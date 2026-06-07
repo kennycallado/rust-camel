@@ -11,6 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+#[cfg(test)]
+use camel_component_api::test_support::PanicRuntimeObservability;
+#[cfg(test)]
+fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
+
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -403,20 +410,26 @@ impl Endpoint for SedaEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(SedaConsumer {
-            state: Arc::clone(&self.state),
-            consumer_id: next_consumer_id(),
-            started: false,
-            cancel_token: CancellationToken::new(),
-            forwarder_handles: Vec::new(),
-        }))
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(SedaConsumer::new(
+            Arc::clone(&self.state),
+            next_consumer_id(),
+            rt,
+        )))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let producer = SedaProducer {
             state: Arc::clone(&self.state),
             producer_config: ProducerConfig::from(&self.config),
+            runtime: rt,
         };
         Ok(BoxProcessor::from_fn(move |ex| {
             let mut svc = producer.clone();
@@ -457,6 +470,27 @@ struct SedaConsumer {
     started: bool,
     cancel_token: CancellationToken,
     forwarder_handles: Vec<JoinHandle<Result<(), CamelError>>>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+}
+
+impl SedaConsumer {
+    fn new(
+        state: Arc<SedaEndpointState>,
+        consumer_id: ConsumerId,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Self {
+        Self {
+            state,
+            consumer_id,
+            started: false,
+            cancel_token: CancellationToken::new(),
+            forwarder_handles: Vec::new(),
+            runtime,
+        }
+    }
 }
 
 #[async_trait]
@@ -605,6 +639,10 @@ async fn forward_envelope(ctx: &ConsumerContext, envelope: ExchangeEnvelope) {
 struct SedaProducer {
     state: Arc<SedaEndpointState>,
     producer_config: ProducerConfig,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl Service<Exchange> for SedaProducer {
@@ -891,12 +929,12 @@ mod consumer_producer_tests {
             .create_endpoint("seda:test1", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let exchange = Exchange::new(Message::new("hello seda"));
         let result = producer.oneshot(exchange).await;
         assert!(result.is_ok());
@@ -917,12 +955,12 @@ mod consumer_producer_tests {
             .create_endpoint("seda:io?exchangePattern=InOut", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let exchange = Exchange::new(Message::new("io test"));
 
         let result =
@@ -939,12 +977,12 @@ mod consumer_producer_tests {
             .create_endpoint("seda:ff", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let exchange = Exchange::new(Message::new("fire and forget"));
         let result = producer.oneshot(exchange).await;
         assert!(result.is_ok());
@@ -959,12 +997,12 @@ mod consumer_producer_tests {
             .create_endpoint("seda:full?size=2", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         producer
             .clone()
             .oneshot(Exchange::new(Message::new("1")))
@@ -993,7 +1031,7 @@ mod consumer_producer_tests {
             )
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(1);
         route_tx
             .send(ExchangeEnvelope {
@@ -1005,7 +1043,7 @@ mod consumer_producer_tests {
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         producer
             .clone()
             .oneshot(Exchange::new(Message::new("1")))
@@ -1038,7 +1076,7 @@ mod consumer_producer_tests {
             .create_endpoint("seda:nocons", &NoOpComponentContext)
             .unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let result = producer.oneshot(Exchange::new(Message::new("test"))).await;
         assert!(result.is_err());
         assert!(
@@ -1059,7 +1097,7 @@ mod consumer_producer_tests {
             )
             .unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let result = producer.oneshot(Exchange::new(Message::new("test"))).await;
         assert!(result.is_ok());
     }
@@ -1071,12 +1109,12 @@ mod consumer_producer_tests {
             .create_endpoint("seda:dup", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer_a = ep.create_consumer().unwrap();
+        let mut consumer_a = ep.create_consumer(rt()).unwrap();
         let (tx_a, _rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
         consumer_a.start(ctx_a).await.unwrap();
 
-        let mut consumer_b = ep.create_consumer().unwrap();
+        let mut consumer_b = ep.create_consumer(rt()).unwrap();
         let (tx_b, _rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx_b = ConsumerContext::new(tx_b, CancellationToken::new());
         let result = consumer_b.start(ctx_b).await;
@@ -1098,17 +1136,17 @@ mod consumer_producer_tests {
             .create_endpoint("seda:fan?multipleConsumers=true", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer_a = ep.create_consumer().unwrap();
+        let mut consumer_a = ep.create_consumer(rt()).unwrap();
         let (tx_a, mut rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
         consumer_a.start(ctx_a).await.unwrap();
 
-        let mut consumer_b = ep.create_consumer().unwrap();
+        let mut consumer_b = ep.create_consumer(rt()).unwrap();
         let (tx_b, mut rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx_b = ConsumerContext::new(tx_b, CancellationToken::new());
         consumer_b.start(ctx_b).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         producer
             .oneshot(Exchange::new(Message::new("fanout msg")))
             .await
@@ -1140,12 +1178,12 @@ mod consumer_producer_tests {
             )
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let result = producer.oneshot(Exchange::new(Message::new("test"))).await;
         assert!(result.is_err());
         assert!(
@@ -1165,12 +1203,12 @@ mod consumer_producer_tests {
             .create_endpoint("seda:stop", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         producer
             .clone()
             .oneshot(Exchange::new(Message::new("before stop")))
@@ -1199,7 +1237,7 @@ mod consumer_producer_tests {
         let ep = comp
             .create_endpoint("seda:conc?concurrentConsumers=4", &NoOpComponentContext)
             .unwrap();
-        let consumer = ep.create_consumer().unwrap();
+        let consumer = ep.create_consumer(rt()).unwrap();
         assert_eq!(
             consumer.concurrency_model(),
             ConcurrencyModel::Concurrent { max: Some(4) }
@@ -1230,12 +1268,12 @@ mod consumer_producer_tests {
             )
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let result = tokio::time::timeout(
             Duration::from_millis(500),
             producer.oneshot(Exchange::new(Message::new("always wait"))),
@@ -1256,17 +1294,17 @@ mod consumer_producer_tests {
             )
             .unwrap();
 
-        let mut consumer_a = ep.create_consumer().unwrap();
+        let mut consumer_a = ep.create_consumer(rt()).unwrap();
         let (tx_a, _rx_a) = mpsc::channel::<ExchangeEnvelope>(1);
         let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
         consumer_a.start(ctx_a).await.unwrap();
 
-        let mut consumer_b = ep.create_consumer().unwrap();
+        let mut consumer_b = ep.create_consumer(rt()).unwrap();
         let (tx_b, _rx_b) = mpsc::channel::<ExchangeEnvelope>(1);
         let ctx_b = ConsumerContext::new(tx_b, CancellationToken::new());
         consumer_b.start(ctx_b).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         producer
             .clone()
             .oneshot(Exchange::new(Message::new("1")))
@@ -1297,7 +1335,7 @@ mod consumer_producer_tests {
             )
             .unwrap();
 
-        let mut consumer_a = ep.create_consumer().unwrap();
+        let mut consumer_a = ep.create_consumer(rt()).unwrap();
         let (tx_a, mut rx_a) = mpsc::channel::<ExchangeEnvelope>(1);
         let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
         consumer_a.start(ctx_a).await.unwrap();
@@ -1321,7 +1359,7 @@ mod consumer_producer_tests {
             SedaMode::Single { .. } => panic!("expected fanout mode"),
         }
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let result = producer
             .oneshot(Exchange::new(Message::new("partial")))
             .await;
@@ -1346,7 +1384,7 @@ mod consumer_producer_tests {
             )
             .unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let result = producer
             .oneshot(Exchange::new(Message::new("discard")))
             .await;
@@ -1360,13 +1398,13 @@ mod consumer_producer_tests {
             .create_endpoint("seda:mpsc", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer_a = ep.create_producer(&test_producer_ctx()).unwrap();
-        let producer_b = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer_a = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        let producer_b = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
 
         producer_a
             .oneshot(Exchange::new(Message::new("A")))
@@ -1401,12 +1439,12 @@ mod consumer_producer_tests {
             )
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let result = tokio::time::timeout(
             Duration::from_millis(500),
             producer.oneshot(Exchange::new(Message::new("no reply"))),
@@ -1427,12 +1465,12 @@ mod consumer_producer_tests {
             .create_endpoint("seda:hdr", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         let mut msg = Message::new("with headers");
         msg.set_header("X-Custom", Value::String("test-value".into()));
         msg.set_header("X-Count", Value::Number(42.into()));
@@ -1464,7 +1502,7 @@ mod consumer_producer_tests {
             .create_endpoint("seda:concsend?size=1000", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(1000);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
@@ -1480,7 +1518,7 @@ mod consumer_producer_tests {
 
         let mut handles = Vec::new();
         for i in 0..10u64 {
-            let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+            let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
             handles.push(tokio::spawn(async move {
                 for j in 0..10u64 {
                     producer
@@ -1520,12 +1558,12 @@ mod consumer_producer_tests {
             .create_endpoint("seda:sz1?size=1", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer = ep.create_consumer().unwrap();
+        let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
 
-        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
         producer
             .clone()
             .oneshot(Exchange::new(Message::new("1")))

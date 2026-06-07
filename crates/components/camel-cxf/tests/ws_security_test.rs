@@ -53,6 +53,8 @@ async fn test_producer_with_profile_invokes_successfully() {
         .expect("channel should connect");
     prepare_ready_slot(&pool, channel).await;
 
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
     let mut producer = CxfProducer::new(
         pool,
         "test_profile".to_string(),
@@ -64,6 +66,7 @@ async fn test_producer_with_profile_invokes_successfully() {
         None,
         false,
         None,
+        rt,
     );
     let mut exchange = Exchange::new(Message::new(Body::Text("<ping/>".to_string())));
     exchange
@@ -104,6 +107,8 @@ async fn test_producer_handles_empty_security_profile() {
         .expect("channel should connect");
     prepare_ready_slot(&pool, channel).await;
 
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
     let mut producer = CxfProducer::new(
         pool,
         "insecure".to_string(),
@@ -115,6 +120,7 @@ async fn test_producer_handles_empty_security_profile() {
         None,
         false,
         None,
+        rt,
     );
     let exchange = Exchange::new(Message::new(Body::Text("<empty/>".to_string())));
     let out = ready_call(&mut producer, exchange)

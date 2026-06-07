@@ -53,12 +53,16 @@ impl Endpoint for HoldEndpoint {
         "hold:test"
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(HoldConsumer))
     }
 
     fn create_producer(
         &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
         _ctx: &camel_api::ProducerContext,
     ) -> Result<camel_api::BoxProcessor, CamelError> {
         Err(CamelError::RouteError("no producer".to_string()))
@@ -670,12 +674,16 @@ async fn add_route_definition_injects_runtime_into_producer_context() {
             "runtime-aware:test"
         }
 
-        fn create_consumer(&self) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
+        fn create_consumer(
+            &self,
+            _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+        ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
             Err(CamelError::RouteError("no consumer".to_string()))
         }
 
         fn create_producer(
             &self,
+            _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
             ctx: &camel_api::ProducerContext,
         ) -> Result<camel_api::BoxProcessor, CamelError> {
             self.saw_runtime
@@ -1171,4 +1179,84 @@ async fn builder_default_matches_new() {
     );
     assert!(ctx_from_default.resolve_language("simple").is_some());
     assert!(ctx_from_new.resolve_language("simple").is_some());
+}
+
+// -------------------------------------------------------------
+// Regression test: CamelContext routes real observability
+// when accessed through Arc<dyn RuntimeObservability>.
+// -------------------------------------------------------------
+
+/// Recording metrics collector used by
+/// `camel_context_routes_real_observability`.
+///
+/// Pattern adapted from `RecordingMetrics` in
+/// crates/components/camel-component-api/tests/runtime_observability_tests.rs.
+struct RecMetrics {
+    errors: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl RecMetrics {
+    fn error_count(&self, route_id: &str, error_type: &str) -> usize {
+        self.errors
+            .lock()
+            .expect("metrics lock")
+            .iter()
+            .filter(|(r, t)| r == route_id && t == error_type)
+            .count()
+    }
+}
+
+impl MetricsCollector for RecMetrics {
+    fn record_exchange_duration(&self, _: &str, _: std::time::Duration) {}
+    fn increment_errors(&self, route_id: &str, error_type: &str) {
+        self.errors
+            .lock()
+            .expect("metrics lock")
+            .push((route_id.to_string(), error_type.to_string()));
+    }
+    fn increment_exchanges(&self, _: &str) {}
+    fn set_queue_depth(&self, _: &str, _: usize) {}
+    fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+}
+
+#[tokio::test]
+async fn camel_context_routes_real_observability() {
+    // GIVEN: a CamelContext configured with a recording MetricsCollector
+    // and a real HealthCheckRegistry (not a NoOp).
+    let metrics: Arc<RecMetrics> = Arc::new(RecMetrics {
+        errors: std::sync::Mutex::new(Vec::new()),
+    });
+    let health_registry = Arc::new(HealthCheckRegistry::new(std::time::Duration::from_secs(5)));
+    let hr_for_builder = Arc::clone(&health_registry);
+
+    let ctx = CamelContext::builder()
+        .metrics(Arc::clone(&metrics) as Arc<dyn MetricsCollector>)
+        .health_registry(hr_for_builder)
+        .build()
+        .await
+        .expect("CamelContext should build");
+
+    // The blanket impl makes Arc<CamelContext> usable as Arc<dyn RuntimeObservability>.
+    let rt: Arc<dyn camel_component_api::RuntimeObservability> = Arc::new(ctx);
+
+    // WHEN: increment_errors is called via the trait
+    rt.metrics().increment_errors("test-route", "test-label");
+
+    // THEN: the underlying MetricsCollector records the increment (NOT a no-op).
+    assert_eq!(
+        metrics.error_count("test-route", "test-label"),
+        1,
+        "CamelContext must route increment_errors to the real MetricsCollector, not a NoOp"
+    );
+
+    // WHEN: force_unhealthy_for_route is called via the trait
+    rt.health()
+        .force_unhealthy_for_route("test-route", "probe", "test reason");
+
+    // THEN: the HealthCheckRegistry marks the route unhealthy.
+    let report = health_registry.check_all().await;
+    assert_eq!(report.status, HealthStatus::Unhealthy);
+    assert_eq!(report.services.len(), 1);
+    assert_eq!(report.services[0].name, "probe");
+    assert_eq!(report.services[0].message.as_deref(), Some("test reason"));
 }

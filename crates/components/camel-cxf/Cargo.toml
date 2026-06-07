@@ -36,6 +36,7 @@ thiserror       = { workspace = true }
 tokio-stream    = { workspace = true }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 camel-component-cxf = { path = ".", features = ["test-util"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
 tokio-stream = { workspace = true }

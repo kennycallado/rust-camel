@@ -34,7 +34,9 @@ async fn send_to_direct(
     };
 
     let endpoint = component.create_endpoint(uri, ctx)?;
-    let producer = endpoint.create_producer(&ctx.producer_context())?;
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let producer = endpoint.create_producer(rt, &ctx.producer_context())?;
     producer.oneshot(Exchange::new(Message::new(payload))).await
 }
 

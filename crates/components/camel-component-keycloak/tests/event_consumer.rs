@@ -1,6 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use camel_component_api::test_support::PanicRuntimeObservability;
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
+
 use async_trait::async_trait;
 use camel_auth::oauth2::TokenProvider;
 use camel_auth::types::AuthError;
@@ -58,7 +63,7 @@ async fn event_consumer_polls_user_events() {
         .await;
 
     let config = make_events_config(&server.uri(), "test", "events");
-    let mut consumer = KeycloakEventConsumer::new(config);
+    let mut consumer = KeycloakEventConsumer::new(config, test_rt());
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
@@ -121,7 +126,7 @@ async fn event_consumer_polls_admin_events() {
         .await;
 
     let config = make_events_config(&server.uri(), "master", "admin-events");
-    let mut consumer = KeycloakEventConsumer::new(config);
+    let mut consumer = KeycloakEventConsumer::new(config, test_rt());
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
@@ -169,7 +174,7 @@ async fn event_consumer_dedup() {
         .await;
 
     let config = make_events_config(&server.uri(), "test", "events");
-    let mut consumer = KeycloakEventConsumer::new(config);
+    let mut consumer = KeycloakEventConsumer::new(config, test_rt());
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
@@ -218,7 +223,7 @@ async fn event_consumer_auth_failure_continues() {
         reqwest::Client::new(),
     )
     .unwrap();
-    let mut consumer = KeycloakEventConsumer::new(config);
+    let mut consumer = KeycloakEventConsumer::new(config, test_rt());
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
@@ -261,7 +266,7 @@ async fn event_consumer_persistent_auth_failure_stops() {
         reqwest::Client::new(),
     )
     .unwrap();
-    let mut consumer = KeycloakEventConsumer::new(config);
+    let mut consumer = KeycloakEventConsumer::new(config, test_rt());
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
@@ -285,7 +290,7 @@ async fn event_consumer_cancellation() {
         .await;
 
     let config = make_events_config(&server.uri(), "test", "events");
-    let mut consumer = KeycloakEventConsumer::new(config);
+    let mut consumer = KeycloakEventConsumer::new(config, test_rt());
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
@@ -312,7 +317,7 @@ async fn event_consumer_empty_results() {
         .await;
 
     let config = make_events_config(&server.uri(), "test", "events");
-    let mut consumer = KeycloakEventConsumer::new(config);
+    let mut consumer = KeycloakEventConsumer::new(config, test_rt());
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
@@ -348,7 +353,7 @@ async fn event_consumer_skips_events_without_id() {
         .await;
 
     let config = make_events_config(&server.uri(), "test", "events");
-    let mut consumer = KeycloakEventConsumer::new(config);
+    let mut consumer = KeycloakEventConsumer::new(config, test_rt());
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();

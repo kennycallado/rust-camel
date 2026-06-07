@@ -41,6 +41,7 @@ camel-otel = { workspace = true, optional = true }
 otel = ["dep:camel-otel"]
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 tokio-util.workspace = true
 tracing-subscriber = { workspace = true }
 

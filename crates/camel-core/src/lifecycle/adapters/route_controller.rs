@@ -493,6 +493,7 @@ impl DefaultRouteController {
         &self,
         config: ErrorHandlerConfig,
         producer_ctx: &ProducerContext,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
         component_ctx: &dyn ComponentContext,
     ) -> Result<ErrorHandlerLayer, CamelError> {
         // Resolve DLC URI → producer.
@@ -502,7 +503,7 @@ impl DefaultRouteController {
                 .resolve_component(&parsed.scheme)
                 .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
             let endpoint = component.create_endpoint(uri, component_ctx)?;
-            Some(endpoint.create_producer(producer_ctx)?)
+            Some(endpoint.create_producer(Arc::clone(&rt), producer_ctx)?)
         } else {
             None
         };
@@ -516,7 +517,7 @@ impl DefaultRouteController {
                     .resolve_component(&parsed.scheme)
                     .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
                 let endpoint = component.create_endpoint(uri, component_ctx)?;
-                Some(endpoint.create_producer(producer_ctx)?)
+                Some(endpoint.create_producer(Arc::clone(&rt), producer_ctx)?)
             } else {
                 None
             };
@@ -532,6 +533,7 @@ impl DefaultRouteController {
         &self,
         config: &UnitOfWorkConfig,
         producer_ctx: &ProducerContext,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
         component_ctx: &dyn ComponentContext,
         counter: Option<Arc<AtomicU64>>,
     ) -> Result<(ExchangeUoWLayer, Arc<AtomicU64>), CamelError> {
@@ -541,9 +543,13 @@ impl DefaultRouteController {
                 .resolve_component(&parsed.scheme)
                 .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
             let endpoint = component.create_endpoint(uri, component_ctx)?;
-            endpoint.create_producer(producer_ctx).map_err(|e| {
-                CamelError::RouteError(format!("UoW hook URI '{uri}' could not be resolved: {e}"))
-            })
+            endpoint
+                .create_producer(Arc::clone(&rt), producer_ctx)
+                .map_err(|e| {
+                    CamelError::RouteError(format!(
+                        "UoW hook URI '{uri}' could not be resolved: {e}"
+                    ))
+                })
         };
 
         let on_complete = config.on_complete.as_deref().map(resolve_uri).transpose()?;
@@ -573,10 +579,13 @@ impl DefaultRouteController {
             self.health_registry(),
             route_id.map(|s| s.to_string()),
         ));
+        let rt: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::clone(&component_ctx) as Arc<_>;
 
         super::step_resolution::resolve_steps(
             steps,
             producer_ctx,
+            rt,
             registry,
             &self.languages,
             &self.beans,
@@ -729,7 +738,7 @@ impl DefaultRouteController {
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
 
         if let Some(config) = eh_config {
-            let component_ctx = ControllerComponentContext::new(
+            let component_ctx = Arc::new(ControllerComponentContext::new(
                 Arc::clone(&self.registry),
                 Arc::clone(&self.languages),
                 self.tracer_metrics
@@ -738,13 +747,16 @@ impl DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.clone()),
-            );
-            let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
+            ));
+            let rt: Arc<dyn camel_component_api::RuntimeObservability> =
+                Arc::clone(&component_ctx) as Arc<_>;
+            let layer =
+                self.resolve_error_handler(config, &producer_ctx, rt, component_ctx.as_ref())?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
         let uow_counter = if let Some(uow_config) = &unit_of_work {
-            let component_ctx = ControllerComponentContext::new(
+            let component_ctx = Arc::new(ControllerComponentContext::new(
                 Arc::clone(&self.registry),
                 Arc::clone(&self.languages),
                 self.tracer_metrics
@@ -753,9 +765,16 @@ impl DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.clone()),
-            );
-            let (uow_layer, counter) =
-                self.resolve_uow_layer(uow_config, &producer_ctx, &component_ctx, None)?;
+            ));
+            let rt: Arc<dyn camel_component_api::RuntimeObservability> =
+                Arc::clone(&component_ctx) as Arc<_>;
+            let (uow_layer, counter) = self.resolve_uow_layer(
+                uow_config,
+                &producer_ctx,
+                rt,
+                component_ctx.as_ref(),
+                None,
+            )?;
             pipeline = BoxProcessor::new(uow_layer.layer(pipeline));
             Some(counter)
         } else {
@@ -898,7 +917,7 @@ impl DefaultRouteController {
             .clone()
             .or_else(|| self.global_error_handler.clone());
         if let Some(config) = eh_config {
-            let component_ctx = ControllerComponentContext::new(
+            let component_ctx = Arc::new(ControllerComponentContext::new(
                 Arc::clone(&self.registry),
                 Arc::clone(&self.languages),
                 self.tracer_metrics
@@ -907,8 +926,11 @@ impl DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.clone()),
-            );
-            let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
+            ));
+            let rt: Arc<dyn camel_component_api::RuntimeObservability> =
+                Arc::clone(&component_ctx) as Arc<_>;
+            let layer =
+                self.resolve_error_handler(config, &producer_ctx, rt, component_ctx.as_ref())?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
@@ -919,7 +941,7 @@ impl DefaultRouteController {
                 .get(&route_id)
                 .and_then(|r| r.in_flight.as_ref().map(Arc::clone));
 
-            let component_ctx = ControllerComponentContext::new(
+            let component_ctx = Arc::new(ControllerComponentContext::new(
                 Arc::clone(&self.registry),
                 Arc::clone(&self.languages),
                 self.tracer_metrics
@@ -928,12 +950,15 @@ impl DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.clone()),
-            );
+            ));
+            let rt: Arc<dyn camel_component_api::RuntimeObservability> =
+                Arc::clone(&component_ctx) as Arc<_>;
 
             let (uow_layer, _counter) = self.resolve_uow_layer(
                 uow_config,
                 &producer_ctx,
-                &component_ctx,
+                rt,
+                component_ctx.as_ref(),
                 existing_counter,
             )?;
 
@@ -982,7 +1007,7 @@ impl DefaultRouteController {
             .clone()
             .or_else(|| self.global_error_handler.clone());
         if let Some(config) = eh_config {
-            let component_ctx = ControllerComponentContext::new(
+            let component_ctx = Arc::new(ControllerComponentContext::new(
                 Arc::clone(&self.registry),
                 Arc::clone(&self.languages),
                 self.tracer_metrics
@@ -991,8 +1016,11 @@ impl DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.clone()),
-            );
-            let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
+            ));
+            let rt: Arc<dyn camel_component_api::RuntimeObservability> =
+                Arc::clone(&component_ctx) as Arc<_>;
+            let layer =
+                self.resolve_error_handler(config, &producer_ctx, rt, component_ctx.as_ref())?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
@@ -1002,7 +1030,7 @@ impl DefaultRouteController {
                 .get(&route_id)
                 .and_then(|r| r.in_flight.as_ref().map(Arc::clone));
 
-            let component_ctx = ControllerComponentContext::new(
+            let component_ctx = Arc::new(ControllerComponentContext::new(
                 Arc::clone(&self.registry),
                 Arc::clone(&self.languages),
                 self.tracer_metrics
@@ -1011,12 +1039,15 @@ impl DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.clone()),
-            );
+            ));
+            let rt: Arc<dyn camel_component_api::RuntimeObservability> =
+                Arc::clone(&component_ctx) as Arc<_>;
 
             let (uow_layer, _counter) = self.resolve_uow_layer(
                 uow_config,
                 &producer_ctx,
-                &component_ctx,
+                rt,
+                component_ctx.as_ref(),
                 existing_counter,
             )?;
 
@@ -1237,20 +1268,24 @@ impl RouteController for DefaultRouteController {
         let crash_notifier = self.crash_notifier.clone();
         let runtime_for_consumer = self.runtime.clone();
 
+        let consumer_component_ctx = Arc::new(ControllerComponentContext::new(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.languages),
+            self.tracer_metrics
+                .clone()
+                .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            Arc::clone(&self.platform_service),
+            self.health_registry(),
+            Some(route_id.to_string()),
+        ));
+        let consumer_rt: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::clone(&consumer_component_ctx) as Arc<_>;
         let (mut consumer, consumer_concurrency) =
             super::consumer_management::create_route_consumer(
+                consumer_rt,
                 &self.registry,
                 &from_uri,
-                &ControllerComponentContext::new(
-                    Arc::clone(&self.registry),
-                    Arc::clone(&self.languages),
-                    self.tracer_metrics
-                        .clone()
-                        .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-                    Arc::clone(&self.platform_service),
-                    self.health_registry(),
-                    Some(route_id.to_string()),
-                ),
+                consumer_component_ctx.as_ref(),
             )?;
 
         // Resolve effective concurrency: route override > consumer default
@@ -1659,19 +1694,23 @@ impl RouteController for DefaultRouteController {
 
         info!(route_id = %route_id, "Resuming route (spawning consumer only)");
 
+        let consumer_component_ctx = Arc::new(ControllerComponentContext::new(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.languages),
+            self.tracer_metrics
+                .clone()
+                .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            Arc::clone(&self.platform_service),
+            self.health_registry(),
+            Some(route_id.to_string()),
+        ));
+        let consumer_rt: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::clone(&consumer_component_ctx) as Arc<_>;
         let (mut consumer, _) = super::consumer_management::create_route_consumer(
+            consumer_rt,
             &self.registry,
             &from_uri,
-            &ControllerComponentContext::new(
-                Arc::clone(&self.registry),
-                Arc::clone(&self.languages),
-                self.tracer_metrics
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-                Arc::clone(&self.platform_service),
-                self.health_registry(),
-                Some(route_id.to_string()),
-            ),
+            consumer_component_ctx.as_ref(),
         )?;
 
         // Wire security context before spawning consumer

@@ -34,8 +34,10 @@ async fn main() -> Result<(), CamelError> {
             &camel_component_api::NoOpComponentContext,
         )
         .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
+    let stream_rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
     let mut stream_consumer = stream_endpoint
-        .create_consumer()
+        .create_consumer(stream_rt)
         .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
 
     let (stream_tx, mut stream_rx) = mpsc::channel::<ExchangeEnvelope>(16);
@@ -54,8 +56,10 @@ async fn main() -> Result<(), CamelError> {
             &camel_component_api::NoOpComponentContext,
         )
         .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
+    let upload_rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
     let mut upload_consumer = upload_endpoint
-        .create_consumer()
+        .create_consumer(upload_rt)
         .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
 
     let (upload_tx, mut upload_rx) = mpsc::channel::<ExchangeEnvelope>(16);

@@ -35,7 +35,7 @@ use tower::Service;
 
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
-use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
 use tracing::debug;
 
 /// Default maximum number of exchanges retained by a mock endpoint.
@@ -545,13 +545,20 @@ impl Endpoint for MockEndpoint {
         &self.0.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "mock endpoint does not support consumers (it is a sink)".to_string(),
         ))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(MockProducer {
             name: self.0.name.clone(),
             received: Arc::clone(&self.0.received),
@@ -839,6 +846,11 @@ impl ExchangeAssert {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::Message;
     use camel_component_api::NoOpComponentContext;
@@ -895,7 +907,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("mock:result", &NoOpComponentContext)
             .unwrap();
-        assert!(endpoint.create_consumer().is_err());
+        assert!(endpoint.create_consumer(rt()).is_err());
     }
 
     #[test]
@@ -905,7 +917,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("mock:result", &NoOpComponentContext)
             .unwrap();
-        assert!(endpoint.create_producer(&ctx).is_ok());
+        assert!(endpoint.create_producer(rt(), &ctx).is_ok());
     }
 
     #[test]
@@ -940,7 +952,7 @@ mod tests {
             .create_endpoint("mock:test", &NoOpComponentContext)
             .unwrap();
 
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let ex1 = Exchange::new(Message::new("first"));
         let ex2 = Exchange::new(Message::new("second"));
@@ -964,7 +976,7 @@ mod tests {
             .create_endpoint("mock:passthrough", &NoOpComponentContext)
             .unwrap();
 
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let exchange = Exchange::new(Message::new("hello"));
         let result = producer.oneshot(exchange).await.unwrap();
 
@@ -983,7 +995,7 @@ mod tests {
         inner.assert_exchange_count(0).await;
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("one")))
             .await
@@ -1018,13 +1030,13 @@ mod tests {
 
         // Producing via ep1's producer...
         let ctx = test_producer_ctx();
-        let mut p1 = ep1.create_producer(&ctx).unwrap();
+        let mut p1 = ep1.create_producer(rt(), &ctx).unwrap();
         p1.call(Exchange::new(Message::new("from-ep1")))
             .await
             .unwrap();
 
         // ...and via ep2's producer...
-        let mut p2 = ep2.create_producer(&ctx).unwrap();
+        let mut p2 = ep2.create_producer(rt(), &ctx).unwrap();
         p2.call(Exchange::new(Message::new("from-ep2")))
             .await
             .unwrap();
@@ -1048,7 +1060,7 @@ mod tests {
             .unwrap();
         let inner = component.get_endpoint("immediate").unwrap();
 
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("a")))
             .await
@@ -1075,7 +1087,7 @@ mod tests {
         let inner = component.get_endpoint("waiter").unwrap();
 
         // Spawn producer that sends after a short delay.
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             producer
@@ -1118,7 +1130,7 @@ mod tests {
             .unwrap();
         let inner = component.get_endpoint("assert-idx").unwrap();
 
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("hello")))
             .await
@@ -1141,7 +1153,7 @@ mod tests {
             .unwrap();
         let inner = component.get_endpoint("oob").unwrap();
 
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("only-one")))
             .await
@@ -1162,7 +1174,7 @@ mod tests {
             .create_endpoint("mock:body-text-pass", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("body-text-pass").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("hello")))
             .await
@@ -1182,7 +1194,7 @@ mod tests {
             .create_endpoint("mock:body-text-fail", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("body-text-fail").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("hello")))
             .await
@@ -1202,7 +1214,7 @@ mod tests {
             .create_endpoint("mock:body-json-pass", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("body-json-pass").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("");
         msg.body = Body::Json(serde_json::json!({"key": "value"}));
         producer.call(Exchange::new(msg)).await.unwrap();
@@ -1224,7 +1236,7 @@ mod tests {
             .create_endpoint("mock:body-json-fail", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("body-json-fail").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("");
         msg.body = Body::Json(serde_json::json!({"key": "value"}));
         producer.call(Exchange::new(msg)).await.unwrap();
@@ -1246,7 +1258,7 @@ mod tests {
             .create_endpoint("mock:body-bytes-pass", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("body-bytes-pass").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("");
         msg.body = Body::Bytes(Bytes::from_static(b"binary"));
         producer.call(Exchange::new(msg)).await.unwrap();
@@ -1267,7 +1279,7 @@ mod tests {
             .create_endpoint("mock:body-bytes-fail", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("body-bytes-fail").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("");
         msg.body = Body::Bytes(Bytes::from_static(b"binary"));
         producer.call(Exchange::new(msg)).await.unwrap();
@@ -1285,7 +1297,7 @@ mod tests {
             .create_endpoint("mock:hdr-pass", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("hdr-pass").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("body");
         msg.headers
             .insert("x-key".to_string(), serde_json::json!("value"));
@@ -1307,7 +1319,7 @@ mod tests {
             .create_endpoint("mock:hdr-fail", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("hdr-fail").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("body");
         msg.headers
             .insert("x-key".to_string(), serde_json::json!("value"));
@@ -1328,7 +1340,7 @@ mod tests {
             .create_endpoint("mock:hdr-exists-pass", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("hdr-exists-pass").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("body");
         msg.headers
             .insert("x-present".to_string(), serde_json::json!(42));
@@ -1348,7 +1360,7 @@ mod tests {
             .create_endpoint("mock:hdr-exists-fail", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("hdr-exists-fail").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("body")))
             .await
@@ -1367,7 +1379,7 @@ mod tests {
             .create_endpoint("mock:err-pass", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("err-pass").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut ex = Exchange::new(Message::new("body"));
         ex.set_error(camel_component_api::CamelError::ProcessorError(
             "oops".to_string(),
@@ -1388,7 +1400,7 @@ mod tests {
             .create_endpoint("mock:has-err-fail", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("has-err-fail").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("body")))
             .await
@@ -1407,7 +1419,7 @@ mod tests {
             .create_endpoint("mock:no-err-pass", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("no-err-pass").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("body")))
             .await
@@ -1431,7 +1443,7 @@ mod tests {
         let inner = component.get_endpoint("reset-test").unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("a")))
             .await
@@ -1459,7 +1471,7 @@ mod tests {
         let inner = component.get_endpoint("bounded").unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         // Send 5 exchanges, but max_retained is 3
         for i in 0..5 {
@@ -1486,7 +1498,7 @@ mod tests {
         let inner = component.get_endpoint("reset-reuse").unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("before-reset")))
             .await
@@ -1512,7 +1524,7 @@ mod tests {
             .create_endpoint("mock:no-err-fail", &NoOpComponentContext)
             .unwrap();
         let inner = component.get_endpoint("no-err-fail").unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut ex = Exchange::new(Message::new("body"));
         ex.set_error(camel_component_api::CamelError::ProcessorError(
             "oops".to_string(),
@@ -1541,7 +1553,7 @@ mod tests {
         let inner = component.get_endpoint("copy").unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut msg = Message::new("original");
         msg.headers.insert("x-test".into(), serde_json::json!(1));
@@ -1565,7 +1577,7 @@ mod tests {
         let inner = component.get_endpoint("no-copy").unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         producer
             .call(Exchange::new(Message::new("direct")))
@@ -1592,7 +1604,7 @@ mod tests {
         inner.expect_body(camel_component_api::Body::Text("beta".into()));
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("alpha")))
             .await
@@ -1618,7 +1630,7 @@ mod tests {
         inner.expect_body(camel_component_api::Body::Text("beta".into()));
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("beta")))
             .await
@@ -1642,7 +1654,7 @@ mod tests {
         inner.expect_header("status", serde_json::json!("ok"));
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("body");
         msg.headers.insert("status".into(), serde_json::json!("ok"));
         producer.call(Exchange::new(msg)).await.unwrap();
@@ -1662,7 +1674,7 @@ mod tests {
         inner.expect_header("missing", serde_json::json!("value"));
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("body")))
             .await
@@ -1687,7 +1699,7 @@ mod tests {
             .unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         // First call succeeds
         producer
@@ -1709,7 +1721,7 @@ mod tests {
         let inner = component.get_endpoint("ff-good").unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         producer
             .call(Exchange::new(Message::new("a")))
@@ -1741,7 +1753,7 @@ mod tests {
         let inner = component.get_endpoint("ap").unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("x")))
             .await
@@ -1765,7 +1777,7 @@ mod tests {
         let inner = component.get_endpoint("ap-fb").unwrap();
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("y")))
             .await
@@ -1791,7 +1803,7 @@ mod tests {
         inner.expect_header_regex("x-trace-id", r"^[a-f0-9]{8}$");
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("body");
         msg.headers
             .insert("x-trace-id".into(), serde_json::json!("deadbeef"));
@@ -1812,7 +1824,7 @@ mod tests {
         inner.expect_header_regex("x-trace-id", r"^\d+$");
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         let mut msg = Message::new("body");
         msg.headers
             .insert("x-trace-id".into(), serde_json::json!("abc"));
@@ -1841,7 +1853,7 @@ mod tests {
         inner.expect_body(camel_component_api::Body::Text("alpha".into()));
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("alpha")))
             .await
@@ -1871,7 +1883,7 @@ mod tests {
         inner.expect_body(camel_component_api::Body::Text("alpha".into()));
 
         let ctx = test_producer_ctx();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("alpha")))
             .await
@@ -1896,7 +1908,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("mock:trace", &NoOpComponentContext)
             .unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("traced")))
             .await

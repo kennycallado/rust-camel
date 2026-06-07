@@ -1,4 +1,4 @@
-use camel_component_api::{Body, CamelError, Exchange, retry_async};
+use camel_component_api::{Body, CamelError, Exchange, RuntimeObservability, retry_async};
 use opensearch::auth::Credentials;
 use opensearch::http::response::Response;
 use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
@@ -53,6 +53,7 @@ pub struct OpenSearchProducer {
     pending_permit: Option<OwnedSemaphorePermit>,
     /// Pinned permit acquisition future.
     acquire_fut: Option<AcquirePermitFut>,
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
@@ -67,6 +68,7 @@ impl Clone for OpenSearchProducer {
             semaphore: Arc::clone(&self.semaphore),
             pending_permit: None,
             acquire_fut: None,
+            runtime: Arc::clone(&self.runtime),
         }
     }
 }
@@ -75,13 +77,14 @@ impl OpenSearchProducer {
     /// Creates a new OpenSearchProducer with the given configuration.
     ///
     /// The client is not established until the first call to `call()`.
-    pub fn new(config: OpenSearchEndpointConfig) -> Self {
+    pub fn new(config: OpenSearchEndpointConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
         Self {
             config,
             client: Arc::new(Mutex::new(None)),
             semaphore: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY_LIMIT)),
             pending_permit: None,
             acquire_fut: None,
+            runtime,
         }
     }
 
@@ -624,6 +627,10 @@ impl Service<Exchange> for OpenSearchProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
     use camel_component_api::Message;
     use futures_util::task::noop_waker_ref;
     use std::task::Context;
@@ -632,7 +639,7 @@ mod tests {
     fn test_producer_new() {
         let config =
             OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
-        let producer = OpenSearchProducer::new(config);
+        let producer = OpenSearchProducer::new(config, test_rt());
         assert!(Arc::strong_count(&producer.client) == 1);
     }
 
@@ -640,7 +647,7 @@ mod tests {
     fn test_producer_clone_shares_client() {
         let config =
             OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
-        let producer = OpenSearchProducer::new(config);
+        let producer = OpenSearchProducer::new(config, test_rt());
         let producer2 = producer.clone();
 
         // Both producers share the same client Arc
@@ -651,7 +658,7 @@ mod tests {
     fn test_producer_clone_increments_arc_count() {
         let config =
             OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
-        let producer = OpenSearchProducer::new(config);
+        let producer = OpenSearchProducer::new(config, test_rt());
         assert_eq!(Arc::strong_count(&producer.client), 1);
 
         let _producer2 = producer.clone();
@@ -662,7 +669,7 @@ mod tests {
     async fn test_producer_client_is_none_initially() {
         let config =
             OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
-        let producer = OpenSearchProducer::new(config);
+        let producer = OpenSearchProducer::new(config, test_rt());
 
         let guard = producer.client.lock().await;
         assert!(guard.is_none());
@@ -839,7 +846,7 @@ mod tests {
     async fn test_poll_ready_always_returns_ready() {
         let config =
             OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
-        let mut producer = OpenSearchProducer::new(config);
+        let mut producer = OpenSearchProducer::new(config, test_rt());
         let mut cx = Context::from_waker(noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, std::task::Poll::Ready(Ok(()))));

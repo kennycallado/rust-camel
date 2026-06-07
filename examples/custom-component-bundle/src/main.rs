@@ -102,13 +102,20 @@ impl Endpoint for EchoEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Err(CamelError::RouteError(
             "echo component is producer-only".into(),
         ))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let prefix = self.prefix.clone();
         // Log the exchange body with the configured prefix.
         Ok(BoxProcessor::from_fn(move |exchange| {

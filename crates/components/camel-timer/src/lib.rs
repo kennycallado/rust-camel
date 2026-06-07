@@ -159,14 +159,21 @@ impl Endpoint for TimerEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(TimerConsumer {
             config: self.config.clone(),
             started: AtomicBool::new(false),
         }))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "timer endpoint does not support producers".to_string(),
         ))
@@ -307,6 +314,11 @@ impl TimerConsumer {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::NoOpComponentContext;
 
@@ -371,7 +383,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("timer:tick", &NoOpComponentContext)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx);
+        let producer = endpoint.create_producer(rt(), &ctx);
         assert!(producer.is_err());
     }
 
@@ -406,7 +418,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
@@ -437,7 +449,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("timer:test?period=50&repeatCount=3", &NoOpComponentContext)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
@@ -513,7 +525,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("timer:stop-test?period=50", &NoOpComponentContext)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -608,7 +620,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
@@ -691,7 +703,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
@@ -735,7 +747,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());

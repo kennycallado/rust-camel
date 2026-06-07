@@ -1,7 +1,9 @@
 use crate::client::{StylesheetId, XsltBridgeClient};
 use crate::component::XsltBridgeRuntime;
 use crate::producer::XsltProducer;
-use camel_component_api::{BoxProcessor, CamelError, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{
+    BoxProcessor, CamelError, Consumer, Endpoint, ProducerContext, RuntimeObservability,
+};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -44,13 +46,20 @@ impl Endpoint for XsltEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "xslt endpoint does not support consumers".to_string(),
         ))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(XsltProducer::new(
             self.stylesheet_bytes.clone(),
             Arc::clone(&self.compiled),

@@ -47,6 +47,7 @@ pub struct CxfProducer {
     semaphore: Arc<Semaphore>,
     pending_permit: Option<OwnedSemaphorePermit>,
     acquire_fut: Option<AcquireFuture>,
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl Clone for CxfProducer {
@@ -65,6 +66,7 @@ impl Clone for CxfProducer {
             semaphore: Arc::clone(&self.semaphore),
             pending_permit: None,
             acquire_fut: None,
+            runtime: Arc::clone(&self.runtime),
         }
     }
 }
@@ -82,6 +84,7 @@ impl CxfProducer {
         default_timeout_ms: Option<u64>,
         mtom_enabled: bool,
         attachment_content_type: Option<String>,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         Self {
             pool,
@@ -97,6 +100,7 @@ impl CxfProducer {
             semaphore: Arc::new(Semaphore::new(1)),
             pending_permit: None,
             acquire_fut: None,
+            runtime,
         }
     }
 
@@ -127,6 +131,7 @@ impl CxfProducer {
         address: Option<String>,
         operation: String,
         default_timeout_ms: Option<u64>,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         use crate::config::CxfPoolConfig;
         use crate::pool::{BridgeSlot, BridgeState};
@@ -175,6 +180,7 @@ impl CxfProducer {
             semaphore: Arc::new(Semaphore::new(1)),
             pending_permit: None,
             acquire_fut: None,
+            runtime,
         }
     }
 }
@@ -382,8 +388,12 @@ mod tests {
     use super::*;
     use crate::pool::{BridgeSlot, CxfBridgePool};
     use camel_component_api::StreamBody;
+    use camel_component_api::test_support::PanicRuntimeObservability;
     use futures::stream;
     use std::sync::Arc;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
     use tokio::sync::Mutex;
     use tokio::sync::watch;
 
@@ -415,6 +425,7 @@ mod tests {
             None,
             false,
             None,
+            test_rt(),
         );
         assert_eq!(producer.operation, "sayHello");
         assert_eq!(producer.profile_name, "baleares");
@@ -435,6 +446,7 @@ mod tests {
             None,
             false,
             None,
+            test_rt(),
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
@@ -460,6 +472,7 @@ mod tests {
             None,
             false,
             None,
+            test_rt(),
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
@@ -494,6 +507,7 @@ mod tests {
             None,
             false,
             None,
+            test_rt(),
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
@@ -529,6 +543,7 @@ mod tests {
             None,
             false,
             None,
+            test_rt(),
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
@@ -566,6 +581,7 @@ mod tests {
             None,
             false,
             None,
+            test_rt(),
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);

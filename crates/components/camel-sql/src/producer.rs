@@ -19,21 +19,32 @@ use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, is_retryable_sqlx_error, row_to_json};
 use camel_component_api::retry_async;
-use camel_component_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
+use camel_component_api::{
+    Body, CamelError, Exchange, Message, RuntimeObservability, StreamBody, StreamMetadata,
+};
 
 #[derive(Clone)]
 pub struct SqlProducer {
     pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
     pub(crate) stopped: Arc<AtomicBool>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    pub(crate) runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl SqlProducer {
-    pub fn new(config: SqlEndpointConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
+    pub fn new(
+        config: SqlEndpointConfig,
+        pool: Arc<OnceCell<AnyPool>>,
+        runtime: Arc<dyn RuntimeObservability>,
+    ) -> Self {
         Self {
             config,
             pool,
             stopped: Arc::new(AtomicBool::new(false)),
+            runtime,
         }
     }
 
@@ -512,6 +523,10 @@ async fn execute_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
     use camel_component_api::Message;
     use camel_component_api::UriConfig;
     use sqlx::any::AnyPoolOptions;
@@ -549,7 +564,7 @@ mod tests {
 
     #[test]
     fn producer_clone_shares_pool() {
-        let p1 = SqlProducer::new(config(), Arc::new(OnceCell::new()));
+        let p1 = SqlProducer::new(config(), Arc::new(OnceCell::new()), test_rt());
         let p2 = p1.clone();
         assert!(Arc::ptr_eq(&p1.pool, &p2.pool));
         assert!(Arc::ptr_eq(&p1.stopped, &p2.stopped));
@@ -846,7 +861,7 @@ mod tests {
         let config = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
         assert!(config.max_connections.is_none());
 
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
         let exchange = Exchange::new(Message::default());
 
         // Should NOT panic — producer calls resolve_defaults() defensively
@@ -874,7 +889,7 @@ mod tests {
         config.idle_timeout_secs = Some(300);
         config.max_lifetime_secs = Some(1800);
 
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
         let exchange = Exchange::new(Message::default());
 
         let result = producer.call(exchange).await;
@@ -896,7 +911,7 @@ mod tests {
             c.resolve_defaults();
             c
         };
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
@@ -910,7 +925,7 @@ mod tests {
             c.resolve_defaults();
             c
         };
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
         producer.stop();
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
@@ -936,7 +951,7 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool).unwrap();
 
-        let mut producer = SqlProducer::new(config, pool_cell);
+        let mut producer = SqlProducer::new(config, pool_cell, test_rt());
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Err(_))));
@@ -960,7 +975,7 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool).unwrap();
 
-        let mut producer = SqlProducer::new(config, pool_cell);
+        let mut producer = SqlProducer::new(config, pool_cell, test_rt());
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
@@ -979,7 +994,7 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool.clone()).unwrap();
 
-        let producer = SqlProducer::new(config, pool_cell.clone());
+        let producer = SqlProducer::new(config, pool_cell.clone(), test_rt());
         assert!(!pool.is_closed(), "Pool should be open before stop");
 
         producer.stop();
@@ -1001,6 +1016,7 @@ mod tests {
                 c
             },
             pool_cell.clone(),
+            test_rt(),
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer2.poll_ready(&mut cx);
@@ -1023,7 +1039,7 @@ mod tests {
         config.resolve_defaults();
         assert!(!config.use_placeholder);
 
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
         // Pre-initialize the pool so we don't hit the pool init path
         producer.pool.set(pool.clone()).unwrap();
 
@@ -1048,7 +1064,7 @@ mod tests {
         config.resolve_defaults();
         assert!(config.use_placeholder);
 
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
         producer.pool.set(pool.clone()).unwrap();
 
         let msg = Message::new(Body::Json(json!([1])));

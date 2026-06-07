@@ -23,15 +23,24 @@ pub struct CxfConsumer {
     profile_name: String,
     cancel_token: Option<CancellationToken>,
     task_handle: Option<JoinHandle<Result<(), CamelError>>>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl CxfConsumer {
-    pub fn new(pool: Arc<CxfBridgePool>, profile_name: String) -> Self {
+    pub fn new(
+        pool: Arc<CxfBridgePool>,
+        profile_name: String,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Self {
         Self {
             pool,
             profile_name,
             cancel_token: None,
             task_handle: None,
+            runtime,
         }
     }
 }
@@ -371,6 +380,10 @@ mod tests {
     use super::*;
     use crate::config::CxfPoolConfig;
     use camel_component_api::NetworkRetryPolicy;
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
 
     fn test_pool() -> Arc<CxfBridgePool> {
         let pool_config = CxfPoolConfig {
@@ -389,7 +402,7 @@ mod tests {
     #[test]
     fn consumer_new() {
         let pool = test_pool();
-        let consumer = CxfConsumer::new(pool, "baleares".to_string());
+        let consumer = CxfConsumer::new(pool, "baleares".to_string(), test_rt());
         assert!(consumer.cancel_token.is_none());
         assert!(consumer.task_handle.is_none());
         assert_eq!(consumer.profile_name, "baleares");
@@ -477,14 +490,14 @@ mod tests {
     #[tokio::test]
     async fn stop_without_start_is_noop() {
         let pool = test_pool();
-        let mut consumer = CxfConsumer::new(pool, "test".to_string());
+        let mut consumer = CxfConsumer::new(pool, "test".to_string(), test_rt());
         assert!(consumer.stop().await.is_ok());
     }
 
     #[tokio::test]
     async fn test_consumer_stop_cleans_up() {
         let pool = test_pool();
-        let mut consumer = CxfConsumer::new(pool, "test".to_string());
+        let mut consumer = CxfConsumer::new(pool, "test".to_string(), test_rt());
 
         // Simulate the internal state that start() would set up,
         // but without actually trying to connect to a bridge.

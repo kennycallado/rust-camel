@@ -160,6 +160,16 @@ impl HealthCheckRegistry {
     }
 }
 
+impl camel_component_api::HealthCheckRegistry for HealthCheckRegistry {
+    fn force_unhealthy_for_route(&self, route_id: &str, name: &str, reason: &str) {
+        // Rust's method resolution prefers inherent methods over trait methods
+        // when both are in scope with the same name. This calls the inherent
+        // method (defined on HealthCheckRegistry directly above), NOT this
+        // trait method we're defining here — so there is no recursion.
+        self.force_unhealthy_for_route(route_id, name, reason.to_string());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +440,49 @@ mod tests {
         assert_eq!(report2.status, HealthStatus::Unhealthy);
         assert_eq!(report1.services[0].name, "forced");
         assert_eq!(report2.services[0].name, "forced");
+    }
+
+    // ---------------------------------------------------------
+    // Regression: trait delegation must not recurse infinitely.
+    // ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_registry_trait_delegation_does_not_recurse() {
+        // GIVEN: the concrete HealthCheckRegistry with a registered probe.
+        let registry = HealthCheckRegistry::new(std::time::Duration::from_secs(5));
+        // Register a no-op live check so the route has at least one entry
+        // (force_unhealthy_for_route replaces all entries for the route).
+        struct NoopCheck;
+        #[async_trait]
+        impl camel_api::AsyncHealthCheck for NoopCheck {
+            fn name(&self) -> &str {
+                "noop"
+            }
+            async fn check(&self) -> camel_api::CheckResult {
+                camel_api::CheckResult::healthy("noop")
+            }
+        }
+        registry.register_for_route("test-route", std::sync::Arc::new(NoopCheck));
+
+        // WHEN: the trait method is invoked (UFCS to be explicit about which
+        // method we're calling). This MUST resolve to the inherent impl, NOT
+        // recurse into the trait method body that calls it.
+        camel_component_api::HealthCheckRegistry::force_unhealthy_for_route(
+            &registry,
+            "test-route",
+            "probe",
+            "test reason",
+        );
+
+        // THEN: call completed without stack overflow AND the route is now
+        // Unhealthy with the forced entry. The `force_unhealthy_for_route`
+        // inherent method replaces all existing entries with a single
+        // ForcedUnhealthy entry; if the trait method had recursed instead,
+        // we'd have stack-overflowed before reaching this assertion.
+        let report = registry.check_all().await;
+        assert_eq!(report.status, camel_api::HealthStatus::Unhealthy);
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(report.services[0].name, "probe");
+        assert_eq!(report.services[0].message.as_deref(), Some("test reason"));
     }
 }

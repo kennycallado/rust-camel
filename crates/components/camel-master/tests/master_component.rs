@@ -10,7 +10,8 @@ use camel_api::{
     PlatformIdentity, PlatformService, ReadinessGate,
 };
 use camel_component_api::{
-    BoxProcessor, Component, ComponentContext, Consumer, ConsumerContext, Endpoint, ProducerContext,
+    BoxProcessor, Component, ComponentContext, Consumer, ConsumerContext, Endpoint,
+    ProducerContext, RuntimeObservability,
 };
 use camel_language_api::Language;
 use camel_master::MasterComponent;
@@ -81,11 +82,18 @@ impl Endpoint for TestDelegateEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(TestDelegateConsumer))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Err(CamelError::EndpointCreationFailed("not used".to_string()))
     }
 }
@@ -280,7 +288,9 @@ async fn works_with_noop_platform_service() {
     let endpoint = component
         .create_endpoint("master:leader-lock:test:delegate", &ctx)
         .unwrap();
-    let mut consumer = endpoint.create_consumer().unwrap();
+    let rt: std::sync::Arc<dyn RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let mut consumer = endpoint.create_consumer(rt).unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let cancel = CancellationToken::new();
@@ -311,7 +321,9 @@ async fn lock_name_is_forwarded_to_leadership_service() {
     let endpoint = component
         .create_endpoint("master:lease-name:test:delegate", &ctx)
         .unwrap();
-    let mut consumer = endpoint.create_consumer().unwrap();
+    let rt: std::sync::Arc<dyn RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let mut consumer = endpoint.create_consumer(rt).unwrap();
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let cancel = CancellationToken::new();
@@ -340,7 +352,9 @@ async fn retries_delegate_start_while_leadership_stays_started() {
     let endpoint = component
         .create_endpoint("master:retry-lock:test:delegate", &ctx)
         .unwrap();
-    let mut consumer = endpoint.create_consumer().unwrap();
+    let rt: std::sync::Arc<dyn RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let mut consumer = endpoint.create_consumer(rt).unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let cancel = CancellationToken::new();
@@ -371,7 +385,9 @@ async fn dropping_consumer_after_start_does_not_step_down_leadership_immediately
     let endpoint = component
         .create_endpoint("master:drop-lock:test:delegate", &ctx)
         .unwrap();
-    let mut consumer = endpoint.create_consumer().unwrap();
+    let rt: std::sync::Arc<dyn RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let mut consumer = endpoint.create_consumer(rt).unwrap();
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let consumer_ctx = ConsumerContext::new(tx, CancellationToken::new());

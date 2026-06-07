@@ -31,6 +31,7 @@ serde           = { workspace = true }
 toml            = { workspace = true }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

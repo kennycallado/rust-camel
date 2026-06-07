@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-use camel_component_api::{BodyType, BoxProcessor, CamelError};
+use camel_component_api::{BodyType, BoxProcessor, CamelError, RuntimeObservability};
 use camel_component_api::{Consumer, Endpoint, ProducerContext};
 use sqlx::AnyPool;
 
@@ -35,17 +35,26 @@ impl Endpoint for SqlEndpoint {
         &self.uri
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(SqlProducer::new(
             self.config.clone(),
             Arc::clone(&self.pool),
+            rt,
         )))
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(SqlConsumer::new(
             self.config.clone(),
             Arc::clone(&self.pool),
+            rt,
         )))
     }
 
@@ -63,6 +72,10 @@ impl Endpoint for SqlEndpoint {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
     use super::*;
     use crate::config::SqlEndpointConfig;
     use camel_component_api::Endpoint;
@@ -121,14 +134,14 @@ mod tests {
     fn create_producer_returns_ok() {
         let endpoint = make_endpoint(false, false);
         let ctx = ProducerContext::new();
-        let result = endpoint.create_producer(&ctx);
+        let result = endpoint.create_producer(test_rt(), &ctx);
         assert!(result.is_ok());
     }
 
     #[test]
     fn create_consumer_returns_ok() {
         let endpoint = make_endpoint(false, false);
-        let result = endpoint.create_consumer();
+        let result = endpoint.create_consumer(test_rt());
         assert!(result.is_ok());
     }
 

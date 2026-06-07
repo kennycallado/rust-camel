@@ -1,6 +1,10 @@
+use camel_component_api::test_support::PanicRuntimeObservability;
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
 use async_trait::async_trait;
 use camel_api::{Exchange, Message, body::Body};
-use camel_component_api::{Component, NoOpComponentContext, ProducerContext};
+use camel_component_api::{Component, NoOpComponentContext, ProducerContext, RuntimeObservability};
 use camel_xslt::{
     BridgeState, StylesheetId, XsltBridgeClient, XsltComponent, XsltComponentConfig, XsltError,
     XsltTransformBackend,
@@ -73,8 +77,9 @@ async fn compile_error_surfaces_on_first_transform() {
         .expect("endpoint creation should succeed with lazy init");
 
     let ctx = ProducerContext::default();
+    let rt: std::sync::Arc<dyn RuntimeObservability> = std::sync::Arc::new(NoOpComponentContext);
     let mut producer = ep
-        .create_producer(&ctx)
+        .create_producer(rt, &ctx)
         .expect("producer creation should succeed");
 
     let exchange = Exchange::new(Message::new(Body::Xml("<x/>".to_string())));

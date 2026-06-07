@@ -73,7 +73,10 @@ impl Endpoint for CrashSimulatorEndpoint {
         "crash-simulator:test"
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(CrashSimulatorConsumer {
             crash_counter: Arc::clone(&self.crash_counter),
             runs_before_crash: self.runs_before_crash,
@@ -82,6 +85,7 @@ impl Endpoint for CrashSimulatorEndpoint {
 
     fn create_producer(
         &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
         _ctx: &camel_api::ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
         Err(CamelError::EndpointCreationFailed(

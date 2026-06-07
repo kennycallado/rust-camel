@@ -1,7 +1,9 @@
 use crate::component::XjBridgeRuntime;
 use crate::config::Direction;
 use crate::producer::XjProducer;
-use camel_component_api::{BoxProcessor, CamelError, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{
+    BoxProcessor, CamelError, Consumer, Endpoint, ProducerContext, RuntimeObservability,
+};
 use camel_xslt::StylesheetId;
 use std::sync::Arc;
 
@@ -55,13 +57,20 @@ impl Endpoint for XjEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "xj endpoint does not support consumers".to_string(),
         ))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(XjProducer::new(
             self.stylesheet_id.clone(),
             self.params.clone(),

@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use camel_api::CamelError;
-use camel_component_api::{Body, Consumer, ConsumerContext, Exchange, Message};
+use camel_component_api::{
+    Body, Consumer, ConsumerContext, Exchange, Message, RuntimeObservability,
+};
 use indexmap::IndexSet;
 use tracing::{debug, error, info, warn};
 
@@ -64,11 +68,15 @@ fn set_opt(msg: &mut Message, key: &str, val: Option<&String>) {
 
 pub struct KeycloakEventConsumer {
     config: EventsEndpointConfig,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl KeycloakEventConsumer {
-    pub fn new(config: EventsEndpointConfig) -> Self {
-        Self { config }
+    pub fn new(config: EventsEndpointConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
+        Self { config, runtime }
     }
 
     async fn fetch_user_events(

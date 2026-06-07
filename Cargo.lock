@@ -10169,6 +10169,7 @@ version = "0.13.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-api",
  "camel-component-direct",
  "camel-component-log",
  "camel-core",
@@ -10193,6 +10194,7 @@ version = "0.13.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-api",
  "camel-component-direct",
  "camel-component-log",
  "camel-core",

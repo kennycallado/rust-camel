@@ -40,6 +40,10 @@ pub fn bridge_bg_rt() -> &'static tokio::runtime::Handle {
 #[cfg(feature = "integration-tests")]
 use camel_component_api::CamelError;
 
+pub fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(camel_component_api::NoOpComponentContext)
+}
+
 #[cfg(feature = "integration-tests")]
 use camel_test::CamelTestContext;
 
@@ -187,7 +191,7 @@ pub async fn send_to_direct(
                         .create_endpoint(endpoint_uri, &*ctx)
                         .expect("failed to create direct endpoint");
                     endpoint
-                        .create_producer(&producer_ctx)
+                        .create_producer(test_rt(), &producer_ctx)
                         .expect("failed to create direct producer")
                 };
 

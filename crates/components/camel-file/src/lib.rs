@@ -15,6 +15,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -651,16 +652,23 @@ impl Endpoint for FileEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(FileConsumer {
-            config: self.config.clone(),
-            seen: HashSet::new(),
-            in_process_locks: self.in_process_locks.clone(),
-            idempotent_repo: self.idempotent_repo.clone(),
-        }))
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(FileConsumer::new(
+            self.config.clone(),
+            self.in_process_locks.clone(),
+            self.idempotent_repo.clone(),
+            rt,
+        )))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(FileProducer {
             config: self.config.clone(),
         }))
@@ -676,6 +684,27 @@ struct FileConsumer {
     seen: HashSet<PathBuf>,
     in_process_locks: std::sync::Arc<DashMap<PathBuf, ()>>,
     idempotent_repo: std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+}
+
+impl FileConsumer {
+    fn new(
+        config: FileConfig,
+        in_process_locks: std::sync::Arc<DashMap<PathBuf, ()>>,
+        idempotent_repo: std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Self {
+        Self {
+            config,
+            seen: HashSet::new(),
+            in_process_locks,
+            idempotent_repo,
+            runtime,
+        }
+    }
 }
 
 #[async_trait]
@@ -1516,6 +1545,11 @@ fn encode_text_by_charset(text: &str, charset: &Option<String>) -> Result<Vec<u8
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use bytes::Bytes;
     use camel_component_api::NoOpComponentContext;
@@ -1626,7 +1660,7 @@ mod tests {
                 &ctx,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
@@ -1783,7 +1817,7 @@ mod tests {
                 &ctx,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
@@ -1829,7 +1863,7 @@ mod tests {
                 &ctx,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
@@ -1904,7 +1938,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("file:{dir_path}?initialDelay=0&delay=50"), &ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
@@ -1941,7 +1975,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("file content"));
         exchange.input.set_header(
@@ -1970,7 +2004,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}/sub/dir"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("nested"));
         exchange.input.set_header(
@@ -1998,7 +2032,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}?fileExist=Fail"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("new"));
         exchange.input.set_header(
@@ -2028,7 +2062,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}?fileExist=Append"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("new"));
         exchange.input.set_header(
@@ -2055,7 +2089,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}?tempPrefix=.tmp"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("atomic write"));
         exchange.input.set_header(
@@ -2084,7 +2118,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}?fileName=fixed.txt"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("content"));
 
@@ -2105,7 +2139,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("content"));
 
@@ -2134,7 +2168,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}/subdir"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("malicious"));
         exchange.input.set_header(
@@ -2165,7 +2199,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("malicious"));
         exchange.input.set_header(
@@ -2190,7 +2224,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let outside_parent = dir.path().parent().unwrap().join("escaped-create-dir");
         if outside_parent.exists() {
@@ -2265,7 +2299,7 @@ mod tests {
                 &component_ctx,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
@@ -2308,7 +2342,7 @@ mod tests {
                 &component_ctx,
             )
             .unwrap();
-        let mut consumer2 = endpoint2.create_consumer().unwrap();
+        let mut consumer2 = endpoint2.create_consumer(rt()).unwrap();
 
         let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
         let token2 = CancellationToken::new();
@@ -2352,7 +2386,9 @@ mod tests {
         let component = FileComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
-        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+        let producer = endpoint
+            .create_producer(rt(), &test_producer_ctx())
+            .unwrap();
 
         let chunks: Vec<Result<Bytes, CamelError>> = vec![
             Ok(Bytes::from("hello ")),
@@ -2390,7 +2426,9 @@ mod tests {
         let component = FileComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
-        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+        let producer = endpoint
+            .create_producer(rt(), &test_producer_ctx())
+            .unwrap();
 
         let chunks: Vec<Result<Bytes, CamelError>> = vec![
             Ok(Bytes::from("partial")),
@@ -2441,7 +2479,9 @@ mod tests {
         let component = FileComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
-        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+        let producer = endpoint
+            .create_producer(rt(), &test_producer_ctx())
+            .unwrap();
 
         let chunks: Vec<Result<Bytes, CamelError>> = vec![Ok(Bytes::from("line2\n"))];
         let stream = futures::stream::iter(chunks);
@@ -2478,7 +2518,9 @@ mod tests {
         let component = FileComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
-        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+        let producer = endpoint
+            .create_producer(rt(), &test_producer_ctx())
+            .unwrap();
 
         // Stream with an error in the middle
         let chunks: Vec<Result<Bytes, CamelError>> = vec![
@@ -2522,7 +2564,9 @@ mod tests {
         let component = FileComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
-        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+        let producer = endpoint
+            .create_producer(rt(), &test_producer_ctx())
+            .unwrap();
 
         // Mutex holds None -> stream already consumed
         type MaybeStream = std::sync::Arc<
@@ -2617,7 +2661,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("content"));
         exchange
@@ -2654,7 +2698,7 @@ mod tests {
             )
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("data"));
         exchange
@@ -2682,7 +2726,7 @@ mod tests {
             .create_endpoint(&format!("file:{dir_path}?fileName=plain.txt"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("data"));
         producer.oneshot(exchange).await.unwrap();

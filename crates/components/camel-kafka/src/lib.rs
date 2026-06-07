@@ -125,17 +125,29 @@ impl Endpoint for KafkaEndpoint {
         &self.uri
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(KafkaProducer::new(self.config.clone())?))
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(KafkaConsumer::new(self.config.clone())))
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(KafkaConsumer::new(self.config.clone(), rt)))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::NoOpComponentContext;
 
@@ -245,7 +257,7 @@ mod tests {
             .expect("endpoint should be created with global defaults");
 
         let producer = endpoint
-            .create_producer(&ProducerContext::default())
+            .create_producer(rt(), &ProducerContext::default())
             .expect("producer should be created from endpoint");
         drop(producer);
     }

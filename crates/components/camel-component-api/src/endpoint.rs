@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use camel_api::{BodyType, BoxProcessor, CamelError, Exchange};
 
 use crate::ProducerContext;
 use crate::consumer::Consumer;
+use crate::runtime_observability::RuntimeObservability;
 
 /// A polling consumer receives messages on demand (pull model) rather than
 /// being event-driven (push model).
@@ -21,10 +24,27 @@ pub trait Endpoint: Send + Sync {
     fn uri(&self) -> &str;
 
     /// Create a consumer that reads from this endpoint.
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError>;
+    ///
+    /// `rt` provides narrow observability access (`metrics()` + `health()`)
+    /// per ADR-0012 Phase A. Consumers store the Arc for later
+    /// `rt.metrics().increment_errors(...)` / `rt.health().force_unhealthy_for_route(...)`
+    /// calls (Phase B).
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError>;
 
     /// Create a producer that writes to this endpoint.
-    fn create_producer(&self, ctx: &ProducerContext) -> Result<BoxProcessor, CamelError>;
+    ///
+    /// `rt` provides narrow observability access (`metrics()` + `health()`)
+    /// per ADR-0012 Phase A. Producers store the Arc for later
+    /// `rt.health().force_unhealthy_for_route(...)` calls on creation failure
+    /// (Phase B category (g) sites).
+    fn create_producer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+        ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError>;
 
     /// Optional body type contract for the producer.
     ///
@@ -49,6 +69,7 @@ pub trait Endpoint: Send + Sync {
 mod tests {
     use super::*;
     use crate::ComponentContext;
+    use crate::test_support::PanicRuntimeObservability;
 
     /// A minimal mock endpoint for testing default trait methods.
     struct MockEndpoint {
@@ -68,11 +89,18 @@ mod tests {
             &self.uri
         }
 
-        fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn crate::RuntimeObservability>,
+        ) -> Result<Box<dyn Consumer>, CamelError> {
             Err(CamelError::EndpointCreationFailed("mock".into()))
         }
 
-        fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+        fn create_producer(
+            &self,
+            _rt: Arc<dyn crate::RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
             Err(CamelError::ProcessorError("mock".into()))
         }
     }
@@ -98,7 +126,8 @@ mod tests {
     #[test]
     fn mock_endpoint_create_consumer_errors() {
         let ep = MockEndpoint::new("mock://test");
-        let result = ep.create_consumer();
+        let rt: Arc<dyn crate::RuntimeObservability> = Arc::new(PanicRuntimeObservability);
+        let result = ep.create_consumer(rt);
         assert!(result.is_err());
     }
 
@@ -106,7 +135,8 @@ mod tests {
     fn mock_endpoint_create_producer_errors() {
         let ep = MockEndpoint::new("mock://test");
         let ctx = ProducerContext::new();
-        let result = ep.create_producer(&ctx);
+        let rt: Arc<dyn crate::RuntimeObservability> = Arc::new(PanicRuntimeObservability);
+        let result = ep.create_producer(rt, &ctx);
         assert!(result.is_err());
     }
 

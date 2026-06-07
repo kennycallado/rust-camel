@@ -2,7 +2,7 @@ use crate::commands;
 use crate::config::{
     RedisCommand, RedisEndpointConfig, is_idempotent_command, is_transient_redis_error,
 };
-use camel_component_api::{CamelError, Exchange};
+use camel_component_api::{CamelError, Exchange, RuntimeObservability};
 use redis::aio::MultiplexedConnection;
 use std::future::Future;
 use std::pin::Pin;
@@ -22,16 +22,21 @@ pub struct RedisProducer {
     config: RedisEndpointConfig,
     /// Shared connection pool - created lazily on first use
     conn: Arc<Mutex<Option<MultiplexedConnection>>>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl RedisProducer {
     /// Creates a new RedisProducer with the given configuration.
     ///
     /// The connection is not established until the first call to `call()`.
-    pub fn new(config: RedisEndpointConfig) -> Self {
+    pub fn new(config: RedisEndpointConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
         Self {
             config,
             conn: Arc::new(Mutex::new(None)),
+            runtime,
         }
     }
 
@@ -395,18 +400,22 @@ impl Service<Exchange> for RedisProducer {
 mod tests {
     use super::*;
     use camel_component_api::Message;
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
 
     #[test]
     fn test_producer_new() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
         assert!(Arc::strong_count(&producer.conn) == 1);
     }
 
     #[test]
     fn test_producer_clone_shares_connection() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
         let producer2 = producer.clone();
 
         // Both producers share the same connection Arc
@@ -519,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn test_poll_ready_always_returns_ready() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let mut producer = RedisProducer::new(config);
+        let mut producer = RedisProducer::new(config, test_rt());
         let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
@@ -556,7 +565,7 @@ mod tests {
     #[test]
     fn test_producer_clone_is_independent_for_async_state() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
         let producer2 = producer.clone();
 
         // Both share the same Arc
@@ -569,7 +578,7 @@ mod tests {
     #[tokio::test]
     async fn test_producer_connection_is_none_initially() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
 
         let guard = producer.conn.lock().await;
         assert!(guard.is_none());
@@ -578,7 +587,7 @@ mod tests {
     #[test]
     fn test_producer_clone_increments_arc_count() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
         assert_eq!(Arc::strong_count(&producer.conn), 1);
 
         let _producer2 = producer.clone();
@@ -590,7 +599,7 @@ mod tests {
         // This test requires a real Redis server, so we mark it as a pattern test
         // In CI, this would be skipped unless Redis is available
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
 
         // Connection should be None initially
         {
@@ -606,7 +615,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_connection_fails_without_redis() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:9933").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
         let result = producer.check_connection().await;
         // Without a Redis on port 9933, this should fail
         // The error may come from connection failure or PING failure
@@ -620,7 +629,7 @@ mod tests {
     #[test]
     fn test_check_connection_available_on_clone() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
         let _clone = producer.clone();
         // Verify the method exists and compiles — actual call requires live Redis
     }

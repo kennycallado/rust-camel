@@ -202,16 +202,22 @@ impl Endpoint for DirectEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(DirectConsumer {
-            name: self.config.name.clone(),
-            registry: Arc::clone(&self.registry),
-            cancel: None,
-            handle: None,
-        }))
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(DirectConsumer::new(
+            self.config.name.clone(),
+            Arc::clone(&self.registry),
+            rt,
+        )))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(DirectProducer {
             name: self.config.name.clone(),
             registry: Arc::clone(&self.registry),
@@ -235,6 +241,26 @@ struct DirectConsumer {
     registry: DirectRegistry,
     cancel: Option<CancellationToken>,
     handle: Option<JoinHandle<Result<(), CamelError>>>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+}
+
+impl DirectConsumer {
+    fn new(
+        name: String,
+        registry: DirectRegistry,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Self {
+        Self {
+            name,
+            registry,
+            cancel: None,
+            handle: None,
+            runtime,
+        }
+    }
 }
 
 #[async_trait]
@@ -504,6 +530,11 @@ impl Service<Exchange> for DirectProducer {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::ExchangeEnvelope;
     use camel_component_api::Message;
@@ -568,7 +599,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("direct:foo", &NoOpComponentContext)
             .unwrap();
-        assert!(endpoint.create_consumer().is_ok());
+        assert!(endpoint.create_consumer(rt()).is_ok());
     }
 
     #[test]
@@ -578,7 +609,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("direct:foo", &NoOpComponentContext)
             .unwrap();
-        assert!(endpoint.create_producer(&ctx).is_ok());
+        assert!(endpoint.create_producer(rt(), &ctx).is_ok());
     }
 
     #[test]
@@ -600,7 +631,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("direct:missing", &NoOpComponentContext)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("test"));
         let result = producer.oneshot(exchange).await;
@@ -614,8 +645,8 @@ mod tests {
             .create_endpoint("direct:dup", &NoOpComponentContext)
             .unwrap();
 
-        let mut consumer_a = endpoint.create_consumer().unwrap();
-        let mut consumer_b = endpoint.create_consumer().unwrap();
+        let mut consumer_a = endpoint.create_consumer(rt()).unwrap();
+        let mut consumer_b = endpoint.create_consumer(rt()).unwrap();
 
         let (route_tx_a, _route_rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx_a = ConsumerContext::new(route_tx_a, tokio_util::sync::CancellationToken::new());
@@ -642,7 +673,7 @@ mod tests {
         let consumer_endpoint = component
             .create_endpoint("direct:test", &NoOpComponentContext)
             .unwrap();
-        let mut consumer = consumer_endpoint.create_consumer().unwrap();
+        let mut consumer = consumer_endpoint.create_consumer(rt()).unwrap();
 
         // The route channel now carries ExchangeEnvelope (request-reply support).
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
@@ -671,7 +702,7 @@ mod tests {
         let producer_endpoint = component
             .create_endpoint("direct:test", &NoOpComponentContext)
             .unwrap();
-        let producer = producer_endpoint.create_producer(&ctx).unwrap();
+        let producer = producer_endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("hello direct"));
         let result = producer.oneshot(exchange).await;
@@ -688,7 +719,7 @@ mod tests {
         let consumer_endpoint = component
             .create_endpoint("direct:err-test", &NoOpComponentContext)
             .unwrap();
-        let mut consumer = consumer_endpoint.create_consumer().unwrap();
+        let mut consumer = consumer_endpoint.create_consumer(rt()).unwrap();
 
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx, tokio_util::sync::CancellationToken::new());
@@ -712,7 +743,7 @@ mod tests {
         let producer_endpoint = component
             .create_endpoint("direct:err-test", &NoOpComponentContext)
             .unwrap();
-        let producer = producer_endpoint.create_producer(&ctx).unwrap();
+        let producer = producer_endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("test"));
         let result = producer.oneshot(exchange).await;
@@ -728,7 +759,7 @@ mod tests {
             .unwrap();
 
         // We need a consumer to register
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx, tokio_util::sync::CancellationToken::new());
@@ -752,6 +783,7 @@ mod tests {
             registry: Arc::clone(&component.registry),
             cancel: None,
             handle: None,
+            runtime: rt(),
         };
         stop_consumer.stop().await.unwrap();
 
@@ -778,6 +810,7 @@ mod tests {
             registry: registry.clone(),
             cancel: None,
             handle: None,
+            runtime: rt(),
         };
 
         let handle = tokio::spawn(async move {
@@ -817,6 +850,7 @@ mod tests {
             registry,
             cancel: None,
             handle: None,
+            runtime: rt(),
         };
         let result = consumer.stop().await;
         assert!(result.is_ok());
@@ -944,7 +978,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("direct:stop-test", &NoOpComponentContext)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let token = CancellationToken::new();
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
@@ -972,6 +1006,7 @@ mod tests {
             registry: Arc::clone(&component.registry),
             cancel: Some(token.clone()),
             handle: None,
+            runtime: rt(),
         };
         stop_consumer.stop().await.unwrap();
 
@@ -995,7 +1030,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("direct:timeout-test", &NoOpComponentContext)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         // Consumer that never replies (simulates a stuck pipeline)
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);

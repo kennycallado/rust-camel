@@ -56,7 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint =
         component.create_endpoint(&write_uri, &camel_component_api::NoOpComponentContext)?;
     let ctx = ProducerContext::new();
-    let producer = endpoint.create_producer(&ctx)?;
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let producer = endpoint.create_producer(rt, &ctx)?;
 
     let exchange = Exchange::new(Message::new(body));
     let result = producer.oneshot(exchange).await?;

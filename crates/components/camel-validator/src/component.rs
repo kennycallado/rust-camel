@@ -12,6 +12,7 @@ use crate::xsd_bridge::{XsdBridge, XsdBridgeBackend};
 use camel_component_api::ComponentContext;
 use camel_component_api::{
     BoxProcessor, CamelError, Component, Consumer, Endpoint, Exchange, ProducerContext,
+    RuntimeObservability,
 };
 
 pub struct ValidatorComponent {
@@ -96,13 +97,20 @@ impl Endpoint for ValidatorEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "validator endpoint does not support consumers".to_string(),
         ))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(ValidatorProducer {
             uri: self.uri.clone(),
             config: self.config.clone(),
@@ -178,6 +186,11 @@ impl Service<Exchange> for ValidatorProducer {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use crate::error::ValidatorError;
     use async_trait::async_trait;
@@ -244,7 +257,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        assert!(ep.create_consumer().is_err());
+        assert!(ep.create_consumer(rt()).is_err());
     }
 
     #[test]
@@ -261,7 +274,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Json(
             serde_json::json!({"id": "1"}),
         )));
@@ -276,7 +289,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Json(
             serde_json::json!({"name": "x"}),
         )));
@@ -299,7 +312,7 @@ mod tests {
         let ep = ValidatorComponent::with_xsd_bridge(backend)
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Xml(
             "<order>hello</order>".to_string(),
         )));
@@ -321,7 +334,7 @@ mod tests {
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
 
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Xml(
             "<order>ok</order>".to_string(),
         )));
@@ -348,7 +361,7 @@ mod tests {
             .create_endpoint(&uri, &NoOpComponentContext)
             .expect("endpoint creation should succeed");
         // The error surfaces when the first message is processed (register is called).
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Xml(
             "<order/>".to_string(),
         )));
@@ -367,7 +380,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         // Send a body that is definitely > 100 bytes
         let big_body: String = "x".repeat(200);
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Text(big_body)));
@@ -387,7 +400,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Json(
             serde_json::json!({"id": "1"}),
         )));
@@ -402,7 +415,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         // Valid JSON that would exceed a 10-byte limit
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Json(
             serde_json::json!({"id": "this is a longer value that would exceed small limits"}),
@@ -421,7 +434,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Empty));
         let result = producer.oneshot(exchange).await;
         assert!(result.is_err());
@@ -439,7 +452,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Empty));
         let result = producer.oneshot(exchange).await;
         assert!(
@@ -455,7 +468,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let mut msg = Message::new(camel_component_api::Body::Empty);
         msg.set_header("X-Data", serde_json::json!({"id": "1"}).to_string());
         let exchange = Exchange::new(msg);
@@ -475,7 +488,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Empty));
         let result = producer.oneshot(exchange).await;
         assert!(result.is_err());
@@ -496,7 +509,7 @@ mod tests {
         let ep = ValidatorComponent::new()
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
-        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let producer = ep.create_producer(rt(), &ProducerContext::new()).unwrap();
         let exchange = Exchange::new(Message::new(camel_component_api::Body::Empty));
         let result = producer.oneshot(exchange).await;
         assert!(

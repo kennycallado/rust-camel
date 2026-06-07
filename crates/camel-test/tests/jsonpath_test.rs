@@ -8,6 +8,10 @@ use camel_language_jsonpath::JsonPathLanguage;
 use camel_test::CamelTestContext;
 use tower::ServiceExt;
 
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(camel_component_api::NoOpComponentContext)
+}
+
 fn ensure_jsonpath_registered(ctx: &mut camel_core::CamelContext) {
     match ctx.register_language("jsonpath", Box::new(JsonPathLanguage::new())) {
         Ok(()) | Err(LanguageRegistryError::AlreadyRegistered { .. }) => {}
@@ -26,7 +30,7 @@ async fn send_to_direct(h: &CamelTestContext, endpoint_uri: &str, exchange: Exch
             .create_endpoint(endpoint_uri, &*ctx)
             .expect("failed to create direct endpoint");
         endpoint
-            .create_producer(&producer_ctx)
+            .create_producer(test_rt(), &producer_ctx)
             .expect("failed to create direct producer")
     };
 

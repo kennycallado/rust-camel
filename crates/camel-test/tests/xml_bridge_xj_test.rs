@@ -13,6 +13,7 @@ use camel_api::{Exchange, Message};
 use camel_component_api::{Component, NoOpComponentContext, ProducerContext};
 use camel_xj::{XjComponent, XjComponentConfig};
 use serde_json::Value;
+use support::test_rt;
 use support::xml_bridge::require_xml_bridge_binary;
 use tower::ServiceExt;
 
@@ -35,7 +36,7 @@ async fn transform_xml_to_json(xml: &str) -> Value {
 
     let producer_ctx = ProducerContext::new();
     let producer = endpoint
-        .create_producer(&producer_ctx)
+        .create_producer(test_rt(), &producer_ctx)
         .expect("producer creation succeeds");
 
     let exchange = Exchange::new(Message::new(xml.as_bytes().to_vec()));

@@ -1,3 +1,7 @@
+use camel_component_api::test_support::PanicRuntimeObservability;
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
 use async_trait::async_trait;
 use camel_api::{Exchange, Message, body::Body};
 use camel_bridge::reconnect::BridgeReconnectHandler;
@@ -82,7 +86,9 @@ async fn reconnect_reseeds_registered_stylesheets() {
         .create_endpoint(&uri, &NoOpComponentContext)
         .unwrap();
     let ctx = ProducerContext::default();
-    let mut producer = ep.create_producer(&ctx).unwrap();
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let mut producer = ep.create_producer(rt, &ctx).unwrap();
     let exchange = Exchange::new(Message::new(Body::Xml("<x/>".to_string())));
     let out = producer
         .call(exchange)

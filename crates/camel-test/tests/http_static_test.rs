@@ -1089,7 +1089,7 @@ fn http_static_endpoint_producer_not_supported() {
         .create_endpoint("http-static:/tmp?port=19900", &ctx)
         .unwrap();
     let producer_ctx = ProducerContext::new();
-    let result = endpoint.create_producer(&producer_ctx);
+    let result = endpoint.create_producer(support::test_rt(), &producer_ctx);
     assert!(result.is_err());
     if let Err(camel_component_api::CamelError::Config(msg)) = result {
         assert!(msg.contains("does not support producers"));

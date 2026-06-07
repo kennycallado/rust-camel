@@ -133,6 +133,7 @@ mod tests {
 
         let result: Result<u32, ProducerError> = retry_async(
             &policy,
+            None,
             || {
                 let c = call_count_clone.clone();
                 async move {
@@ -166,6 +167,7 @@ mod tests {
 
         let result: Result<u32, ProducerError> = retry_async(
             &policy,
+            None,
             || {
                 let c = call_count_clone.clone();
                 async move {
@@ -197,6 +199,7 @@ mod tests {
 
         let result: Result<u32, ProducerError> = retry_async(
             &policy,
+            None,
             || {
                 let c = calls_clone.clone();
                 async move {

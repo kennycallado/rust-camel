@@ -17,6 +17,7 @@ tower.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

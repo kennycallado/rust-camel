@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use camel_api::CamelError;
 use camel_auth::oauth2::TokenProvider;
-use camel_component_api::{BoxProcessor, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{
+    BoxProcessor, Consumer, Endpoint, ProducerContext, RuntimeObservability,
+};
 
 use crate::admin_endpoint_config::AdminEndpointConfig;
 use crate::admin_operation::AdminOperation;
@@ -100,10 +102,13 @@ impl Endpoint for KeycloakEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         match &self.config {
             KeycloakEndpointConfig::Events(config) => Ok(Box::new(
-                crate::keycloak_consumer::KeycloakEventConsumer::new(config.clone()),
+                crate::keycloak_consumer::KeycloakEventConsumer::new(config.clone(), rt),
             )),
             KeycloakEndpointConfig::Admin(_) => Err(CamelError::EndpointCreationFailed(
                 "keycloak admin endpoint does not support consumers".into(),
@@ -111,10 +116,14 @@ impl Endpoint for KeycloakEndpoint {
         }
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         match &self.config {
             KeycloakEndpointConfig::Admin(config) => Ok(BoxProcessor::new(
-                crate::keycloak_producer::KeycloakAdminProducer::new(config.clone()),
+                crate::keycloak_producer::KeycloakAdminProducer::new(config.clone(), rt),
             )),
             KeycloakEndpointConfig::Events(_) => Err(CamelError::EndpointCreationFailed(
                 "keycloak events endpoint does not support producers".into(),

@@ -13,6 +13,13 @@ use tracing::{debug, error, warn};
 use camel_api::{CamelError, Exchange};
 use camel_core::Registry;
 
+#[cfg(test)]
+use camel_component_api::test_support::PanicRuntimeObservability;
+#[cfg(test)]
+fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
+
 fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
     CamelError::ProcessorError(format!("lock poisoned: {}", e))
 }
@@ -70,6 +77,11 @@ pub struct WasmProducer {
     sem: Arc<Semaphore>,
     pending_permit: Option<OwnedSemaphorePermit>,
     acquire_fut: AcquireFut,
+    /// `Arc<dyn RuntimeObservability>` for Phase B metric/health calls.
+    /// Named `observability` (not `runtime`) to avoid collision with the
+    /// existing `runtime: Arc<Mutex<Option<Arc<WasmRuntime>>>>` field above
+    /// which holds the WASM runtime instance, not the observability surface.
+    observability: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl Clone for WasmProducer {
@@ -84,6 +96,7 @@ impl Clone for WasmProducer {
             sem: Arc::clone(&self.sem),
             pending_permit: None,
             acquire_fut: None,
+            observability: Arc::clone(&self.observability),
         }
     }
 }
@@ -93,6 +106,7 @@ impl WasmProducer {
         module_path: PathBuf,
         registry: Arc<std::sync::Mutex<Registry>>,
         config: crate::config::WasmConfig,
+        observability: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         let max_concurrent_calls = config.max_concurrent_calls;
         Self {
@@ -105,6 +119,7 @@ impl WasmProducer {
             sem: Arc::new(Semaphore::new(max_concurrent_calls)),
             pending_permit: None,
             acquire_fut: None,
+            observability,
         }
     }
 
@@ -226,6 +241,10 @@ impl Service<Exchange> for WasmProducer {
 mod tests {
     use super::*;
     use crate::config::WasmConfig;
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
 
     #[test]
     fn test_producer_stores_config() {
@@ -238,6 +257,7 @@ mod tests {
             PathBuf::from("test.wasm"),
             Arc::new(std::sync::Mutex::new(Registry::new())),
             config,
+            test_rt(),
         );
         assert_eq!(producer.config().timeout_secs, 5);
         assert_eq!(producer.config().max_memory_bytes, 1024);
@@ -250,6 +270,7 @@ mod tests {
             PathBuf::from("test.wasm"),
             Arc::new(std::sync::Mutex::new(Registry::new())),
             config,
+            test_rt(),
         );
         let _cloned = producer.clone();
     }
@@ -261,6 +282,7 @@ mod tests {
             PathBuf::from("test.wasm"),
             Arc::new(std::sync::Mutex::new(Registry::new())),
             config,
+            test_rt(),
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
@@ -274,6 +296,7 @@ mod tests {
             PathBuf::from("test.wasm"),
             Arc::new(std::sync::Mutex::new(Registry::new())),
             config,
+            test_rt(),
         );
         producer.init_failed.store(true, Ordering::Relaxed);
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
@@ -294,6 +317,7 @@ mod tests {
             PathBuf::from("test.wasm"),
             Arc::new(std::sync::Mutex::new(Registry::new())),
             config,
+            test_rt(),
         );
 
         let permit = Arc::clone(&producer.sem)

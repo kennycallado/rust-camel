@@ -853,11 +853,18 @@ impl Endpoint for WsEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(WsConsumer::new(self.cfg.server_config())))
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(WsConsumer::new(self.cfg.server_config(), rt)))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(WsProducer::new(self.cfg.client_config())))
     }
 }
@@ -869,10 +876,17 @@ pub struct WsConsumer {
     registry_key: Option<(String, u16, String)>,
     forward_task: Option<JoinHandle<Result<(), CamelError>>>,
     security_ctx: Option<camel_component_api::SecurityContext>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl WsConsumer {
-    pub fn new(cfg: WsServerConfig) -> Self {
+    pub fn new(
+        cfg: WsServerConfig,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Self {
         Self {
             cfg,
             registry: Arc::new(WsConnectionRegistry::new()),
@@ -880,6 +894,7 @@ impl WsConsumer {
             registry_key: None,
             forward_task: None,
             security_ctx: None,
+            runtime,
         }
     }
 }
@@ -1475,6 +1490,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::NoOpComponentContext;
     use std::time::Duration;
@@ -1579,16 +1602,16 @@ mod tests {
             .create_endpoint("ws://127.0.0.1:9010/trait", &ctx)
             .unwrap();
 
-        endpoint.create_consumer().unwrap();
+        endpoint.create_consumer(rt()).unwrap();
         endpoint
-            .create_producer(&ProducerContext::default())
+            .create_producer(rt(), &ProducerContext::default())
             .unwrap();
     }
 
     #[test]
     fn ws_consumer_concurrency_model_uses_max_connections() {
         let cfg = WsEndpointConfig::from_uri("ws://127.0.0.1:9011/cm?maxConnections=321").unwrap();
-        let consumer = WsConsumer::new(cfg.server_config());
+        let consumer = WsConsumer::new(cfg.server_config(), test_rt());
         assert_eq!(
             consumer.concurrency_model(),
             ConcurrencyModel::Concurrent { max: Some(321) }
@@ -1656,9 +1679,9 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let producer = endpoint
-            .create_producer(&ProducerContext::default())
+            .create_producer(rt(), &ProducerContext::default())
             .unwrap();
 
         let (route_tx, mut route_rx) = mpsc::channel(16);
@@ -1732,7 +1755,7 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
@@ -1806,7 +1829,7 @@ mod tests {
         let endpoint = WssComponent::new()
             .create_endpoint(&format!("wss://127.0.0.1:{port}/secure"), &component_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         let result = consumer.start(ctx).await;
@@ -1827,7 +1850,7 @@ mod tests {
                 "wss://127.0.0.1:{port}/secure?tlsCert=/nonexistent/cert.pem&tlsKey=/nonexistent/key.pem"
             ), &component_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, CancellationToken::new());
         let result = consumer.start(ctx).await;
@@ -1933,7 +1956,7 @@ mod tests {
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
@@ -1982,7 +2005,7 @@ mod tests {
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
@@ -2032,7 +2055,7 @@ mod tests {
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
@@ -2079,9 +2102,9 @@ mod tests {
         let endpoint = WsComponent::new()
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let producer = endpoint
-            .create_producer(&ProducerContext::default())
+            .create_producer(rt(), &ProducerContext::default())
             .unwrap();
 
         let (route_tx, _route_rx) = mpsc::channel(16);
@@ -2297,7 +2320,7 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
 
@@ -2328,7 +2351,7 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
@@ -2370,9 +2393,9 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let producer = endpoint
-            .create_producer(&ProducerContext::default())
+            .create_producer(rt(), &ProducerContext::default())
             .unwrap();
 
         let (route_tx, _route_rx) = mpsc::channel(1); // Tiny channel to force backpressure
@@ -2427,7 +2450,7 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
@@ -2513,7 +2536,7 @@ mod tests {
             .create_endpoint(&uri, &component_ctx)
             .unwrap();
 
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
 
@@ -2557,7 +2580,7 @@ mod tests {
     async fn consumer_stop_returns_error_when_server_had_errors() {
         let port = free_port();
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/errorflag")).unwrap();
-        let mut consumer = WsConsumer::new(cfg.server_config());
+        let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();
@@ -2583,7 +2606,7 @@ mod tests {
     async fn consumer_stop_succeeds_when_server_healthy() {
         let port = free_port();
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/healthy")).unwrap();
-        let mut consumer = WsConsumer::new(cfg.server_config());
+        let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         consumer.start(ctx).await.unwrap();

@@ -1,3 +1,7 @@
+use camel_component_api::test_support::PanicRuntimeObservability;
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
 #[tokio::test]
 async fn yaml_route_validate_step_works_end_to_end() {
     use camel_component_api::{Body, Exchange, Message};
@@ -41,7 +45,9 @@ routes:
             .get("direct")
             .expect("direct component not registered");
         let endpoint = component.create_endpoint("direct:in", &ctx).unwrap();
-        endpoint.create_producer(&producer_ctx).unwrap()
+        let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+            std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+        endpoint.create_producer(rt, &producer_ctx).unwrap()
     };
 
     let valid = Exchange::new(Message::new(Body::Json(serde_json::json!({"id": "42"}))));
@@ -54,7 +60,9 @@ routes:
             .get("direct")
             .expect("direct component not registered");
         let endpoint = component.create_endpoint("direct:in", &ctx).unwrap();
-        endpoint.create_producer(&producer_ctx).unwrap()
+        let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+            std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+        endpoint.create_producer(rt, &producer_ctx).unwrap()
     };
 
     let invalid = Exchange::new(Message::new(Body::Json(serde_json::json!({"name": "x"}))));

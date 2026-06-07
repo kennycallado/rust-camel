@@ -16,6 +16,16 @@ pub trait ComponentContext: Send + Sync {
     /// Access the active metrics collector.
     fn metrics(&self) -> Arc<dyn MetricsCollector>;
 
+    /// Access the active health-check registry.
+    ///
+    /// Used by component code paths that need to pin a route Unhealthy
+    /// (category (g) per ADR-0012). Default: NoOp — tests/examples inherit
+    /// the no-op. Concrete runtimes (CamelContext) override to return the
+    /// real registry.
+    fn health(&self) -> Arc<dyn crate::HealthCheckRegistry> {
+        Arc::new(crate::NoOpHealthCheckRegistry)
+    }
+
     /// Access the active platform service.
     fn platform_service(&self) -> Arc<dyn PlatformService>;
 
@@ -57,4 +67,17 @@ impl ComponentContext for NoOpComponentContext {
     fn register_route_health_check(&self, _route_id: &str, _check: Arc<dyn AsyncHealthCheck>) {}
 
     fn unregister_route_health_check(&self, _route_id: &str) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_context_health_default_is_noop() {
+        let ctx = NoOpComponentContext;
+        let h = ctx.health();
+        // Must not panic.
+        h.force_unhealthy_for_route("any", "any", "any");
+    }
 }

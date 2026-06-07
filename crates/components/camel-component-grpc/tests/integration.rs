@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use camel_component_api::{Body, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message};
+use camel_component_api::NoOpComponentContext;
+use camel_component_api::{
+    Body, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message, RuntimeObservability,
+};
 use camel_component_grpc::GrpcMode;
 use camel_component_grpc::config::GrpcConfig;
 use camel_component_grpc::consumer::GrpcConsumer;
@@ -33,6 +36,10 @@ fn default_grpc_config() -> GrpcConfig {
         producer_strategy: camel_component_grpc::ProducerStrategy::default(),
         retry: camel_component_api::NetworkRetryPolicy::default(),
     }
+}
+
+fn test_rt() -> std::sync::Arc<dyn RuntimeObservability> {
+    std::sync::Arc::new(NoOpComponentContext)
 }
 
 mod helloworld {
@@ -175,6 +182,7 @@ async fn grpc_producer_roundtrip_json() {
         GrpcMode::Unary,
         None,
         &default_grpc_config(),
+        test_rt(),
     )
     .expect("producer");
 
@@ -212,6 +220,7 @@ async fn grpc_consumer_roundtrip_json() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     assert_eq!(
@@ -285,6 +294,7 @@ async fn test_grpc_deadline_enforced() {
         GrpcMode::Unary,
         Some(100),
         &default_grpc_config(),
+        test_rt(),
     )
     .expect("producer");
 
@@ -321,6 +331,7 @@ async fn grpc_consumer_bad_proto_startup_fails() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
@@ -373,6 +384,7 @@ async fn grpc_consumer_unknown_path_returns_unimplemented() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -430,6 +442,7 @@ async fn grpc_consumer_stop_then_request_returns_unimplemented() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -497,6 +510,7 @@ async fn grpc_consumer_multiple_paths_same_port() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx1, mut route_rx1) = tokio::sync::mpsc::channel(16);
@@ -527,6 +541,7 @@ async fn grpc_consumer_multiple_paths_same_port() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx2, mut route_rx2) = tokio::sync::mpsc::channel(16);
@@ -606,6 +621,7 @@ async fn grpc_consumer_invalid_body_returns_error() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -670,6 +686,7 @@ async fn grpc_consumer_duplicate_path_fails() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx1, mut route_rx1) = tokio::sync::mpsc::channel(16);
@@ -697,6 +714,7 @@ async fn grpc_consumer_duplicate_path_fails() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx2, _route_rx2) = tokio::sync::mpsc::channel(16);
@@ -740,6 +758,7 @@ async fn grpc_consumer_pipeline_error_returns_internal() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        test_rt(),
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -806,6 +825,7 @@ async fn grpc_consumer_server_streaming_roundtrip() {
         "streaming.StreamService".to_string(),
         "ServerList".to_string(),
         GrpcMode::ServerStreaming,
+        test_rt(),
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -901,6 +921,7 @@ async fn grpc_producer_server_streaming() {
         GrpcMode::ServerStreaming,
         None,
         &default_grpc_config(),
+        test_rt(),
     )
     .expect("producer");
 
@@ -944,6 +965,7 @@ async fn grpc_producer_client_streaming() {
         GrpcMode::ClientStreaming,
         None,
         &default_grpc_config(),
+        test_rt(),
     )
     .expect("producer");
 
@@ -985,6 +1007,7 @@ async fn grpc_producer_bidi_streaming() {
         GrpcMode::Bidi,
         None,
         &default_grpc_config(),
+        test_rt(),
     )
     .expect("producer");
 

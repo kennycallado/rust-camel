@@ -26,6 +26,13 @@ use retry::retry_rpc;
 use retry::tonic_to_camel_error;
 
 mod convert;
+#[cfg(test)]
+use camel_component_api::test_support::PanicRuntimeObservability;
+#[cfg(test)]
+fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
+
 pub(crate) use convert::proto_cache;
 use convert::{json_to_protobuf, protobuf_to_json};
 
@@ -49,6 +56,7 @@ pub struct GrpcProducer {
     acquire_fut: AcquireFut,
     auth: AuthConfig,
     config_metadata: Option<String>,
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl Clone for GrpcProducer {
@@ -67,11 +75,13 @@ impl Clone for GrpcProducer {
             acquire_fut: None,
             auth: self.auth.clone(),
             config_metadata: self.config_metadata.clone(),
+            runtime: Arc::clone(&self.runtime),
         }
     }
 }
 
 impl GrpcProducer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         addr: String,
         proto_path: PathBuf,
@@ -80,6 +90,7 @@ impl GrpcProducer {
         mode: GrpcMode,
         deadline_ms: Option<u64>,
         config: &GrpcConfig,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Result<Self, CamelError> {
         let endpoint = Endpoint::from_shared(addr.clone()).map_err(|e| {
             // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
@@ -140,6 +151,7 @@ impl GrpcProducer {
             acquire_fut: None,
             auth: config.auth.clone(),
             config_metadata: config.metadata.clone(),
+            runtime,
         })
     }
 
@@ -511,6 +523,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use super::GrpcProducer;
+    use super::rt;
     use crate::GrpcMode;
     use crate::config::GrpcConfig;
     use camel_api::{Body, CamelError, Exchange, Message};
@@ -720,6 +733,7 @@ mod tests {
             GrpcMode::Unary,
             None,
             &default_config(),
+            rt(),
         );
         assert!(result.is_err());
     }
@@ -734,6 +748,7 @@ mod tests {
             GrpcMode::Unary,
             None,
             &default_config(),
+            rt(),
         );
         let err = match result {
             Err(e) => e,
@@ -753,6 +768,7 @@ mod tests {
             GrpcMode::Unary,
             None,
             &default_config(),
+            rt(),
         );
         let err = match result {
             Err(e) => e,
@@ -772,6 +788,7 @@ mod tests {
             GrpcMode::Unary,
             None,
             &default_config(),
+            rt(),
         );
         let err = match result {
             Err(e) => e,
@@ -791,6 +808,7 @@ mod tests {
             GrpcMode::Unary,
             None,
             &default_config(),
+            rt(),
         )
         .unwrap();
 
@@ -810,6 +828,7 @@ mod tests {
             GrpcMode::Unary,
             None,
             &default_config(),
+            rt(),
         )
         .unwrap();
 
@@ -821,6 +840,7 @@ mod tests {
             GrpcMode::ServerStreaming,
             None,
             &default_config(),
+            rt(),
         )
         .unwrap();
 

@@ -726,6 +726,12 @@ impl ComponentContext for CamelContext {
         Arc::clone(&self.metrics)
     }
 
+    fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {
+        // The concrete HealthCheckRegistry struct implements the trait via
+        // the impl added in health_registry.rs.
+        Arc::clone(&self.health_registry) as Arc<dyn camel_component_api::HealthCheckRegistry>
+    }
+
     fn platform_service(&self) -> Arc<dyn PlatformService> {
         Arc::clone(&self.platform_service)
     }

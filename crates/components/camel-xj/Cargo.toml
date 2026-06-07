@@ -20,6 +20,7 @@ tonic = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 tonic = { workspace = true }
 serde_json = { workspace = true }
 

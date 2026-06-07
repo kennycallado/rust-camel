@@ -38,8 +38,10 @@ impl Host for WasmHostState {
                 .create_endpoint(&uri, &camel_component_api::NoOpComponentContext)
                 .map_err(|e| WasmError::ProcessorError(format!("create_endpoint failed: {}", e)))?;
 
+            let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+                std::sync::Arc::new(camel_component_api::NoOpComponentContext);
             let producer = endpoint
-                .create_producer(&camel_api::ProducerContext::new())
+                .create_producer(rt, &camel_api::ProducerContext::new())
                 .map_err(|e| WasmError::ProcessorError(format!("create_producer failed: {}", e)))?;
 
             let exchange =

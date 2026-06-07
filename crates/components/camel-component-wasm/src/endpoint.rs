@@ -39,17 +39,25 @@ impl Endpoint for WasmEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "WASM consumer (from: wasm:...) is not supported in v1".to_string(),
         ))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let producer = crate::producer::WasmProducer::new(
             self.module_path.clone(),
             self.registry.clone(),
             self.config.clone(),
+            rt,
         );
         Ok(BoxProcessor::new(producer))
     }

@@ -34,7 +34,7 @@ pub mod health;
 pub mod producer;
 
 use camel_component_api::{BoxProcessor, CamelError};
-use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
 use std::sync::Arc;
 
 pub use bundle::RedisBundle;
@@ -113,17 +113,35 @@ impl Endpoint for RedisEndpoint {
         &self.uri
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
-        Ok(BoxProcessor::new(RedisProducer::new(self.config.clone())))
+    fn create_producer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        Ok(BoxProcessor::new(RedisProducer::new(
+            self.config.clone(),
+            rt,
+        )))
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(RedisConsumer::new(self.config.clone())?))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::NoOpComponentContext;
 
@@ -166,14 +184,14 @@ mod tests {
             .expect("endpoint should be created with defaults");
 
         let _producer = endpoint
-            .create_producer(&ProducerContext::default())
+            .create_producer(rt(), &ProducerContext::default())
             .expect("producer should be created");
         // GET is not a valid consumer command (REDIS-003), so use BLPOP for consumer test
         let endpoint2 = component
             .create_endpoint("redis://?command=BLPOP&key=test", &ctx)
             .expect("endpoint should be created");
         let _consumer = endpoint2
-            .create_consumer()
+            .create_consumer(rt())
             .expect("consumer should be created");
     }
 
@@ -195,7 +213,11 @@ mod tests {
 mod integration_tests {
     use crate::{RedisComponent, RedisEndpointConfig, RedisProducer};
     use camel_component_api::NoOpComponentContext;
+    use camel_component_api::test_support::PanicRuntimeObservability;
     use camel_component_api::{Component, ProducerContext};
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
     use std::time::Duration;
 
     /// Helper to check if a local Redis is available.
@@ -215,7 +237,7 @@ mod integration_tests {
             return;
         }
         let config = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=PING").unwrap();
-        let producer = RedisProducer::new(config);
+        let producer = RedisProducer::new(config, test_rt());
         producer
             .check_connection()
             .await
@@ -238,7 +260,7 @@ mod integration_tests {
             .unwrap();
 
         let _producer = endpoint
-            .create_producer(&ProducerContext::default())
+            .create_producer(test_rt(), &ProducerContext::default())
             .expect("producer should be created");
         // NOTE: Full SET/GET round-trip requires tower::Service::call which needs
         // an active runtime loop. This test scaffolding proves the endpoint
@@ -264,7 +286,7 @@ mod integration_tests {
             .unwrap();
 
         let mut consumer = endpoint
-            .create_consumer()
+            .create_consumer(test_rt())
             .expect("consumer should be created");
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);

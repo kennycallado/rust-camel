@@ -1,4 +1,8 @@
-use camel_component_api::{CamelError, Component, Consumer, Endpoint, ProducerContext};
+use std::sync::Arc;
+
+use camel_component_api::{
+    CamelError, Component, Consumer, Endpoint, ProducerContext, RuntimeObservability,
+};
 use tower_http::services::ServeDir;
 
 use crate::registry::{MountMode, StaticMount};
@@ -70,14 +74,16 @@ impl Endpoint for HttpStaticEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(HttpStaticConsumer {
-            config: self.config.clone(),
-        }))
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(HttpStaticConsumer::new(self.config.clone(), rt)))
     }
 
     fn create_producer(
         &self,
+        _rt: Arc<dyn RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<camel_component_api::BoxProcessor, CamelError> {
         Err(CamelError::Config(
@@ -103,12 +109,16 @@ impl Endpoint for HttpStaticEndpoint {
 /// - Unregisters the mount from the registry.
 pub struct HttpStaticConsumer {
     config: HttpStaticConfig,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl HttpStaticConsumer {
     /// Create a new `HttpStaticConsumer` from the given config.
-    pub fn new(config: HttpStaticConfig) -> Self {
-        Self { config }
+    pub fn new(config: HttpStaticConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
+        Self { config, runtime }
     }
 }
 
@@ -206,6 +216,14 @@ impl Consumer for HttpStaticConsumer {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use crate::REGISTRY_TEST_MUTEX;
     use camel_component_api::{ConsumerContext, ExchangeEnvelope};
@@ -254,7 +272,7 @@ mod tests {
             uri: "http-static:/tmp".to_string(),
             config,
         };
-        let consumer = endpoint.create_consumer();
+        let consumer = endpoint.create_consumer(rt());
         assert!(consumer.is_ok());
     }
 
@@ -269,7 +287,7 @@ mod tests {
             config,
         };
         let ctx = camel_component_api::ProducerContext::new();
-        let result = endpoint.create_producer(&ctx);
+        let result = endpoint.create_producer(rt(), &ctx);
         assert!(result.is_err());
         if let Err(CamelError::Config(msg)) = result {
             assert!(msg.contains("does not support producers"));
@@ -285,7 +303,7 @@ mod tests {
             port: 19900,
             ..HttpStaticConfig::default()
         };
-        let mut consumer = HttpStaticConsumer::new(config);
+        let mut consumer = HttpStaticConsumer::new(config, test_rt());
         let notify = Arc::new(Notify::new());
         let ctx = test_consumer_ctx(notify);
 

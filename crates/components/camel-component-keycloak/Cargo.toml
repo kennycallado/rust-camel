@@ -27,6 +27,7 @@ tokio.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 wiremock.workspace = true
 base64.workspace = true
 

@@ -32,7 +32,7 @@ use axum::body::BodyDataStream;
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
-use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
@@ -903,11 +903,15 @@ fn title_case_header(name: &str) -> String {
 
 pub struct HttpConsumer {
     config: HttpServerConfig,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl HttpConsumer {
-    pub fn new(config: HttpServerConfig) -> Self {
-        Self { config }
+    pub fn new(config: HttpServerConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
+        Self { config, runtime }
     }
 }
 
@@ -1390,11 +1394,18 @@ impl Endpoint for HttpEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(HttpConsumer::new(self.server_config.clone())))
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(HttpConsumer::new(self.server_config.clone(), rt)))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let producer = HttpProducer {
             config: Arc::new(self.config.clone()),
             client: self.client.clone(),
@@ -1848,6 +1859,14 @@ pub(crate) static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::{Message, NoOpComponentContext};
     use std::sync::Arc;
@@ -2003,7 +2022,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("http://0.0.0.0:19100/test", &ctx)
             .unwrap();
-        assert!(endpoint.create_consumer().is_ok());
+        assert!(endpoint.create_consumer(rt()).is_ok());
     }
 
     #[test]
@@ -2013,7 +2032,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("https://0.0.0.0:8443/test", &ctx)
             .unwrap();
-        assert!(endpoint.create_consumer().is_ok());
+        assert!(endpoint.create_consumer(rt()).is_ok());
     }
 
     #[test]
@@ -2024,7 +2043,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("http://localhost/api", &endpoint_ctx)
             .unwrap();
-        assert!(endpoint.create_producer(&ctx).is_ok());
+        assert!(endpoint.create_producer(rt(), &ctx).is_ok());
     }
 
     // -----------------------------------------------------------------------
@@ -2083,7 +2102,7 @@ mod tests {
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint(&uri, &endpoint_ctx).unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("hello"));
 
@@ -2179,7 +2198,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2209,7 +2228,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("request body"));
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2234,7 +2253,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -2266,7 +2285,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2294,7 +2313,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await;
@@ -2323,7 +2342,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2351,7 +2370,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -2380,7 +2399,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2448,7 +2467,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2478,7 +2497,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("{url}?allowPrivateIps=true"), &endpoint_ctx)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2511,7 +2530,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2616,7 +2635,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("{url}/slow?allowPrivateIps=true"), &endpoint_ctx)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await;
@@ -2643,7 +2662,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -2673,7 +2692,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -2734,7 +2753,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("http://example.com/api", &endpoint_ctx)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -2756,7 +2775,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("http://example.com/api", &endpoint_ctx)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -2780,7 +2799,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("http://192.168.1.1/api?allowPrivateIps=true", &endpoint_ctx)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
 
@@ -3041,7 +3060,7 @@ mod tests {
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
         };
-        let mut consumer = HttpConsumer::new(consumer_cfg);
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3094,7 +3113,7 @@ mod tests {
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1,
         };
-        let mut consumer = HttpConsumer::new(consumer_cfg);
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3171,7 +3190,7 @@ mod tests {
             max_response_body: 16,
             max_inflight_requests: 1024,
         };
-        let mut consumer = HttpConsumer::new(consumer_cfg);
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3219,7 +3238,7 @@ mod tests {
             max_response_body: 16,
             max_inflight_requests: 1024,
         };
-        let mut consumer = HttpConsumer::new(consumer_cfg);
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3268,7 +3287,7 @@ mod tests {
             max_response_body: 16,
             max_inflight_requests: 1024,
         };
-        let mut consumer = HttpConsumer::new(consumer_cfg);
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3320,7 +3339,7 @@ mod tests {
             max_response_body: 16,
             max_inflight_requests: 1024,
         };
-        let mut consumer = HttpConsumer::new(consumer_cfg);
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3377,7 +3396,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("http://127.0.0.1:{port}/echo"), &endpoint_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3436,13 +3455,13 @@ mod tests {
         let endpoint_a = component
             .create_endpoint(&format!("http://127.0.0.1:{port}/hello"), &endpoint_ctx)
             .unwrap();
-        let mut consumer_a = endpoint_a.create_consumer().unwrap();
+        let mut consumer_a = endpoint_a.create_consumer(rt()).unwrap();
 
         // Consumer B: /world
         let endpoint_b = component
             .create_endpoint(&format!("http://127.0.0.1:{port}/world"), &endpoint_ctx)
             .unwrap();
-        let mut consumer_b = endpoint_b.create_consumer().unwrap();
+        let mut consumer_b = endpoint_b.create_consumer(rt()).unwrap();
 
         let (tx_a, mut rx_a) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token_a = tokio_util::sync::CancellationToken::new();
@@ -3509,7 +3528,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3555,7 +3574,7 @@ mod tests {
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
         };
-        let consumer = HttpConsumer::new(config);
+        let consumer = HttpConsumer::new(config, test_rt());
         assert_eq!(
             consumer.concurrency_model(),
             ConcurrencyModel::Concurrent { max: None }
@@ -3603,7 +3622,7 @@ mod tests {
             let endpoint = component
                 .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
                 .unwrap();
-            let producer = endpoint.create_producer(&ctx).unwrap();
+            let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
             // Create exchange with an OTel context by extracting from a traceparent header
             let mut exchange = Exchange::new(Message::default());
@@ -3658,7 +3677,7 @@ mod tests {
             let endpoint = component
                 .create_endpoint(&format!("http://127.0.0.1:{port}/trace"), &endpoint_ctx)
                 .unwrap();
-            let mut consumer = endpoint.create_consumer().unwrap();
+            let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
             let token = tokio_util::sync::CancellationToken::new();
@@ -3724,7 +3743,7 @@ mod tests {
             let endpoint = component
                 .create_endpoint(&format!("http://127.0.0.1:{port}/trace"), &endpoint_ctx)
                 .unwrap();
-            let mut consumer = endpoint.create_consumer().unwrap();
+            let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
             let token = tokio_util::sync::CancellationToken::new();
@@ -3786,7 +3805,7 @@ mod tests {
             let endpoint = component
                 .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
                 .unwrap();
-            let producer = endpoint.create_producer(&ctx).unwrap();
+            let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
             // Create exchange with default (empty) otel_context - no trace context
             let exchange = Exchange::new(Message::default());
@@ -3870,7 +3889,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("http://127.0.0.1:{port}/upload"), &endpoint_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3940,7 +3959,7 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("http://127.0.0.1:{port}/stream"), &endpoint_ctx)
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -3997,7 +4016,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -4043,7 +4062,7 @@ mod tests {
                 &endpoint_ctx,
             )
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
@@ -4227,7 +4246,7 @@ mod tests {
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
         };
-        let mut consumer = HttpConsumer::new(consumer_cfg);
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
         let (tx, rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();

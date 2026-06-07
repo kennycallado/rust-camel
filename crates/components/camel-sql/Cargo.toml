@@ -37,6 +37,7 @@ url = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-util = { workspace = true }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }

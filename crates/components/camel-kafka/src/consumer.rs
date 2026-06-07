@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use camel_component_api::{Body, CamelError, Exchange, Message};
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext, NetworkRetryPolicy};
+use camel_component_api::{
+    ConcurrencyModel, Consumer, ConsumerContext, NetworkRetryPolicy, RuntimeObservability,
+};
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{
@@ -55,15 +57,23 @@ pub struct KafkaConsumer {
     task_handle: Option<JoinHandle<Result<(), CamelError>>>,
     /// Notified once the consumer has received its first partition assignment.
     ready: Arc<Notify>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl KafkaConsumer {
-    pub fn new(config: ResolvedKafkaEndpointConfig) -> Self {
+    pub fn new(
+        config: ResolvedKafkaEndpointConfig,
+        runtime: Arc<dyn RuntimeObservability>,
+    ) -> Self {
         Self {
             config,
             cancel_token: None,
             task_handle: None,
             ready: Arc::new(Notify::new()),
+            runtime,
         }
     }
 
@@ -469,7 +479,12 @@ mod tests {
     use super::*;
     use crate::config::KafkaEndpointConfig;
     use camel_api::{BackoffConfig, BackoffState};
+    use camel_component_api::test_support::PanicRuntimeObservability;
     use rdkafka::Timestamp;
+
+    fn test_rt() -> Arc<dyn camel_component_api::RuntimeObservability> {
+        Arc::new(PanicRuntimeObservability)
+    }
 
     fn make_resolved_config() -> ResolvedKafkaEndpointConfig {
         KafkaEndpointConfig::from_uri("kafka:test-topic?brokers=localhost:9092&groupId=test-group")
@@ -500,7 +515,7 @@ mod tests {
     #[test]
     fn test_consumer_new() {
         let config = make_resolved_config();
-        let consumer = KafkaConsumer::new(config);
+        let consumer = KafkaConsumer::new(config, test_rt());
         assert!(consumer.cancel_token.is_none());
         assert!(consumer.task_handle.is_none());
     }
@@ -508,14 +523,14 @@ mod tests {
     #[test]
     fn test_concurrency_model_is_sequential() {
         let config = make_resolved_config();
-        let consumer = KafkaConsumer::new(config);
+        let consumer = KafkaConsumer::new(config, test_rt());
         assert_eq!(consumer.concurrency_model(), ConcurrencyModel::Sequential);
     }
 
     #[tokio::test]
     async fn test_consumer_stop_without_start() {
         let config = make_resolved_config();
-        let mut consumer = KafkaConsumer::new(config);
+        let mut consumer = KafkaConsumer::new(config, test_rt());
         // stop() before start() should be a no-op, not panic
         let result = consumer.stop().await;
         assert!(result.is_ok());
@@ -526,7 +541,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_stop_propagates_task_error() {
         let config = make_resolved_config();
-        let mut consumer = KafkaConsumer::new(config);
+        let mut consumer = KafkaConsumer::new(config, test_rt());
 
         // Simulate a task that returns an error
         let handle = tokio::spawn(async {
@@ -549,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn test_kafka_consumer_stop_closes() {
         let config = make_resolved_config();
-        let mut consumer = KafkaConsumer::new(config);
+        let mut consumer = KafkaConsumer::new(config, test_rt());
 
         let token = CancellationToken::new();
         let token_for_task = token.clone();
@@ -583,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_stop_propagates_panic() {
         let config = make_resolved_config();
-        let mut consumer = KafkaConsumer::new(config);
+        let mut consumer = KafkaConsumer::new(config, test_rt());
 
         // Simulate a task that panics
         let handle = tokio::spawn(async {
@@ -606,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn consumer_double_start_returns_error() {
         let config = make_resolved_config();
-        let mut consumer = KafkaConsumer::new(config);
+        let mut consumer = KafkaConsumer::new(config, test_rt());
 
         // Simulate an already-started state by setting a cancel token directly.
         consumer.cancel_token = Some(CancellationToken::new());
@@ -804,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_ready_signal_returns_shared_notify_handle() {
-        let consumer = KafkaConsumer::new(make_resolved_config());
+        let consumer = KafkaConsumer::new(make_resolved_config(), test_rt());
         let ready_a = consumer.ready_signal();
         let ready_b = consumer.ready_signal();
         assert!(Arc::ptr_eq(&ready_a, &ready_b));

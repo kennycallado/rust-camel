@@ -22,6 +22,8 @@ async fn make_producer() -> (CxfProducer, MockState) {
         .await
         .expect("connect");
 
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
     let producer = CxfProducer::from_channel(
         channel,
         "test".to_string(),
@@ -31,6 +33,7 @@ async fn make_producer() -> (CxfProducer, MockState) {
         Some("http://localhost:8080/ws".to_string()),
         "defaultOperation".to_string(),
         None,
+        rt,
     );
     (producer, state)
 }

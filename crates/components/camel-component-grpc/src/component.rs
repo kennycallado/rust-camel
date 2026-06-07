@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use camel_component_api::{
     BoxProcessor, CamelError, Component, ComponentContext, Consumer, Endpoint, ProducerContext,
+    RuntimeObservability,
 };
 
 use crate::config::{GrpcConfig, parse_grpc_uri};
@@ -76,7 +77,10 @@ impl Endpoint for GrpcEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         let path = format!("/{}/{}", self.service_name, self.method_name);
         let mode = resolve_grpc_mode(&self.proto_path, &self.service_name, &self.method_name)?;
         Ok(Box::new(GrpcConsumer::new(
@@ -87,10 +91,15 @@ impl Endpoint for GrpcEndpoint {
             self.service_name.clone(),
             self.method_name.clone(),
             mode,
+            rt,
         )))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let mode = resolve_grpc_mode(&self.proto_path, &self.service_name, &self.method_name)?;
         let producer = GrpcProducer::new(
             self.addr.clone(),
@@ -100,6 +109,7 @@ impl Endpoint for GrpcEndpoint {
             mode,
             self.deadline_ms,
             &self.config,
+            rt,
         )?;
         Ok(BoxProcessor::new(producer))
     }

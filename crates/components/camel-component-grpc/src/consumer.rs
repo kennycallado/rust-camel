@@ -1,5 +1,6 @@
 use std::collections::HashMap as StdHashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -262,9 +263,14 @@ pub struct GrpcConsumer {
     method_name: String,
     mode: GrpcMode,
     security_ctx: Option<SecurityContext>,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl GrpcConsumer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: String,
         port: u16,
@@ -273,6 +279,7 @@ impl GrpcConsumer {
         service_name: String,
         method_name: String,
         mode: GrpcMode,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         Self {
             host,
@@ -283,6 +290,7 @@ impl GrpcConsumer {
             method_name,
             mode,
             security_ctx: None,
+            runtime,
         }
     }
 

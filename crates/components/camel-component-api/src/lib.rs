@@ -12,9 +12,14 @@ pub mod component;
 pub mod component_context;
 pub mod consumer;
 pub mod endpoint;
+pub mod health_registry;
+pub mod runtime_observability;
+
 pub mod network_retry;
 pub mod producer;
 pub mod registrar;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use bundle::ComponentBundle;
 pub use component::Component;
@@ -23,11 +28,18 @@ pub use consumer::{
     ConcurrencyModel, Consumer, ConsumerContext, ExchangeEnvelope, SecurityContext,
 };
 pub use endpoint::{Endpoint, PollingConsumer};
+pub use health_registry::{
+    HealthCheckRegistry, NoOpHealthCheckRegistry, noop_health_check_registry,
+};
+pub use runtime_observability::RuntimeObservability;
+
 pub use network_retry::{
     NetworkRetryPolicy, is_retryable_camel_error, retry_async, retry_async_cancelable,
 };
 pub use producer::ProducerContext;
 pub use registrar::ComponentRegistrar;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::PanicRuntimeObservability;
 
 // Re-export camel-api types for component convenience
 pub use camel_api::{

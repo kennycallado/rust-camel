@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+use camel_component_api::test_support::PanicRuntimeObservability;
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
+
 use async_trait::async_trait;
 use camel_auth::oauth2::TokenProvider;
 use camel_auth::types::AuthError;
@@ -50,7 +55,7 @@ async fn admin_producer_create_user_success() {
         .await;
 
     let config = make_config(&server.uri(), AdminOperation::CreateUser, "test", None);
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({
         "username": "testuser",
@@ -86,7 +91,7 @@ async fn admin_producer_delete_user_success() {
         "test",
         Some("user-123"),
     );
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let exchange = Exchange::new(Message::new(Body::Empty));
 
@@ -117,7 +122,7 @@ async fn admin_producer_get_user_success() {
         "test",
         Some("user-456"),
     );
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let exchange = Exchange::new(Message::new(Body::Empty));
 
@@ -145,7 +150,7 @@ async fn admin_producer_create_role_success() {
         .await;
 
     let config = make_config(&server.uri(), AdminOperation::CreateRole, "test", None);
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({
         "name": "admin-role",
@@ -175,7 +180,7 @@ async fn admin_producer_assign_role_success() {
         "test",
         Some("user-789"),
     );
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!([
         { "id": "role-1", "name": "admin" }
@@ -197,7 +202,7 @@ async fn admin_producer_create_client_success() {
         .await;
 
     let config = make_config(&server.uri(), AdminOperation::CreateClient, "test", None);
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({
         "clientId": "my-client",
@@ -220,7 +225,7 @@ async fn admin_producer_create_realm_success() {
         .await;
 
     let config = make_config(&server.uri(), AdminOperation::CreateRealm, "ignored", None);
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({
         "realm": "new-realm",
@@ -250,7 +255,7 @@ async fn admin_producer_api_error() {
         "test",
         Some("nonexistent"),
     );
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let exchange = Exchange::new(Message::new(Body::Empty));
 
@@ -275,7 +280,7 @@ async fn admin_producer_user_id_from_header() {
         .await;
 
     let config = make_config(&server.uri(), AdminOperation::GetUser, "test", None);
-    let mut producer = KeycloakAdminProducer::new(config);
+    let mut producer = KeycloakAdminProducer::new(config, test_rt());
 
     let mut exchange = Exchange::new(Message::new(Body::Empty));
     exchange.set_property("camel.keycloak.userId", serde_json::json!("from-property"));

@@ -79,15 +79,23 @@ impl Endpoint for CxfEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         let profile = self.resolve_profile()?;
         Ok(Box::new(CxfConsumer::new(
             Arc::clone(&self.pool),
             profile.name.clone(),
+            rt,
         )))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let profile = self.resolve_profile()?;
         let operation = self.endpoint_config.operation.clone().unwrap_or_default();
         // The URI's address is the SOAP target endpoint and overrides the
@@ -109,12 +117,18 @@ impl Endpoint for CxfEndpoint {
             self.endpoint_config.timeout_ms,
             self.endpoint_config.mtom_enabled,
             self.endpoint_config.attachment_content_type.clone(),
+            rt,
         )))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use crate::config::{CxfPoolConfig, CxfProfileConfig};
     use camel_component_api::NetworkRetryPolicy;
@@ -203,7 +217,7 @@ mod tests {
                 &camel_component_api::NoOpComponentContext,
             )
             .unwrap();
-        let result = endpoint.create_producer(&ProducerContext::default());
+        let result = endpoint.create_producer(rt(), &ProducerContext::default());
         assert!(
             result.is_ok(),
             "create_producer must return Ok(BoxProcessor)"
@@ -220,7 +234,7 @@ mod tests {
                 &camel_component_api::NoOpComponentContext,
             )
             .unwrap();
-        let result = endpoint.create_consumer();
+        let result = endpoint.create_consumer(rt());
         assert!(result.is_ok(), "got: {:?}", result.err());
     }
 
@@ -234,7 +248,7 @@ mod tests {
                 &camel_component_api::NoOpComponentContext,
             )
             .unwrap();
-        let result = endpoint.create_producer(&ProducerContext::default());
+        let result = endpoint.create_producer(rt(), &ProducerContext::default());
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("profile"),
@@ -252,7 +266,7 @@ mod tests {
                 &camel_component_api::NoOpComponentContext,
             )
             .unwrap();
-        let result = endpoint.create_producer(&ProducerContext::default());
+        let result = endpoint.create_producer(rt(), &ProducerContext::default());
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(

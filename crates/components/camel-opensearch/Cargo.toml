@@ -25,6 +25,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures-util = "0.3"
 

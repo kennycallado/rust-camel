@@ -377,6 +377,7 @@ mod tests {
 
         let result = retry_async::<(), _, _, _, CamelError>(
             &policy,
+            None,
             || {
                 let c = attempts_clone.clone();
                 async move {

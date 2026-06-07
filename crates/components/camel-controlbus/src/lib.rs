@@ -52,7 +52,7 @@ use camel_component_api::{
     Body, BoxProcessor, CamelError, Exchange, RouteAction, RuntimeCommand, RuntimeHandle,
     RuntimeQuery, RuntimeQueryResult, parse_uri,
 };
-use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
 #[cfg(test)]
 use camel_component_api::{RouteStatus, RuntimeCommandBus, RuntimeCommandResult, RuntimeQueryBus};
 
@@ -163,13 +163,20 @@ impl Endpoint for ControlBusEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "controlbus endpoint does not support consumers".to_string(),
         ))
     }
 
-    fn create_producer(&self, ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let action = self.action.clone().ok_or_else(|| {
             CamelError::EndpointCreationFailed(
                 "controlbus: action is required to create producer".to_string(),
@@ -343,6 +350,10 @@ fn command_id(route_id: &str, operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
     use super::*;
     use camel_component_api::Message;
     use camel_component_api::NoOpComponentContext;
@@ -494,7 +505,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        assert!(endpoint.create_consumer().is_err());
+        assert!(endpoint.create_consumer(rt()).is_err());
     }
 
     #[test]
@@ -507,7 +518,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        assert!(endpoint.create_producer(&ctx).is_ok());
+        assert!(endpoint.create_producer(rt(), &ctx).is_ok());
     }
 
     #[test]
@@ -526,7 +537,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -543,7 +554,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -562,7 +573,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -582,7 +593,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -603,7 +614,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -623,7 +634,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -643,7 +654,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let err = producer.oneshot(exchange).await.unwrap_err().to_string();
@@ -661,7 +672,7 @@ mod tests {
         let endpoint = comp
             .create_endpoint("controlbus:route?action=status", &NoOpComponentContext)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -687,7 +698,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         // Header has different route ID, but URI param should take precedence
@@ -709,7 +720,7 @@ mod tests {
         let endpoint = comp
             .create_endpoint("controlbus:route?action=status", &NoOpComponentContext)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await;
@@ -732,7 +743,7 @@ mod tests {
                 &NoOpComponentContext,
             )
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await;

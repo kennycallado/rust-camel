@@ -3,11 +3,13 @@ use std::hint::black_box;
 use camel_language_api::{Exchange, Language, Message, Value};
 use camel_language_simple::SimpleLanguage;
 use criterion::{Criterion, criterion_group, criterion_main};
+use tokio::runtime::Runtime;
 
 fn bench_expression_eval(c: &mut Criterion) {
     let mut group = c.benchmark_group("language_simple/expression_eval");
 
     let lang = SimpleLanguage::new();
+    let rt = Runtime::new().expect("tokio runtime");
 
     let mut ex = Exchange::new(Message::new("hello world"));
     ex.input.set_header("foo", Value::String("bar".to_string()));
@@ -30,8 +32,8 @@ fn bench_expression_eval(c: &mut Criterion) {
             .expect("expression should parse");
         group.bench_function(name, |b| {
             b.iter(|| {
-                let value = expr
-                    .evaluate(black_box(&ex))
+                let value = rt
+                    .block_on(expr.evaluate(black_box(&ex)))
                     .expect("expression evaluation should succeed");
                 black_box(value);
             })
@@ -45,6 +47,7 @@ fn bench_predicate_eval(c: &mut Criterion) {
     let mut group = c.benchmark_group("language_simple/predicate_eval");
 
     let lang = SimpleLanguage::new();
+    let rt = Runtime::new().expect("tokio runtime");
 
     let mut ex = Exchange::new(Message::new("hello world"));
     ex.input.set_header("foo", Value::String("bar".to_string()));
@@ -67,8 +70,8 @@ fn bench_predicate_eval(c: &mut Criterion) {
             .expect("predicate should parse");
         group.bench_function(name, |b| {
             b.iter(|| {
-                let matched = predicate
-                    .matches(black_box(&ex))
+                let matched = rt
+                    .block_on(predicate.matches(black_box(&ex)))
                     .expect("predicate evaluation should succeed");
                 black_box(matched);
             })

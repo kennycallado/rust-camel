@@ -129,12 +129,16 @@ impl Endpoint for CrashingEndpoint {
         "crash:test"
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(CrashingConsumer))
     }
 
     fn create_producer(
         &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
         _ctx: &camel_api::ProducerContext,
     ) -> Result<camel_api::BoxProcessor, CamelError> {
         Err(CamelError::RouteError("no producer".into()))
@@ -190,7 +194,10 @@ impl Endpoint for CrashOnceThenHoldEndpoint {
         "crash-once-hold:test"
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(CrashOnceThenHoldConsumer {
             starts: Arc::clone(&self.starts),
         }))
@@ -198,6 +205,7 @@ impl Endpoint for CrashOnceThenHoldEndpoint {
 
     fn create_producer(
         &self,
+        _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
         _ctx: &camel_api::ProducerContext,
     ) -> Result<camel_api::BoxProcessor, CamelError> {
         Err(CamelError::RouteError("no producer".into()))

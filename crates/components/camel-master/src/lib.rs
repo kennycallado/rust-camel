@@ -106,7 +106,10 @@ impl Endpoint for MasterEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(MasterConsumer::new(
             self.lock_name.clone(),
             self.delegate_uri.clone(),
@@ -115,10 +118,15 @@ impl Endpoint for MasterEndpoint {
             Arc::clone(&self.platform_service),
             self.drain_timeout,
             self.reconnect.clone(),
+            rt,
         )))
     }
 
-    fn create_producer(&self, ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let delegate_ctx = MasterDelegateContext {
             delegate_component: Arc::clone(&self.delegate_component),
             metrics: Arc::clone(&self.metrics),
@@ -127,7 +135,7 @@ impl Endpoint for MasterEndpoint {
 
         self.delegate_component
             .create_endpoint(&self.delegate_uri, &delegate_ctx)?
-            .create_producer(ctx)
+            .create_producer(rt, ctx)
     }
 }
 
@@ -180,9 +188,11 @@ struct MasterConsumer {
     reconnect: NetworkRetryPolicy,
     leadership_task: Option<JoinHandle<Result<(), CamelError>>>,
     stop_token: Option<CancellationToken>,
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl MasterConsumer {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         lock_name: String,
         delegate_uri: String,
@@ -191,6 +201,7 @@ impl MasterConsumer {
         platform_service: Arc<dyn PlatformService>,
         drain_timeout: Duration,
         reconnect: NetworkRetryPolicy,
+        runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         Self {
             lock_name,
@@ -202,6 +213,7 @@ impl MasterConsumer {
             reconnect,
             leadership_task: None,
             stop_token: None,
+            runtime,
         }
     }
 }
@@ -260,6 +272,7 @@ struct ReconcileContext<'a> {
     drain_timeout: Duration,
     metrics: &'a Arc<dyn MetricsCollector>,
     platform_service: &'a Arc<dyn PlatformService>,
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 async fn reconcile_event(
@@ -294,7 +307,7 @@ async fn reconcile_event(
                 }
             };
 
-            let mut consumer = match endpoint.create_consumer() {
+            let mut consumer = match endpoint.create_consumer(Arc::clone(&ctx.runtime)) {
                 Ok(consumer) => consumer,
                 Err(err) => {
                     if is_retryable_camel_error(&err) {
@@ -353,6 +366,7 @@ impl Consumer for MasterConsumer {
         let parent_cancel = context.cancel_token();
         let drain_timeout = self.drain_timeout;
         let reconnect = self.reconnect.clone();
+        let runtime = Arc::clone(&self.runtime);
         let mut events = handle.events.clone();
 
         let stop_token = CancellationToken::new();
@@ -374,6 +388,7 @@ impl Consumer for MasterConsumer {
                 drain_timeout,
                 metrics: &metrics,
                 platform_service: &platform_service,
+                runtime: Arc::clone(&runtime),
             };
 
             let initial_event = { events.borrow().clone() };
@@ -564,6 +579,7 @@ mod tests {
         PlatformService, ReadinessGate,
     };
     use camel_component_api::NoOpComponentContext;
+    use camel_component_api::test_support::PanicRuntimeObservability;
     use std::time::Instant;
     use tokio::sync::{oneshot, watch};
     use tokio::time::{sleep, timeout};
@@ -663,11 +679,18 @@ mod tests {
                 "mock:delegate"
             }
 
-            fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+            fn create_consumer(
+                &self,
+                _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+            ) -> Result<Box<dyn Consumer>, CamelError> {
                 Err(CamelError::EndpointCreationFailed("not used".to_string()))
             }
 
-            fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+            fn create_producer(
+                &self,
+                _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+                _ctx: &ProducerContext,
+            ) -> Result<BoxProcessor, CamelError> {
                 Err(CamelError::EndpointCreationFailed("not used".to_string()))
             }
         }
@@ -756,13 +779,20 @@ mod tests {
             "mock:delegate"
         }
 
-        fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+        fn create_consumer(
+            &self,
+            _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+        ) -> Result<Box<dyn Consumer>, CamelError> {
             Err(CamelError::EndpointCreationFailed(
                 "not used in test".to_string(),
             ))
         }
 
-        fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+        fn create_producer(
+            &self,
+            _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
             self.create_producer_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_producer {
                 return Err(CamelError::ProcessorError(
@@ -794,7 +824,13 @@ mod tests {
             .create_endpoint("master:lock-1:mock:delegate", &ctx)
             .unwrap();
         let producer_ctx = ProducerContext::new();
-        let producer = endpoint.create_producer(&producer_ctx).unwrap();
+        let producer = endpoint
+            .create_producer(
+                Arc::new(PanicRuntimeObservability)
+                    as Arc<dyn camel_component_api::RuntimeObservability>,
+                &producer_ctx,
+            )
+            .unwrap();
 
         let exchange = Exchange::new(Message::new("ok"));
         let result = producer.oneshot(exchange).await.unwrap();
@@ -823,7 +859,13 @@ mod tests {
             .create_endpoint("master:lock-1:mock:delegate", &ctx)
             .unwrap();
         let producer_ctx = ProducerContext::new();
-        let err = endpoint.create_producer(&producer_ctx).unwrap_err();
+        let err = endpoint
+            .create_producer(
+                Arc::new(PanicRuntimeObservability)
+                    as Arc<dyn camel_component_api::RuntimeObservability>,
+                &producer_ctx,
+            )
+            .unwrap_err();
 
         assert!(matches!(err, CamelError::ProcessorError(_)));
         assert_eq!(endpoint_calls.load(Ordering::SeqCst), 1);
@@ -947,7 +989,10 @@ mod tests {
             "fake:delegate"
         }
 
-        fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+        fn create_consumer(
+            &self,
+            _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+        ) -> Result<Box<dyn Consumer>, CamelError> {
             let epoch = self.create_consumer_calls.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(Box::new(FakeDelegateConsumer {
                 epoch,
@@ -955,7 +1000,11 @@ mod tests {
             }))
         }
 
-        fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+        fn create_producer(
+            &self,
+            _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
             Err(CamelError::EndpointCreationFailed("not used".to_string()))
         }
     }
@@ -1042,6 +1091,8 @@ mod tests {
             platform_service,
             Duration::from_millis(500),
             reconnect,
+            Arc::new(PanicRuntimeObservability)
+                as Arc<dyn camel_component_api::RuntimeObservability>,
         )
     }
 
@@ -1208,7 +1259,10 @@ mod tests {
             "errdelegate:delegate"
         }
 
-        fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+        fn create_consumer(
+            &self,
+            _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+        ) -> Result<Box<dyn Consumer>, CamelError> {
             let call_idx = self.create_consumer_calls.fetch_add(1, Ordering::SeqCst) + 1;
             if call_idx <= self.consumer_error_after {
                 return Err(self
@@ -1219,7 +1273,11 @@ mod tests {
             Ok(Box::new(SuccessDelegateConsumer))
         }
 
-        fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+        fn create_producer(
+            &self,
+            _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
             Err(CamelError::EndpointCreationFailed("not used".to_string()))
         }
     }
@@ -1270,6 +1328,8 @@ mod tests {
             platform_service,
             Duration::from_millis(500),
             reconnect,
+            Arc::new(PanicRuntimeObservability)
+                as Arc<dyn camel_component_api::RuntimeObservability>,
         )
     }
 
@@ -1403,6 +1463,8 @@ mod tests {
                 max_attempts: 1,
                 ..NetworkRetryPolicy::default()
             },
+            Arc::new(PanicRuntimeObservability)
+                as Arc<dyn camel_component_api::RuntimeObservability>,
         );
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
@@ -1471,11 +1533,18 @@ mod tests {
                 "slow:delegate"
             }
 
-            fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+            fn create_consumer(
+                &self,
+                _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+            ) -> Result<Box<dyn Consumer>, CamelError> {
                 Ok(Box::new(SlowStoppingConsumer))
             }
 
-            fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+            fn create_producer(
+                &self,
+                _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+                _ctx: &ProducerContext,
+            ) -> Result<BoxProcessor, CamelError> {
                 Err(CamelError::EndpointCreationFailed("not used".into()))
             }
         }
@@ -1496,6 +1565,8 @@ mod tests {
                 max_attempts: 30,
                 ..NetworkRetryPolicy::default()
             },
+            Arc::new(PanicRuntimeObservability)
+                as Arc<dyn camel_component_api::RuntimeObservability>,
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -1568,11 +1639,18 @@ mod tests {
                 "failstart:delegate"
             }
 
-            fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+            fn create_consumer(
+                &self,
+                _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+            ) -> Result<Box<dyn Consumer>, CamelError> {
                 Ok(Box::new(FailingStartConsumer))
             }
 
-            fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+            fn create_producer(
+                &self,
+                _rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
+                _ctx: &ProducerContext,
+            ) -> Result<BoxProcessor, CamelError> {
                 Err(CamelError::EndpointCreationFailed("not used".into()))
             }
         }
@@ -1593,6 +1671,8 @@ mod tests {
                 max_attempts: 30,
                 ..NetworkRetryPolicy::default()
             },
+            Arc::new(PanicRuntimeObservability)
+                as Arc<dyn camel_component_api::RuntimeObservability>,
         );
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);

@@ -1,7 +1,11 @@
-use camel_component_api::{Body, Exchange, Message};
+use camel_component_api::{Body, Exchange, Message, test_support::PanicRuntimeObservability};
 use camel_component_opensearch::{OpenSearchEndpointConfig, OpenSearchProducer};
 use futures_util::future::poll_fn;
 use tower::Service;
+
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
 
 async fn call_ready(producer: &mut OpenSearchProducer, exchange: Exchange) {
     poll_fn(|cx| producer.poll_ready(cx))
@@ -23,6 +27,7 @@ async fn live_index_search_delete_roundtrip() {
             "opensearch://localhost:9200/{index}?operation=INDEX"
         ))
         .expect("valid endpoint config"),
+        test_rt(),
     );
 
     let mut msg = Message::new(Body::Json(serde_json::json!({"msg": "hello"})));
@@ -34,6 +39,7 @@ async fn live_index_search_delete_roundtrip() {
             "opensearch://localhost:9200/{index}?operation=SEARCH&size=1&from=0"
         ))
         .expect("valid search endpoint config"),
+        test_rt(),
     );
     call_ready(
         &mut search,
@@ -48,6 +54,7 @@ async fn live_index_search_delete_roundtrip() {
             "opensearch://localhost:9200/{index}?operation=DELETE"
         ))
         .expect("valid delete endpoint config"),
+        test_rt(),
     );
     let mut delete_msg = Message::default();
     delete_msg.set_header("CamelOpenSearch.Id", serde_json::json!("doc-1"));

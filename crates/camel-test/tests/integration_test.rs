@@ -2651,7 +2651,12 @@ async fn delay_step_waits_configured_duration() {
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
         let endpoint = component.create_endpoint("direct:delay-in", &*ctx).unwrap();
-        endpoint.create_producer(&producer_ctx).unwrap()
+        endpoint
+            .create_producer(
+                std::sync::Arc::new(camel_component_api::NoOpComponentContext),
+                &producer_ctx,
+            )
+            .unwrap()
     };
 
     let exchange = Exchange::new(Message::new(Body::Text("hello".to_string())));
@@ -2711,7 +2716,12 @@ async fn xml_body_pipeline() {
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
         let endpoint = component.create_endpoint("direct:xml-in", &*ctx).unwrap();
-        endpoint.create_producer(&producer_ctx).unwrap()
+        endpoint
+            .create_producer(
+                std::sync::Arc::new(camel_component_api::NoOpComponentContext),
+                &producer_ctx,
+            )
+            .unwrap()
     };
 
     // Send exchange with Body::Xml

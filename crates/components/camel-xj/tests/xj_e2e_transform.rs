@@ -29,7 +29,11 @@ async fn xml2json_e2e_passes_xml_as_document() {
         .expect("endpoint creation");
 
     let ctx = ProducerContext::new();
-    let mut producer = endpoint.create_producer(&ctx).expect("producer creation");
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(NoOpComponentContext);
+    let mut producer = endpoint
+        .create_producer(rt, &ctx)
+        .expect("producer creation");
 
     let xml = b"<root><child>hello</child></root>".to_vec();
     let exchange = Exchange::new(Message::new(Body::from(xml.clone())));
@@ -84,7 +88,11 @@ async fn json2xml_e2e_passes_json_as_parameter() {
         .expect("endpoint creation");
 
     let ctx = ProducerContext::new();
-    let mut producer = endpoint.create_producer(&ctx).expect("producer creation");
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(NoOpComponentContext);
+    let mut producer = endpoint
+        .create_producer(rt, &ctx)
+        .expect("producer creation");
 
     let json = r#"{"name":"test","value":42}"#.as_bytes().to_vec();
     let exchange = Exchange::new(Message::new(Body::from(json.clone())));

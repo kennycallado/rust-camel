@@ -8,7 +8,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use camel_api::{CamelError, RuntimeHandle};
-use camel_component_api::{ComponentContext, ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{
+    ComponentContext, ConcurrencyModel, Consumer, ConsumerContext, RuntimeObservability,
+};
 use camel_endpoint::parse_uri;
 
 use crate::lifecycle::adapters::route_controller::{
@@ -17,6 +19,7 @@ use crate::lifecycle::adapters::route_controller::{
 use crate::shared::components::domain::Registry;
 
 pub(crate) fn create_route_consumer(
+    rt: Arc<dyn RuntimeObservability>,
     registry: &Arc<std::sync::Mutex<Registry>>,
     from_uri: &str,
     component_ctx: &dyn ComponentContext,
@@ -29,7 +32,7 @@ pub(crate) fn create_route_consumer(
         guard.get_or_err(&parsed.scheme)?.clone()
     };
     let endpoint = component.create_endpoint(from_uri, component_ctx)?;
-    let consumer = endpoint.create_consumer()?;
+    let consumer = endpoint.create_consumer(rt)?;
     let concurrency = consumer.concurrency_model();
     Ok((consumer, concurrency))
 }
@@ -260,22 +263,23 @@ mod tests {
 
     #[test]
     fn create_route_consumer_returns_err_for_unknown_scheme() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        use crate::lifecycle::adapters::route_controller::ControllerComponentContext;
 
-        let err = match create_route_consumer(
-            &registry,
-            "unknown:foo",
-            &crate::lifecycle::adapters::route_controller::ControllerComponentContext::new(
-                Arc::clone(&registry),
-                Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-                Arc::new(camel_api::NoOpMetrics),
-                Arc::new(camel_api::NoopPlatformService::default()),
-                Arc::new(crate::health_registry::HealthCheckRegistry::new(
-                    std::time::Duration::from_secs(5),
-                )),
-                None,
-            ),
-        ) {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let component_ctx = Arc::new(ControllerComponentContext::new(
+            Arc::clone(&registry),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            Arc::new(camel_api::NoOpMetrics),
+            Arc::new(camel_api::NoopPlatformService::default()),
+            Arc::new(crate::health_registry::HealthCheckRegistry::new(
+                std::time::Duration::from_secs(5),
+            )),
+            None,
+        ));
+        let rt: Arc<dyn RuntimeObservability> = Arc::clone(&component_ctx) as Arc<_>;
+
+        let err = match create_route_consumer(rt, &registry, "unknown:foo", component_ctx.as_ref())
+        {
             Ok(_) => panic!("unknown scheme should fail consumer creation"),
             Err(err) => err,
         };

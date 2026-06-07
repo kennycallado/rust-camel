@@ -696,16 +696,24 @@ impl Endpoint for JmsEndpoint {
         &self.uri
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(LazyJmsProducer {
             pool: Arc::clone(&self.pool),
             broker_name: self.broker_name.clone(),
             endpoint_config: self.endpoint_config.clone(),
             resolved_broker_type: self.resolved_broker_type.clone(),
+            runtime: rt,
         }))
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(JmsConsumer::new(
             Arc::clone(&self.pool),
             self.broker_name.clone(),
@@ -722,6 +730,10 @@ struct LazyJmsProducer {
     endpoint_config: JmsEndpointConfig,
     #[allow(dead_code)]
     resolved_broker_type: BrokerType,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
 impl Service<Exchange> for LazyJmsProducer {
@@ -871,6 +883,14 @@ pub fn is_bridge_transport_error(err: &CamelError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use crate::config::{BrokerConfig, JmsPoolConfig};
     use std::collections::HashMap;
@@ -1155,7 +1175,7 @@ mod tests {
             )
             .unwrap();
         let mut producer = endpoint
-            .create_producer(&camel_component_api::ProducerContext::default())
+            .create_producer(rt(), &camel_component_api::ProducerContext::default())
             .unwrap();
 
         let mut exchange = Exchange::default();
@@ -1211,6 +1231,7 @@ mod tests {
             broker_name: "default".to_string(),
             endpoint_config,
             resolved_broker_type: BrokerType::ActiveMq,
+            runtime: test_rt(),
         };
 
         let mut exchange = Exchange::default();
@@ -1429,6 +1450,7 @@ mod tests {
             broker_name: "default".to_string(),
             endpoint_config,
             resolved_broker_type: BrokerType::ActiveMq,
+            runtime: test_rt(),
         };
 
         let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
@@ -1472,6 +1494,7 @@ mod tests {
             broker_name: "default".to_string(),
             endpoint_config,
             resolved_broker_type: BrokerType::ActiveMq,
+            runtime: test_rt(),
         };
 
         let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
@@ -1523,6 +1546,7 @@ mod tests {
             broker_name: "default".to_string(),
             endpoint_config,
             resolved_broker_type: BrokerType::ActiveMq,
+            runtime: test_rt(),
         };
 
         let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
@@ -1569,6 +1593,7 @@ mod tests {
             broker_name: "default".to_string(),
             endpoint_config,
             resolved_broker_type: BrokerType::ActiveMq,
+            runtime: test_rt(),
         };
 
         let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
@@ -1597,6 +1622,7 @@ mod tests {
             broker_name: "default".to_string(),
             endpoint_config,
             resolved_broker_type: BrokerType::ActiveMq,
+            runtime: test_rt(),
         };
 
         // No slot exists yet — poll_ready should return Ready so call() can start the bridge.
@@ -1866,6 +1892,7 @@ mod tests {
             broker_name: "default".to_string(),
             endpoint_config,
             resolved_broker_type: BrokerType::ActiveMq,
+            runtime: test_rt(),
         };
 
         let mut exchange = Exchange::default();

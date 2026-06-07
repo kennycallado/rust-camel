@@ -36,6 +36,7 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 futures = "0.3"
 tempfile = "3"
 wat = "1"

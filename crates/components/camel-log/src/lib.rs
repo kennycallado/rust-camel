@@ -16,7 +16,7 @@ use tracing::{debug, error, info, trace, warn};
 use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
-use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
 
 // ---------------------------------------------------------------------------
 // LogLevel
@@ -216,13 +216,20 @@ impl Endpoint for LogEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "log endpoint does not support consumers".to_string(),
         ))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(LogProducer::new(self.config.clone())))
     }
 }
@@ -376,6 +383,10 @@ impl Service<Exchange> for LogProducer {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
     use super::*;
     use camel_component_api::Body;
     use camel_component_api::Message;
@@ -480,7 +491,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("log:info", &NoOpComponentContext)
             .unwrap();
-        assert!(endpoint.create_consumer().is_err());
+        assert!(endpoint.create_consumer(rt()).is_err());
     }
 
     #[test]
@@ -490,7 +501,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("log:info", &NoOpComponentContext)
             .unwrap();
-        assert!(endpoint.create_producer(&ctx).is_ok());
+        assert!(endpoint.create_producer(rt(), &ctx).is_ok());
     }
 
     #[tokio::test]
@@ -500,7 +511,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("log:test?showHeaders=true", &NoOpComponentContext)
             .unwrap();
-        let producer = endpoint.create_producer(&ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("hello world"));
         exchange

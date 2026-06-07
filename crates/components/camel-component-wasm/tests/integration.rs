@@ -1,3 +1,7 @@
+use camel_component_api::test_support::PanicRuntimeObservability;
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -115,6 +119,7 @@ async fn wasm_producer_constructor_creates_instance() {
         PathBuf::from("missing-module.wasm"),
         make_registry(),
         WasmConfig::default(),
+        test_rt(),
     );
     let exchange = Exchange::new(Message::new("hello"));
     let result = producer.clone().oneshot(exchange).await;
@@ -126,7 +131,7 @@ async fn wasm_producer_returns_component_not_found_for_invalid_module_file() {
     let base = tempdir().unwrap();
     let invalid = base.path().join("invalid.wasm");
     std::fs::write(&invalid, b"this-is-not-a-wasm-component").unwrap();
-    let producer = WasmProducer::new(invalid, make_registry(), WasmConfig::default());
+    let producer = WasmProducer::new(invalid, make_registry(), WasmConfig::default(), test_rt());
     let exchange = Exchange::new(Message::new("hello"));
     let result = producer.clone().oneshot(exchange).await;
     assert!(
@@ -143,11 +148,15 @@ fn wasm_endpoint_creation_flow_uri_and_consumer_producer_behavior() {
         WasmConfig::default(),
     );
     assert_eq!(endpoint.uri(), "wasm:plugins/worker.wasm");
-    let consumer = endpoint.create_consumer();
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let consumer = endpoint.create_consumer(rt);
     assert!(
         matches!(consumer, Err(CamelError::EndpointCreationFailed(msg)) if msg.contains("not supported in v1"))
     );
-    let producer = endpoint.create_producer(&ProducerContext::new());
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
+    let producer = endpoint.create_producer(rt, &ProducerContext::new());
     assert!(producer.is_ok());
 }
 

@@ -17,7 +17,7 @@ use camel_api::{
     loop_eip::{LoopConfig, LoopMode},
 };
 use camel_bean::BeanRegistry;
-use camel_component_api::ComponentContext;
+use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_endpoint::parse_uri;
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use camel_processor::script_mutator::ScriptMutator;
@@ -120,6 +120,7 @@ fn value_to_body(value: Value) -> Body {
 pub(crate) fn resolve_steps(
     steps: Vec<BuilderStep>,
     producer_ctx: &ProducerContext,
+    rt: Arc<dyn RuntimeObservability>,
     registry: &Arc<std::sync::Mutex<Registry>>,
     languages: &SharedLanguageRegistry,
     beans: &Arc<std::sync::Mutex<BeanRegistry>>,
@@ -134,7 +135,7 @@ pub(crate) fn resolve_steps(
             .resolve_component(&parsed.scheme)
             .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
         let endpoint = component.create_endpoint(uri, component_ctx.as_ref())?;
-        endpoint.create_producer(producer_ctx)
+        endpoint.create_producer(Arc::clone(&rt), producer_ctx)
     };
 
     let mut processors: Vec<(BoxProcessor, Option<camel_api::BodyType>)> = Vec::new();
@@ -150,7 +151,7 @@ pub(crate) fn resolve_steps(
                     .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
                 let endpoint = component.create_endpoint(&uri, component_ctx.as_ref())?;
                 let contract = endpoint.body_contract();
-                let producer = endpoint.create_producer(producer_ctx)?;
+                let producer = endpoint.create_producer(Arc::clone(&rt), producer_ctx)?;
                 processors.push((producer, contract));
             }
             BuilderStep::Stop => {
@@ -164,6 +165,7 @@ pub(crate) fn resolve_steps(
                 let sub_pairs = resolve_steps(
                     steps,
                     producer_ctx,
+                    Arc::clone(&rt),
                     registry,
                     languages,
                     beans,
@@ -203,6 +205,7 @@ pub(crate) fn resolve_steps(
                 let sub_pairs = resolve_steps(
                     steps,
                     producer_ctx,
+                    Arc::clone(&rt),
                     registry,
                     languages,
                     beans,
@@ -282,6 +285,7 @@ pub(crate) fn resolve_steps(
                 let sub_pairs = resolve_steps(
                     steps,
                     producer_ctx,
+                    Arc::clone(&rt),
                     registry,
                     languages,
                     beans,
@@ -303,6 +307,7 @@ pub(crate) fn resolve_steps(
                     let sub_pairs = resolve_steps(
                         when_step.steps,
                         producer_ctx,
+                        Arc::clone(&rt),
                         registry,
                         languages,
                         beans,
@@ -323,6 +328,7 @@ pub(crate) fn resolve_steps(
                     let sub_pairs = resolve_steps(
                         otherwise_steps,
                         producer_ctx,
+                        Arc::clone(&rt),
                         registry,
                         languages,
                         beans,
@@ -397,6 +403,7 @@ pub(crate) fn resolve_steps(
                 let sub_pairs = resolve_steps(
                     steps,
                     producer_ctx,
+                    Arc::clone(&rt),
                     registry,
                     languages,
                     beans,
@@ -456,6 +463,7 @@ pub(crate) fn resolve_steps(
                 let sub_pairs = resolve_steps(
                     steps,
                     producer_ctx,
+                    Arc::clone(&rt),
                     registry,
                     languages,
                     beans,
@@ -484,6 +492,7 @@ pub(crate) fn resolve_steps(
                 let sub_pairs = resolve_steps(
                     steps,
                     producer_ctx,
+                    Arc::clone(&rt),
                     registry,
                     languages,
                     beans,
@@ -505,6 +514,7 @@ pub(crate) fn resolve_steps(
                     let sub_pairs = resolve_steps(
                         when_step.steps,
                         producer_ctx,
+                        Arc::clone(&rt),
                         registry,
                         languages,
                         beans,
@@ -526,6 +536,7 @@ pub(crate) fn resolve_steps(
                     let sub_pairs = resolve_steps(
                         otherwise_steps,
                         producer_ctx,
+                        Arc::clone(&rt),
                         registry,
                         languages,
                         beans,
@@ -555,6 +566,7 @@ pub(crate) fn resolve_steps(
                     let sub_pairs = resolve_steps(
                         vec![step],
                         producer_ctx,
+                        Arc::clone(&rt),
                         registry,
                         languages,
                         beans,
@@ -653,6 +665,7 @@ pub(crate) fn resolve_steps(
                 let sub_pairs = resolve_steps(
                     steps,
                     producer_ctx,
+                    Arc::clone(&rt),
                     registry,
                     languages,
                     beans,
@@ -674,6 +687,7 @@ pub(crate) fn resolve_steps(
                     let sub_pairs = resolve_steps(
                         vec![step],
                         producer_ctx,
+                        Arc::clone(&rt),
                         registry,
                         languages,
                         beans,
@@ -696,6 +710,7 @@ pub(crate) fn resolve_steps(
 
                 let producer_ctx_clone = producer_ctx.clone();
                 let component_ctx_clone = Arc::clone(&component_ctx);
+                let rt_clone = Arc::clone(&rt);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
@@ -710,7 +725,9 @@ pub(crate) fn resolve_steps(
                             Ok(e) => e,
                             Err(_) => return None,
                         };
-                    let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                    let producer = match endpoint
+                        .create_producer(Arc::clone(&rt_clone), &producer_ctx_clone)
+                    {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
@@ -751,6 +768,7 @@ pub(crate) fn resolve_steps(
 
                 let producer_ctx_clone = producer_ctx.clone();
                 let component_ctx_clone = Arc::clone(&component_ctx);
+                let rt_clone = Arc::clone(&rt);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
@@ -765,7 +783,9 @@ pub(crate) fn resolve_steps(
                             Ok(e) => e,
                             Err(_) => return None,
                         };
-                    let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                    let producer = match endpoint
+                        .create_producer(Arc::clone(&rt_clone), &producer_ctx_clone)
+                    {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
@@ -780,6 +800,7 @@ pub(crate) fn resolve_steps(
 
                 let producer_ctx_clone = producer_ctx.clone();
                 let component_ctx_clone = Arc::clone(&component_ctx);
+                let rt_clone = Arc::clone(&rt);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
@@ -794,7 +815,9 @@ pub(crate) fn resolve_steps(
                             Ok(e) => e,
                             Err(_) => return None,
                         };
-                    let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                    let producer = match endpoint
+                        .create_producer(Arc::clone(&rt_clone), &producer_ctx_clone)
+                    {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
@@ -830,6 +853,7 @@ pub(crate) fn resolve_steps(
 
                 let producer_ctx_clone = producer_ctx.clone();
                 let component_ctx_clone = Arc::clone(&component_ctx);
+                let rt_clone = Arc::clone(&rt);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
@@ -844,7 +868,9 @@ pub(crate) fn resolve_steps(
                             Ok(e) => e,
                             Err(_) => return None,
                         };
-                    let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                    let producer = match endpoint
+                        .create_producer(Arc::clone(&rt_clone), &producer_ctx_clone)
+                    {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
@@ -859,6 +885,7 @@ pub(crate) fn resolve_steps(
 
                 let producer_ctx_clone = producer_ctx.clone();
                 let component_ctx_clone = Arc::clone(&component_ctx);
+                let rt_clone = Arc::clone(&rt);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
@@ -873,7 +900,9 @@ pub(crate) fn resolve_steps(
                             Ok(e) => e,
                             Err(_) => return None,
                         };
-                    let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                    let producer = match endpoint
+                        .create_producer(Arc::clone(&rt_clone), &producer_ctx_clone)
+                    {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
@@ -917,6 +946,7 @@ pub(crate) fn resolve_steps(
 
                 let producer_ctx_clone = producer_ctx.clone();
                 let component_ctx_clone = Arc::clone(&component_ctx);
+                let rt_clone = Arc::clone(&rt);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
@@ -931,7 +961,9 @@ pub(crate) fn resolve_steps(
                             Ok(e) => e,
                             Err(_) => return None,
                         };
-                    let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                    let producer = match endpoint
+                        .create_producer(Arc::clone(&rt_clone), &producer_ctx_clone)
+                    {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
@@ -1037,6 +1069,7 @@ mod tests {
         let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
         let component_ctx: Arc<dyn ComponentContext> =
             Arc::new(camel_component_api::NoOpComponentContext);
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(camel_component_api::NoOpComponentContext);
 
         let both = resolve_steps(
             vec![BuilderStep::DeclarativeLoop {
@@ -1048,6 +1081,7 @@ mod tests {
                 steps: vec![],
             }],
             &producer_ctx,
+            Arc::clone(&rt),
             &registry,
             &languages,
             &beans,
@@ -1069,6 +1103,7 @@ mod tests {
                 steps: vec![],
             }],
             &producer_ctx,
+            Arc::clone(&rt),
             &registry,
             &languages,
             &beans,
@@ -1093,10 +1128,12 @@ mod tests {
         let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
         let component_ctx: Arc<dyn ComponentContext> =
             Arc::new(camel_component_api::NoOpComponentContext);
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(camel_component_api::NoOpComponentContext);
 
         let err = resolve_steps(
             vec![BuilderStep::To("unknown:dest".into())],
             &producer_ctx,
+            Arc::clone(&rt),
             &registry,
             &languages,
             &beans,
@@ -1159,6 +1196,7 @@ mod tests {
         let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
         let component_ctx: Arc<dyn ComponentContext> =
             Arc::new(camel_component_api::NoOpComponentContext);
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(camel_component_api::NoOpComponentContext);
 
         let steps = vec![
             BuilderStep::Processor(BoxProcessor::new(IdentityProcessor)),
@@ -1291,6 +1329,7 @@ mod tests {
         let resolved = resolve_steps(
             steps,
             &producer_ctx,
+            Arc::clone(&rt),
             &registry,
             &languages,
             &beans,

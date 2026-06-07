@@ -1,22 +1,32 @@
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use camel_component_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::{Body, CamelError, Exchange, Message, RuntimeObservability};
 
 use crate::admin_endpoint_config::AdminEndpointConfig;
+
+#[cfg(test)]
+use camel_component_api::test_support::PanicRuntimeObservability;
+#[cfg(test)]
+fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(PanicRuntimeObservability)
+}
 
 const USER_ID_HEADER: &str = "camel.keycloak.userId";
 
 pub struct KeycloakAdminProducer {
     config: AdminEndpointConfig,
     http: reqwest::Client,
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl KeycloakAdminProducer {
-    pub fn new(config: AdminEndpointConfig) -> Self {
+    pub fn new(config: AdminEndpointConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
         Self {
             http: config.http.clone(),
             config,
+            runtime,
         }
     }
 
@@ -106,6 +116,7 @@ impl Clone for KeycloakAdminProducer {
         Self {
             config: self.config.clone(),
             http: self.http.clone(),
+            runtime: Arc::clone(&self.runtime),
         }
     }
 }

@@ -10,6 +10,8 @@ pub mod config;
 pub mod health;
 pub mod producer;
 
+use std::sync::Arc;
+
 use camel_component_api::{BoxProcessor, CamelError};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
@@ -135,13 +137,21 @@ impl Endpoint for OpenSearchEndpoint {
         &self.uri
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(OpenSearchProducer::new(
             self.config.clone(),
+            rt,
         )))
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "OpenSearch component does not support consumers".to_string(),
         ))
@@ -154,6 +164,11 @@ impl Endpoint for OpenSearchEndpoint {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::NoOpComponentContext;
 
@@ -233,7 +248,7 @@ mod tests {
             .create_endpoint("opensearch://localhost:9200/myindex?operation=INDEX", &ctx)
             .expect("endpoint should be created");
 
-        let result = endpoint.create_consumer();
+        let result = endpoint.create_consumer(rt());
         assert!(result.is_err(), "create_consumer should return an error");
         let err = result.err().expect("error must exist");
         assert!(

@@ -12,7 +12,9 @@ use tokio::sync::OnceCell;
 use tracing::{debug, error, info, warn};
 
 use camel_component_api::retry_async;
-use camel_component_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
+use camel_component_api::{
+    Body, CamelError, Exchange, Message, RuntimeObservability, StreamBody, StreamMetadata,
+};
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
 use crate::config::{
@@ -27,14 +29,23 @@ pub struct SqlConsumer {
     pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
     stopped: bool,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl SqlConsumer {
-    pub fn new(config: SqlEndpointConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
+    pub fn new(
+        config: SqlEndpointConfig,
+        pool: Arc<OnceCell<AnyPool>>,
+        runtime: Arc<dyn RuntimeObservability>,
+    ) -> Self {
         Self {
             config,
             pool,
             stopped: false,
+            runtime,
         }
     }
 
@@ -522,6 +533,10 @@ impl Consumer for SqlConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
     use crate::config::SqlEndpointConfig;
     use camel_component_api::ExchangeEnvelope;
     use camel_component_api::UriConfig;
@@ -561,7 +576,7 @@ mod tests {
 
     #[test]
     fn consumer_concurrency_model() {
-        let c = SqlConsumer::new(config(), Arc::new(OnceCell::new()));
+        let c = SqlConsumer::new(config(), Arc::new(OnceCell::new()), test_rt());
         assert_eq!(c.concurrency_model(), ConcurrencyModel::Sequential);
     }
 
@@ -571,7 +586,7 @@ mod tests {
             "sql:select * from t?db_url=postgres://localhost/test&delay=2000&onConsume=update t set done=true"
         ).unwrap();
         config.resolve_defaults();
-        let c = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let c = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         assert_eq!(c.config.delay_ms, 2000);
         assert!(c.config.on_consume.is_some());
     }
@@ -587,7 +602,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -632,7 +647,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -678,7 +693,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -728,7 +743,7 @@ mod tests {
         // Deliberately NOT calling resolve_defaults() — pool fields remain None
         assert!(config.max_connections.is_none());
 
-        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()));
+        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), test_rt());
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
             while let Some(env) = rx.recv().await {
@@ -767,7 +782,7 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool.clone()).unwrap();
 
-        let mut consumer = SqlConsumer::new(config, pool_cell);
+        let mut consumer = SqlConsumer::new(config, pool_cell, test_rt());
         consumer.stop().await.expect("stop should succeed");
 
         // After stop, the pool should be closed
@@ -790,7 +805,7 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool.clone()).unwrap();
 
-        let mut consumer = SqlConsumer::new(config, pool_cell);
+        let mut consumer = SqlConsumer::new(config, pool_cell, test_rt());
         consumer.stop().await.expect("first stop should succeed");
         consumer
             .stop()
@@ -811,7 +826,7 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool.clone()).unwrap();
 
-        let mut consumer = SqlConsumer::new(config, pool_cell);
+        let mut consumer = SqlConsumer::new(config, pool_cell, test_rt());
         consumer.stop().await.expect("stop should succeed");
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -846,7 +861,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -899,7 +914,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -945,7 +960,7 @@ mod tests {
     async fn bridge_error_handler_routes_poll_errors_to_exchange_error() {
         let mut config = config();
         config.bridge_error_handler = true;
-        let consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), test_rt());
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
         tokio::spawn(async move {
@@ -981,7 +996,7 @@ mod tests {
         // Query a non-existent table to trigger a query-failure poll error.
         config.query = "select * from nonexistent_table".to_string();
         config.resolve_defaults();
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         // Healthy downstream — replies Ok so bridge_poll_error succeeds
@@ -1040,7 +1055,7 @@ mod tests {
         config.resolve_defaults();
         // Explicitly non-bridged: normal-data send path.
         config.bridge_error_handler = false;
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         // Downstream that returns Err — simulates unhandled route failure.
@@ -1075,7 +1090,7 @@ mod tests {
         config.bridge_error_handler = false;
         config.query = "select * from nonexistent_table".to_string();
         config.resolve_defaults();
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         // Healthy downstream task; should not be reached for this poll-failure path.
@@ -1115,7 +1130,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -1190,7 +1205,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, rx) = tokio::sync::oneshot::channel();

@@ -19,6 +19,7 @@ toml = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 anyhow = { workspace = true }
 tower = { workspace = true }
 

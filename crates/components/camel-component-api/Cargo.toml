@@ -25,6 +25,12 @@ serde    = { workspace = true, features = ["derive"] }
 tracing  = { workspace = true }
 rand     = { workspace = true }
 
+[features]
+default = []
+# Enables `test_support` module + `PanicRuntimeObservability` for downstream
+# crates' test code. NEVER enable in production — the stub panics on use.
+test-support = []
+
 [dev-dependencies]
 serde_json.workspace = true
 tracing-subscriber = { workspace = true }

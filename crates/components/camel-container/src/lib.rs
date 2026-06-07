@@ -30,7 +30,9 @@ use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::parse_uri;
 use camel_component_api::retry_async_cancelable;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, Message};
-use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
+use camel_component_api::{
+    Component, Consumer, ConsumerContext, Endpoint, ProducerContext, RuntimeObservability,
+};
 use tower::Service;
 
 /// Global tracker for containers created by this component.
@@ -1368,6 +1370,16 @@ impl Service<Exchange> for ContainerProducer {
 /// to the route as exchanges. It implements automatic reconnection on connection failures.
 pub struct ContainerConsumer {
     config: ContainerConfig,
+    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    #[allow(dead_code)]
+    runtime: Arc<dyn RuntimeObservability>,
+}
+
+impl ContainerConsumer {
+    pub fn new(config: ContainerConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
+        Self { config, runtime }
+    }
 }
 
 #[async_trait]
@@ -1703,13 +1715,18 @@ impl Endpoint for ContainerEndpoint {
         &self.uri
     }
 
-    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(ContainerConsumer {
-            config: self.config.clone(),
-        }))
+    fn create_consumer(
+        &self,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(ContainerConsumer::new(self.config.clone(), rt)))
     }
 
-    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
         let docker = self.config.connect_docker_client()?;
         Ok(BoxProcessor::new(ContainerProducer {
             config: self.config.clone(),
@@ -1720,6 +1737,14 @@ impl Endpoint for ContainerEndpoint {
 
 #[cfg(test)]
 mod tests {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
+
     use super::*;
     use camel_component_api::NoOpComponentContext;
 
@@ -2044,7 +2069,7 @@ mod tests {
         let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
 
         let ctx = ProducerContext::new();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
         exchange
@@ -2080,7 +2105,7 @@ mod tests {
             .unwrap();
 
         let ctx = ProducerContext::new();
-        let result = endpoint.create_producer(&ctx);
+        let result = endpoint.create_producer(rt(), &ctx);
 
         // The producer should return an error because it cannot connect to the invalid socket
         assert!(
@@ -2124,7 +2149,7 @@ mod tests {
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint("container:start", &ctx).unwrap();
         let ctx = ProducerContext::new();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         // Test each lifecycle operation without CamelContainerId header
         for operation in ["start", "stop", "remove"] {
@@ -2179,7 +2204,7 @@ mod tests {
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint("container:stop", &ctx).unwrap();
         let ctx = ProducerContext::new();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
         exchange
@@ -2235,7 +2260,7 @@ mod tests {
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
         let ctx = ProducerContext::new();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
         exchange
@@ -2285,7 +2310,7 @@ mod tests {
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
         let ctx = ProducerContext::new();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
         exchange
@@ -2369,7 +2394,7 @@ mod tests {
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
         let ctx = ProducerContext::new();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         // Run container with unique name
         let timestamp = std::time::SystemTime::now()
@@ -2443,7 +2468,7 @@ mod tests {
         let component = ContainerComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         // Create a minimal ConsumerContext
         let (tx, _rx) = mpsc::channel(16);
@@ -2474,6 +2499,7 @@ mod tests {
     fn test_container_consumer_concurrency_model_is_concurrent() {
         let consumer = ContainerConsumer {
             config: ContainerConfig::from_uri("container:events").unwrap(),
+            runtime: test_rt(),
         };
 
         assert_eq!(
@@ -2507,7 +2533,7 @@ mod tests {
         let component = ContainerComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component.create_endpoint("container:events", &ctx).unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         // Create a ConsumerContext
         let (tx, _rx) = mpsc::channel(16);
@@ -2580,7 +2606,7 @@ mod tests {
         let endpoint = component.create_endpoint("container:list", &ctx).unwrap();
 
         let ctx = ProducerContext::new();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         // Create exchange with list operation in header
         let mut exchange = Exchange::new(Message::new(""));
@@ -2937,7 +2963,7 @@ mod tests {
             )
             .unwrap();
         let ctx = ProducerContext::new();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
         exchange.input.set_header(
@@ -2966,7 +2992,7 @@ mod tests {
         let endpoint = component
             .create_endpoint("container:network-list", &component_ctx)
             .unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
         exchange.input.set_header(
@@ -2996,7 +3022,7 @@ mod tests {
                 &component_ctx,
             )
             .unwrap();
-        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
         exchange.input.set_header(
@@ -3025,6 +3051,7 @@ mod tests {
 
         let mut consumer = ContainerConsumer {
             config: ContainerConfig::from_uri("container:logs").unwrap(),
+            runtime: test_rt(),
         };
         let (tx, _rx) = mpsc::channel(4);
         let context = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
@@ -3044,6 +3071,7 @@ mod tests {
 
         let mut consumer = ContainerConsumer {
             config: ContainerConfig::from_uri("container:events").unwrap(),
+            runtime: test_rt(),
         };
 
         let (tx, _rx) = mpsc::channel(4);
