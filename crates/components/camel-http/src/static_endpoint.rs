@@ -242,7 +242,7 @@ mod tests {
             notify.notified().await;
             token_clone.cancel();
         });
-        ConsumerContext::new(tx, token)
+        ConsumerContext::new(tx, token, "http-static-test-route".to_string())
     }
 
     #[test]

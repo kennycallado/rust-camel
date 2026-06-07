@@ -263,9 +263,6 @@ pub struct GrpcConsumer {
     method_name: String,
     mode: GrpcMode,
     security_ctx: Option<SecurityContext>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -335,6 +332,7 @@ impl GrpcConsumer {
                 &self.host,
                 self.port,
                 GrpcServerConfig::default(),
+                Arc::clone(&self.runtime),
             )
             .await?;
         self.start_inner(ctx, dispatch).await
@@ -581,7 +579,12 @@ impl Consumer for GrpcConsumer {
             "grpc consumer starting"
         );
         let dispatch = GrpcServerRegistry::global()
-            .get_or_spawn(&self.host, self.port, GrpcServerConfig::default())
+            .get_or_spawn(
+                &self.host,
+                self.port,
+                GrpcServerConfig::default(),
+                Arc::clone(&self.runtime),
+            )
             .await?;
         self.start_inner(ctx, dispatch).await
     }

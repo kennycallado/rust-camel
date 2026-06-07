@@ -241,9 +241,6 @@ struct DirectConsumer {
     registry: DirectRegistry,
     cancel: Option<CancellationToken>,
     handle: Option<JoinHandle<Result<(), CamelError>>>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -288,6 +285,8 @@ impl Consumer for DirectConsumer {
         let registry = Arc::clone(&self.registry);
         let cancel = context.cancel_token();
         let cancel_clone = cancel.clone();
+        let route_id = context.route_id().to_owned();
+        let runtime = Arc::clone(&self.runtime);
 
         info!(endpoint_name = %self.name, "direct consumer started");
 
@@ -313,9 +312,11 @@ impl Consumer for DirectConsumer {
                                     // meaning the route handler did NOT absorb the failure —
                                     // see ADR-0012 "b-bridged discriminator". This emitter is the
                                     // only ERROR signal for the unhandled failure; must stay loud.)
-                                    // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:direct:send-and-wait") via bd rc-mf3
+                                    runtime
+                                        .metrics()
+                                        .increment_errors(&route_id, "b-prime:direct:send-and-wait");
                                     // log-policy: outside-contract
-                                    error!( // allow-log-levels
+                                    error!(
                                         endpoint_name = %name,
                                         error = %err,
                                         "direct consumer pipeline error"
@@ -530,17 +531,67 @@ impl Service<Exchange> for DirectProducer {
 
 #[cfg(test)]
 mod tests {
-    use camel_component_api::test_support::PanicRuntimeObservability;
+    use std::sync::Mutex;
+
+    use camel_api::MetricsCollector;
+    use camel_component_api::HealthCheckRegistry;
+    use std::time::Duration;
     fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-        std::sync::Arc::new(PanicRuntimeObservability)
+        // NoOpComponentContext implements RuntimeObservability via blanket
+        // impl and returns a no-op metrics collector — avoids panicking now
+        // that direct consumer calls runtime.metrics() on send_and_wait errors.
+        std::sync::Arc::new(NoOpComponentContext)
     }
 
     use super::*;
     use camel_component_api::ExchangeEnvelope;
     use camel_component_api::Message;
     use camel_component_api::NoOpComponentContext;
+    use camel_component_api::RuntimeObservability;
     use std::task::RawWakerVTable;
     use tower::ServiceExt;
+
+    // -----------------------------------------------------------------------
+    // Recording metrics collector for testing increment_errors calls
+    // -----------------------------------------------------------------------
+
+    struct RecordingMetrics {
+        errors: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl MetricsCollector for RecordingMetrics {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .unwrap()
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        metrics_collector: Arc<RecordingMetrics>,
+    }
+
+    impl RecordingRuntime {
+        fn new(errors: Arc<Mutex<Vec<(String, String)>>>) -> Self {
+            Self {
+                metrics_collector: Arc::new(RecordingMetrics { errors }),
+            }
+        }
+    }
+
+    impl RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            self.metrics_collector.clone() as Arc<dyn MetricsCollector>
+        }
+        fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+            panic!("RecordingRuntime::health not used in this test")
+        }
+    }
 
     fn noop_waker() -> std::task::Waker {
         const VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RAW, |_| {}, |_| {}, |_| {});
@@ -649,11 +700,19 @@ mod tests {
         let mut consumer_b = endpoint.create_consumer(rt()).unwrap();
 
         let (route_tx_a, _route_rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx_a = ConsumerContext::new(route_tx_a, tokio_util::sync::CancellationToken::new());
+        let ctx_a = ConsumerContext::new(
+            route_tx_a,
+            tokio_util::sync::CancellationToken::new(),
+            "direct-test-route-a".to_string(),
+        );
         consumer_a.start(ctx_a).await.unwrap();
 
         let (route_tx_b, _route_rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx_b = ConsumerContext::new(route_tx_b, tokio_util::sync::CancellationToken::new());
+        let ctx_b = ConsumerContext::new(
+            route_tx_b,
+            tokio_util::sync::CancellationToken::new(),
+            "direct-test-route-b".to_string(),
+        );
         let result = consumer_b.start(ctx_b).await;
 
         assert!(matches!(
@@ -677,7 +736,11 @@ mod tests {
 
         // The route channel now carries ExchangeEnvelope (request-reply support).
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, tokio_util::sync::CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            tokio_util::sync::CancellationToken::new(),
+            "direct-test-route".to_string(),
+        );
 
         // Start the consumer in a background task
         tokio::spawn(async move {
@@ -722,7 +785,11 @@ mod tests {
         let mut consumer = consumer_endpoint.create_consumer(rt()).unwrap();
 
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, tokio_util::sync::CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            tokio_util::sync::CancellationToken::new(),
+            "direct-test-route".to_string(),
+        );
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -762,7 +829,11 @@ mod tests {
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, tokio_util::sync::CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            tokio_util::sync::CancellationToken::new(),
+            "direct-test-route".to_string(),
+        );
 
         // Start consumer in background
         let handle = tokio::spawn(async move {
@@ -803,7 +874,7 @@ mod tests {
         let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
         let token = CancellationToken::new();
         let (tx, _rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "direct-test-route".to_string());
 
         let mut consumer = DirectConsumer {
             name: "cancel-test".to_string(),
@@ -982,7 +1053,7 @@ mod tests {
 
         let token = CancellationToken::new();
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, token.clone());
+        let ctx = ConsumerContext::new(route_tx, token.clone(), "direct-test-route".to_string());
 
         // start() blocks — it should run the consumer loop on a JoinHandle
         // and return immediately. But currently start() IS the loop.
@@ -1035,7 +1106,7 @@ mod tests {
         // Consumer that never replies (simulates a stuck pipeline)
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(route_tx, token.clone());
+        let ctx = ConsumerContext::new(route_tx, token.clone(), "direct-test-route".to_string());
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
         });
@@ -1083,6 +1154,71 @@ mod tests {
         );
 
         token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_send_and_wait_error_increments_errors_metric() {
+        let errors: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Arc::new(RecordingRuntime::new(Arc::clone(&errors)));
+
+        let component = DirectComponent::new();
+        let endpoint = component
+            .create_endpoint("direct:metrics-error", &NoOpComponentContext)
+            .unwrap();
+        let mut consumer = endpoint.create_consumer(runtime).unwrap();
+
+        // Route that returns Err — simulates unhandled pipeline failure
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(route_tx, cancel.clone(), "test-route-id".to_string());
+
+        tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Route pipeline: reply with Err for every incoming exchange
+        tokio::spawn(async move {
+            while let Some(envelope) = route_rx.recv().await {
+                if let Some(tx) = envelope.reply_tx {
+                    let _ = tx.send(Err(CamelError::ProcessorError(
+                        "pipeline failure".to_string(),
+                    )));
+                }
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Send an exchange via the producer so the consumer's send_and_wait
+        // returns Err, triggering the metrics call.
+        let ctx = test_producer_ctx();
+        let producer_endpoint = component
+            .create_endpoint("direct:metrics-error", &NoOpComponentContext)
+            .unwrap();
+        let producer = producer_endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::new("test"));
+        // The producer oneshot wraps the call — it returns the Err from
+        // send_and_wait back to us.
+        let _result = producer.oneshot(exchange).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        cancel.cancel();
+
+        // Verify MetricsCollector::increment_errors was called
+        let recorded = errors.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "expected 1 increment_errors call, got {}: {:?}",
+            recorded.len(),
+            *recorded
+        );
+        assert_eq!(recorded[0].0, "test-route-id");
+        assert_eq!(recorded[0].1, "b-prime:direct:send-and-wait");
     }
 
     #[test]

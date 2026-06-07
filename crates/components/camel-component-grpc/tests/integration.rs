@@ -183,6 +183,7 @@ async fn grpc_producer_roundtrip_json() {
         None,
         &default_grpc_config(),
         test_rt(),
+        "grpc-integration-test",
     )
     .expect("producer");
 
@@ -230,7 +231,11 @@ async fn grpc_consumer_roundtrip_json() {
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
-    let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-test-route".to_string(),
+    );
 
     let consumer_task = tokio::spawn(async move {
         consumer
@@ -295,6 +300,7 @@ async fn test_grpc_deadline_enforced() {
         Some(100),
         &default_grpc_config(),
         test_rt(),
+        "grpc-integration-test",
     )
     .expect("producer");
 
@@ -336,7 +342,11 @@ async fn grpc_consumer_bad_proto_startup_fails() {
 
     let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
-    let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-test-route".to_string(),
+    );
 
     let result = consumer.start_with_listener(ctx, listener).await;
     assert!(result.is_err(), "startup should fail with bad proto path");
@@ -389,7 +399,11 @@ async fn grpc_consumer_unknown_path_returns_unimplemented() {
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
-    let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-test-route".to_string(),
+    );
 
     let consumer_task = tokio::spawn(async move {
         consumer
@@ -447,7 +461,11 @@ async fn grpc_consumer_stop_then_request_returns_unimplemented() {
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
-    let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-test-route".to_string(),
+    );
 
     let consumer_task = tokio::spawn(async move {
         consumer
@@ -515,7 +533,11 @@ async fn grpc_consumer_multiple_paths_same_port() {
 
     let (route_tx1, mut route_rx1) = tokio::sync::mpsc::channel(16);
     let cancel_token1 = CancellationToken::new();
-    let ctx1 = ConsumerContext::new(route_tx1, cancel_token1.clone());
+    let ctx1 = ConsumerContext::new(
+        route_tx1,
+        cancel_token1.clone(),
+        "grpc-test-route-1".to_string(),
+    );
 
     let consumer1_task = tokio::spawn(async move {
         consumer1
@@ -546,7 +568,11 @@ async fn grpc_consumer_multiple_paths_same_port() {
 
     let (route_tx2, mut route_rx2) = tokio::sync::mpsc::channel(16);
     let cancel_token2 = CancellationToken::new();
-    let ctx2 = ConsumerContext::new(route_tx2, cancel_token2.clone());
+    let ctx2 = ConsumerContext::new(
+        route_tx2,
+        cancel_token2.clone(),
+        "grpc-test-route-2".to_string(),
+    );
 
     let consumer2_task = tokio::spawn(async move {
         consumer2.start(ctx2).await.expect("start consumer2");
@@ -626,7 +652,11 @@ async fn grpc_consumer_invalid_body_returns_error() {
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
-    let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-test-route".to_string(),
+    );
 
     let consumer_task = tokio::spawn(async move {
         consumer
@@ -691,7 +721,11 @@ async fn grpc_consumer_duplicate_path_fails() {
 
     let (route_tx1, mut route_rx1) = tokio::sync::mpsc::channel(16);
     let cancel_token1 = CancellationToken::new();
-    let ctx1 = ConsumerContext::new(route_tx1, cancel_token1.clone());
+    let ctx1 = ConsumerContext::new(
+        route_tx1,
+        cancel_token1.clone(),
+        "grpc-test-route-1".to_string(),
+    );
 
     let consumer1_task = tokio::spawn(async move {
         consumer1
@@ -719,7 +753,11 @@ async fn grpc_consumer_duplicate_path_fails() {
 
     let (route_tx2, _route_rx2) = tokio::sync::mpsc::channel(16);
     let cancel_token2 = CancellationToken::new();
-    let ctx2 = ConsumerContext::new(route_tx2, cancel_token2.clone());
+    let ctx2 = ConsumerContext::new(
+        route_tx2,
+        cancel_token2.clone(),
+        "grpc-test-route-2".to_string(),
+    );
 
     // Need a new listener bound to the same port — this will fail since port is already in use
     // But the duplicate path check happens before binding, so we use start() which uses get_or_spawn
@@ -763,7 +801,11 @@ async fn grpc_consumer_pipeline_error_returns_internal() {
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
-    let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-test-route".to_string(),
+    );
 
     let consumer_task = tokio::spawn(async move {
         consumer
@@ -830,7 +872,11 @@ async fn grpc_consumer_server_streaming_roundtrip() {
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
     let cancel_token = CancellationToken::new();
-    let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-test-route".to_string(),
+    );
 
     let consumer_task = tokio::spawn(async move {
         consumer
@@ -922,6 +968,7 @@ async fn grpc_producer_server_streaming() {
         None,
         &default_grpc_config(),
         test_rt(),
+        "grpc-integration-test",
     )
     .expect("producer");
 
@@ -966,6 +1013,7 @@ async fn grpc_producer_client_streaming() {
         None,
         &default_grpc_config(),
         test_rt(),
+        "grpc-integration-test",
     )
     .expect("producer");
 
@@ -1008,6 +1056,7 @@ async fn grpc_producer_bidi_streaming() {
         None,
         &default_grpc_config(),
         test_rt(),
+        "grpc-integration-test",
     )
     .expect("producer");
 

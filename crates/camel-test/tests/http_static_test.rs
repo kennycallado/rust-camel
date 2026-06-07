@@ -52,7 +52,7 @@ fn test_ctx() -> (ConsumerContext, CancellationToken, Arc<Notify>) {
     let (_tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
     let token = CancellationToken::new();
     let notify = Arc::new(Notify::new());
-    let ctx = ConsumerContext::new(_tx, token.clone());
+    let ctx = ConsumerContext::new(_tx, token.clone(), "http-static-test-route".to_string());
     (ctx, token, notify)
 }
 

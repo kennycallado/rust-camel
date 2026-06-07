@@ -27,10 +27,8 @@ use retry::tonic_to_camel_error;
 
 mod convert;
 #[cfg(test)]
-use camel_component_api::test_support::PanicRuntimeObservability;
-#[cfg(test)]
 fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-    std::sync::Arc::new(PanicRuntimeObservability)
+    std::sync::Arc::new(camel_component_api::NoOpComponentContext)
 }
 
 pub(crate) use convert::proto_cache;
@@ -91,10 +89,16 @@ impl GrpcProducer {
         deadline_ms: Option<u64>,
         config: &GrpcConfig,
         runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+        route_id: &str,
     ) -> Result<Self, CamelError> {
         let endpoint = Endpoint::from_shared(addr.clone()).map_err(|e| {
-            // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
-            error!(error = %e, "grpc producer creation failed"); // allow-log-levels
+            runtime.health().force_unhealthy_for_route(
+                route_id,
+                "g:grpc:producer-create",
+                &format!("invalid grpc endpoint: {e}"),
+            );
+            // log-policy: outside-contract
+            error!(error = %e, "grpc producer creation failed");
             CamelError::EndpointCreationFailed(format!("invalid grpc endpoint: {e}"))
         })?;
         let channel = endpoint.connect_lazy();
@@ -103,8 +107,13 @@ impl GrpcProducer {
         let pool = cache
             .get_or_compile(&proto_path, std::iter::empty::<&Path>())
             .map_err(|e| {
-                // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
-                error!(error = %e, "grpc producer creation failed"); // allow-log-levels
+                runtime.health().force_unhealthy_for_route(
+                    route_id,
+                    "g:grpc:producer-create",
+                    &format!("failed to compile proto: {e}"),
+                );
+                // log-policy: outside-contract
+                error!(error = %e, "grpc producer creation failed");
                 CamelError::EndpointCreationFailed(format!("failed to compile proto: {e}"))
             })?;
 
@@ -112,8 +121,13 @@ impl GrpcProducer {
             let err = CamelError::EndpointCreationFailed(format!(
                 "service descriptor not found: {service_name}"
             ));
-            // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
-            error!(service = %service_name, error = %err, "grpc producer creation failed"); // allow-log-levels
+            runtime.health().force_unhealthy_for_route(
+                route_id,
+                "g:grpc:producer-create",
+                &format!("service descriptor not found: {service_name}"),
+            );
+            // log-policy: outside-contract
+            error!(service = %service_name, error = %err, "grpc producer creation failed");
             err
         })?;
 
@@ -124,16 +138,26 @@ impl GrpcProducer {
                 let err = CamelError::EndpointCreationFailed(format!(
                     "method descriptor not found: {service_name}/{method_name}"
                 ));
-                // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
-                error!(service = %service_name, method = %method_name, error = %err, "grpc producer creation failed"); // allow-log-levels
+                runtime.health().force_unhealthy_for_route(
+                    route_id,
+                    "g:grpc:producer-create",
+                    &format!("method descriptor not found: {service_name}/{method_name}"),
+                );
+                // log-policy: outside-contract
+                error!(service = %service_name, method = %method_name, error = %err, "grpc producer creation failed");
                 err
             })?;
         let req_descriptor = method.input();
         let resp_descriptor = method.output();
         let path = PathAndQuery::from_maybe_shared(format!("/{service_name}/{method_name}"))
             .map_err(|e| {
-                // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
-                error!(error = %e, "grpc producer creation failed"); // allow-log-levels
+                runtime.health().force_unhealthy_for_route(
+                    route_id,
+                    "g:grpc:producer-create",
+                    &format!("invalid gRPC path: {e}"),
+                );
+                // log-policy: outside-contract
+                error!(error = %e, "grpc producer creation failed");
                 CamelError::EndpointCreationFailed(format!("invalid gRPC path: {e}"))
             })?;
 
@@ -520,14 +544,16 @@ impl Service<Exchange> for GrpcProducer {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
+    use std::time::Duration;
 
     use super::GrpcProducer;
     use super::rt;
     use crate::GrpcMode;
     use crate::config::GrpcConfig;
-    use camel_api::{Body, CamelError, Exchange, Message};
-    use camel_component_api::NetworkRetryPolicy;
+    use camel_api::{Body, CamelError, Exchange, Message, MetricsCollector};
+    use camel_component_api::{HealthCheckRegistry, NetworkRetryPolicy, RuntimeObservability};
     use tonic::Request;
     use tower::Service;
 
@@ -734,6 +760,7 @@ mod tests {
             None,
             &default_config(),
             rt(),
+            "grpc-producer-test-route",
         );
         assert!(result.is_err());
     }
@@ -749,6 +776,7 @@ mod tests {
             None,
             &default_config(),
             rt(),
+            "grpc-producer-test-route",
         );
         let err = match result {
             Err(e) => e,
@@ -769,6 +797,7 @@ mod tests {
             None,
             &default_config(),
             rt(),
+            "grpc-producer-test-route",
         );
         let err = match result {
             Err(e) => e,
@@ -789,6 +818,7 @@ mod tests {
             None,
             &default_config(),
             rt(),
+            "grpc-producer-test-route",
         );
         let err = match result {
             Err(e) => e,
@@ -809,6 +839,7 @@ mod tests {
             None,
             &default_config(),
             rt(),
+            "grpc-producer-test-route",
         )
         .unwrap();
 
@@ -829,6 +860,7 @@ mod tests {
             None,
             &default_config(),
             rt(),
+            "grpc-producer-test-route",
         )
         .unwrap();
 
@@ -841,11 +873,80 @@ mod tests {
             None,
             &default_config(),
             rt(),
+            "grpc-producer-test-route",
         )
         .unwrap();
 
         assert_eq!(producer_unary.mode, GrpcMode::Unary);
         assert_eq!(producer_streaming.mode, GrpcMode::ServerStreaming);
+    }
+
+    // ── force_unhealthy_for_route regression tests ────────────────────
+
+    /// Fixture: captures `force_unhealthy_for_route` calls.
+    #[derive(Debug, Default)]
+    struct RecordingHealth {
+        forced: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl HealthCheckRegistry for RecordingHealth {
+        fn force_unhealthy_for_route(&self, route_id: &str, name: &str, reason: &str) {
+            self.forced.lock().unwrap().push((
+                route_id.to_string(),
+                name.to_string(),
+                reason.to_string(),
+            ));
+        }
+    }
+
+    struct NoopMetrics;
+
+    impl MetricsCollector for NoopMetrics {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, _: &str, _: &str) {}
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        health: Arc<RecordingHealth>,
+    }
+
+    impl RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            Arc::new(NoopMetrics)
+        }
+        fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+            self.health.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_producer_new_invalid_endpoint_calls_force_unhealthy() {
+        let health = Arc::new(RecordingHealth::default());
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(RecordingRuntime {
+            health: health.clone(),
+        });
+
+        let result = GrpcProducer::new(
+            "not-a-valid-endpoint".to_string(),
+            PathBuf::from("/dev/null"),
+            "svc".to_string(),
+            "Method".to_string(),
+            GrpcMode::Unary,
+            None,
+            &default_config(),
+            rt,
+            "grpc-producer-test-route",
+        );
+        assert!(result.is_err());
+
+        let forced = health.forced.lock().unwrap();
+        assert_eq!(forced.len(), 1, "expected one force_unhealthy call");
+        assert_eq!(forced[0].0, "grpc-producer-test-route");
+        assert_eq!(forced[0].1, "g:grpc:producer-create");
+        assert!(!forced[0].2.is_empty(), "reason should be non-empty");
     }
 
     // ── edge case tests ────────────────────────────────────────────────

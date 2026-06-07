@@ -627,7 +627,8 @@ mod tests {
         consumer.cancel_token = Some(CancellationToken::new());
 
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx =
+            ConsumerContext::new(route_tx, CancellationToken::new(), "test-route".to_string());
         let result = consumer.start(ctx).await;
         assert!(result.is_err(), "second start must return an error");
         let msg = result.unwrap_err().to_string();

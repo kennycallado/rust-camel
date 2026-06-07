@@ -38,12 +38,14 @@ impl Endpoint for SqlEndpoint {
     fn create_producer(
         &self,
         rt: Arc<dyn RuntimeObservability>,
-        _ctx: &ProducerContext,
+        ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
+        let route_id = ctx.route_id().unwrap_or("unknown").to_string();
         Ok(BoxProcessor::new(SqlProducer::new(
             self.config.clone(),
             Arc::clone(&self.pool),
             rt,
+            route_id,
         )))
     }
 

@@ -24,14 +24,23 @@ pub struct ExchangeEnvelope {
 pub struct ConsumerContext {
     sender: mpsc::Sender<ExchangeEnvelope>,
     cancel_token: CancellationToken,
+    route_id: String,
 }
 
 impl ConsumerContext {
     /// Create a new consumer context wrapping the given channel sender.
-    pub fn new(sender: mpsc::Sender<ExchangeEnvelope>, cancel_token: CancellationToken) -> Self {
+    ///
+    /// The `route_id` identifies the route this consumer is bound to, enabling
+    /// ADR-0012 per-route metrics and health observations.
+    pub fn new(
+        sender: mpsc::Sender<ExchangeEnvelope>,
+        cancel_token: CancellationToken,
+        route_id: String,
+    ) -> Self {
         Self {
             sender,
             cancel_token,
+            route_id,
         }
     }
 
@@ -44,6 +53,15 @@ impl ConsumerContext {
     /// Returns true if shutdown has been requested.
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
+    }
+
+    /// Returns the route_id this consumer is bound to.
+    ///
+    /// Available for ADR-0012 metrics/health calls that require a route_id
+    /// (categories (b′), (e), (g)). Set at construction time by the route
+    /// controller when spawning the consumer task.
+    pub fn route_id(&self) -> &str {
+        &self.route_id
     }
 
     /// Returns a clone of the `CancellationToken`.
@@ -251,11 +269,18 @@ pub trait Consumer: Send + Sync {
 mod tests {
     use super::*;
 
+    #[test]
+    fn consumer_context_exposes_route_id() {
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "test-route".to_string());
+        assert_eq!(ctx.route_id(), "test-route");
+    }
+
     #[tokio::test]
     async fn test_consumer_context_cancelled() {
         let (tx, _rx) = mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "test-route".to_string());
 
         assert!(!ctx.is_cancelled());
         token.cancel();

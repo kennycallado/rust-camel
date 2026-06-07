@@ -41,6 +41,10 @@ _Avoid_: handler, middleware, transformer
 The composition root of the runtime. Manages component, language, function, and service registries; controls Route lifecycle.
 _Avoid_: container, application context, context (unqualified)
 
+**RuntimeObservability**:
+Narrow trait implemented by the runtime and injected into Component Endpoints at `create_consumer` / `create_producer` time. Provides `metrics()` (counter increments for categories b′/e) and `health()` (forced-unhealthy signalling for category g) so Component code can record failures without taking a hard dependency on metrics/health infrastructure. Established by ADR-0012 Phase A.
+_Avoid_: metrics handle, observability service, runtime hook (use RuntimeObservability when describing the trait)
+
 **UnitOfWorkConfig**:
 Optional per-Route configuration that wraps the Pipeline with exchange lifecycle tracking. When present, fires completion or failure hooks (by producer URI) when an Exchange exits the Pipeline.
 _Avoid_: transaction, scope, UnitOfWork

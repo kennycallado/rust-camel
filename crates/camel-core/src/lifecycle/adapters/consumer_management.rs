@@ -317,7 +317,11 @@ mod tests {
     #[tokio::test]
     async fn spawn_consumer_task_resume_failure_sends_crash_notification() {
         let (tx, _rx) = mpsc::channel(1);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            tx,
+            CancellationToken::new(),
+            "consumer-mgmt-test-route".to_string(),
+        );
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
         let handle = spawn_consumer_task(
@@ -379,7 +383,7 @@ mod tests {
     async fn spawn_consumer_task_deferred_failure_sends_crash_notification() {
         let (exchange_tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
-        let ctx = ConsumerContext::new(exchange_tx, cancel);
+        let ctx = ConsumerContext::new(exchange_tx, cancel, "consumer-mgmt-test-route".to_string());
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
         let handle = spawn_consumer_task(
@@ -402,7 +406,11 @@ mod tests {
     async fn spawn_consumer_task_deferred_failure_suppressed_on_cancellation() {
         let (exchange_tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
-        let ctx = ConsumerContext::new(exchange_tx, cancel.clone());
+        let ctx = ConsumerContext::new(
+            exchange_tx,
+            cancel.clone(),
+            "consumer-mgmt-test-route".to_string(),
+        );
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
         // Cancel BEFORE the bg task exits — simulates graceful shutdown
@@ -448,7 +456,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let (tx, _rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, cancel.clone());
+        let ctx = ConsumerContext::new(tx, cancel.clone(), "consumer-mgmt-test-route".to_string());
 
         let handle = spawn_consumer_task(
             "test-route".into(),

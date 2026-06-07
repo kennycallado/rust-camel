@@ -1370,9 +1370,8 @@ impl Service<Exchange> for ContainerProducer {
 /// to the route as exchanges. It implements automatic reconnection on connection failures.
 pub struct ContainerConsumer {
     config: ContainerConfig,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
+    /// ADR-0012 observability handle: `rt.metrics().increment_errors(...)` and
+    /// `rt.health().force_unhealthy_for_route(...)` calls.
     runtime: Arc<dyn RuntimeObservability>,
 }
 
@@ -1429,8 +1428,11 @@ impl ContainerConsumer {
                     return Ok(());
                 }
                 Err(e) => {
-                    // TODO(ADR-0012-e-metrics): wire increment_errors("e:container:events-connect") via bd rc-mf3
-                    tracing::error!(error = %e, "Container events consumer exhausted reconnect attempts"); // allow-log-levels
+                    self.runtime
+                        .metrics()
+                        .increment_errors(context.route_id(), "e:container:events-connect");
+                    // log-policy: outside-contract
+                    tracing::error!(error = %e, "Container events consumer exhausted reconnect attempts");
                     return Err(e);
                 }
             };
@@ -1458,8 +1460,9 @@ impl ContainerConsumer {
                                 }
                             }
                             Some(Err(e)) => {
-                                // TODO(ADR-0012-e-metrics): wire increment_errors("e:container:events-stream") via bd rc-mf3
-                                tracing::error!("Docker event stream error: {}. Reconnecting...", e); // allow-log-levels
+                                self.runtime.metrics().increment_errors(context.route_id(), "e:container:events-stream");
+                                // log-policy: outside-contract
+                                tracing::error!("Docker event stream error: {}. Reconnecting...", e);
                                 break;
                             }
                             None => {
@@ -1512,8 +1515,11 @@ impl ContainerConsumer {
                     return Ok(());
                 }
                 Err(e) => {
-                    // TODO(ADR-0012-e-metrics): wire increment_errors("e:container:logs-connect") via bd rc-mf3
-                    tracing::error!(error = %e, "Container logs consumer exhausted reconnect attempts"); // allow-log-levels
+                    self.runtime
+                        .metrics()
+                        .increment_errors(context.route_id(), "e:container:logs-connect");
+                    // log-policy: outside-contract
+                    tracing::error!(error = %e, "Container logs consumer exhausted reconnect attempts");
                     return Err(e);
                 }
             };
@@ -1593,8 +1599,9 @@ impl ContainerConsumer {
                                 }
                             }
                             Some(Err(e)) => {
-                                // TODO(ADR-0012-e-metrics): wire increment_errors("e:container:logs-stream") via bd rc-mf3
-                                tracing::error!("Docker log stream error: {}. Reconnecting...", e); // allow-log-levels
+                                self.runtime.metrics().increment_errors(context.route_id(), "e:container:logs-stream");
+                                // log-policy: outside-contract
+                                tracing::error!("Docker log stream error: {}. Reconnecting...", e);
                                 break;
                             }
                             None => {
@@ -1746,6 +1753,8 @@ mod tests {
     }
 
     use super::*;
+    use camel_api::MetricsCollector;
+    use camel_component_api::HealthCheckRegistry;
     use camel_component_api::NoOpComponentContext;
 
     #[test]
@@ -2473,7 +2482,7 @@ mod tests {
         // Create a minimal ConsumerContext
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let context = ConsumerContext::new(tx, cancel_token);
+        let context = ConsumerContext::new(tx, cancel_token, "container-test-route".to_string());
 
         let result = consumer.start(context).await;
 
@@ -2538,7 +2547,8 @@ mod tests {
         // Create a ConsumerContext
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let context = ConsumerContext::new(tx, cancel_token.clone());
+        let context =
+            ConsumerContext::new(tx, cancel_token.clone(), "container-test-route".to_string());
 
         // Track if the consumer task has completed
         let completed = Arc::new(AtomicBool::new(false));
@@ -3054,7 +3064,11 @@ mod tests {
             runtime: test_rt(),
         };
         let (tx, _rx) = mpsc::channel(4);
-        let context = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
+        let context = ConsumerContext::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            "container-test-route".to_string(),
+        );
 
         let err = consumer.start(context).await.unwrap_err();
         match err {
@@ -3077,7 +3091,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel();
-        let context = ConsumerContext::new(tx, cancel);
+        let context = ConsumerContext::new(tx, cancel, "container-test-route".to_string());
 
         let result = consumer.start(context).await;
         assert!(result.is_ok());
@@ -3153,5 +3167,84 @@ mod tests {
             3,
             "max_attempts=3 must yield exactly 3 invocations"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-0012 (e) metric wiring regression tests
+    // -----------------------------------------------------------------------
+
+    /// Regression: events-connect error path calls increment_errors with
+    /// correct route_id and label. Uses an unsupported tcp:// host to trigger
+    /// the error path WITHOUT needing a real Docker daemon (docker_socket_path
+    /// returns Err on non-unix/npipe schemes).
+    #[tokio::test]
+    async fn events_connect_error_increments_metrics() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        struct RecordingMetrics(Mutex<Vec<(String, String)>>);
+
+        impl MetricsCollector for RecordingMetrics {
+            fn record_exchange_duration(&self, _: &str, _: Duration) {}
+            fn increment_errors(&self, route_id: &str, error_type: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((route_id.to_string(), error_type.to_string()));
+            }
+            fn increment_exchanges(&self, _: &str) {}
+            fn set_queue_depth(&self, _: &str, _: usize) {}
+            fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+        }
+
+        struct RecordingRuntime {
+            metrics: Arc<RecordingMetrics>,
+        }
+
+        impl HealthCheckRegistry for RecordingRuntime {
+            fn force_unhealthy_for_route(&self, _: &str, _: &str, _: &str) {}
+        }
+
+        impl RuntimeObservability for RecordingRuntime {
+            fn metrics(&self) -> Arc<dyn MetricsCollector> {
+                self.metrics.clone()
+            }
+            fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+                Arc::new(camel_component_api::NoOpHealthCheckRegistry)
+            }
+        }
+
+        let recording = Arc::new(RecordingMetrics(Mutex::new(Vec::new())));
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(RecordingRuntime {
+            metrics: recording.clone(),
+        });
+
+        // Use unsupported tcp:// host so docker_socket_path() fails fast
+        // without any real I/O. Disable retry so the first failure propagates
+        // immediately to the Err(e) arm.
+        let mut config = ContainerConfig::from_uri("container:events").unwrap();
+        config.host = Some("tcp://192.0.2.1:2375".to_string());
+        config.reconnect = NetworkRetryPolicy::disabled();
+
+        let mut consumer = ContainerConsumer {
+            config,
+            runtime: rt,
+        };
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let context = ConsumerContext::new(tx, cancel, "events-test-route".to_string());
+
+        let result = consumer.start(context).await;
+        assert!(result.is_err(), "expected Docker connection error");
+
+        let errors = recording.0.lock().unwrap();
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one increment_errors call"
+        );
+        assert_eq!(errors[0].0, "events-test-route");
+        assert_eq!(errors[0].1, "e:container:events-connect");
     }
 }

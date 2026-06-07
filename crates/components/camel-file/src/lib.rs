@@ -1202,7 +1202,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "file-test-route".to_string());
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -1245,7 +1245,7 @@ mod tests {
         let config = FileConfig::from_uri(&uri).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token);
+        let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
 
         let include_re = None;
         let exclude_re = None;
@@ -1297,7 +1297,7 @@ mod tests {
         let config = FileConfig::from_uri(&uri).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token);
+        let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
 
         let include_re = None;
         let exclude_re = None;
@@ -1359,7 +1359,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "file-test-route".to_string());
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -1405,7 +1405,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "file-test-route".to_string());
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -1433,7 +1433,7 @@ mod tests {
         let config = FileConfig::from_uri(&uri).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token);
+        let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
 
         let include_re = None;
         let exclude_re = None;
@@ -1480,7 +1480,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "file-test-route".to_string());
 
         let handle = tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -1841,7 +1841,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "file-test-route".to_string());
 
         tokio::spawn(async move {
             let _ = consumer.start(ctx).await;
@@ -1884,7 +1884,7 @@ mod tests {
 
         let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
         let token2 = CancellationToken::new();
-        let ctx2 = ConsumerContext::new(tx2, token2.clone());
+        let ctx2 = ConsumerContext::new(tx2, token2.clone(), "file-test-route-2".to_string());
 
         tokio::spawn(async move {
             let _ = consumer2.start(ctx2).await;

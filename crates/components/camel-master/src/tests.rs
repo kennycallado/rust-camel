@@ -538,7 +538,7 @@ async fn starts_delegate_only_after_started_leading() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     master.start(ctx).await.unwrap();
 
@@ -575,7 +575,7 @@ async fn stops_delegate_on_stopped_leading() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     master.start(ctx).await.unwrap();
     leadership.emit(LeadershipEvent::StartedLeading).await;
@@ -612,7 +612,7 @@ async fn recreates_delegate_on_new_leadership_epoch() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     master.start(ctx).await.unwrap();
 
@@ -784,7 +784,7 @@ async fn delegate_permanent_error_terminates_master_without_retry() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     master.start(ctx).await.unwrap();
 
@@ -846,7 +846,7 @@ async fn delegate_transient_error_retries_and_eventually_succeeds() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     master.start(ctx).await.unwrap();
 
@@ -894,7 +894,7 @@ async fn stops_retrying_delegate_start_after_max_attempts() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     master.start(ctx).await.unwrap();
     sleep(Duration::from_millis(750)).await;
@@ -995,7 +995,7 @@ async fn stop_completes_quickly_when_leadership_task_is_slow() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     master.start(ctx).await.unwrap();
 
@@ -1100,7 +1100,7 @@ async fn stop_propagates_delegate_start_error() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     master.start(ctx).await.unwrap();
     sleep(Duration::from_millis(250)).await;

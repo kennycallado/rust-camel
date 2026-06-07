@@ -17,6 +17,12 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ProducerContext {
     runtime: Option<Arc<dyn RuntimeHandle>>,
+    /// The route_id this producer is bound to, if any.
+    ///
+    /// Available for ADR-0012 metrics/health calls that require a route_id
+    /// (categories (b′), (e), (g)). Set at producer creation time by the
+    /// route build pipeline (step_resolution.rs).
+    route_id: Option<String>,
     /// Default headers to inject into every outgoing message produced.
     default_headers: HashMap<String, String>,
     /// Optional timeout in milliseconds for producer operations.
@@ -28,6 +34,7 @@ impl ProducerContext {
     pub fn new() -> Self {
         Self {
             runtime: None,
+            route_id: None,
             default_headers: HashMap::new(),
             timeout_ms: None,
         }
@@ -37,6 +44,17 @@ impl ProducerContext {
     pub fn with_runtime(mut self, runtime: Arc<dyn RuntimeHandle>) -> Self {
         self.runtime = Some(runtime);
         self
+    }
+
+    /// Attaches the route_id this producer is bound to.
+    pub fn with_route_id(mut self, route_id: impl Into<String>) -> Self {
+        self.route_id = Some(route_id.into());
+        self
+    }
+
+    /// Returns the route_id this producer is bound to, if set.
+    pub fn route_id(&self) -> Option<&str> {
+        self.route_id.as_deref()
     }
 
     /// Returns the runtime command/query handle, if configured.
@@ -162,6 +180,18 @@ mod tests {
             .with_runtime(second.clone());
 
         assert!(Arc::ptr_eq(ctx.runtime().unwrap(), &second));
+    }
+
+    #[test]
+    fn producer_context_route_id_is_set_via_builder() {
+        let ctx = ProducerContext::new().with_route_id("my-route");
+        assert_eq!(ctx.route_id(), Some("my-route"));
+    }
+
+    #[test]
+    fn producer_context_route_id_none_by_default() {
+        let ctx = ProducerContext::new();
+        assert_eq!(ctx.route_id(), None);
     }
 
     #[test]

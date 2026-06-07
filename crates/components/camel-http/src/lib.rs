@@ -3064,7 +3064,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -3117,7 +3117,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -3194,7 +3194,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -3242,7 +3242,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -3291,7 +3291,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -3343,7 +3343,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -3400,7 +3400,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3465,11 +3465,11 @@ mod tests {
 
         let (tx_a, mut rx_a) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token_a = tokio_util::sync::CancellationToken::new();
-        let ctx_a = ConsumerContext::new(tx_a, token_a.clone());
+        let ctx_a = ConsumerContext::new(tx_a, token_a.clone(), "http-test-route-a".to_string());
 
         let (tx_b, mut rx_b) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token_b = tokio_util::sync::CancellationToken::new();
-        let ctx_b = ConsumerContext::new(tx_b, token_b.clone());
+        let ctx_b = ConsumerContext::new(tx_b, token_b.clone(), "http-test-route-b".to_string());
 
         tokio::spawn(async move { consumer_a.start(ctx_a).await.unwrap() });
         tokio::spawn(async move { consumer_b.start(ctx_b).await.unwrap() });
@@ -3532,7 +3532,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
 
@@ -3681,7 +3681,7 @@ mod tests {
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
             let token = tokio_util::sync::CancellationToken::new();
-            let ctx = ConsumerContext::new(tx, token.clone());
+            let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
             tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3747,7 +3747,7 @@ mod tests {
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
             let token = tokio_util::sync::CancellationToken::new();
-            let ctx = ConsumerContext::new(tx, token.clone());
+            let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
             tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3893,7 +3893,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3963,7 +3963,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -4020,7 +4020,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -4066,7 +4066,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -4250,7 +4250,7 @@ mod tests {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

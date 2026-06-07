@@ -25,13 +25,37 @@ use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, is_retryable_sqlx_error, row_to_json};
 
+/// Record a post-process (b′) failure for ADR-0012 outside-contract sites in this
+/// consumer. Increments the per-label error metric AND emits an `error!` log
+/// per ADR-0012 L57 + L70-72 (the metric is the operator signal; `error!`
+/// provides loud log visibility — b′ errors are NOT absorbed by route handlers).
+///
+/// Both the metric call and the `error!` live INSIDE this helper so that
+/// `lint-log-levels`'s `has_replacement_signal` (scripts/xtask/src/main.rs)
+/// sees both literals in the helper's function body. Call sites have NO
+/// `error!` of their own.
+///
+/// Regression-tested by:
+/// - `record_post_process_failure_increments_errors_and_emits_error_log` (helper unit)
+/// - `unbridged_send_and_wait_failure_emits_error_loud` (StreamList integration path)
+fn record_post_process_failure(
+    runtime: &dyn RuntimeObservability,
+    route_id: &str,
+    label: &str,
+    error: &CamelError,
+    message: &str,
+) {
+    runtime.metrics().increment_errors(route_id, label);
+    // log-policy: outside-contract
+    error!(error = %error, "{message}");
+}
+
 pub struct SqlConsumer {
     pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
     stopped: bool,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
+    /// Runtime observability for metrics and health — used by the
+    /// `record_post_process_failure` helper for ADR-0012 (b′) metric calls.
     runtime: Arc<dyn RuntimeObservability>,
 }
 
@@ -56,6 +80,9 @@ impl SqlConsumer {
         context: &ConsumerContext,
         template: &QueryTemplate,
     ) -> Result<(), CamelError> {
+        // Capture route_id from ConsumerContext for ADR-0012 metrics
+        let route_id = context.route_id();
+
         // Create an empty exchange for parameter resolution (consumer has no input)
         let empty_exchange = Exchange::new(Message::default());
 
@@ -112,8 +139,13 @@ impl SqlConsumer {
 
                 // Handle post-processing (onConsume/onConsumeFailed)
                 if let Err(e) = self.handle_post_processing(pool, &result, &row_json).await {
-                    // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:sql:on-consume") via bd rc-mf3
-                    error!(error = %e, "Post-processing failed"); // allow-log-levels
+                    record_post_process_failure(
+                        self.runtime.as_ref(),
+                        route_id,
+                        "b-prime:sql:on-consume",
+                        &e,
+                        "Post-processing failed",
+                    );
                     if self.config.break_batch_on_consume_fail {
                         return Err(e);
                     }
@@ -149,8 +181,13 @@ impl SqlConsumer {
             // (e.g. `:#id`). Each row gets its own post-processing query execution.
             for row_json in rows_json.iter() {
                 if let Err(e) = self.handle_post_processing(pool, &result, row_json).await {
-                    // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:sql:on-consume-batch") via bd rc-mf3
-                    error!(error = %e, "Post-processing failed for batch row"); // allow-log-levels
+                    record_post_process_failure(
+                        self.runtime.as_ref(),
+                        route_id,
+                        "b-prime:sql:on-consume-batch",
+                        &e,
+                        "Post-processing failed for batch row",
+                    );
                     if self.config.break_batch_on_consume_fail {
                         return Err(e);
                     }
@@ -214,14 +251,13 @@ impl SqlConsumer {
         let exchange = Exchange::new(msg);
         let result = context.send_and_wait(exchange).await;
         if let Err(e) = result {
-            // log-policy: outside-contract
-            // (category b′: send_and_wait returned Err on a normal-data send,
-            // meaning the route handler did NOT absorb the failure —
-            // see ADR-0012 "b-bridged discriminator". This emitter is the
-            // only ERROR signal for the unhandled failure; must stay loud.
-            // Regression-tested by unbridged_send_and_wait_failure_emits_error_loud.)
-            // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:sql:stream-list") via bd rc-mf3
-            error!(error = %e, "StreamList consumer downstream processing failed"); // allow-log-levels
+            record_post_process_failure(
+                self.runtime.as_ref(),
+                context.route_id(),
+                "b-prime:sql:stream-list",
+                &e,
+                "StreamList consumer downstream processing failed",
+            );
             return Err(e);
         }
 
@@ -314,9 +350,13 @@ impl SqlConsumer {
                     error!(error = %route_err, "Failed to bridge SQL consumer error to route");
                 }
             } else {
-                // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:sql:poll-failed")
-                //   via bd rc-mf3 (Endpoint trait change to expose ComponentContext::metrics())
-                error!(error = %e, "SQL consumer poll failed"); // allow-log-levels
+                record_post_process_failure(
+                    self.runtime.as_ref(),
+                    context.route_id(),
+                    "b-prime:sql:poll-failed",
+                    &e,
+                    "SQL consumer poll failed",
+                );
             }
         }
     }
@@ -346,6 +386,7 @@ impl Consumer for SqlConsumer {
         }
 
         // Step 1: Initialize the connection pool
+        let route_id = context.route_id().to_string();
         let pool = self
             .pool
             .get_or_try_init(|| async {
@@ -396,8 +437,13 @@ impl Consumer for SqlConsumer {
                 )
                 .await
                 .map_err(|e| {
-                    // TODO(ADR-0012-g): replace with force_unhealthy_for_route once bd rc-1mo lands
-                    error!(error = %e, db_url = %redact_db_url(&self.config.db_url), "SQL connect failed, giving up"); // allow-log-levels
+                    self.runtime.health().force_unhealthy_for_route(
+                        &route_id,
+                        "g:sql:consumer-pool-init",
+                        &e.to_string(),
+                    );
+                    // log-policy: outside-contract
+                    error!(error = %e, db_url = %redact_db_url(&self.config.db_url), "SQL connect failed, giving up");
                     CamelError::EndpointCreationFailed(format!(
                         "Failed to connect to database: {}",
                         e
@@ -533,6 +579,8 @@ impl Consumer for SqlConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::MetricsCollector;
+    use camel_component_api::HealthCheckRegistry;
     use camel_component_api::test_support::PanicRuntimeObservability;
     fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
@@ -542,9 +590,86 @@ mod tests {
     use camel_component_api::UriConfig;
     use sqlx::any::AnyPoolOptions;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
+
+    // -----------------------------------------------------------------------
+    // Recording metrics collector for testing increment_errors calls
+    // -----------------------------------------------------------------------
+
+    struct RecordingMetrics {
+        errors: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl MetricsCollector for RecordingMetrics {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .unwrap()
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        metrics_collector: Arc<RecordingMetrics>,
+    }
+
+    impl RecordingRuntime {
+        fn new(errors: Arc<Mutex<Vec<(String, String)>>>) -> Self {
+            Self {
+                metrics_collector: Arc::new(RecordingMetrics { errors }),
+            }
+        }
+    }
+
+    impl RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            self.metrics_collector.clone() as Arc<dyn MetricsCollector>
+        }
+        fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+            panic!("RecordingRuntime::health not used in this test")
+        }
+    }
+
+    /// Regression test for ADR-0012: the record_post_process_failure helper
+    /// must increment the error metric with the correct route_id and label,
+    /// AND emit error! via tracing.
+    #[tracing_test::traced_test]
+    #[test]
+    fn record_post_process_failure_increments_errors_and_emits_error_log() {
+        let errors: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Arc::new(RecordingRuntime::new(Arc::clone(&errors)));
+        let error = CamelError::ProcessorError("test failure".to_string());
+
+        // Directly invoke the helper
+        record_post_process_failure(
+            runtime.as_ref(),
+            "test-route",
+            "b-prime:sql:on-consume",
+            &error,
+            "Post-processing failed",
+        );
+
+        // Verify MetricsCollector::increment_errors was called
+        let recorded = errors.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "expected 1 increment_errors call");
+        assert_eq!(recorded[0].0, "test-route");
+        assert_eq!(recorded[0].1, "b-prime:sql:on-consume");
+        drop(recorded);
+
+        // Verify error! was emitted
+        assert!(logs_contain("ERROR"), "helper must emit error! log");
+        assert!(
+            logs_contain("Post-processing failed"),
+            "helper must include the message in the log"
+        );
+    }
 
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
@@ -613,7 +738,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         consumer
             .poll_database(&pool, &ctx, &template)
@@ -659,7 +784,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         consumer
             .poll_database(&pool, &ctx, &template)
@@ -705,7 +830,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         let err = consumer
             .poll_database(&pool, &ctx, &template)
@@ -753,7 +878,7 @@ mod tests {
             }
         });
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "sql-test-route".to_string());
 
         // Spawn the consumer and cancel it quickly — it should not panic
         let consumer_handle = tokio::spawn(async move { consumer.start(ctx).await });
@@ -837,7 +962,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         let result = consumer.start(ctx).await;
         assert!(result.is_err());
@@ -872,7 +997,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         consumer
             .poll_database(&pool, &ctx, &template)
@@ -926,7 +1051,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         consumer
             .poll_database(&pool, &ctx, &template)
@@ -973,7 +1098,7 @@ mod tests {
             }
         });
 
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
         consumer
             .bridge_poll_error(&ctx, CamelError::ProcessorError("poll failed".into()))
             .await
@@ -1009,7 +1134,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         // Drive poll — fetch_all will fail because the table is missing.
         consumer.handle_poll_result(&pool, &ctx, &template).await;
@@ -1055,7 +1180,11 @@ mod tests {
         config.resolve_defaults();
         // Explicitly non-bridged: normal-data send path.
         config.bridge_error_handler = false;
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(
+            config.clone(),
+            Arc::new(OnceCell::new()),
+            Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new())))),
+        );
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         // Downstream that returns Err — simulates unhandled route failure.
@@ -1067,7 +1196,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         let _ = consumer.poll_database(&pool, &ctx, &template).await;
 
@@ -1090,7 +1219,11 @@ mod tests {
         config.bridge_error_handler = false;
         config.query = "select * from nonexistent_table".to_string();
         config.resolve_defaults();
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(
+            config.clone(),
+            Arc::new(OnceCell::new()),
+            Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new())))),
+        );
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         // Healthy downstream task; should not be reached for this poll-failure path.
@@ -1102,7 +1235,7 @@ mod tests {
                 }
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         consumer.handle_poll_result(&pool, &ctx, &template).await;
 
@@ -1144,7 +1277,7 @@ mod tests {
                 let _ = result_tx.send(env.exchange);
             }
         });
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
 
         consumer
             .poll_database(&pool, &ctx, &template)
@@ -1219,7 +1352,11 @@ mod tests {
                 break;
             }
         });
-        let ctx = ConsumerContext::new(mpsc_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            mpsc_tx,
+            CancellationToken::new(),
+            "sql-test-route".to_string(),
+        );
 
         consumer
             .poll_database(&pool, &ctx, &template)
@@ -1248,6 +1385,87 @@ mod tests {
             }
             ref other => panic!("expected Body::Stream, got {:?}", other),
         }
+    }
+
+    // ── ADR-0012 (g) regression tests ──────────────────────────────────
+
+    /// Fixture: captures `force_unhealthy_for_route` calls.
+    #[derive(Debug, Default)]
+    struct RecordingHealth {
+        forced: Arc<Mutex<Vec<(String, String, String)>>>,
+    }
+
+    impl HealthCheckRegistry for RecordingHealth {
+        fn force_unhealthy_for_route(&self, route_id: &str, name: &str, reason: &str) {
+            self.forced.lock().unwrap().push((
+                route_id.to_string(),
+                name.to_string(),
+                reason.to_string(),
+            ));
+        }
+    }
+
+    struct NoopMetricsForConsumer;
+
+    impl MetricsCollector for NoopMetricsForConsumer {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, _: &str, _: &str) {}
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntimeWithHealth {
+        health: Arc<RecordingHealth>,
+    }
+
+    impl RuntimeObservability for RecordingRuntimeWithHealth {
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            Arc::new(NoopMetricsForConsumer)
+        }
+        fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+            self.health.clone()
+        }
+    }
+
+    /// Regression: consumer pool init failure calls force_unhealthy_for_route
+    /// with correct route_id + name "g:sql:consumer-pool-init" + non-empty reason.
+    #[tokio::test]
+    async fn consumer_pool_init_failure_calls_force_unhealthy_for_route() {
+        let health = Arc::new(RecordingHealth::default());
+        let recorded_health = health.clone();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(RecordingRuntimeWithHealth { health });
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://nonexistent-host:5432/nonexistent_db&retryEnabled=false&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.max_connections = Some(1);
+        config.min_connections = Some(0);
+        config.idle_timeout_secs = Some(300);
+        config.max_lifetime_secs = Some(1800);
+
+        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), rt);
+
+        let (tx, _rx) = mpsc::channel(8);
+        let ctx = ConsumerContext::new(
+            tx,
+            CancellationToken::new(),
+            "sql-consumer-test-route".to_string(),
+        );
+
+        let result = consumer.start(ctx).await;
+        assert!(result.is_err(), "pool init should fail with bad db_url");
+
+        let forced = recorded_health.forced.lock().unwrap();
+        assert_eq!(
+            forced.len(),
+            1,
+            "expected one force_unhealthy_for_route call"
+        );
+        assert_eq!(forced[0].0, "sql-consumer-test-route");
+        assert_eq!(forced[0].1, "g:sql:consumer-pool-init");
+        assert!(!forced[0].2.is_empty(), "reason should be non-empty");
     }
 
     /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).

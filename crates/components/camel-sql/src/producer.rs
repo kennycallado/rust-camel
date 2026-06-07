@@ -28,10 +28,9 @@ pub struct SqlProducer {
     pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
     pub(crate) stopped: Arc<AtomicBool>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
     pub(crate) runtime: Arc<dyn RuntimeObservability>,
+    /// Route identifier for ADR-0012 (g) health/observability calls.
+    pub(crate) route_id: String,
 }
 
 impl SqlProducer {
@@ -39,12 +38,14 @@ impl SqlProducer {
         config: SqlEndpointConfig,
         pool: Arc<OnceCell<AnyPool>>,
         runtime: Arc<dyn RuntimeObservability>,
+        route_id: impl Into<String>,
     ) -> Self {
         Self {
             config,
             pool,
             stopped: Arc::new(AtomicBool::new(false)),
             runtime,
+            route_id: route_id.into(),
         }
     }
 
@@ -132,6 +133,8 @@ impl Service<Exchange> for SqlProducer {
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let mut config = self.config.clone();
         let pool_cell = Arc::clone(&self.pool);
+        let runtime = Arc::clone(&self.runtime);
+        let route_id = self.route_id.clone();
 
         Box::pin(async move {
             // Get or initialize the connection pool
@@ -180,8 +183,13 @@ impl Service<Exchange> for SqlProducer {
                     )
                     .await
                     .map_err(|e| {
-                        // TODO(ADR-0012-g): replace with force_unhealthy_for_route once bd rc-1mo lands
-                        error!(error = %e, db_url = %redact_db_url(&config.db_url), "Failed to connect to database"); // allow-log-levels
+                        runtime.health().force_unhealthy_for_route(
+                            &route_id,
+                            "g:sql:producer-pool-init",
+                            &e.to_string(),
+                        );
+                        // log-policy: outside-contract
+                        error!(error = %e, db_url = %redact_db_url(&config.db_url), "Failed to connect to database");
                         CamelError::EndpointCreationFailed(format!(
                             "Failed to connect to database: {}",
                             e
@@ -523,6 +531,8 @@ async fn execute_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::MetricsCollector;
+    use camel_component_api::HealthCheckRegistry;
     use camel_component_api::test_support::PanicRuntimeObservability;
     fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
@@ -531,7 +541,48 @@ mod tests {
     use camel_component_api::UriConfig;
     use sqlx::any::AnyPoolOptions;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use tokio::sync::OnceCell;
+
+    // ── Recording health fixture for ADR-0012 (g) tests ───────────────────
+
+    #[derive(Debug, Default)]
+    struct RecordingHealth {
+        forced: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl HealthCheckRegistry for RecordingHealth {
+        fn force_unhealthy_for_route(&self, route_id: &str, name: &str, reason: &str) {
+            self.forced.lock().unwrap().push((
+                route_id.to_string(),
+                name.to_string(),
+                reason.to_string(),
+            ));
+        }
+    }
+
+    struct NoopMetrics;
+
+    impl MetricsCollector for NoopMetrics {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, _: &str, _: &str) {}
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        health: Arc<RecordingHealth>,
+    }
+
+    impl RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            Arc::new(NoopMetrics)
+        }
+        fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+            self.health.clone()
+        }
+    }
 
     async fn sqlite_pool() -> AnyPool {
         sqlx::any::install_default_drivers();
@@ -564,7 +615,12 @@ mod tests {
 
     #[test]
     fn producer_clone_shares_pool() {
-        let p1 = SqlProducer::new(config(), Arc::new(OnceCell::new()), test_rt());
+        let p1 = SqlProducer::new(
+            config(),
+            Arc::new(OnceCell::new()),
+            test_rt(),
+            "sql-producer-test-route",
+        );
         let p2 = p1.clone();
         assert!(Arc::ptr_eq(&p1.pool, &p2.pool));
         assert!(Arc::ptr_eq(&p1.stopped, &p2.stopped));
@@ -861,7 +917,12 @@ mod tests {
         let config = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
         assert!(config.max_connections.is_none());
 
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
+        let mut producer = SqlProducer::new(
+            config,
+            Arc::new(OnceCell::new()),
+            test_rt(),
+            "sql-producer-test-route",
+        );
         let exchange = Exchange::new(Message::default());
 
         // Should NOT panic — producer calls resolve_defaults() defensively
@@ -889,7 +950,16 @@ mod tests {
         config.idle_timeout_secs = Some(300);
         config.max_lifetime_secs = Some(1800);
 
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
+        let health = Arc::new(RecordingHealth::default());
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(RecordingRuntime {
+            health: health.clone(),
+        });
+        let mut producer = SqlProducer::new(
+            config,
+            Arc::new(OnceCell::new()),
+            rt,
+            "sql-producer-test-route",
+        );
         let exchange = Exchange::new(Message::default());
 
         let result = producer.call(exchange).await;
@@ -901,6 +971,15 @@ mod tests {
             "Expected connection error, got: {}",
             err_msg
         );
+        // Verify force_unhealthy_for_route was also called
+        let forced = health.forced.lock().unwrap();
+        assert_eq!(
+            forced.len(),
+            1,
+            "expected one force_unhealthy_for_route call"
+        );
+        assert_eq!(forced[0].0, "sql-producer-test-route");
+        assert_eq!(forced[0].1, "g:sql:producer-pool-init");
     }
 
     // SQL-007: poll_ready returns Ready (pool lazily initialized on first call)
@@ -911,7 +990,12 @@ mod tests {
             c.resolve_defaults();
             c
         };
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
+        let mut producer = SqlProducer::new(
+            config,
+            Arc::new(OnceCell::new()),
+            test_rt(),
+            "sql-producer-test-route",
+        );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
@@ -925,7 +1009,12 @@ mod tests {
             c.resolve_defaults();
             c
         };
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
+        let mut producer = SqlProducer::new(
+            config,
+            Arc::new(OnceCell::new()),
+            test_rt(),
+            "sql-producer-test-route",
+        );
         producer.stop();
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
@@ -951,7 +1040,8 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool).unwrap();
 
-        let mut producer = SqlProducer::new(config, pool_cell, test_rt());
+        let mut producer =
+            SqlProducer::new(config, pool_cell, test_rt(), "sql-producer-test-route");
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Err(_))));
@@ -975,7 +1065,8 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool).unwrap();
 
-        let mut producer = SqlProducer::new(config, pool_cell, test_rt());
+        let mut producer =
+            SqlProducer::new(config, pool_cell, test_rt(), "sql-producer-test-route");
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
@@ -994,7 +1085,12 @@ mod tests {
         let pool_cell = Arc::new(OnceCell::new());
         pool_cell.set(pool.clone()).unwrap();
 
-        let producer = SqlProducer::new(config, pool_cell.clone(), test_rt());
+        let producer = SqlProducer::new(
+            config,
+            pool_cell.clone(),
+            test_rt(),
+            "sql-producer-test-route",
+        );
         assert!(!pool.is_closed(), "Pool should be open before stop");
 
         producer.stop();
@@ -1017,6 +1113,7 @@ mod tests {
             },
             pool_cell.clone(),
             test_rt(),
+            "sql-producer-test-route",
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer2.poll_ready(&mut cx);
@@ -1039,7 +1136,12 @@ mod tests {
         config.resolve_defaults();
         assert!(!config.use_placeholder);
 
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
+        let mut producer = SqlProducer::new(
+            config,
+            Arc::new(OnceCell::new()),
+            test_rt(),
+            "sql-producer-test-route",
+        );
         // Pre-initialize the pool so we don't hit the pool init path
         producer.pool.set(pool.clone()).unwrap();
 
@@ -1064,7 +1166,12 @@ mod tests {
         config.resolve_defaults();
         assert!(config.use_placeholder);
 
-        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()), test_rt());
+        let mut producer = SqlProducer::new(
+            config,
+            Arc::new(OnceCell::new()),
+            test_rt(),
+            "sql-producer-test-route",
+        );
         producer.pool.set(pool.clone()).unwrap();
 
         let msg = Message::new(Body::Json(json!([1])));
@@ -1114,5 +1221,47 @@ mod tests {
             3,
             "max_attempts=3 must yield exactly 3 invocations"
         );
+    }
+
+    // ── ADR-0012 (g) regression tests ──────────────────────────────────
+
+    /// Regression: producer pool init failure calls force_unhealthy_for_route
+    /// with correct route_id + name "g:sql:producer-pool-init" + non-empty reason.
+    #[tokio::test]
+    async fn producer_pool_init_failure_calls_force_unhealthy_for_route() {
+        let health = Arc::new(RecordingHealth::default());
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(RecordingRuntime {
+            health: health.clone(),
+        });
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://nonexistent-host:5432/nonexistent_db&retryEnabled=false",
+        )
+        .unwrap();
+        config.max_connections = Some(1);
+        config.min_connections = Some(0);
+        config.idle_timeout_secs = Some(300);
+        config.max_lifetime_secs = Some(1800);
+
+        let mut producer = SqlProducer::new(
+            config,
+            Arc::new(OnceCell::new()),
+            rt,
+            "sql-producer-test-route",
+        );
+        let exchange = Exchange::new(Message::default());
+
+        let result = producer.call(exchange).await;
+        assert!(result.is_err());
+
+        let forced = health.forced.lock().unwrap();
+        assert_eq!(
+            forced.len(),
+            1,
+            "expected one force_unhealthy_for_route call"
+        );
+        assert_eq!(forced[0].0, "sql-producer-test-route");
+        assert_eq!(forced[0].1, "g:sql:producer-pool-init");
+        assert!(!forced[0].2.is_empty(), "reason should be non-empty");
     }
 }

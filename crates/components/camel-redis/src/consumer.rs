@@ -677,7 +677,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-test-route".to_string());
 
         assert!(consumer.task_handle.is_none());
         let result = consumer.start(ctx).await;
@@ -695,7 +695,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-test-route".to_string());
 
         let result = consumer.start(ctx).await;
         assert!(result.is_ok());
@@ -762,7 +762,7 @@ mod tests {
         // Create a mock context (won't actually be used in this test)
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-test-route".to_string());
 
         // Start should succeed
         let start_result = consumer.start(ctx).await;
@@ -784,7 +784,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-test-route".to_string());
 
         // First start
         assert!(consumer.start(ctx).await.is_ok());
@@ -796,7 +796,8 @@ mod tests {
         // Start again after stop — should succeed (clean restart)
         let (tx2, _rx2) = mpsc::channel(16);
         let cancel_token2 = CancellationToken::new();
-        let ctx2 = ConsumerContext::new(tx2, cancel_token2.clone());
+        let ctx2 =
+            ConsumerContext::new(tx2, cancel_token2.clone(), "redis-test-route-2".to_string());
         assert!(consumer.start(ctx2).await.is_ok());
         tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -812,7 +813,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-test-route".to_string());
 
         // Start the consumer
         assert!(consumer.start(ctx).await.is_ok());
@@ -843,7 +844,8 @@ mod tests {
         // Start again — must create fresh state without panic or error
         let (tx2, _rx2) = mpsc::channel(16);
         let cancel_token2 = CancellationToken::new();
-        let ctx2 = ConsumerContext::new(tx2, cancel_token2.clone());
+        let ctx2 =
+            ConsumerContext::new(tx2, cancel_token2.clone(), "redis-test-route-2".to_string());
         assert!(consumer.start(ctx2).await.is_ok());
         assert!(
             consumer.task_handle.is_some(),
@@ -866,7 +868,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "redis-test-route".to_string());
 
         assert!(consumer.start(ctx).await.is_ok());
         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -51,6 +51,7 @@ pub(crate) struct ReconcileContext<'a> {
     pub(crate) lock_name: &'a str,
     pub(crate) delegate_component: &'a Arc<dyn Component>,
     pub(crate) delegate_uri: &'a str,
+    pub(crate) route_id: String,
     pub(crate) sender: &'a tokio::sync::mpsc::Sender<ExchangeEnvelope>,
     pub(crate) parent_cancel: &'a CancellationToken,
     pub(crate) drain_timeout: Duration,
@@ -103,7 +104,8 @@ pub(crate) async fn reconcile_event(
             };
 
             let run_token = ctx.parent_cancel.child_token();
-            let delegate_ctx = ConsumerContext::new(ctx.sender.clone(), run_token.clone());
+            let delegate_ctx =
+                ConsumerContext::new(ctx.sender.clone(), run_token.clone(), ctx.route_id.clone());
             let handle = tokio::spawn(async move {
                 consumer.start(delegate_ctx).await?;
                 consumer.stop().await?;

@@ -291,7 +291,11 @@ mod integration_tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let consumer_ctx = camel_component_api::ConsumerContext::new(tx, cancel_token.clone());
+        let consumer_ctx = camel_component_api::ConsumerContext::new(
+            tx,
+            cancel_token.clone(),
+            "redis-test-route".to_string(),
+        );
 
         // Start subscriber, let it run briefly, then cancel
         consumer

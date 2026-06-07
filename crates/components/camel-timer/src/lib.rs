@@ -421,7 +421,11 @@ mod tests {
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            "timer-test-route".to_string(),
+        );
 
         // Start the consumer (spawns internally, returns immediately)
         consumer.start(ctx).await.unwrap();
@@ -452,7 +456,11 @@ mod tests {
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            "timer-test-route".to_string(),
+        );
 
         // Run consumer in background
         tokio::spawn(async move {
@@ -488,7 +496,7 @@ mod tests {
 
         let token = CancellationToken::new();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "timer-test-route".to_string());
 
         let mut consumer = TimerConsumer {
             config: TimerConfig::from_uri("timer:cancel-test?period=50").unwrap(),
@@ -529,7 +537,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token.clone(), "timer-test-route".to_string());
 
         // Run consumer in background (start() blocks until cancelled)
         tokio::spawn(async move {
@@ -596,7 +604,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+        let ctx = ConsumerContext::new(tx, cancel_token.clone(), "timer-test-route".to_string());
 
         // Second start on an already-started consumer must return an error.
         let result = consumer.start(ctx).await;
@@ -623,7 +631,11 @@ mod tests {
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            "timer-test-route".to_string(),
+        );
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -706,7 +718,11 @@ mod tests {
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            "timer-test-route".to_string(),
+        );
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -750,7 +766,11 @@ mod tests {
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+            "timer-test-route".to_string(),
+        );
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();

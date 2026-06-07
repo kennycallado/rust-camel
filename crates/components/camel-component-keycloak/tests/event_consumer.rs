@@ -67,7 +67,7 @@ async fn event_consumer_polls_user_events() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "keycloak-test-route".to_string());
 
     let handle = tokio::spawn(async move {
         consumer.start(ctx).await.unwrap();
@@ -130,7 +130,7 @@ async fn event_consumer_polls_admin_events() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "keycloak-test-route".to_string());
 
     let handle = tokio::spawn(async move {
         consumer.start(ctx).await.unwrap();
@@ -178,7 +178,7 @@ async fn event_consumer_dedup() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "keycloak-test-route".to_string());
 
     let handle = tokio::spawn(async move {
         consumer.start(ctx).await.unwrap();
@@ -227,7 +227,7 @@ async fn event_consumer_auth_failure_continues() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "keycloak-test-route".to_string());
 
     let handle = tokio::spawn(async move {
         let _ = consumer.start(ctx).await;
@@ -270,7 +270,7 @@ async fn event_consumer_persistent_auth_failure_stops() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "keycloak-test-route".to_string());
 
     let result = consumer.start(ctx).await;
     assert!(
@@ -294,7 +294,7 @@ async fn event_consumer_cancellation() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "keycloak-test-route".to_string());
 
     let handle = tokio::spawn(async move {
         consumer.start(ctx).await.unwrap();
@@ -321,7 +321,7 @@ async fn event_consumer_empty_results() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "keycloak-test-route".to_string());
 
     let handle = tokio::spawn(async move {
         consumer.start(ctx).await.unwrap();
@@ -357,7 +357,7 @@ async fn event_consumer_skips_events_without_id() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let ctx = ConsumerContext::new(tx, cancel.clone());
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "keycloak-test-route".to_string());
 
     let handle = tokio::spawn(async move {
         consumer.start(ctx).await.unwrap();

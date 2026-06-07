@@ -480,8 +480,8 @@ impl DefaultRouteController {
         self.tracer_metrics = config.metrics_collector.clone();
     }
 
-    fn build_producer_context(&self) -> Result<ProducerContext, CamelError> {
-        let mut producer_ctx = ProducerContext::new();
+    fn build_producer_context(&self, route_id: &str) -> Result<ProducerContext, CamelError> {
+        let mut producer_ctx = ProducerContext::new().with_route_id(route_id);
         if let Some(runtime) = self.runtime.as_ref().and_then(Weak::upgrade) {
             producer_ctx = producer_ctx.with_runtime(runtime);
         }
@@ -661,7 +661,7 @@ impl DefaultRouteController {
             ..
         } = definition;
 
-        let producer_ctx = self.build_producer_context()?;
+        let producer_ctx = self.build_producer_context(&route_id)?;
 
         let mut aggregate_split: Option<AggregateSplitInfo> = None;
         let processors_with_contracts = match find_top_level_aggregate_requiring_split(&steps) {
@@ -885,7 +885,7 @@ impl DefaultRouteController {
     ) -> Result<BoxProcessor, CamelError> {
         let route_id = def.route_id().to_string();
 
-        let producer_ctx = self.build_producer_context()?;
+        let producer_ctx = self.build_producer_context(&route_id)?;
 
         let processors_with_contracts = self.resolve_steps(
             def.steps,
@@ -975,7 +975,7 @@ impl DefaultRouteController {
     ) -> Result<BoxProcessor, CamelError> {
         let route_id = def.route_id().to_string();
 
-        let producer_ctx = self.build_producer_context()?;
+        let producer_ctx = self.build_producer_context(&route_id)?;
 
         let processors_with_contracts = self.resolve_steps(
             def.steps,
@@ -1315,7 +1315,7 @@ impl RouteController for DefaultRouteController {
         let pipeline_cancel = managed.pipeline_cancel_token.child_token();
         // Clone sender for storage (to reuse on resume)
         let tx_for_storage = tx.clone();
-        let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone());
+        let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone(), route_id.to_string());
 
         // --- Aggregator v2: check for aggregate route with timeout ---
         let managed = self
@@ -1741,7 +1741,8 @@ impl RouteController for DefaultRouteController {
         let runtime_for_consumer = self.runtime.clone();
 
         // Create ConsumerContext with the stored sender
-        let consumer_ctx = ConsumerContext::new(sender, consumer_cancel.clone());
+        let consumer_ctx =
+            ConsumerContext::new(sender, consumer_cancel.clone(), route_id.to_string());
 
         // Spawn consumer task
         let consumer_handle = super::consumer_management::spawn_consumer_task(

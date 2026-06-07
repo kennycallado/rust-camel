@@ -23,4 +23,5 @@ tracing.workspace = true
 workspace = true
 
 [dev-dependencies]
+camel-api.workspace = true
 camel-component-api = { workspace = true, features = ["test-support"] }

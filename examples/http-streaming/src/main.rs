@@ -42,7 +42,11 @@ async fn main() -> Result<(), CamelError> {
 
     let (stream_tx, mut stream_rx) = mpsc::channel::<ExchangeEnvelope>(16);
     let stream_token = tokio_util::sync::CancellationToken::new();
-    let stream_ctx = ConsumerContext::new(stream_tx, stream_token.clone());
+    let stream_ctx = ConsumerContext::new(
+        stream_tx,
+        stream_token.clone(),
+        "http-streaming-test".to_string(),
+    );
 
     // Spawn the stream consumer
     tokio::spawn(async move {
@@ -64,7 +68,11 @@ async fn main() -> Result<(), CamelError> {
 
     let (upload_tx, mut upload_rx) = mpsc::channel::<ExchangeEnvelope>(16);
     let upload_token = tokio_util::sync::CancellationToken::new();
-    let upload_ctx = ConsumerContext::new(upload_tx, upload_token.clone());
+    let upload_ctx = ConsumerContext::new(
+        upload_tx,
+        upload_token.clone(),
+        "http-streaming-test-upload".to_string(),
+    );
 
     // Spawn the upload consumer
     tokio::spawn(async move {

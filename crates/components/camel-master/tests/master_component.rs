@@ -294,7 +294,7 @@ async fn works_with_noop_platform_service() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let cancel = CancellationToken::new();
-    let consumer_ctx = ConsumerContext::new(tx, cancel.clone());
+    let consumer_ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     consumer.start(consumer_ctx).await.unwrap();
 
@@ -327,7 +327,7 @@ async fn lock_name_is_forwarded_to_leadership_service() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let cancel = CancellationToken::new();
-    let consumer_ctx = ConsumerContext::new(tx, cancel.clone());
+    let consumer_ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     consumer.start(consumer_ctx).await.unwrap();
 
@@ -358,7 +358,7 @@ async fn retries_delegate_start_while_leadership_stays_started() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let cancel = CancellationToken::new();
-    let consumer_ctx = ConsumerContext::new(tx, cancel.clone());
+    let consumer_ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
 
     consumer.start(consumer_ctx).await.unwrap();
 
@@ -390,7 +390,11 @@ async fn dropping_consumer_after_start_does_not_step_down_leadership_immediately
     let mut consumer = endpoint.create_consumer(rt).unwrap();
 
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let consumer_ctx = ConsumerContext::new(tx, CancellationToken::new());
+    let consumer_ctx = ConsumerContext::new(
+        tx,
+        CancellationToken::new(),
+        "master-test-route".to_string(),
+    );
 
     consumer.start(consumer_ctx).await.unwrap();
     drop(consumer);

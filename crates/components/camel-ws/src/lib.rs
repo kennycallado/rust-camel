@@ -1685,7 +1685,11 @@ mod tests {
             .unwrap();
 
         let (route_tx, mut route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let route_task = tokio::spawn(async move {
@@ -1757,7 +1761,11 @@ mod tests {
 
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/shutdown");
@@ -1831,7 +1839,7 @@ mod tests {
             .unwrap();
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "ws-test-route".to_string());
         let result = consumer.start(ctx).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1852,7 +1860,7 @@ mod tests {
             .unwrap();
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "ws-test-route".to_string());
         let result = consumer.start(ctx).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1958,7 +1966,11 @@ mod tests {
             .unwrap();
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/limited");
@@ -2007,7 +2019,11 @@ mod tests {
             .unwrap();
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/sizelimit");
@@ -2057,7 +2073,11 @@ mod tests {
             .unwrap();
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let state = ServerRegistry::global()
@@ -2108,7 +2128,11 @@ mod tests {
             .unwrap();
 
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/bc");
@@ -2322,14 +2346,22 @@ mod tests {
 
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
 
         // First start should succeed
         consumer.start(ctx).await.unwrap();
 
         // Second start should fail
         let (route_tx2, _route_rx2) = mpsc::channel(16);
-        let ctx2 = ConsumerContext::new(route_tx2, CancellationToken::new());
+        let ctx2 = ConsumerContext::new(
+            route_tx2,
+            CancellationToken::new(),
+            "ws-test-route-2".to_string(),
+        );
         let result = consumer.start(ctx2).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -2353,7 +2385,11 @@ mod tests {
 
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         // Verify registry entry exists
@@ -2399,7 +2435,11 @@ mod tests {
             .unwrap();
 
         let (route_tx, _route_rx) = mpsc::channel(1); // Tiny channel to force backpressure
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         // Connect a client so the registry has an entry
@@ -2452,7 +2492,11 @@ mod tests {
 
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let url = format!("ws://127.0.0.1:{port}/pingpong");
@@ -2538,7 +2582,11 @@ mod tests {
 
         let mut consumer = endpoint.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
 
         // Start should succeed (server spawns, but bind may fail)
         let start_result = consumer.start(ctx).await;
@@ -2582,7 +2630,11 @@ mod tests {
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/errorflag")).unwrap();
         let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         // Simulate server error by setting the flag directly
@@ -2608,7 +2660,11 @@ mod tests {
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/healthy")).unwrap();
         let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let result = consumer.stop().await;

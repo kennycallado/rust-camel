@@ -931,7 +931,11 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -957,7 +961,11 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -979,7 +987,11 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -999,7 +1011,11 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1040,7 +1056,11 @@ mod consumer_producer_tests {
             })
             .await
             .unwrap();
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1111,12 +1131,20 @@ mod consumer_producer_tests {
 
         let mut consumer_a = ep.create_consumer(rt()).unwrap();
         let (tx_a, _rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
+        let ctx_a = ConsumerContext::new(
+            tx_a,
+            CancellationToken::new(),
+            "seda-test-route-a".to_string(),
+        );
         consumer_a.start(ctx_a).await.unwrap();
 
         let mut consumer_b = ep.create_consumer(rt()).unwrap();
         let (tx_b, _rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx_b = ConsumerContext::new(tx_b, CancellationToken::new());
+        let ctx_b = ConsumerContext::new(
+            tx_b,
+            CancellationToken::new(),
+            "seda-test-route-b".to_string(),
+        );
         let result = consumer_b.start(ctx_b).await;
         assert!(result.is_err());
         assert!(
@@ -1138,12 +1166,20 @@ mod consumer_producer_tests {
 
         let mut consumer_a = ep.create_consumer(rt()).unwrap();
         let (tx_a, mut rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
+        let ctx_a = ConsumerContext::new(
+            tx_a,
+            CancellationToken::new(),
+            "seda-test-route-a".to_string(),
+        );
         consumer_a.start(ctx_a).await.unwrap();
 
         let mut consumer_b = ep.create_consumer(rt()).unwrap();
         let (tx_b, mut rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx_b = ConsumerContext::new(tx_b, CancellationToken::new());
+        let ctx_b = ConsumerContext::new(
+            tx_b,
+            CancellationToken::new(),
+            "seda-test-route-b".to_string(),
+        );
         consumer_b.start(ctx_b).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1180,7 +1216,7 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1205,7 +1241,7 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1270,7 +1306,11 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (route_tx, _) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1296,12 +1336,20 @@ mod consumer_producer_tests {
 
         let mut consumer_a = ep.create_consumer(rt()).unwrap();
         let (tx_a, _rx_a) = mpsc::channel::<ExchangeEnvelope>(1);
-        let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
+        let ctx_a = ConsumerContext::new(
+            tx_a,
+            CancellationToken::new(),
+            "seda-test-route-a".to_string(),
+        );
         consumer_a.start(ctx_a).await.unwrap();
 
         let mut consumer_b = ep.create_consumer(rt()).unwrap();
         let (tx_b, _rx_b) = mpsc::channel::<ExchangeEnvelope>(1);
-        let ctx_b = ConsumerContext::new(tx_b, CancellationToken::new());
+        let ctx_b = ConsumerContext::new(
+            tx_b,
+            CancellationToken::new(),
+            "seda-test-route-b".to_string(),
+        );
         consumer_b.start(ctx_b).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1337,7 +1385,11 @@ mod consumer_producer_tests {
 
         let mut consumer_a = ep.create_consumer(rt()).unwrap();
         let (tx_a, mut rx_a) = mpsc::channel::<ExchangeEnvelope>(1);
-        let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
+        let ctx_a = ConsumerContext::new(
+            tx_a,
+            CancellationToken::new(),
+            "seda-test-route-a".to_string(),
+        );
         consumer_a.start(ctx_a).await.unwrap();
 
         let state = comp
@@ -1400,7 +1452,7 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
         consumer.start(ctx).await.unwrap();
 
         let producer_a = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1441,7 +1493,7 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1467,7 +1519,7 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
@@ -1504,7 +1556,7 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(1000);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
         consumer.start(ctx).await.unwrap();
 
         let counter = Arc::new(AtomicU64::new(0));
@@ -1560,7 +1612,7 @@ mod consumer_producer_tests {
 
         let mut consumer = ep.create_consumer(rt()).unwrap();
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
         consumer.start(ctx).await.unwrap();
 
         let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();

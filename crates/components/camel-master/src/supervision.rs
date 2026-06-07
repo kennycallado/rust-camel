@@ -36,6 +36,7 @@ impl Consumer for MasterConsumer {
         let platform_service = Arc::clone(&self.platform_service);
         let sender = context.sender();
         let parent_cancel = context.cancel_token();
+        let route_id = context.route_id().to_string();
         let drain_timeout = self.drain_timeout;
         let reconnect = self.reconnect.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -55,6 +56,7 @@ impl Consumer for MasterConsumer {
                 lock_name: &lock_name,
                 delegate_component: &delegate_component,
                 delegate_uri: &delegate_uri,
+                route_id,
                 sender: &sender,
                 parent_cancel: &parent_cancel,
                 drain_timeout,

@@ -615,7 +615,11 @@ mod tests {
         consumer.cancel_token = Some(CancellationToken::new());
 
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-test-route".to_string(),
+        );
         let result = consumer.start(ctx).await;
         assert!(result.is_err(), "second start must return an error");
         let msg = result.unwrap_err().to_string();
@@ -752,7 +756,11 @@ mod tests {
         );
 
         let (route_tx, _route_rx) = mpsc::channel(16);
-        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-test-route-2".to_string(),
+        );
 
         let start = std::time::Instant::now();
         let result = consumer.start(ctx).await;

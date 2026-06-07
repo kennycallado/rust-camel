@@ -98,9 +98,11 @@ impl Endpoint for GrpcEndpoint {
     fn create_producer(
         &self,
         rt: Arc<dyn RuntimeObservability>,
-        _ctx: &ProducerContext,
+        ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
         let mode = resolve_grpc_mode(&self.proto_path, &self.service_name, &self.method_name)?;
+        // route_id may not be set in test scenarios (e.g., standalone endpoint tests)
+        let route_id = ctx.route_id().unwrap_or("unknown");
         let producer = GrpcProducer::new(
             self.addr.clone(),
             self.proto_path.clone(),
@@ -110,6 +112,7 @@ impl Endpoint for GrpcEndpoint {
             self.deadline_ms,
             &self.config,
             rt,
+            route_id,
         )?;
         Ok(BoxProcessor::new(producer))
     }

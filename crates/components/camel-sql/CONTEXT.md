@@ -12,21 +12,21 @@ Per ADR-0012.
 
 **Bridging:** this component supports `bridgeErrorHandler=true` (URI param). When enabled, poll-loop errors are wrapped as Exchanges and routed through the owning route's error handler — the consumer logs at `warn!` on the bridged path to avoid duplicate `error!` (Apache Camel ErrorHandler pattern).
 
-**Labels planned for category (b′) side-effect failures** (wiring deferred to `bd rc-mf3` — Endpoint trait change to expose `ComponentContext::metrics()` to consumers/producers):
-- `b-prime:sql:on-consume` — post-process single row failure (`consumer.rs:103`).
-- `b-prime:sql:on-consume-batch` — post-process batch row failure (`consumer.rs:139`).
-- `b-prime:sql:poll-failed` — unbridged poll failure (`consumer.rs:429` unbridged branch).
-- `b-prime:sql:stream-list` — StreamList downstream send failure (`consumer.rs:205`).
+**Labels wired in Phase B (commits cfb7c74c + 0a801cec):**
 
-**Note on consumer.rs:205 (StreamList):** This is a **normal-data `send_and_wait` → Err** site, NOT a deliberate error-handoff (bridge) site. Per ADR-0012 "b-bridged discriminator", `send_and_wait → Err` means the route handler did NOT absorb the failure — the consumer's `error!` is the only ERROR signal for the unhandled failure. The site keeps `error!` with `// log-policy: outside-contract` + `// TODO(ADR-0012-e-metrics)` marker. Once `bd rc-mf3` lands, the metric call will be added and the site may optionally downgrade to `warn!` if the metric proves operationally sufficient. Protected by regression test `unbridged_send_and_wait_failure_emits_error_loud`.
+All 4 sites are category (b′) outside-contract: a normal-data `send_and_wait` or post-processing call returned Err, meaning the route handler did NOT absorb the failure — the consumer's `error!` is the only ERROR signal. Each site calls `runtime.metrics().increment_errors(route_id, label)` via a shared `record_post_process_failure` helper (`consumer.rs:41-51`), then logs at `error!` with `// log-policy: outside-contract`:
+- `b-prime:sql:on-consume` (`consumer.rs:145`) — post-process single row failure.
+- `b-prime:sql:on-consume-batch` (`consumer.rs:187`) — post-process batch row failure.
+- `b-prime:sql:stream-list` (`consumer.rs:257`) — StreamList downstream send failure.
+- `b-prime:sql:poll-failed` (`consumer.rs:356`) — unbridged poll failure.
 
-**Category (g) — Producer/Endpoint creation failure** (wiring deferred to `bd rc-1mo` — ComponentContext extension for `force_unhealthy_for_route`):
-- `producer.rs:162` (producer lazy pool init) uses inline `// allow-log-levels` escape + `// TODO(ADR-0012-g)` marker. Once rc-1mo lands, replace with `force_unhealthy_for_route(route_id, "endpoint-creation", reason)` + `// log-policy: outside-contract` annotation.
-- `consumer.rs:388` (consumer pool init giving up after retry budget exhausted) — same (g) category, same marker pattern, same rc-1mo deferral. Annotated in Phase 3 Task 5 polish after Phase 2 miss.
+**Category (g) labels wired in Phase B (commit 78ef8430):**
+- `g:sql:producer-pool-init` (`producer.rs:188`) — producer lazy pool init failure. Calls `runtime.health().force_unhealthy_for_route(route_id, label, reason)` + `// log-policy: outside-contract`.
+- `g:sql:consumer-pool-init` (`consumer.rs:442`) — consumer pool init giving up after retry budget exhausted. Calls `runtime.health().force_unhealthy_for_route(route_id, label, reason)` + `// log-policy: outside-contract`.
 
-**Migration status (Phase 2 close):**
+**Migration status (Phase B close):**
 - All handler-owned sites (categories a, b-bridged) → `warn!`.
 - All system-broken sites (category c) → `// log-policy: system-broken` + `error!`.
-- All outside-contract sites (categories b′, e, g) → deferred to `bd rc-mf3` / `bd rc-1mo` with inline markers.
-- Duplicate logs at `producer.rs:171` and `consumer.rs:160` removed.
-- `consumer.rs:429` duplicate-`error!` bug fixed (split into bridged warn + deferred unbridged error).
+- All outside-contract sites (categories b′, e, g) → WIRED in Phase B with real `increment_errors` / `force_unhealthy_for_route` calls + `// log-policy: outside-contract` annotations. See ADR-0012 Phase B closure notes.
+- Duplicate logs at `producer.rs:171` and `consumer.rs:160` removed (Phase 2).
+- `consumer.rs:429` duplicate-`error!` bug fixed (Phase 2; split into bridged warn + unbridged error with increment_errors).
