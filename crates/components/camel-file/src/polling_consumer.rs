@@ -48,14 +48,14 @@ impl FilePollingConsumer {
             .as_ref()
             .map(|p| Regex::new(p))
             .transpose()
-            .expect("invalid include regex in FileConfig");
+            .expect("invalid include regex in FileConfig"); // allow-unwrap
 
         let exclude_re = config
             .exclude
             .as_ref()
             .map(|p| Regex::new(p))
             .transpose()
-            .expect("invalid exclude regex in FileConfig");
+            .expect("invalid exclude regex in FileConfig"); // allow-unwrap
 
         Self {
             config,

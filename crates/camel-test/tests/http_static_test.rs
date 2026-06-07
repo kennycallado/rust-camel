@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camel_component_api::{
-    Component, ComponentBundle, Consumer, ConsumerContext, ExchangeEnvelope,
+    Component, ComponentBundle, Consumer, ConsumerContext, ExchangeEnvelope, NoOpComponentContext,
 };
 use camel_component_http::registry::{MountMode, StaticMount};
 use camel_component_http::{
@@ -61,7 +61,8 @@ async fn start_static_consumer(
     config: HttpStaticConfig,
 ) -> (CancellationToken, tokio::task::JoinHandle<()>) {
     let (ctx, token, _notify) = test_ctx();
-    let mut consumer = HttpStaticConsumer::new(config);
+    let rt = Arc::new(NoOpComponentContext);
+    let mut consumer = HttpStaticConsumer::new(config, rt);
 
     let handle = tokio::spawn(async move {
         let _ = consumer.start(ctx).await;
@@ -1076,7 +1077,7 @@ fn http_static_endpoint_creates_consumer() {
     let endpoint = component
         .create_endpoint("http-static:/tmp?port=19900", &ctx)
         .unwrap();
-    assert!(endpoint.create_consumer().is_ok());
+    assert!(endpoint.create_consumer(Arc::new(NoOpComponentContext)).is_ok());
 }
 
 #[test]

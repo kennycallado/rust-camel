@@ -51,6 +51,7 @@ async fn get_shared_cxf_pool() -> Arc<CxfBridgePool> {
                     bridge_cache_dir: None,
                     version: camel_component_cxf::BRIDGE_VERSION.to_string(),
                     bind_address: None,
+                    reconnect: Default::default(),
                 })
                 .unwrap(),
             );
@@ -162,6 +163,7 @@ fn cxf_component_with_bind(bind_port: Option<u16>) -> CxfComponent {
             bridge_cache_dir: None,
             version: camel_component_cxf::BRIDGE_VERSION.to_string(),
             bind_address: bind_port.map(|p| format!("http://127.0.0.1:{p}/cxf")),
+            reconnect: Default::default(),
         })
         .unwrap(),
     );
@@ -767,6 +769,7 @@ fn multi_profile_cxf_component(port_a: u16, port_b: u16) -> CxfComponent {
             bridge_cache_dir: None,
             version: camel_component_cxf::BRIDGE_VERSION.to_string(),
             bind_address: None,
+            reconnect: Default::default(),
         })
         .unwrap(),
     );

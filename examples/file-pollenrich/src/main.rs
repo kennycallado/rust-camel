@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let config_dir_str = config_dir.to_str().unwrap(); // allow-unwrap
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(FileComponent::new());
     ctx.register_component(LogComponent::new());

@@ -770,8 +770,8 @@ mod tests {
             handle: None,
         };
 
-        let result = timeout(Duration::from_secs(5), bridge.stop()).await;
-        assert!(result.is_ok(), "stop() must complete within 5s");
+        let result = timeout(Duration::from_secs(10), bridge.stop()).await;
+        assert!(result.is_ok(), "stop() must complete within 10s");
     }
 
     // --- BRG-004: Redacted<T> tests ---

@@ -9,6 +9,7 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use camel_api::{Exchange, Message, Value};
@@ -487,7 +488,7 @@ async fn http_producer_blocks_localhost_by_default() {
     let endpoint = component
         .create_endpoint("http://example.com/api", &endpoint_ctx)
         .unwrap();
-    let producer = endpoint.create_producer(&ctx).unwrap();
+    let producer = endpoint.create_producer(Arc::new(NoOpComponentContext), &ctx).unwrap();
 
     let mut exchange = Exchange::new(Message::default());
     exchange.input.set_header(
@@ -529,7 +530,7 @@ async fn http_producer_allows_localhost_when_configured() {
             &endpoint_ctx,
         )
         .unwrap();
-    let producer = endpoint.create_producer(&ctx).unwrap();
+    let producer = endpoint.create_producer(Arc::new(NoOpComponentContext), &ctx).unwrap();
 
     let exchange = Exchange::new(Message::default());
     let result = producer.oneshot(exchange).await.unwrap();
@@ -575,7 +576,7 @@ async fn http_custom_ok_status_code_range() {
             &endpoint_ctx,
         )
         .unwrap();
-    let producer = endpoint.create_producer(&ctx).unwrap();
+    let producer = endpoint.create_producer(Arc::new(NoOpComponentContext), &ctx).unwrap();
 
     let exchange = Exchange::new(Message::default());
     let result = producer.oneshot(exchange).await;
@@ -657,7 +658,7 @@ fn http_endpoint_created_from_uri() {
         .create_endpoint("http://0.0.0.0:19200/test", &ctx)
         .unwrap();
     assert_eq!(endpoint.uri(), "http://0.0.0.0:19200/test");
-    assert!(endpoint.create_consumer().is_ok());
+    assert!(endpoint.create_consumer(Arc::new(NoOpComponentContext)).is_ok());
 }
 
 #[test]
@@ -668,7 +669,7 @@ fn https_endpoint_created_from_uri() {
         .create_endpoint("https://0.0.0.0:8443/test", &ctx)
         .unwrap();
     assert_eq!(endpoint.uri(), "https://0.0.0.0:8443/test");
-    assert!(endpoint.create_consumer().is_ok());
+    assert!(endpoint.create_consumer(Arc::new(NoOpComponentContext)).is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -928,7 +929,7 @@ async fn http_producer_bridge_endpoint_skips_auth() {
             &endpoint_ctx,
         )
         .unwrap();
-    let producer = endpoint.create_producer(&ctx).unwrap();
+    let producer = endpoint.create_producer(Arc::new(NoOpComponentContext), &ctx).unwrap();
 
     let exchange = Exchange::new(Message::default());
     let result = producer.oneshot(exchange).await.unwrap();
@@ -991,7 +992,7 @@ async fn http_producer_connection_close_header() {
             &endpoint_ctx,
         )
         .unwrap();
-    let producer = endpoint.create_producer(&ctx).unwrap();
+    let producer = endpoint.create_producer(Arc::new(NoOpComponentContext), &ctx).unwrap();
 
     let exchange = Exchange::new(Message::default());
     let result = producer.oneshot(exchange).await.unwrap();
@@ -1055,7 +1056,7 @@ async fn http_producer_skip_request_headers() {
             &endpoint_ctx,
         )
         .unwrap();
-    let producer = endpoint.create_producer(&ctx).unwrap();
+    let producer = endpoint.create_producer(Arc::new(NoOpComponentContext), &ctx).unwrap();
 
     let mut exchange = Exchange::new(Message::default());
     exchange

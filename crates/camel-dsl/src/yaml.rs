@@ -72,6 +72,7 @@ const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
 
 pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
     let routes: YamlRoutes = serde_yml::from_str(yaml).map_err(|e| {
+        // log-policy: system-broken
         error!(error = %e, "yaml parse failed");
         CamelError::RouteError(format!("YAML parse error: {e}"))
     })?;
@@ -1273,6 +1274,7 @@ fn parse_language_expression(
 pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
     info!(path = %path.display(), "loading routes from file");
     let content = std::fs::read_to_string(path).map_err(|e| {
+        // log-policy: system-broken
         error!(path = %path.display(), error = %e, "failed to load routes from file");
         CamelError::Io(format!("Failed to read {}: {e}", path.display()))
     })?;

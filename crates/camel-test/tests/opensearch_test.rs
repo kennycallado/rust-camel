@@ -854,7 +854,7 @@ async fn opensearch_invalid_host_goes_to_error() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(serde_json::json!({"query": {"match_all": {}}}))
-        .to("opensearch://127.0.0.1:1/test-bad-host-idx?operation=SEARCH")
+        .to("opensearch://127.0.0.1:1/test-bad-host-idx?operation=SEARCH&retryEnabled=false")
         .to("mock:result")
         .route_id("opensearch-invalid-host-test")
         .build()

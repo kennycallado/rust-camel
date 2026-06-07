@@ -1038,6 +1038,7 @@ mod tests {
         }
         fn create_consumer(
             &self,
+            _rt: Arc<dyn RuntimeObservability>,
         ) -> Result<Box<dyn camel_component_api::consumer::Consumer>, CamelError> {
             Err(CamelError::EndpointCreationFailed(
                 "mock not a consumer".into(),
@@ -1045,6 +1046,7 @@ mod tests {
         }
         fn create_producer(
             &self,
+            _rt: Arc<dyn RuntimeObservability>,
             _ctx: &camel_component_api::ProducerContext,
         ) -> Result<BoxProcessor, CamelError> {
             Err(CamelError::ProcessorError("mock not a producer".into()))
@@ -1466,6 +1468,7 @@ mod tests {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(TestComponentContext);
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(camel_component_api::NoOpComponentContext);
 
         let err = resolve_steps(
             vec![BuilderStep::PollEnrich {
@@ -1474,6 +1477,7 @@ mod tests {
                 timeout_ms: None,
             }],
             &producer_ctx,
+            Arc::clone(&rt),
             &registry,
             &languages,
             &beans,
