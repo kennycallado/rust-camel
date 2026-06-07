@@ -1077,7 +1077,11 @@ fn http_static_endpoint_creates_consumer() {
     let endpoint = component
         .create_endpoint("http-static:/tmp?port=19900", &ctx)
         .unwrap();
-    assert!(endpoint.create_consumer(Arc::new(NoOpComponentContext)).is_ok());
+    assert!(
+        endpoint
+            .create_consumer(Arc::new(NoOpComponentContext))
+            .is_ok()
+    );
 }
 
 #[test]

@@ -9,7 +9,6 @@
 #![cfg(feature = "integration-tests")]
 
 use bollard::Docker;
-use std::sync::Arc;
 use camel_api::{Body, Exchange, Message};
 use camel_component_api::{Component, NoOpComponentContext, ProducerContext};
 use camel_component_container::{
@@ -17,6 +16,7 @@ use camel_component_container::{
     HEADER_EXIT_CODE,
 };
 use serde_json::Value;
+use std::sync::Arc;
 use tower::{Service, ServiceExt};
 
 async fn connect_docker() -> Option<Docker> {
@@ -46,7 +46,9 @@ async fn test_container_producer_run_with_volumes() {
     );
     let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
     let ctx = ProducerContext::new();
-    let mut producer = endpoint.create_producer(Arc::new(NoOpComponentContext), &ctx).unwrap();
+    let mut producer = endpoint
+        .create_producer(Arc::new(NoOpComponentContext), &ctx)
+        .unwrap();
 
     let mut exchange = Exchange::new(Message::new(""));
     exchange
@@ -94,7 +96,9 @@ async fn test_container_producer_exec() {
         )
         .unwrap();
     let ctx = ProducerContext::new();
-    let mut producer = endpoint.create_producer(Arc::new(NoOpComponentContext), &ctx).unwrap();
+    let mut producer = endpoint
+        .create_producer(Arc::new(NoOpComponentContext), &ctx)
+        .unwrap();
 
     let mut exchange = Exchange::new(Message::new(""));
     exchange
