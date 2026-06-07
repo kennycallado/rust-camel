@@ -17,3 +17,6 @@ bridges/*/.gradle-docker-cache/
 !.beads/config.yaml
 !.beads/metadata.json
 !.beads/.gitignore
+
+# bv (beads viewer) local config and caches
+.bv/

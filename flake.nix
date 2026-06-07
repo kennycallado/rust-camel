@@ -129,7 +129,8 @@
             export RUSTC_WRAPPER=sccache
             sccache --stop-server 2>/dev/null || true
             sccache --start-server
-            export CARGO_TARGET_DIR="$HOME/.cache/rust-camel-target"
+            # export CARGO_TARGET_DIR="$HOME/.cache/rust-camel-target"
+            export CARGO_TARGET_DIR="/home/shared/rust-camel-target"
 
             # JMS bridge: auto-detect native binary
             BRIDGE_BIN="$PWD/bridges/jms/build/native/jms-bridge"
