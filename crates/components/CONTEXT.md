@@ -13,12 +13,16 @@ An instantiated communication point created by a Component from a URI. An Endpoi
 _Avoid_: URI, address, channel (these describe *where* an Endpoint points, not the Endpoint itself)
 
 **Consumer**:
-Inbound adapter started by the Runtime for a Route's `from:` Endpoint. Receives data from an external system and submits Exchanges to the Route's Pipeline.
+Inbound adapter started by the Runtime for a Route's `from:` Endpoint. Event-driven (push model): receives data from an external system and submits Exchanges to the Route's Pipeline.
 _Avoid_: listener, subscriber, source
+
+**PollingConsumer**:
+Pull-based adapter created on demand via `Endpoint::polling_consumer()`, delivering one Exchange per `receive(timeout)` call. Contrasts with the event-driven Consumer that drives a Route; a PollingConsumer never starts a Route. Endpoints opt in; purely event-driven components (HTTP server, Kafka) return `None` by default. Used by the EIP-7 `pollEnrich` verb and the WASM `camel_poll` host function. Established by ADR-0015.
+_Avoid_: synchronous consumer, on-demand reader, pull consumer
 
 **Producer**:
 Outbound adapter created for a `to:` Endpoint via `Endpoint::create_producer()`, which returns a
-`BoxProcessor`. Sends an Exchange to an external system by running it through the returned processor.
+`BoxProcessor`. Sends an Exchange to an external system by running it through the returned processor. Producers are strictly write/send (Tower `Service<Exchange>`); reading a resource mid-route uses `PollingConsumer`, not a producer mode.
 _Avoid_: sender, publisher, sink
 
 **ExchangeEnvelope**:
