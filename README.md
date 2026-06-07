@@ -228,6 +228,7 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 | -------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
 | Aggregator           | `.aggregate(config)`                 | Correlate and aggregate exchanges with size/timeout completion, expression correlation, force-complete-on-stop |
 | Content-Based Router | `.choice()` / `.when()`              | Route based on exchange content                                                                                |
+| Content Enricher     | `.enrich(uri)` / `.poll_enrich(uri, timeout)` | Merge additional content mid-route via producer (`enrich`) or polling consumer (`pollEnrich`); pluggable `EnrichmentStrategy` (default `UseEnrichedBody`) |
 | Delayer              | `.delay()` / `delay:`                | Fixed or dynamic delay (header-based)                                                                          |
 | Dynamic Router       | `.dynamic_router(expr)`              | Expression-based routing with slip pattern                                                                     |
 | Routing Slip         | `.routing_slip(expr)`                | Route through a sequence of endpoints determined at runtime                                                    |
