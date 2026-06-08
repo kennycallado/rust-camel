@@ -117,7 +117,7 @@ fn create_test_controller_with_registry(
 #[tokio::test(flavor = "multi_thread")]
 async fn test_bean_registration_and_lookup() {
     // Create bean registry
-    let mut bean_registry = BeanRegistry::new();
+    let bean_registry = BeanRegistry::new();
 
     // Register beans
     bean_registry
@@ -136,7 +136,7 @@ async fn test_bean_registration_and_lookup() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_simple_bean_route() {
     // Setup registries
-    let mut bean_registry = BeanRegistry::new();
+    let bean_registry = BeanRegistry::new();
     bean_registry
         .register("orderService", OrderService)
         .unwrap();
@@ -197,7 +197,7 @@ async fn test_simple_bean_route() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multi_step_bean_route() {
     // Setup registries
-    let mut bean_registry = BeanRegistry::new();
+    let bean_registry = BeanRegistry::new();
     bean_registry
         .register("orderService", OrderService)
         .unwrap();
@@ -261,7 +261,7 @@ async fn test_multi_step_bean_route() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_bean_with_validation() {
     // Setup registries
-    let mut bean_registry = BeanRegistry::new();
+    let bean_registry = BeanRegistry::new();
     bean_registry
         .register("orderService", OrderService)
         .unwrap();
@@ -341,7 +341,7 @@ async fn test_bean_with_validation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_bean_route_with_other_steps() {
     // Setup registries
-    let mut bean_registry = BeanRegistry::new();
+    let bean_registry = BeanRegistry::new();
     bean_registry
         .register("orderService", OrderService)
         .unwrap();
@@ -461,7 +461,7 @@ async fn test_yaml_to_bean_execution() {
     // This test simulates the complete YAML → Bean flow
 
     // Setup registries
-    let mut bean_registry = BeanRegistry::new();
+    let bean_registry = BeanRegistry::new();
     bean_registry
         .register("orderService", OrderService)
         .unwrap();

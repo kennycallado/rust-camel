@@ -128,7 +128,15 @@ async fn http_static_shared_port_api_and_static() {
     wait_for_server(port, 40).await;
 
     let registry = ServerRegistry::global()
-        .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            2 * 1024 * 1024,
+            10 * 1024 * 1024,
+            1024,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
+            "test-route".to_string(),
+        )
         .await
         .expect("get registry");
 
@@ -614,7 +622,15 @@ async fn http_static_duplicate_mount_path_rejected() {
     wait_for_server(port, 40).await;
 
     let registry = ServerRegistry::global()
-        .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            2 * 1024 * 1024,
+            10 * 1024 * 1024,
+            1024,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
+            "test-route".to_string(),
+        )
         .await
         .expect("get registry");
 
@@ -809,7 +825,15 @@ async fn http_static_spa_and_non_spa_same_mount_path_rejected() {
     wait_for_server(port, 40).await;
 
     let registry = ServerRegistry::global()
-        .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            2 * 1024 * 1024,
+            10 * 1024 * 1024,
+            1024,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
+            "test-route".to_string(),
+        )
         .await
         .expect("get registry");
 
