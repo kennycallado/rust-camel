@@ -1590,14 +1590,13 @@ impl RouteController for DefaultRouteController {
         managed.channel_sender = Some(tx_for_storage);
 
         info!(route_id = %route_id, "Route started");
+        self.health_registry().mark_route_started(route_id);
         Ok(())
     }
 
     async fn stop_route(&mut self, route_id: &str) -> Result<(), CamelError> {
         self.stop_route_internal(route_id).await?;
-        if let Some(reg) = &self.health_registry {
-            reg.unregister_for_route(route_id);
-        }
+        self.health_registry().mark_route_stopped(route_id);
         Ok(())
     }
 
@@ -1664,6 +1663,7 @@ impl RouteController for DefaultRouteController {
         managed.consumer_cancel_token = CancellationToken::new();
 
         info!(route_id = %route_id, "Route suspended (pipeline still running)");
+        self.health_registry().mark_route_stopped(route_id);
         Ok(())
     }
 
@@ -1762,6 +1762,7 @@ impl RouteController for DefaultRouteController {
         managed.consumer_handle = Some(consumer_handle);
 
         info!(route_id = %route_id, "Route resumed");
+        self.health_registry().mark_route_started(route_id);
         Ok(())
     }
 

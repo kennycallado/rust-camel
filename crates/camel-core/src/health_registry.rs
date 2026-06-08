@@ -8,13 +8,19 @@ use futures::future::join_all;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
-enum HealthEntry {
-    Live { check: Arc<dyn AsyncHealthCheck> },
-    ForcedUnhealthy { name: String, reason: String },
+struct ForcedEntry {
+    name: String,
+    reason: String,
+}
+
+struct RouteHealth {
+    active: bool,
+    live: Vec<Arc<dyn AsyncHealthCheck>>,
+    forced: Option<ForcedEntry>,
 }
 
 pub struct HealthCheckRegistry {
-    entries: RwLock<HashMap<String, Vec<HealthEntry>>>,
+    entries: RwLock<HashMap<String, RouteHealth>>,
     default_timeout: Duration,
     cancel_token: CancellationToken,
 }
@@ -30,14 +36,37 @@ impl HealthCheckRegistry {
 
     pub fn register_for_route(&self, route_id: &str, check: Arc<dyn AsyncHealthCheck>) {
         let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
-        let route_entries = entries.entry(route_id.to_string()).or_default();
-        if route_entries
+        let route_health = entries
+            .entry(route_id.to_string())
+            .or_insert_with(|| RouteHealth {
+                active: false,
+                live: Vec::new(),
+                forced: None,
+            });
+        let check_name = check.name();
+        if let Some(existing) = route_health
+            .live
             .iter()
-            .any(|entry| matches!(entry, HealthEntry::ForcedUnhealthy { .. }))
+            .position(|c| c.name() == check_name)
         {
-            *route_entries = vec![HealthEntry::Live { check }];
+            route_health.live[existing] = check;
         } else {
-            route_entries.push(HealthEntry::Live { check });
+            route_health.live.push(check);
+        }
+        route_health.forced = None;
+    }
+
+    pub fn mark_route_started(&self, route_id: &str) {
+        let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
+        if let Some(route_health) = entries.get_mut(route_id) {
+            route_health.active = true;
+        }
+    }
+
+    pub fn mark_route_stopped(&self, route_id: &str) {
+        let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
+        if let Some(route_health) = entries.get_mut(route_id) {
+            route_health.active = false;
         }
     }
 
@@ -48,13 +77,18 @@ impl HealthCheckRegistry {
 
     pub fn force_unhealthy_for_route(&self, route_id: &str, name: &str, reason: impl Into<String>) {
         let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
-        entries.insert(
-            route_id.to_string(),
-            vec![HealthEntry::ForcedUnhealthy {
-                name: name.to_string(),
-                reason: reason.into(),
-            }],
-        );
+        let route_health = entries
+            .entry(route_id.to_string())
+            .or_insert_with(|| RouteHealth {
+                active: false,
+                live: Vec::new(),
+                forced: None,
+            });
+        route_health.active = true;
+        route_health.forced = Some(ForcedEntry {
+            name: name.to_string(),
+            reason: reason.into(),
+        });
     }
 
     pub fn cancel_token(&self) -> CancellationToken {
@@ -74,34 +108,40 @@ impl HealthCheckRegistry {
             };
         }
 
-        let entries: Vec<HealthEntry> = {
+        let checks: Vec<CheckTask> = {
             let guard = self.entries.read().expect("health registry lock poisoned"); // allow-unwrap
             guard
                 .values()
-                .flat_map(|route_entries| route_entries.iter())
-                .map(|entry| match entry {
-                    HealthEntry::Live { check } => HealthEntry::Live {
-                        check: Arc::clone(check),
-                    },
-                    HealthEntry::ForcedUnhealthy { name, reason } => HealthEntry::ForcedUnhealthy {
-                        name: name.clone(),
-                        reason: reason.clone(),
-                    },
+                .filter(|rh| rh.active)
+                .flat_map(|rh| {
+                    if let Some(ref forced) = rh.forced {
+                        vec![CheckTask::Forced {
+                            name: forced.name.clone(),
+                            reason: forced.reason.clone(),
+                        }]
+                    } else {
+                        rh.live
+                            .iter()
+                            .map(|c| CheckTask::Live {
+                                check: Arc::clone(c),
+                            })
+                            .collect()
+                    }
                 })
                 .collect()
         };
 
-        if entries.is_empty() {
+        if checks.is_empty() {
             return HealthReport::default();
         }
 
-        let futures: Vec<_> = entries
+        let futures: Vec<_> = checks
             .into_iter()
-            .map(|entry| {
+            .map(|task| {
                 let dur = self.default_timeout;
                 async move {
-                    match entry {
-                        HealthEntry::Live { check } => {
+                    match task {
+                        CheckTask::Live { check } => {
                             let check_name = check.name().to_string();
                             std::panic::AssertUnwindSafe(async {
                                 match timeout(dur, check.check()).await {
@@ -115,7 +155,7 @@ impl HealthCheckRegistry {
                                 CheckResult::unhealthy(&check_name, "checker panicked")
                             })
                         }
-                        HealthEntry::ForcedUnhealthy { name, reason } => {
+                        CheckTask::Forced { name, reason } => {
                             CheckResult::unhealthy(&name, &reason)
                         }
                     }
@@ -158,6 +198,11 @@ impl HealthCheckRegistry {
             timestamp: Utc::now(),
         }
     }
+}
+
+enum CheckTask {
+    Live { check: Arc<dyn AsyncHealthCheck> },
+    Forced { name: String, reason: String },
 }
 
 impl camel_component_api::HealthCheckRegistry for HealthCheckRegistry {
@@ -232,6 +277,7 @@ mod tests {
     async fn single_healthy_check() {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Healthy);
         assert_eq!(report.services.len(), 1);
@@ -242,7 +288,9 @@ mod tests {
     async fn one_unhealthy_makes_aggregate_unhealthy() {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
         registry.register_for_route("route-2", unhealthy_check("kafka"));
+        registry.mark_route_started("route-2");
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Unhealthy);
     }
@@ -251,7 +299,9 @@ mod tests {
     async fn one_degraded_makes_aggregate_degraded() {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
         registry.register_for_route("route-2", degraded_check("sql"));
+        registry.mark_route_started("route-2");
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Degraded);
     }
@@ -260,7 +310,9 @@ mod tests {
     async fn unhealthy_takes_precedence_over_degraded() {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", degraded_check("sql"));
+        registry.mark_route_started("route-1");
         registry.register_for_route("route-2", unhealthy_check("kafka"));
+        registry.mark_route_started("route-2");
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Unhealthy);
     }
@@ -270,6 +322,7 @@ mod tests {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", healthy_check("redis"));
         registry.register_for_route("route-1", unhealthy_check("sql"));
+        registry.mark_route_started("route-1");
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Unhealthy);
         assert_eq!(report.services.len(), 2);
@@ -279,6 +332,7 @@ mod tests {
     async fn unregister_removes_check() {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", unhealthy_check("kafka"));
+        registry.mark_route_started("route-1");
         registry.unregister_for_route("route-1");
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Healthy);
@@ -297,6 +351,7 @@ mod tests {
     async fn message_preserved_in_report() {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", unhealthy_check("kafka"));
+        registry.mark_route_started("route-1");
         let report = registry.check_all().await;
         assert_eq!(report.services[0].message.as_deref(), Some("fail"));
     }
@@ -319,6 +374,7 @@ mod tests {
     async fn timeout_returns_unhealthy() {
         let registry = HealthCheckRegistry::new(Duration::from_millis(50));
         registry.register_for_route("route-1", Arc::new(SlowCheck));
+        registry.mark_route_started("route-1");
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Unhealthy);
     }
@@ -340,6 +396,7 @@ mod tests {
     async fn panic_caught_and_reported_as_unhealthy() {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", Arc::new(PanickingCheck));
+        registry.mark_route_started("route-1");
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Unhealthy);
         assert!(
@@ -355,6 +412,7 @@ mod tests {
     async fn register_during_check_all_does_not_deadlock() {
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
         let registry = Arc::new(registry);
         let reg = Arc::clone(&registry);
         let h = tokio::spawn(async move {
@@ -448,10 +506,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_registry_trait_delegation_does_not_recurse() {
-        // GIVEN: the concrete HealthCheckRegistry with a registered probe.
         let registry = HealthCheckRegistry::new(std::time::Duration::from_secs(5));
-        // Register a no-op live check so the route has at least one entry
-        // (force_unhealthy_for_route replaces all entries for the route).
         struct NoopCheck;
         #[async_trait]
         impl camel_api::AsyncHealthCheck for NoopCheck {
@@ -464,9 +519,6 @@ mod tests {
         }
         registry.register_for_route("test-route", std::sync::Arc::new(NoopCheck));
 
-        // WHEN: the trait method is invoked (UFCS to be explicit about which
-        // method we're calling). This MUST resolve to the inherent impl, NOT
-        // recurse into the trait method body that calls it.
         camel_component_api::HealthCheckRegistry::force_unhealthy_for_route(
             &registry,
             "test-route",
@@ -474,15 +526,105 @@ mod tests {
             "test reason",
         );
 
-        // THEN: call completed without stack overflow AND the route is now
-        // Unhealthy with the forced entry. The `force_unhealthy_for_route`
-        // inherent method replaces all existing entries with a single
-        // ForcedUnhealthy entry; if the trait method had recursed instead,
-        // we'd have stack-overflowed before reaching this assertion.
         let report = registry.check_all().await;
         assert_eq!(report.status, camel_api::HealthStatus::Unhealthy);
         assert_eq!(report.services.len(), 1);
         assert_eq!(report.services[0].name, "probe");
         assert_eq!(report.services[0].message.as_deref(), Some("test reason"));
+    }
+
+    // ---------------------------------------------------------
+    // Route-health state gating tests
+    // ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn inactive_route_not_checked() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", unhealthy_check("redis"));
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.services.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mark_route_started_makes_check_active() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(report.services[0].name, "redis");
+    }
+
+    #[tokio::test]
+    async fn mark_route_stopped_makes_check_inactive() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", unhealthy_check("redis"));
+        registry.mark_route_started("route-1");
+        registry.mark_route_stopped("route-1");
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.services.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_does_not_delete_probes() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        registry.mark_route_stopped("route-1");
+        registry.mark_route_started("route-1");
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(report.services[0].name, "redis");
+    }
+
+    #[tokio::test]
+    async fn forced_unhealthy_marks_route_active() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        // route not marked started — still inactive
+        registry.force_unhealthy_for_route("route-1", "forced", "crashed");
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(report.services[0].name, "forced");
+        assert_eq!(report.services[0].message.as_deref(), Some("crashed"));
+    }
+
+    #[tokio::test]
+    async fn restart_does_not_duplicate_probes() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let check1: Arc<dyn AsyncHealthCheck> = Arc::new(CountingCheck {
+            calls: Arc::clone(&calls),
+        });
+        registry.register_for_route("route-1", check1);
+        registry.mark_route_started("route-1");
+        registry.mark_route_stopped("route-1");
+
+        let check2: Arc<dyn AsyncHealthCheck> = Arc::new(CountingCheck {
+            calls: Arc::clone(&calls),
+        });
+        registry.register_for_route("route-1", check2);
+        registry.mark_route_started("route-1");
+
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_route_unregisters_completely() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        registry.unregister_for_route("route-1");
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.services.is_empty());
     }
 }

@@ -333,6 +333,7 @@ async fn test_health_check_degraded_when_service_stopped() {
     let ctx = CamelContext::builder().build().await.unwrap();
     ctx.health_registry()
         .register_for_route("route-1", Arc::new(DegradedCheck));
+    ctx.health_registry().mark_route_started("route-1");
 
     let report = ctx.health_check().await;
     assert_eq!(
@@ -362,6 +363,7 @@ async fn test_health_check_unhealthy_when_service_failed() {
     let ctx = CamelContext::builder().build().await.unwrap();
     ctx.health_registry()
         .register_for_route("route-1", Arc::new(FailedCheck));
+    ctx.health_registry().mark_route_started("route-1");
 
     let report = ctx.health_check().await;
     assert_eq!(
@@ -401,7 +403,9 @@ async fn test_health_check_failed_overrides_stopped() {
     let ctx = CamelContext::builder().build().await.unwrap();
     let registry = ctx.health_registry();
     registry.register_for_route("route-1", Arc::new(DegradedCheck));
+    registry.mark_route_started("route-1");
     registry.register_for_route("route-2", Arc::new(FailedCheck));
+    registry.mark_route_started("route-2");
 
     let report = ctx.health_check().await;
     assert_eq!(
