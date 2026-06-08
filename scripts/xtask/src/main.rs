@@ -1341,16 +1341,19 @@ fn validate_inline_escape_markers(
 fn is_structurally_excluded(file_rel: &str, lines: &[&str], line_idx: usize) -> bool {
     // camel-log LogProducer — symbol-bound inside `impl Service<Exchange> for LogProducer`
     if file_rel.contains("camel-log/src/lib.rs") {
-        let impl_start = lines.iter().position(|l| {
-            l.contains("impl Service<Exchange> for LogProducer")
-        });
+        let impl_start = lines
+            .iter()
+            .position(|l| l.contains("impl Service<Exchange> for LogProducer"));
         if let Some(start) = impl_start {
             let mut depth: i32 = 0;
             let mut seen_open = false;
             for (i, line) in lines.iter().enumerate().skip(start) {
                 for ch in line.chars() {
                     match ch {
-                        '{' => { depth += 1; seen_open = true; }
+                        '{' => {
+                            depth += 1;
+                            seen_open = true;
+                        }
                         '}' => depth -= 1,
                         _ => {}
                     }
@@ -1483,8 +1486,7 @@ pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> 
                     None => {
                         if is_structurally_excluded(&file_rel, &lines, line_idx) {
                             // Structural exclusion (e.g. camel-log LogProducer).
-                        } else if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist)
-                        {
+                        } else if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist) {
                             violations.push(Violation {
                                 file: path.to_string_lossy().to_string(),
                                 line: line_idx + 1,
