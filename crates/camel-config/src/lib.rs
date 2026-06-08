@@ -4,8 +4,9 @@
 //! Main modules: `config`, `context_ext`, `discovery`, `properties`, `yaml`.
 
 pub mod config;
-pub mod context_ext;
+pub(crate) mod context_ext;
 pub mod discovery;
+pub(crate) mod filter;
 pub(crate) mod include;
 pub mod properties;
 pub mod wasm_limits;

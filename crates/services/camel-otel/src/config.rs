@@ -29,7 +29,6 @@ pub struct OtelConfig {
     pub sampler: OtelSampler,
     pub resource_attrs: Vec<(String, String)>,
     pub logs_enabled: bool,
-    pub log_level: String,
     pub metrics_interval_ms: u64,
 }
 
@@ -42,7 +41,6 @@ impl OtelConfig {
             sampler: OtelSampler::default(),
             resource_attrs: vec![],
             logs_enabled: true,
-            log_level: "info".to_string(),
             metrics_interval_ms: 60000,
         }
     }
@@ -59,11 +57,6 @@ impl OtelConfig {
 
     pub fn with_resource_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.resource_attrs.push((key.into(), value.into()));
-        self
-    }
-
-    pub fn with_log_level(mut self, level: impl Into<String>) -> Self {
-        self.log_level = level.into();
         self
     }
 
@@ -125,18 +118,6 @@ mod tests {
     fn test_otel_config_logs_enabled_default() {
         let cfg = OtelConfig::new("http://localhost:4317", "my-service");
         assert!(cfg.logs_enabled, "logs_enabled should default to true");
-    }
-
-    #[test]
-    fn test_otel_config_log_level_default() {
-        let cfg = OtelConfig::new("http://localhost:4317", "my-service");
-        assert_eq!(cfg.log_level, "info", "log_level should default to 'info'");
-    }
-
-    #[test]
-    fn test_otel_config_with_log_level() {
-        let cfg = OtelConfig::new("http://localhost:4317", "my-service").with_log_level("debug");
-        assert_eq!(cfg.log_level, "debug");
     }
 
     #[test]

@@ -35,7 +35,6 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
                     enabled: true,
                     endpoint: "http://localhost:9999".to_string(),
                     service_name: "test".to_string(),
-                    log_level: "INFO".to_string(),
                     ..Default::default()
                 })
             } else {

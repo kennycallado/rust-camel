@@ -190,8 +190,21 @@ async fn test_configure_context_with_invalid_log_level() {
 
     let result = CamelConfig::configure_context(&config).await;
     assert!(
-        result.is_ok(),
-        "configure_context should succeed even with invalid log level (should default to INFO)"
+        result.is_err(),
+        "configure_context should fail with unknown log level"
+    );
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("configure_context should fail with unknown log level"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Unknown log level"),
+        "error should mention unknown log level: {msg}"
+    );
+    assert!(
+        msg.contains("Unknown log level"),
+        "error should mention unknown log level: {msg}"
     );
 }
 
@@ -212,7 +225,6 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
                 enabled: true,
                 endpoint: "http://localhost:4317".to_string(),
                 service_name: "test-service".to_string(),
-                log_level: "info".to_string(),
                 ..Default::default()
             }),
             ..Default::default()

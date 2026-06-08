@@ -323,9 +323,6 @@ pub struct OtelCamelConfig {
     #[serde(default = "default_otel_service_name")]
     pub service_name: String,
 
-    #[serde(default = "default_otel_log_level")]
-    pub log_level: String,
-
     #[serde(default)]
     pub protocol: OtelProtocol,
 
@@ -351,7 +348,6 @@ impl Default for OtelCamelConfig {
             enabled: false,
             endpoint: default_otel_endpoint(),
             service_name: default_otel_service_name(),
-            log_level: default_otel_log_level(),
             protocol: OtelProtocol::default(),
             sampler: OtelSampler::default(),
             sampler_ratio: None,
@@ -857,9 +853,6 @@ fn default_otel_endpoint() -> String {
 fn default_otel_service_name() -> String {
     "rust-camel".to_string()
 }
-fn default_otel_log_level() -> String {
-    "info".to_string()
-}
 fn default_otel_metrics_interval_ms() -> u64 {
     60000
 }
@@ -925,11 +918,6 @@ impl CamelConfig {
                 &resolver,
                 &mut otel.service_name,
                 "observability.otel.service_name",
-            );
-            resolve_string_in_place(
-                &resolver,
-                &mut otel.log_level,
-                "observability.otel.log_level",
             );
             for (k, v) in &mut otel.resource_attrs {
                 let field = format!("observability.otel.resource_attrs.{k}");

@@ -18,7 +18,6 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::Level;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -188,7 +187,6 @@ impl CamelConfig {
             let mut otel_config = OtelConfig::new(&otel_cfg.endpoint, &otel_cfg.service_name)
                 .with_protocol(protocol)
                 .with_sampler(sampler)
-                .with_log_level(&otel_cfg.log_level)
                 .with_logs_enabled(otel_cfg.logs_enabled)
                 .with_metrics_interval_ms(otel_cfg.metrics_interval_ms);
 
@@ -334,12 +332,13 @@ impl CamelConfig {
         otel_active: bool,
         logger_provider: Option<camel_otel::SdkLoggerProvider>,
     ) -> Result<(), CamelError> {
-        let level = parse_log_level(log_level);
+        let rust_log = std::env::var("RUST_LOG").ok();
+        let env_filter = crate::filter::build_env_filter(log_level, rust_log.as_deref())?;
 
         // Layer 1+2: general fmt layer — all log events, stdout, plaintext
         let general_layer = tracing_subscriber::fmt::layer()
             .with_writer(std::io::stdout)
-            .with_filter(tracing_subscriber::filter::LevelFilter::from_level(level))
+            .with_filter(env_filter.clone())
             .boxed();
 
         // Layer 3a: camel_tracer stdout output (JSON or Plain)
@@ -419,7 +418,7 @@ impl CamelConfig {
             if let Some(lp) = logger_provider {
                 Some(
                     opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&lp)
-                        .with_filter(tracing_subscriber::filter::LevelFilter::from_level(level))
+                        .with_filter(env_filter.clone())
                         .boxed(),
                 )
             } else {
@@ -459,11 +458,12 @@ impl CamelConfig {
         log_level: &str,
         _otel_active: bool,
     ) -> Result<(), CamelError> {
-        let level = parse_log_level(log_level);
+        let rust_log = std::env::var("RUST_LOG").ok();
+        let env_filter = crate::filter::build_env_filter(log_level, rust_log.as_deref())?;
 
         let general_layer = tracing_subscriber::fmt::layer()
             .with_writer(std::io::stdout)
-            .with_filter(tracing_subscriber::filter::LevelFilter::from_level(level))
+            .with_filter(env_filter)
             .boxed();
 
         let stdout_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
@@ -554,18 +554,6 @@ fn effective_tracer_config(mut tracer_config: TracerConfig, otel_enabled: bool) 
         tracer_config.enabled = true;
     }
     tracer_config
-}
-
-/// Parse a log level string, defaulting to INFO on failure.
-fn parse_log_level(s: &str) -> Level {
-    match s.to_lowercase().as_str() {
-        "trace" => Level::TRACE,
-        "debug" => Level::DEBUG,
-        "info" => Level::INFO,
-        "warn" | "warning" => Level::WARN,
-        "error" => Level::ERROR,
-        _ => Level::INFO,
-    }
 }
 
 #[cfg(test)]
@@ -704,17 +692,6 @@ mod configure_context_smoke_tests {
     }
 
     #[test]
-    fn parse_log_level_covers_all_branches() {
-        assert_eq!(parse_log_level("trace"), Level::TRACE);
-        assert_eq!(parse_log_level("debug"), Level::DEBUG);
-        assert_eq!(parse_log_level("info"), Level::INFO);
-        assert_eq!(parse_log_level("warn"), Level::WARN);
-        assert_eq!(parse_log_level("warning"), Level::WARN);
-        assert_eq!(parse_log_level("error"), Level::ERROR);
-        assert_eq!(parse_log_level("unknown"), Level::INFO);
-    }
-
-    #[test]
     fn load_routes_returns_empty_when_routes_not_declared() {
         use std::io::Write;
 
@@ -845,14 +822,6 @@ type = "kubernetes"
 
         let out = effective_tracer_config(cfg, false);
         assert!(!out.enabled);
-    }
-
-    #[test]
-    fn parse_log_level_is_case_insensitive_and_defaults_to_info() {
-        assert_eq!(parse_log_level("TRACE"), Level::TRACE);
-        assert_eq!(parse_log_level("DeBuG"), Level::DEBUG);
-        assert_eq!(parse_log_level("WARNING"), Level::WARN);
-        assert_eq!(parse_log_level(""), Level::INFO);
     }
 
     #[tokio::test]

@@ -151,7 +151,6 @@ log_level = "INFO"
 enabled = true
 endpoint = "http://localhost:4317"
 service_name = "my-app"
-log_level = "debug"
 "#;
     fs::write(&config_path, content).unwrap();
 
@@ -165,7 +164,6 @@ log_level = "debug"
     assert!(otel.enabled);
     assert_eq!(otel.endpoint, "http://localhost:4317");
     assert_eq!(otel.service_name, "my-app");
-    assert_eq!(otel.log_level, "debug");
 }
 
 #[test]
@@ -208,5 +206,4 @@ enabled = true
     assert!(otel.enabled);
     assert_eq!(otel.endpoint, "http://localhost:4317");
     assert_eq!(otel.service_name, "rust-camel");
-    assert_eq!(otel.log_level, "info");
 }
