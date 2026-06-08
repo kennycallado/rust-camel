@@ -887,13 +887,12 @@ pub struct Violation {
 fn is_test_file(path: &std::path::Path) -> bool {
     use std::path::Component;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    // Exclude files under a `tests/` directory (portable, no string slicing)
-    path.components().any(|c| c == Component::Normal("tests".as_ref()))
-        // Exclude test_*.rs, *_test.rs, *_tests.rs
+    path.components()
+        .any(|c| c == Component::Normal("tests".as_ref()))
         || name.starts_with("test_")
         || name.ends_with("_test.rs")
         || name.ends_with("_tests.rs")
-        // Exclude build scripts
+        || name == "tests.rs"
         || name == "build.rs"
 }
 
