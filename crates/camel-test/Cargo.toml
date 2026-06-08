@@ -15,7 +15,7 @@ categories.workspace = true
 camel-api.workspace = true
 camel-core.workspace = true
 camel-builder.workspace = true
-camel-component-api.workspace = true
+camel-component-api = { workspace = true, features = ["test-support"] }
 camel-processor.workspace = true
 camel-component-mock.workspace = true
 camel-component-timer.workspace = true

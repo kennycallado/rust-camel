@@ -116,6 +116,8 @@ fn make_app_state(path: &str, sec_ctx: Option<SecurityContext>) -> WsAppState {
         path_configs,
         path_policies,
         server_error: Arc::new(AtomicBool::new(false)),
+        runtime: Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
+        route_id: "test-route".to_string(),
     }
 }
 
