@@ -1169,6 +1169,9 @@ mod tests {
                 failure_threshold: 3,
                 open_duration_ms: 500,
             }),
+            auto_startup: None,
+            startup_order: None,
+            concurrency: None,
             version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
         };
 

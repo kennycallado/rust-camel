@@ -94,7 +94,7 @@ pub fn parse_json_to_canonical(json: &str) -> Result<Vec<CanonicalRouteSpec>, Ca
     }
     routes
         .into_iter()
-        .map(compile_declarative_route_to_canonical)
+        .map(|r| compile_declarative_route_to_canonical(r, false).map(|(spec, _)| spec))
         .collect()
 }
 
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].route_id, "canonical-v1");
         assert_eq!(routes[0].from, "direct:start");
-        assert_eq!(routes[0].version, 1);
+        assert_eq!(routes[0].version, 2);
         assert_eq!(routes[0].steps.len(), 3);
     }
 

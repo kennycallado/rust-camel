@@ -16,7 +16,7 @@ fn builder_emits_canonical_route_spec() {
 
     assert_eq!(spec.route_id, "r1");
     assert_eq!(spec.from, "direct:start");
-    assert_eq!(spec.version, 1);
+    assert_eq!(spec.version, 2);
     assert_eq!(spec.steps.len(), 3);
     assert!(matches!(
         spec.steps[0],

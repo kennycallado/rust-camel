@@ -763,7 +763,7 @@ impl RouteBuilder {
         Ok(definition)
     }
 
-    /// Compile this builder route into canonical v1 spec.
+    /// Compile this builder route into canonical spec.
     pub fn build_canonical(self) -> Result<CanonicalRouteSpec, CamelError> {
         validate_uri(&self.from_uri)?;
         let route_id = self
@@ -793,6 +793,9 @@ impl RouteBuilder {
             from: self.from_uri,
             steps,
             circuit_breaker,
+            auto_startup: None,
+            startup_order: None,
+            concurrency: None,
             version: camel_api::CANONICAL_CONTRACT_VERSION,
         };
         spec.validate_contract()?;

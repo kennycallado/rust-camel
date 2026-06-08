@@ -21,7 +21,7 @@ The structured representation of a Route — produced by RouteBuilder or by pars
 _Avoid_: route spec, route config, route descriptor
 
 **CanonicalRouteSpec**:
-Stable minimal Route contract used by runtime commands, config tooling, and hot-reload paths. It is not a full RouteDefinition mirror; unsupported fields are rejected or reset to defaults when compiled.
+Versioned stable minimal Route contract used by runtime commands, config tooling, and hot-reload paths. v2 adds lifecycle metadata (`auto_startup`, `startup_order`, `concurrency`). Unsupported fields are strictly rejected (no silent loss); lossy escape hatch via `allow_loss` parameter. Not a full RouteDefinition mirror. (ADR-0011, ADR-0016)
 _Avoid_: route definition, full DSL model
 
 **auto_startup**:

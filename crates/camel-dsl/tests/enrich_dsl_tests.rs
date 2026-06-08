@@ -15,7 +15,7 @@ routes:
 #[test]
 fn yaml_parses_enrich_step_with_kind() {
     let yaml = enrich_yaml(r#"enrich: "file:/tmp/data.json""#);
-    let result = camel_dsl::yaml::parse_yaml_to_canonical(&yaml);
+    let result = camel_dsl::yaml::parse_yaml_to_canonical(&yaml, false);
     // Enrich is not supported in canonical v1, but we still test that
     // the YAML is parsed into the correct DeclarativeStepKind.
     // The canonical error tells us parsing succeeded but compilation failed.
@@ -29,7 +29,7 @@ fn yaml_parses_enrich_step_with_kind() {
 #[test]
 fn yaml_parses_poll_enrich_step_with_kind() {
     let yaml = enrich_yaml(r#"pollEnrich: "file:/tmp/inbox?timeout=5000""#);
-    let result = camel_dsl::yaml::parse_yaml_to_canonical(&yaml);
+    let result = camel_dsl::yaml::parse_yaml_to_canonical(&yaml, false);
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("poll_enrich") || err.contains("not supported"),

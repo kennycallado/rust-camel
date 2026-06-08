@@ -98,10 +98,10 @@ pub use routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
 pub use runtime::{
     CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS, CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS,
     CANONICAL_CONTRACT_NAME, CANONICAL_CONTRACT_RUST_ONLY_STEPS,
-    CANONICAL_CONTRACT_SUPPORTED_STEPS, CANONICAL_CONTRACT_VERSION, CanonicalRouteSpec,
-    RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeEvent, RuntimeHandle,
-    RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult, canonical_contract_rejection_reason,
-    canonical_contract_supports_step,
+    CANONICAL_CONTRACT_SUPPORTED_STEPS, CANONICAL_CONTRACT_VERSION, CanonicalConcurrencySpec,
+    CanonicalFieldLoss, CanonicalLossReport, CanonicalRouteSpec, RuntimeCommand, RuntimeCommandBus,
+    RuntimeCommandResult, RuntimeEvent, RuntimeHandle, RuntimeQuery, RuntimeQueryBus,
+    RuntimeQueryResult, canonical_contract_rejection_reason, canonical_contract_supports_step,
 };
 pub use splitter::{
     AggregationStrategy, SplitExpression, SplitterConfig, split_body, split_body_json_array,

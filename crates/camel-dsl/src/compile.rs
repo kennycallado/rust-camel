@@ -11,9 +11,9 @@ use camel_api::splitter::{
     split_body_lines,
 };
 use camel_api::{
-    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, DelayConfig, IdentityProcessor,
-    LoadBalanceStrategy, LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig,
-    canonical_contract_rejection_reason,
+    CamelError, CanonicalConcurrencySpec, CanonicalFieldLoss, CanonicalLossReport,
+    CanonicalRouteSpec, CircuitBreakerConfig, DelayConfig, IdentityProcessor, LoadBalanceStrategy,
+    LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig, canonical_contract_rejection_reason,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
@@ -230,17 +230,72 @@ pub fn compile_declarative_route_with_stream_cache_threshold(
 
 pub fn compile_declarative_route_to_canonical(
     route: DeclarativeRoute,
-) -> Result<CanonicalRouteSpec, CamelError> {
+    allow_loss: bool,
+) -> Result<(CanonicalRouteSpec, Option<CanonicalLossReport>), CamelError> {
     validate_route(&route)?;
     if route.security_policy.is_some() {
         return Err(CamelError::RouteError(
             "routes with security_policy cannot use the canonical/hot-reload path (not yet supported)".into(),
         ));
     }
+    if !allow_loss {
+        if route.error_handler.is_some() {
+            return Err(CamelError::RouteError(
+                "routes with error_handler cannot use the canonical/hot-reload path (not yet supported)".into(),
+            ));
+        }
+        if route.unit_of_work.is_some() {
+            return Err(CamelError::RouteError(
+                "routes with unit_of_work cannot use the canonical/hot-reload path (not yet supported)".into(),
+            ));
+        }
+    }
+
+    let mut report = CanonicalLossReport::default();
+    if allow_loss {
+        if route.error_handler.is_some() {
+            report.dropped_fields.push(CanonicalFieldLoss {
+                field: "error_handler",
+                reason: "not supported by CanonicalRouteSpec v2".to_string(),
+                target_version: camel_api::CANONICAL_CONTRACT_VERSION,
+            });
+        }
+        if route.unit_of_work.is_some() {
+            report.dropped_fields.push(CanonicalFieldLoss {
+                field: "unit_of_work",
+                reason: "not supported by CanonicalRouteSpec v2".to_string(),
+                target_version: camel_api::CANONICAL_CONTRACT_VERSION,
+            });
+        }
+    }
+
     let circuit_breaker = route.circuit_breaker.map(|cb| CanonicalCircuitBreakerSpec {
         failure_threshold: cb.failure_threshold,
         open_duration_ms: cb.open_duration_ms,
     });
+
+    let concurrency = match route.concurrency {
+        Some(DeclarativeConcurrency::Sequential) => Some(CanonicalConcurrencySpec::Sequential),
+        Some(DeclarativeConcurrency::Concurrent { max: Some(m) }) => {
+            Some(CanonicalConcurrencySpec::Concurrent { max: m })
+        }
+        Some(DeclarativeConcurrency::Concurrent { max: None }) => {
+            if allow_loss {
+                report.dropped_fields.push(CanonicalFieldLoss {
+                    field: "concurrency.max",
+                    reason: "unbounded concurrency (max=None) not supported by CanonicalRouteSpec v2, dropped".to_string(),
+                    target_version: camel_api::CANONICAL_CONTRACT_VERSION,
+                });
+                None
+            } else {
+                return Err(CamelError::RouteError(
+                    "concurrent routes with unbounded max (max=None) cannot use the canonical path. Specify an explicit max or use the full DSL path.".into(),
+                ));
+            }
+        }
+        None => None,
+    };
+
     let steps = route
         .steps
         .into_iter()
@@ -252,10 +307,19 @@ pub fn compile_declarative_route_to_canonical(
         from: route.from,
         steps,
         circuit_breaker,
+        auto_startup: Some(route.auto_startup),
+        startup_order: Some(route.startup_order),
+        concurrency,
         version: camel_api::CANONICAL_CONTRACT_VERSION,
     };
     spec.validate_contract()?;
-    Ok(spec)
+
+    let loss_report = if report.is_empty() {
+        None
+    } else {
+        Some(report)
+    };
+    Ok((spec, loss_report))
 }
 
 pub fn compile_canonical_route(
@@ -267,7 +331,20 @@ pub fn compile_canonical_route(
 
     let mut definition = RouteDefinition::new(spec.from, steps)
         .with_route_id(spec.route_id)
-        .with_auto_startup(true);
+        .with_auto_startup(spec.auto_startup.unwrap_or(true));
+
+    if let Some(order) = spec.startup_order {
+        definition = definition.with_startup_order(order);
+    }
+
+    if let Some(concurrency) = spec.concurrency {
+        definition = definition.with_concurrency(match concurrency {
+            CanonicalConcurrencySpec::Sequential => ConcurrencyModel::Sequential,
+            CanonicalConcurrencySpec::Concurrent { max } => {
+                ConcurrencyModel::Concurrent { max: Some(max) }
+            }
+        });
+    }
 
     if let Some(cb) = spec.circuit_breaker {
         definition = definition.with_circuit_breaker(
@@ -3483,7 +3560,291 @@ mod tests {
                 uri: "log:info".into(),
             })],
         };
-        let result = compile_declarative_route_to_canonical(route);
+        let result = compile_declarative_route_to_canonical(route, false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_rejects_error_handler() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: Some(DeclarativeErrorHandler {
+                dead_letter_channel: Some("log:dlq".into()),
+                retry: None,
+                on_exceptions: None,
+            }),
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::To(ToStepDef {
+                uri: "log:info".into(),
+            })],
+        };
+        let err = compile_declarative_route_to_canonical(route, false)
+            .err()
+            .expect("expected error");
+        assert!(err.to_string().contains("error_handler"));
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_rejects_unit_of_work() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: Some(camel_api::UnitOfWorkConfig {
+                on_complete: Some("log:done".into()),
+                on_failure: None,
+            }),
+            steps: vec![DeclarativeStep::To(ToStepDef {
+                uri: "log:info".into(),
+            })],
+        };
+        let err = compile_declarative_route_to_canonical(route, false)
+            .err()
+            .expect("expected error");
+        assert!(err.to_string().contains("unit_of_work"));
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_propagates_v2_fields() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test".into(),
+            auto_startup: false,
+            startup_order: 42,
+            concurrency: Some(DeclarativeConcurrency::Concurrent { max: Some(4) }),
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::To(ToStepDef {
+                uri: "log:info".into(),
+            })],
+        };
+        let (spec, loss_report) =
+            compile_declarative_route_to_canonical(route, false).expect("should succeed");
+        assert!(loss_report.is_none());
+        assert_eq!(spec.auto_startup, Some(false));
+        assert_eq!(spec.startup_order, Some(42));
+        assert_eq!(
+            spec.concurrency,
+            Some(CanonicalConcurrencySpec::Concurrent { max: 4 })
+        );
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_lossy_drops_error_handler() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: Some(DeclarativeErrorHandler {
+                dead_letter_channel: Some("log:dlq".into()),
+                retry: None,
+                on_exceptions: None,
+            }),
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::To(ToStepDef {
+                uri: "log:info".into(),
+            })],
+        };
+        let (spec, loss_report) =
+            compile_declarative_route_to_canonical(route, true).expect("should succeed");
+        assert!(spec.auto_startup.is_some());
+        let report = loss_report.expect("expected loss report");
+        assert_eq!(report.dropped_fields.len(), 1);
+        assert_eq!(report.dropped_fields[0].field, "error_handler");
+    }
+
+    #[test]
+    fn compile_canonical_route_respects_auto_startup_false() {
+        use camel_api::runtime::CanonicalStepSpec;
+        let spec = CanonicalRouteSpec {
+            route_id: "test".into(),
+            from: "direct:start".into(),
+            steps: vec![CanonicalStepSpec::Stop],
+            circuit_breaker: None,
+            auto_startup: Some(false),
+            startup_order: None,
+            concurrency: None,
+            version: camel_api::CANONICAL_CONTRACT_VERSION,
+        };
+        let def = compile_canonical_route(spec, 1024).expect("should succeed");
+        assert!(!def.auto_startup());
+    }
+
+    #[test]
+    fn compile_canonical_route_respects_startup_order() {
+        use camel_api::runtime::CanonicalStepSpec;
+        let spec = CanonicalRouteSpec {
+            route_id: "test".into(),
+            from: "direct:start".into(),
+            steps: vec![CanonicalStepSpec::Stop],
+            circuit_breaker: None,
+            auto_startup: None,
+            startup_order: Some(42),
+            concurrency: None,
+            version: camel_api::CANONICAL_CONTRACT_VERSION,
+        };
+        let def = compile_canonical_route(spec, 1024).expect("should succeed");
+        assert_eq!(def.startup_order(), 42);
+    }
+
+    #[test]
+    fn compile_canonical_route_respects_concurrency() {
+        use camel_api::runtime::CanonicalStepSpec;
+        let spec = CanonicalRouteSpec {
+            route_id: "test".into(),
+            from: "direct:start".into(),
+            steps: vec![CanonicalStepSpec::Stop],
+            circuit_breaker: None,
+            auto_startup: None,
+            startup_order: None,
+            concurrency: Some(CanonicalConcurrencySpec::Concurrent { max: 4 }),
+            version: camel_api::CANONICAL_CONTRACT_VERSION,
+        };
+        let def = compile_canonical_route(spec, 1024).expect("should succeed");
+        assert_eq!(
+            def.concurrency_override(),
+            Some(&ConcurrencyModel::Concurrent { max: Some(4) })
+        );
+    }
+
+    #[test]
+    fn compile_canonical_route_defaults_auto_startup_true() {
+        use camel_api::runtime::CanonicalStepSpec;
+        let spec = CanonicalRouteSpec {
+            route_id: "test".into(),
+            from: "direct:start".into(),
+            steps: vec![CanonicalStepSpec::Stop],
+            circuit_breaker: None,
+            auto_startup: None,
+            startup_order: None,
+            concurrency: None,
+            version: camel_api::CANONICAL_CONTRACT_VERSION,
+        };
+        let def = compile_canonical_route(spec, 1024).expect("should succeed");
+        assert!(def.auto_startup());
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_lossy_drops_unit_of_work() {
+        let route = DeclarativeRoute {
+            from: "timer:tick".into(),
+            route_id: "r1".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: Some(camel_api::UnitOfWorkConfig {
+                on_complete: Some("log:done".into()),
+                on_failure: None,
+            }),
+            steps: vec![],
+        };
+        let (spec, report) = compile_declarative_route_to_canonical(route, true).unwrap();
+        assert_eq!(spec.route_id, "r1");
+        let report = report.unwrap();
+        assert!(
+            report
+                .dropped_fields
+                .iter()
+                .any(|f| f.field == "unit_of_work")
+        );
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_rejects_unbounded_concurrency() {
+        let route = DeclarativeRoute {
+            from: "timer:tick".into(),
+            route_id: "r1".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: Some(DeclarativeConcurrency::Concurrent { max: None }),
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: None,
+            steps: vec![],
+        };
+        let err = compile_declarative_route_to_canonical(route, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unbounded") || err.contains("max=None"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_lossy_drops_multiple_fields() {
+        let route = DeclarativeRoute {
+            from: "timer:tick".into(),
+            route_id: "r1".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: Some(DeclarativeErrorHandler {
+                dead_letter_channel: Some("log:dlq".into()),
+                retry: None,
+                on_exceptions: None,
+            }),
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: Some(camel_api::UnitOfWorkConfig {
+                on_complete: Some("log:done".into()),
+                on_failure: None,
+            }),
+            steps: vec![],
+        };
+        let (spec, report) = compile_declarative_route_to_canonical(route, true).unwrap();
+        assert_eq!(spec.route_id, "r1");
+        let report = report.unwrap();
+        assert_eq!(report.dropped_fields.len(), 2);
+        let fields: Vec<&str> = report.dropped_fields.iter().map(|f| f.field).collect();
+        assert!(fields.contains(&"error_handler"));
+        assert!(fields.contains(&"unit_of_work"));
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_lossy_drops_unbounded_concurrency() {
+        let route = DeclarativeRoute {
+            from: "timer:tick".into(),
+            route_id: "r1".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: Some(DeclarativeConcurrency::Concurrent { max: None }),
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: None,
+            steps: vec![],
+        };
+        let (spec, report) = compile_declarative_route_to_canonical(route, true).unwrap();
+        assert_eq!(spec.route_id, "r1");
+        assert!(spec.concurrency.is_none());
+        let report = report.unwrap();
+        assert!(
+            report
+                .dropped_fields
+                .iter()
+                .any(|f| f.field == "concurrency.max")
+        );
     }
 }

@@ -784,7 +784,10 @@ async fn register_route_accepts_advanced_canonical_steps() {
             failure_threshold: 3,
             open_duration_ms: 250,
         }),
-        version: 1,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::CANONICAL_CONTRACT_VERSION,
     };
 
     runtime

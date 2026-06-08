@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tracing::{debug, error, info};
 
-use camel_api::{CamelError, CanonicalRouteSpec};
+use camel_api::{CamelError, CanonicalLossReport, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
 use crate::compile::{
@@ -120,7 +120,10 @@ pub fn parse_yaml_with_threshold_and_security(
         .collect()
 }
 
-pub fn parse_yaml_to_canonical(yaml: &str) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
+pub fn parse_yaml_to_canonical(
+    yaml: &str,
+    allow_loss: bool,
+) -> Result<Vec<(CanonicalRouteSpec, Option<CanonicalLossReport>)>, CamelError> {
     let routes = parse_yaml_to_declarative(yaml)?;
     for route in &routes {
         if route.security_policy.is_some() {
@@ -131,7 +134,7 @@ pub fn parse_yaml_to_canonical(yaml: &str) -> Result<Vec<CanonicalRouteSpec>, Ca
     }
     routes
         .into_iter()
-        .map(compile_declarative_route_to_canonical)
+        .map(|r| compile_declarative_route_to_canonical(r, allow_loss))
         .collect()
 }
 
@@ -1439,12 +1442,12 @@ routes:
           message: "hello"
       - stop: true
 "#;
-        let routes = parse_yaml_to_canonical(yaml).unwrap();
+        let routes = parse_yaml_to_canonical(yaml, false).unwrap();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].route_id, "canonical-v1");
-        assert_eq!(routes[0].from, "direct:start");
-        assert_eq!(routes[0].version, 1);
-        assert_eq!(routes[0].steps.len(), 3);
+        assert_eq!(routes[0].0.route_id, "canonical-v1");
+        assert_eq!(routes[0].0.from, "direct:start");
+        assert_eq!(routes[0].0.version, 2);
+        assert_eq!(routes[0].0.steps.len(), 3);
     }
 
     #[test]
@@ -1483,11 +1486,12 @@ routes:
           source: "${body}"
 "#;
 
-        let routes = parse_yaml_to_canonical(yaml).unwrap();
+        let routes = parse_yaml_to_canonical(yaml, false).unwrap();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].route_id, "canonical-v1-advanced");
-        assert_eq!(routes[0].steps.len(), 6);
+        assert_eq!(routes[0].0.route_id, "canonical-v1-advanced");
+        assert_eq!(routes[0].0.steps.len(), 6);
         let cb = routes[0]
+            .0
             .circuit_breaker
             .as_ref()
             .expect("circuit breaker should be present");
@@ -1506,7 +1510,9 @@ routes:
           key: "k"
           value: "v"
 "#;
-        let err = parse_yaml_to_canonical(yaml).unwrap_err().to_string();
+        let err = parse_yaml_to_canonical(yaml, false)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("canonical v1 does not support step `set_header`"),
             "unexpected error: {err}"
@@ -1906,7 +1912,7 @@ routes:
     steps:
       - to: log:info
 "#;
-        let result = parse_yaml_to_canonical(yaml);
+        let result = parse_yaml_to_canonical(yaml, false);
         assert!(result.is_err());
     }
 
@@ -2623,7 +2629,9 @@ routes:
           source: "return {};"
           timeout_ms: 1000
 "#;
-        let err = parse_yaml_to_canonical(yaml).unwrap_err().to_string();
+        let err = parse_yaml_to_canonical(yaml, false)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("canonical v1 does not support step `function`"),
             "unexpected error: {err}"

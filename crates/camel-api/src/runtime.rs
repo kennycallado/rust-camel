@@ -5,7 +5,7 @@ use crate::CamelError;
 use crate::declarative::LanguageExpressionDef;
 
 pub const CANONICAL_CONTRACT_NAME: &str = "canonical-v1";
-pub const CANONICAL_CONTRACT_VERSION: u32 = 1;
+pub const CANONICAL_CONTRACT_VERSION: u32 = 2;
 pub const CANONICAL_CONTRACT_SUPPORTED_STEPS: &[&str] = &[
     "to",
     "log",
@@ -80,16 +80,20 @@ pub fn canonical_contract_rejection_reason(step: &str) -> Option<&'static str> {
 pub struct CanonicalRouteSpec {
     /// Stable minimal route representation for runtime command registration.
     ///
-    /// Scope note (v1):
+    /// Scope notes:
     /// - This is intentionally a partial model and does not mirror every `BuilderStep`.
-    /// - Not included in v1: auto_startup, startup_order, concurrency, error_handler,
-    ///   unit_of_work. These are set to defaults when compiling from canonical.
+    /// - Version 2 adds: auto_startup, startup_order, concurrency.
+    /// - Still excluded: error_handler, unit_of_work. These are set to defaults
+    ///   when compiling from canonical.
     /// - Round-trip (YAML → Canonical → YAML) loses these fields.
     /// - Advanced EIPs continue to use the existing RouteDefinition/BuilderStep path.
     pub route_id: String,
     pub from: String,
     pub steps: Vec<CanonicalStepSpec>,
     pub circuit_breaker: Option<CanonicalCircuitBreakerSpec>,
+    pub auto_startup: Option<bool>,
+    pub startup_order: Option<i32>,
+    pub concurrency: Option<CanonicalConcurrencySpec>,
     pub version: u32,
 }
 
@@ -256,6 +260,22 @@ pub struct CanonicalCircuitBreakerSpec {
     pub open_duration_ms: u64,
 }
 
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum CanonicalConcurrencySpec {
+    Sequential,
+    Concurrent { max: usize },
+}
+
 impl CanonicalRouteSpec {
     pub fn new(route_id: impl Into<String>, from: impl Into<String>) -> Self {
         Self {
@@ -263,8 +283,26 @@ impl CanonicalRouteSpec {
             from: from.into(),
             steps: Vec::new(),
             circuit_breaker: None,
+            auto_startup: None,
+            startup_order: None,
+            concurrency: None,
             version: CANONICAL_CONTRACT_VERSION,
         }
+    }
+
+    pub fn with_auto_startup(mut self, auto: bool) -> Self {
+        self.auto_startup = Some(auto);
+        self
+    }
+
+    pub fn with_startup_order(mut self, order: i32) -> Self {
+        self.startup_order = Some(order);
+        self
+    }
+
+    pub fn with_concurrency(mut self, concurrency: CanonicalConcurrencySpec) -> Self {
+        self.concurrency = Some(concurrency);
+        self
     }
 
     pub fn validate_contract(&self) -> Result<(), CamelError> {
@@ -278,7 +316,7 @@ impl CanonicalRouteSpec {
                 "canonical contract violation: from cannot be empty".to_string(),
             ));
         }
-        if self.version != CANONICAL_CONTRACT_VERSION {
+        if self.version == 0 || self.version > CANONICAL_CONTRACT_VERSION {
             return Err(CamelError::RouteError(format!(
                 "canonical contract violation: expected version {}, got {}",
                 CANONICAL_CONTRACT_VERSION, self.version
@@ -299,7 +337,40 @@ impl CanonicalRouteSpec {
                 ));
             }
         }
+        if let Some(CanonicalConcurrencySpec::Concurrent { max: 0 }) = &self.concurrency {
+            return Err(CamelError::RouteError(
+                "canonical contract violation: concurrency max must be > 0".to_string(),
+            ));
+        }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CanonicalFieldLoss {
+    pub field: &'static str,
+    pub reason: String,
+    pub target_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct CanonicalLossReport {
+    pub dropped_fields: Vec<CanonicalFieldLoss>,
+}
+
+impl CanonicalLossReport {
+    pub fn from_field(field: &'static str, reason: &str, target_version: u32) -> Self {
+        Self {
+            dropped_fields: vec![CanonicalFieldLoss {
+                field,
+                reason: reason.to_string(),
+                target_version,
+            }],
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dropped_fields.is_empty()
     }
 }
 
@@ -569,7 +640,7 @@ mod tests {
     #[test]
     fn canonical_contract_rejects_invalid_version() {
         let mut spec = CanonicalRouteSpec::new("r1", "timer:tick");
-        spec.version = 2;
+        spec.version = 3;
         let err = spec.validate_contract().unwrap_err().to_string();
         assert!(err.contains("expected version"));
     }
@@ -889,6 +960,48 @@ mod tests {
     #[test]
     fn canonical_contract_name_and_version_constants_match() {
         assert_eq!(CANONICAL_CONTRACT_NAME, "canonical-v1");
-        assert_eq!(CANONICAL_CONTRACT_VERSION, 1);
+        assert_eq!(CANONICAL_CONTRACT_VERSION, 2);
+    }
+
+    #[test]
+    fn canonical_concurrency_spec_rejects_zero_max() {
+        let spec = CanonicalRouteSpec::new("r1", "timer:tick")
+            .with_concurrency(CanonicalConcurrencySpec::Concurrent { max: 0 });
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("concurrency max must be > 0"), "{err}");
+    }
+
+    #[test]
+    fn canonical_v2_round_trip() {
+        let spec = CanonicalRouteSpec::new("r1", "timer:tick")
+            .with_auto_startup(false)
+            .with_startup_order(42)
+            .with_concurrency(CanonicalConcurrencySpec::Concurrent { max: 8 });
+        spec.validate_contract().unwrap();
+    }
+
+    #[test]
+    fn canonical_v2_version_is_2() {
+        assert_eq!(CANONICAL_CONTRACT_VERSION, 2);
+    }
+
+    #[test]
+    fn canonical_loss_report_builder() {
+        let report =
+            CanonicalLossReport::from_field("error_handler", "not supported by canonical path", 2);
+        assert_eq!(report.dropped_fields.len(), 1);
+        assert_eq!(report.dropped_fields[0].field, "error_handler");
+    }
+
+    #[test]
+    fn canonical_v1_json_deserializes_in_v2() {
+        let json = r#"{"route_id":"r1","from":"timer:tick","steps":[],"version":1}"#;
+        let spec: CanonicalRouteSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.route_id, "r1");
+        assert!(spec.auto_startup.is_none());
+        assert!(spec.startup_order.is_none());
+        assert!(spec.concurrency.is_none());
+        // CRITICAL: v1 specs must pass validation in v2 runtime (backward compat)
+        spec.validate_contract().unwrap();
     }
 }
