@@ -257,6 +257,7 @@ impl LeadershipService for KubernetesLeadershipService {
             }
 
             if !cancelled {
+                // log-policy: system-broken
                 error!(
                     lease_name = %lease_name,
                     namespace = %namespace,

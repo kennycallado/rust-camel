@@ -116,7 +116,8 @@ impl AggregatorService {
                             }
                         }
                         Err(e) => {
-                            tracing::error!(
+                            // log-policy: handler-owned
+                            tracing::warn!(
                                 key = %key,
                                 error = %e,
                                 "aggregation failed in force_complete_all"
@@ -459,7 +460,8 @@ fn spawn_timeout_task(
                             }
                         }
                         Err(e) => {
-                            tracing::error!(
+                            // log-policy: handler-owned
+                            tracing::warn!(
                                 key = %key,
                                 error = %e,
                                 "aggregation failed in timeout task"

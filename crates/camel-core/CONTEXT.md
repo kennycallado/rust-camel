@@ -63,6 +63,12 @@ Runtime per-error matching rule compiled from a DSL `OnException`. Uses a predic
 `CamelError` to select which errors trigger this policy's retry/routing behaviour.
 _Avoid_: OnException (use OnException in DSL context; ExceptionPolicy in runtime context)
 
+## ADR-0012 log-policy annotations
+
+| File | Line | Category | Reason |
+|------|------|----------|--------|
+| `src/lifecycle/application/commands.rs` | 161 | `system-broken` | Control-plane inconsistency — persist + rollback both failed |
+
 ## Example dialogue
 
 > "When a Consumer submits an Exchange, what happens next?"

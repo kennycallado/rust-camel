@@ -39,7 +39,7 @@ pub use network_retry::{
 pub use producer::ProducerContext;
 pub use registrar::ComponentRegistrar;
 #[cfg(any(test, feature = "test-support"))]
-pub use test_support::PanicRuntimeObservability;
+pub use test_support::{NoopRuntimeObservability, PanicRuntimeObservability};
 
 // Re-export camel-api types for component convenience
 pub use camel_api::{

@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tower::Service;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use camel_api::{CamelError, Exchange};
 use camel_core::Registry;
@@ -224,7 +224,8 @@ impl Service<Exchange> for WasmProducer {
                     Ok(out)
                 }
                 Err(e) => {
-                    error!(component = "wasm", error = %e, "wasm call failed");
+                    // log-policy: handler-owned
+                    warn!(component = "wasm", error = %e, "wasm call failed");
                     warn!(
                         module = %module_path.display(),
                         error = %e,

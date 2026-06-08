@@ -1,6 +1,18 @@
 # DSL
 
-The route definition layer. Provides a fluent builder API and YAML/JSON configuration format for constructing Routes that the Runtime can execute.
+The route definition layer. Provides a fluent builder API and YAML/JSON configuration format for
+constructing Routes that the Runtime can execute.
+
+## ADR-0012 log-policy sites
+
+Both sites in this crate are category **(c) system-broken** — DSL compile/validation failures
+that occur before any route ErrorHandler exists. The `error!` level is preserved; each call site
+carries a `// log-policy: system-broken` annotation.
+
+| File | Line | Category | Annotation |
+|------|------|----------|------------|
+| `yaml.rs` | 75 | (c) system-broken | `// log-policy: system-broken` — YAML parse failure |
+| `yaml.rs` | 1277 | (c) system-broken | `// log-policy: system-broken` — file read failure |
 
 ## Language
 

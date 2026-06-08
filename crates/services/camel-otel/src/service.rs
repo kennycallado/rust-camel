@@ -285,6 +285,7 @@ impl Lifecycle for OtelService {
 
         if let Err(e) = self.validate_config() {
             self.status.store(STATUS_FAILED, Ordering::SeqCst);
+            // log-policy: system-broken
             error!(error = %e, "OTel config validation failed");
             return Err(e);
         }

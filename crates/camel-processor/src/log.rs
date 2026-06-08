@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tower::Service;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -61,7 +61,8 @@ impl Service<Exchange> for LogProcessor {
             LogLevel::Debug => debug!(exchange_id = %exchange_id, "{}", msg),
             LogLevel::Info => info!(exchange_id = %exchange_id, "{}", msg),
             LogLevel::Warn => warn!(exchange_id = %exchange_id, "{}", msg),
-            LogLevel::Error => error!(exchange_id = %exchange_id, "{}", msg),
+            // log-policy: handler-owned
+            LogLevel::Error => warn!(exchange_id = %exchange_id, "{}", msg),
         }
         self.inner.call(exchange)
     }
@@ -109,7 +110,8 @@ where
             LogLevel::Debug => debug!(exchange_id = %exchange_id, "{}", msg),
             LogLevel::Info => info!(exchange_id = %exchange_id, "{}", msg),
             LogLevel::Warn => warn!(exchange_id = %exchange_id, "{}", msg),
-            LogLevel::Error => error!(exchange_id = %exchange_id, "{}", msg),
+            // log-policy: handler-owned
+            LogLevel::Error => warn!(exchange_id = %exchange_id, "{}", msg),
         }
         self.inner.call(exchange)
     }

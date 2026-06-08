@@ -11,8 +11,10 @@ use camel_bridge::health::wait_for_health;
 use camel_bridge::process::{BridgeError, BridgeProcess, BridgeProcessConfig};
 use camel_bridge::reconnect::BridgeReconnectHandler;
 use camel_bridge::spec::XML_BRIDGE;
+use camel_component_api::RuntimeObservability;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 use tokio::sync::{Mutex, RwLock, watch};
 use tonic::Code;
 use tonic::transport::Channel;
@@ -114,6 +116,7 @@ pub struct XsdBridgeBackend {
     bridge_version: String,
     bridge_cache_dir: std::path::PathBuf,
     bridge_start_timeout_ms: u64,
+    observability: Arc<OnceLock<(Arc<dyn RuntimeObservability>, String)>>,
 }
 
 impl std::fmt::Debug for XsdBridgeBackend {
@@ -147,6 +150,7 @@ impl XsdBridgeBackend {
             bridge_version: crate::BRIDGE_VERSION.to_string(),
             bridge_cache_dir: default_cache_dir_for_spec(&XML_BRIDGE),
             bridge_start_timeout_ms: 30_000,
+            observability: Arc::new(OnceLock::new()),
         }
     }
 
@@ -173,7 +177,12 @@ impl XsdBridgeBackend {
             bridge_version: crate::BRIDGE_VERSION.to_string(),
             bridge_cache_dir: default_cache_dir_for_spec(&XML_BRIDGE),
             bridge_start_timeout_ms: 30_000,
+            observability: Arc::new(OnceLock::new()),
         }
+    }
+
+    pub fn set_observability(&self, runtime: Arc<dyn RuntimeObservability>, route_id: String) {
+        self.observability.set((runtime, route_id)).ok();
     }
 
     pub fn schema_id_for(xsd_bytes: &[u8]) -> SchemaId {
@@ -351,6 +360,11 @@ impl BridgeReconnectHandler for XsdBridgeBackend {
                 .map(|entry| (entry.key().clone(), entry.value().clone()))
                 .collect();
 
+            let observability = this
+                .observability
+                .get()
+                .map(|(rt, rid)| (Arc::clone(rt), rid.clone()));
+
             for (schema_id, schema_bytes) in schemas {
                 if let Err(e) = this
                     .rpc
@@ -363,6 +377,11 @@ impl BridgeReconnectHandler for XsdBridgeBackend {
                     )
                     .await
                 {
+                    if let Some((ref rt, ref rid)) = observability {
+                        rt.metrics()
+                            .increment_errors(rid, "e:validator:reconnect-reseed");
+                    }
+                    // log-policy: outside-contract
                     error!(schema_id = %schema_id, error = %e, "re-seed schema failed after reconnect");
                 }
             }

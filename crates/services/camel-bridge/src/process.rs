@@ -363,10 +363,12 @@ impl BridgeProcess {
                     if let Some(p) = v.get("port").and_then(|p| p.as_u64()) {
                         return Ok(p as u16);
                     }
+                    // log-policy: system-broken
                     tracing::error!("bridge ready message malformed: {line}");
                     return Err(BridgeError::BadReadyMessage(line));
                 }
             }
+            // log-policy: system-broken
             tracing::error!("bridge stdout closed before ready message");
             Err(BridgeError::StdoutClosed)
         })
@@ -376,6 +378,7 @@ impl BridgeProcess {
                 "{} failed to start: health check timeout after {}ms",
                 config.spec.name, config.start_timeout_ms
             );
+            // log-policy: system-broken
             tracing::error!("{msg}");
             BridgeError::Timeout(msg)
         })??;

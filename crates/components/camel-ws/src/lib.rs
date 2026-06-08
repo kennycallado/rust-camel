@@ -25,7 +25,7 @@ use camel_api::security_policy::AuthorizationDecision;
 use camel_component_api::{
     Body as CamelBody, BoxProcessor, CamelError, Component, ConcurrencyModel, Consumer,
     ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, Message as CamelMessage,
-    NetworkRetryPolicy, ProducerContext, retry_async,
+    NetworkRetryPolicy, ProducerContext, RuntimeObservability, retry_async,
 };
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
@@ -97,6 +97,8 @@ impl ServerRegistry {
         host: &str,
         port: u16,
         tls_config: Option<WsTlsConfig>,
+        runtime: Arc<dyn RuntimeObservability>,
+        route_id: String,
     ) -> Result<WsAppState, CamelError> {
         let wants_tls = tls_config.is_some();
         let host_owned = host.to_string();
@@ -114,7 +116,16 @@ impl ServerRegistry {
         };
 
         let handle = cell
-            .get_or_try_init(|| async { spawn_server(&host_owned, port, tls_config).await })
+            .get_or_try_init(|| async {
+                spawn_server(
+                    &host_owned,
+                    port,
+                    tls_config,
+                    runtime.clone(),
+                    route_id.clone(),
+                )
+                .await
+            })
             .await?;
 
         if wants_tls != handle.is_tls {
@@ -161,6 +172,8 @@ async fn spawn_server(
     host: &str,
     port: u16,
     tls_config: Option<WsTlsConfig>,
+    runtime: Arc<dyn RuntimeObservability>,
+    route_id: String,
 ) -> Result<ServerHandle, CamelError> {
     let host_owned = host.to_string();
     let addr = format!("{host}:{port}");
@@ -173,6 +186,8 @@ async fn spawn_server(
         path_configs: Arc::clone(&path_configs),
         path_policies: Arc::clone(&path_policies),
         server_error: Arc::clone(&server_error),
+        runtime: Arc::clone(&runtime),
+        route_id: route_id.clone(),
     };
     let app = Router::new()
         .fallback(dispatch_handler)
@@ -185,11 +200,16 @@ async fn spawn_server(
         })?;
         let tls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls));
         let error_flag = Arc::clone(&server_error);
+        let rt = Arc::clone(&runtime);
+        let rid = route_id.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = axum_server::bind_rustls(parsed_addr, tls_cfg)
                 .serve(app.into_make_service())
                 .await
             {
+                rt.health()
+                    .force_unhealthy_for_route(&rid, "g:ws:bind-tls", &e.to_string());
+                // log-policy: outside-contract
                 tracing::error!(
                     host = host_owned,
                     port = port,
@@ -205,8 +225,13 @@ async fn spawn_server(
             CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
         })?;
         let error_flag = Arc::clone(&server_error);
+        let rt = Arc::clone(&runtime);
+        let rid = route_id.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = serve(listener, app).await {
+                rt.health()
+                    .force_unhealthy_for_route(&rid, "g:ws:bind-plain", &e.to_string());
+                // log-policy: outside-contract
                 tracing::error!(
                     host = host_owned,
                     port = port,
@@ -234,6 +259,10 @@ pub struct WsAppState {
     pub path_configs: Arc<DashMap<String, WsPathConfig>>,
     pub path_policies: Arc<DashMap<String, camel_component_api::SecurityContext>>,
     pub server_error: Arc<AtomicBool>,
+    /// Observable runtime for ADR-0012 (e) metric and (g) health calls.
+    pub runtime: Arc<dyn RuntimeObservability>,
+    /// Route id of the consumer that created this server.
+    pub route_id: String,
 }
 
 pub struct WsConnectionRegistry {
@@ -357,6 +386,11 @@ pub async fn dispatch_handler(
                                 return (StatusCode::FORBIDDEN, "Forbidden").into_response();
                             }
                             Err(e) => {
+                                state
+                                    .runtime
+                                    .metrics()
+                                    .increment_errors(&state.route_id, "e:ws:policy-eval");
+                                // log-policy: outside-contract
                                 tracing::error!(path = %path, error = %e, "Policy evaluation error during WS upgrade");
                                 return (
                                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -876,9 +910,7 @@ pub struct WsConsumer {
     registry_key: Option<(String, u16, String)>,
     forward_task: Option<JoinHandle<Result<(), CamelError>>>,
     security_ctx: Option<camel_component_api::SecurityContext>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
+    /// Runtime observability handle for ADR-0012 metrics and health calls.
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -933,7 +965,13 @@ impl Consumer for WsConsumer {
         };
 
         let state = ServerRegistry::global()
-            .get_or_spawn(&self.cfg.inner.host, self.cfg.inner.port, tls_config)
+            .get_or_spawn(
+                &self.cfg.inner.host,
+                self.cfg.inner.port,
+                tls_config,
+                self.runtime.clone(),
+                ctx.route_id().to_string(),
+            )
             .await?;
 
         let (env_tx, mut env_rx) = mpsc::channel::<ExchangeEnvelope>(64);
@@ -1874,11 +1912,11 @@ mod tests {
     async fn server_registry_returns_same_state_for_same_port() {
         let port = free_port();
         let state1 = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, None)
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
         let state2 = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, None)
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
         assert!(
@@ -1891,7 +1929,7 @@ mod tests {
     async fn dispatch_handler_returns_404_for_unregistered_path() {
         let port = free_port();
         let state = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, None)
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
         let app = Router::new().fallback(dispatch_handler).with_state(state);
@@ -2081,7 +2119,7 @@ mod tests {
         consumer.start(ctx).await.unwrap();
 
         let state = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, None)
+            .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
         let app = Router::new().fallback(dispatch_handler).with_state(state);
@@ -2196,7 +2234,7 @@ mod tests {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
                 let state = ServerRegistry::global()
-                    .get_or_spawn("127.0.0.1", port, None)
+                    .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
                     .await
                     .unwrap();
                 results.lock().unwrap().push(state);
@@ -2604,6 +2642,8 @@ mod tests {
             path_configs: Arc::new(DashMap::new()),
             path_policies: Arc::new(DashMap::new()),
             server_error: new_atomic_false(),
+            runtime: test_rt(),
+            route_id: "test-route".into(),
         };
         assert!(
             !state.server_error.load(Ordering::Relaxed),
@@ -2618,6 +2658,8 @@ mod tests {
             path_configs: Arc::new(DashMap::new()),
             path_policies: Arc::new(DashMap::new()),
             server_error: new_atomic_false(),
+            runtime: test_rt(),
+            route_id: "test-route".into(),
         };
         assert!(!state.server_error.load(Ordering::Relaxed));
         state.server_error.store(true, Ordering::Relaxed);

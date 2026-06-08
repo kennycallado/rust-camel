@@ -65,6 +65,7 @@ impl Component for ValidatorComponent {
             uri: uri.to_string(),
             config,
             compiled: Arc::new(compiled),
+            xsd_backend: self.xsd_backend.as_ref().map(Arc::clone),
         }))
     }
 }
@@ -78,6 +79,7 @@ struct ValidatorEndpoint {
     uri: String,
     config: ValidatorConfig,
     compiled: Arc<CompiledValidator>,
+    xsd_backend: Option<Arc<XsdBridgeBackend>>,
 }
 
 impl ValidatorEndpoint {
@@ -108,9 +110,15 @@ impl Endpoint for ValidatorEndpoint {
 
     fn create_producer(
         &self,
-        _rt: Arc<dyn RuntimeObservability>,
-        _ctx: &ProducerContext,
+        rt: Arc<dyn RuntimeObservability>,
+        ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
+        if let Some(ref backend) = self.xsd_backend {
+            backend.set_observability(
+                rt.clone(),
+                ctx.route_id().unwrap_or("validator-bridge").to_string(),
+            );
+        }
         Ok(BoxProcessor::new(ValidatorProducer {
             uri: self.uri.clone(),
             config: self.config.clone(),

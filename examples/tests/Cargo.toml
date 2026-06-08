@@ -1,0 +1,10 @@
+[package]
+name = "camel-examples-tests"
+description = "Regression tests for ADR-0012 Phase C annotations in examples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true

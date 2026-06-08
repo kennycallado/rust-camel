@@ -126,9 +126,9 @@ impl Endpoint for RedisEndpoint {
 
     fn create_consumer(
         &self,
-        _rt: Arc<dyn RuntimeObservability>,
+        rt: Arc<dyn RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(RedisConsumer::new(self.config.clone())?))
+        Ok(Box::new(RedisConsumer::new(self.config.clone(), rt)?))
     }
 }
 

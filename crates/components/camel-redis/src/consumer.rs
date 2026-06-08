@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use camel_component_api::{Body, CamelError, Exchange, Message};
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext, RuntimeObservability};
 use futures_util::StreamExt;
 use redis::Msg;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +49,8 @@ pub enum RedisConsumerMode {
 pub struct RedisConsumer {
     config: RedisEndpointConfig,
     mode: RedisConsumerMode,
+    /// Runtime observability for ADR-0012 metrics calls
+    runtime: Arc<dyn RuntimeObservability>,
     /// Cancellation token for graceful shutdown
     cancel_token: Option<CancellationToken>,
     /// Handle to the spawned consumer task
@@ -64,7 +67,10 @@ impl RedisConsumer {
     ///
     /// Returns an error for commands that are not valid consumer commands
     /// (REDIS-003: no silent fallback to BLPOP).
-    pub fn new(config: RedisEndpointConfig) -> Result<Self, CamelError> {
+    pub fn new(
+        config: RedisEndpointConfig,
+        runtime: Arc<dyn RuntimeObservability>,
+    ) -> Result<Self, CamelError> {
         let mode = match &config.command {
             RedisCommand::Subscribe => RedisConsumerMode::PubSub {
                 channels: config.channels.clone(),
@@ -99,6 +105,7 @@ impl RedisConsumer {
         Ok(Self {
             config,
             mode,
+            runtime,
             cancel_token: None,
             task_handle: None,
         })
@@ -150,11 +157,12 @@ impl Consumer for RedisConsumer {
             "Starting Redis consumer"
         );
 
-        // Spawn the appropriate consumer loop based on mode
+        // Capture runtime for ADR-0012 metrics in spawned tasks
+        let runtime = self.runtime.clone();
         let handle =
             match mode {
                 RedisConsumerMode::PubSub { channels, patterns } => tokio::spawn(
-                    run_pubsub_consumer(config, channels, patterns, ctx, cancel_token),
+                    run_pubsub_consumer(config, channels, patterns, ctx, cancel_token, runtime),
                 ),
                 RedisConsumerMode::Queue {
                     key,
@@ -167,6 +175,7 @@ impl Consumer for RedisConsumer {
                     pop_command,
                     ctx,
                     cancel_token,
+                    runtime,
                 )),
             };
 
@@ -187,10 +196,12 @@ impl Consumer for RedisConsumer {
             match handle.await {
                 Ok(result) => {
                     if let Err(e) = result {
+                        // log-policy: system-broken
                         error!("Consumer task exited with error: {}", e);
                     }
                 }
                 Err(e) => {
+                    // log-policy: system-broken
                     error!("Failed to join consumer task: {}", e);
                 }
             }
@@ -233,6 +244,7 @@ async fn run_pubsub_consumer(
     patterns: Vec<String>,
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
+    runtime: Arc<dyn RuntimeObservability>,
 ) -> Result<(), CamelError> {
     info!(endpoint = %config.safe_endpoint(), "PubSub consumer connecting");
 
@@ -274,6 +286,8 @@ async fn run_pubsub_consumer(
                 if let Some(msg) = msg {
                     let exchange = build_exchange_from_pubsub(msg);
                     if let Err(e) = ctx.send(exchange).await {
+                        runtime.metrics().increment_errors(ctx.route_id(), "b-prime:redis:pubsub-channel-closed");
+                        // log-policy: outside-contract
                         error!("Failed to send exchange to pipeline: {}", e);
                         // Don't break - continue processing messages
                     }
@@ -300,6 +314,7 @@ async fn run_queue_consumer(
     pop_command: QueuePopCommand,
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
+    runtime: Arc<dyn RuntimeObservability>,
 ) -> Result<(), CamelError> {
     info!(
         endpoint = %config.safe_endpoint(),
@@ -357,6 +372,8 @@ async fn run_queue_consumer(
                         attempt = 0;
                         let exchange = build_exchange_from_blpop(key, value);
                         if let Err(e) = ctx.send(exchange).await {
+                            runtime.metrics().increment_errors(ctx.route_id(), "b-prime:redis:blpop-channel-closed");
+                            // log-policy: outside-contract
                             error!("Failed to send exchange to pipeline: {}", e);
                             // Don't break - continue processing items
                         }
@@ -372,6 +389,7 @@ async fn run_queue_consumer(
                         } else if is_transient_redis_error(&CamelError::ProcessorError(e.to_string())) {
                             attempt += 1;
                             if !config.reconnect.should_retry(attempt) {
+                                // log-policy: system-broken
                                 error!(
                                     command = %queue_cmd,
                                     attempts = attempt,
@@ -393,6 +411,8 @@ async fn run_queue_consumer(
                             tokio::time::sleep(delay).await;
                         } else {
                             // Non-transient error — log and continue with small delay
+                            runtime.metrics().increment_errors(ctx.route_id(), "e:redis:message-non-transient");
+                            // log-policy: outside-contract
                             error!(command = %queue_cmd, error = %e, "Non-transient error");
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
@@ -457,7 +477,12 @@ fn build_exchange_from_blpop(key: String, value: String) -> Exchange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
+
+    fn test_rt() -> Arc<dyn RuntimeObservability> {
+        Arc::new(camel_component_api::test_support::PanicRuntimeObservability)
+    }
 
     fn create_test_config(command: RedisCommand) -> RedisEndpointConfig {
         RedisEndpointConfig {
@@ -477,7 +502,7 @@ mod tests {
     #[test]
     fn test_consumer_new_subscribe() {
         let config = create_test_config(RedisCommand::Subscribe);
-        let consumer = RedisConsumer::new(config).expect("Subscribe should be valid");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("Subscribe should be valid");
 
         match consumer.mode {
             RedisConsumerMode::PubSub { channels, patterns } => {
@@ -491,7 +516,7 @@ mod tests {
     #[test]
     fn test_consumer_new_psubscribe() {
         let config = create_test_config(RedisCommand::Psubscribe);
-        let consumer = RedisConsumer::new(config).expect("Psubscribe should be valid");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("Psubscribe should be valid");
 
         match consumer.mode {
             RedisConsumerMode::PubSub { channels, patterns } => {
@@ -505,7 +530,7 @@ mod tests {
     #[test]
     fn test_consumer_new_blpop() {
         let config = create_test_config(RedisCommand::Blpop);
-        let consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
 
         match consumer.mode {
             RedisConsumerMode::Queue {
@@ -524,7 +549,7 @@ mod tests {
     #[test]
     fn test_consumer_new_brpop_uses_right_pop_command() {
         let config = create_test_config(RedisCommand::Brpop);
-        let consumer = RedisConsumer::new(config).expect("Brpop should be valid");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("Brpop should be valid");
 
         match consumer.mode {
             RedisConsumerMode::Queue { pop_command, .. } => {
@@ -538,7 +563,7 @@ mod tests {
     fn test_consumer_new_blpop_default_key() {
         let mut config = create_test_config(RedisCommand::Blpop);
         config.key = None;
-        let consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
 
         match consumer.mode {
             RedisConsumerMode::Queue {
@@ -555,7 +580,7 @@ mod tests {
     #[test]
     fn test_consumer_new_invalid_command_returns_error() {
         let config = create_test_config(RedisCommand::Set);
-        let result = RedisConsumer::new(config);
+        let result = RedisConsumer::new(config, test_rt());
         assert!(
             result.is_err(),
             "SET should not be a valid consumer command"
@@ -570,7 +595,7 @@ mod tests {
     #[test]
     fn test_consumer_new_get_command_returns_error() {
         let config = create_test_config(RedisCommand::Get);
-        let result = RedisConsumer::new(config);
+        let result = RedisConsumer::new(config, test_rt());
         assert!(
             result.is_err(),
             "GET should not be a valid consumer command"
@@ -586,7 +611,7 @@ mod tests {
     #[test]
     fn test_consumer_concurrency_model_is_sequential() {
         let config = create_test_config(RedisCommand::Subscribe);
-        let consumer = RedisConsumer::new(config).expect("Subscribe should be valid");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("Subscribe should be valid");
         assert_eq!(consumer.concurrency_model(), ConcurrencyModel::Sequential);
     }
 
@@ -663,7 +688,8 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_stop_without_start() {
         let config = create_test_config(RedisCommand::Subscribe);
-        let mut consumer = RedisConsumer::new(config).expect("Subscribe should be valid");
+        let mut consumer =
+            RedisConsumer::new(config, test_rt()).expect("Subscribe should be valid");
 
         // Stop without start should succeed gracefully
         let result = consumer.stop().await;
@@ -673,7 +699,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_start_sets_task_handle() {
         let config = create_test_config(RedisCommand::Blpop);
-        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+        let mut consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
@@ -691,7 +717,8 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_start_pubsub_mode() {
         let config = create_test_config(RedisCommand::Subscribe);
-        let mut consumer = RedisConsumer::new(config).expect("Subscribe should be valid");
+        let mut consumer =
+            RedisConsumer::new(config, test_rt()).expect("Subscribe should be valid");
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
@@ -709,7 +736,7 @@ mod tests {
     fn test_consumer_new_blpop_with_default_key_when_none() {
         let mut config = create_test_config(RedisCommand::Blpop);
         config.key = None;
-        let consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
 
         match &consumer.mode {
             RedisConsumerMode::Queue { key, .. } => {
@@ -723,7 +750,7 @@ mod tests {
     fn test_consumer_new_brpop_with_default_key_when_none() {
         let mut config = create_test_config(RedisCommand::Brpop);
         config.key = None;
-        let consumer = RedisConsumer::new(config).expect("Brpop should be valid");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("Brpop should be valid");
 
         match &consumer.mode {
             RedisConsumerMode::Queue {
@@ -757,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_stops_gracefully() {
         let config = create_test_config(RedisCommand::Blpop);
-        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+        let mut consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
 
         // Create a mock context (won't actually be used in this test)
         let (tx, _rx) = mpsc::channel(16);
@@ -780,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_start_stop_start_lifecycle() {
         let config = create_test_config(RedisCommand::Blpop);
-        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+        let mut consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
@@ -809,7 +836,7 @@ mod tests {
     #[tokio::test]
     async fn test_redis_restart_after_stop() {
         let config = create_test_config(RedisCommand::Blpop);
-        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+        let mut consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
@@ -864,7 +891,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_double_stop_is_safe() {
         let config = create_test_config(RedisCommand::Blpop);
-        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+        let mut consumer = RedisConsumer::new(config, test_rt()).expect("Blpop should be valid");
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();

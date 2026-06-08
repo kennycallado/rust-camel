@@ -4,10 +4,10 @@ use crate::proto::{
 };
 use async_trait::async_trait;
 use camel_bridge::{process::BridgeError, reconnect::BridgeReconnectHandler};
+use camel_component_api::RuntimeObservability;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::watch;
 use tonic::Code;
@@ -210,6 +210,7 @@ pub struct XsltBridgeClient {
     state_rx: Arc<watch::Receiver<BridgeState>>,
     backend: Arc<dyn XsltTransformBackend>,
     stylesheets: Arc<StylesheetCache>,
+    observability: OnceLock<(Arc<dyn RuntimeObservability>, String)>,
 }
 
 impl std::fmt::Debug for XsltBridgeClient {
@@ -233,7 +234,12 @@ impl XsltBridgeClient {
             state_rx,
             backend,
             stylesheets: Arc::new(StylesheetCache::new()),
+            observability: OnceLock::new(),
         }
+    }
+
+    pub fn set_observability(&self, runtime: Arc<dyn RuntimeObservability>, route_id: String) {
+        self.observability.set((runtime, route_id)).ok();
     }
 
     pub fn stylesheet_id_for(xslt_bytes: &[u8]) -> StylesheetId {
@@ -310,8 +316,18 @@ impl BridgeReconnectHandler for XsltBridgeClient {
         let backend = Arc::clone(&self.backend);
         let stylesheets = self.stylesheets.snapshot();
 
+        let observability = self
+            .observability
+            .get()
+            .map(|(rt, rid)| (Arc::clone(rt), rid.clone()));
+
         handle.spawn(async move {
             if let Err(err) = backend.recompile_all(port, stylesheets).await {
+                if let Some((rt, rid)) = observability {
+                    rt.metrics()
+                        .increment_errors(&rid, "e:xslt:reconnect-reseed");
+                }
+                // log-policy: outside-contract
                 error!(error = %err, "failed to re-seed stylesheets after reconnect");
             }
         });

@@ -98,6 +98,7 @@ async fn main() -> Result<(), CamelError> {
         )
         .await;
         if let Err(e) = result {
+            // log-policy: system-broken
             tracing::error!("File watcher error: {e}");
         }
     });

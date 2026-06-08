@@ -1565,6 +1565,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-examples-tests"
+version = "0.14.0"
+
+[[package]]
 name = "camel-function"
 version = "0.14.0"
 dependencies = [

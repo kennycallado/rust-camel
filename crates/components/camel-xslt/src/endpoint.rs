@@ -57,9 +57,13 @@ impl Endpoint for XsltEndpoint {
 
     fn create_producer(
         &self,
-        _rt: Arc<dyn RuntimeObservability>,
-        _ctx: &ProducerContext,
+        rt: Arc<dyn RuntimeObservability>,
+        ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
+        self.client.set_observability(
+            rt.clone(),
+            ctx.route_id().unwrap_or("xslt-bridge").to_string(),
+        );
         Ok(BoxProcessor::new(XsltProducer::new(
             self.stylesheet_bytes.clone(),
             Arc::clone(&self.compiled),

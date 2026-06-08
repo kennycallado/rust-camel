@@ -27,6 +27,7 @@ impl ComponentBundle for KafkaBundle {
         match KafkaComponent::with_config(self.config) {
             Ok(component) => ctx.register_component_dyn(Arc::new(component)),
             Err(e) => {
+                // log-policy: system-broken
                 tracing::error!("KafkaComponent::with_config failed despite validation: {e}");
             }
         }

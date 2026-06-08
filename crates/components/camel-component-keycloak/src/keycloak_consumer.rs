@@ -70,7 +70,6 @@ pub struct KeycloakEventConsumer {
     config: EventsEndpointConfig,
     /// Phase B will use this for `rt.metrics().increment_errors(...)` and
     /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
     runtime: Arc<dyn RuntimeObservability>,
 }
 
@@ -144,12 +143,14 @@ impl KeycloakEventConsumer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_event_batch<E: KeycloakEvent>(
         events: &[E],
         label: &str,
         build_exchange: impl Fn(&E) -> Exchange,
         seen_ids: &mut IndexSet<String>,
         capacity: usize,
+        runtime: &dyn RuntimeObservability,
         context: &ConsumerContext,
         last_event_time: u64,
     ) -> BatchOutcome {
@@ -170,6 +171,10 @@ impl KeycloakEventConsumer {
             }
             let exchange = build_exchange(event);
             if context.send(exchange).await.is_err() {
+                runtime
+                    .metrics()
+                    .increment_errors(context.route_id(), "b-prime:keycloak:response-body");
+                // log-policy: outside-contract
                 error!(error = "failed to send exchange, channel closed");
                 return BatchOutcome::ChannelClosed;
             }
@@ -247,6 +252,11 @@ impl Consumer for KeycloakEventConsumer {
                     let token = match self.config.token_provider.get_token().await {
                         Ok(t) => t,
                         Err(e) => {
+                            self.runtime.metrics().increment_errors(
+                                context.route_id(),
+                                "e:keycloak:auth-material",
+                            );
+                            // log-policy: outside-contract
                             error!(error = %e, "failed to acquire event auth material, skipping poll");
                             continue;
                         }
@@ -262,6 +272,7 @@ impl Consumer for KeycloakEventConsumer {
                                         Self::build_user_event_exchange,
                                         &mut seen_ids,
                                         capacity,
+                                        &*self.runtime,
                                         &context,
                                         last_event_time,
                                     )
@@ -287,6 +298,7 @@ impl Consumer for KeycloakEventConsumer {
                                         Self::build_admin_event_exchange,
                                         &mut seen_ids,
                                         capacity,
+                                        &*self.runtime,
                                         &context,
                                         last_event_time,
                                     )
@@ -310,6 +322,7 @@ impl Consumer for KeycloakEventConsumer {
                             PollError::Auth(msg) => {
                                 consecutive_auth_errors += 1;
                                 if consecutive_auth_errors >= max_auth_errors {
+                                    // log-policy: system-broken
                                     error!(
                                         errors = consecutive_auth_errors,
                                         "max consecutive auth errors reached, stopping consumer"

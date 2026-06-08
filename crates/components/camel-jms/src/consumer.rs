@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use camel_component_api::{
     Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message,
-    NetworkRetryPolicy,
+    NetworkRetryPolicy, RuntimeObservability,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +26,9 @@ pub struct JmsConsumer {
     reconnect: NetworkRetryPolicy,
     cancel_token: Option<CancellationToken>,
     task_handles: Vec<JoinHandle<Result<(), CamelError>>>,
+    /// Phase C ADR-0012: used for `metrics().increment_errors(…)` at
+    /// consumer-send failure sites.
+    runtime: Arc<dyn RuntimeObservability>,
 }
 
 impl JmsConsumer {
@@ -34,6 +37,7 @@ impl JmsConsumer {
         broker_name: String,
         endpoint_config: JmsEndpointConfig,
         reconnect: NetworkRetryPolicy,
+        runtime: Arc<dyn RuntimeObservability>,
     ) -> Self {
         Self {
             pool,
@@ -42,6 +46,7 @@ impl JmsConsumer {
             reconnect,
             cancel_token: None,
             task_handles: Vec::new(),
+            runtime,
         }
     }
 }
@@ -113,6 +118,7 @@ async fn await_ready_channel(
 
 /// Background consumer loop, extracted so it can be spawned multiple times
 /// for concurrent consumers (JMS-011).
+#[allow(clippy::too_many_arguments)]
 async fn consumer_loop(
     pool: &JmsBridgePool,
     broker_name: &str,
@@ -121,6 +127,7 @@ async fn consumer_loop(
     cancel: CancellationToken,
     ctx: &ConsumerContext,
     idx: u32,
+    runtime: Arc<dyn RuntimeObservability>,
 ) {
     let destination = destination(endpoint_config);
     let map_headers = endpoint_config.map_jms_headers;
@@ -302,6 +309,11 @@ async fn consumer_loop(
                             attempt = 0;
                             let exchange = build_exchange(&jms_msg, map_headers);
                             if let Err(e) = ctx.send(exchange).await {
+                                runtime.metrics().increment_errors(
+                                    ctx.route_id(),
+                                    "b-prime:jms:consumer-send",
+                                );
+                                // log-policy: outside-contract
                                 error!(
                                     broker = %broker_name,
                                     consumer_idx = idx,
@@ -435,6 +447,7 @@ impl Consumer for JmsConsumer {
 
         // JMS-011: spawn concurrent consumer tasks
         let consumer_count = endpoint_config.concurrent_consumers;
+        let runtime = self.runtime.clone();
         // allow-unwrap: consumer_count validated >= 1 in from_uri
         let handles: Vec<JoinHandle<Result<(), CamelError>>> = (0..consumer_count)
             .map(|idx| {
@@ -444,6 +457,7 @@ impl Consumer for JmsConsumer {
                 let cancel = cancel.clone();
                 let ctx = ctx.clone();
                 let reconnect = reconnect.clone();
+                let runtime = runtime.clone();
 
                 tokio::spawn(async move {
                     consumer_loop(
@@ -454,6 +468,7 @@ impl Consumer for JmsConsumer {
                         cancel,
                         &ctx,
                         idx,
+                        runtime,
                     )
                     .await;
                     Ok(())
@@ -503,7 +518,12 @@ mod tests {
     use super::*;
     use crate::BrokerType;
     use crate::config::{JmsPoolConfig, jms_reconnect_default};
+    use camel_component_api::test_support::PanicRuntimeObservability;
     use tokio::sync::mpsc;
+
+    fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(PanicRuntimeObservability)
+    }
 
     #[test]
     fn build_exchange_text_body() {
@@ -588,6 +608,7 @@ mod tests {
             "default".to_string(),
             endpoint_cfg,
             jms_reconnect_default(),
+            rt(),
         );
         assert!(consumer.stop().await.is_ok());
     }
@@ -609,6 +630,7 @@ mod tests {
             "default".to_string(),
             endpoint_cfg,
             jms_reconnect_default(),
+            rt(),
         );
 
         // Simulate an already-started state by setting a cancel token directly.
@@ -647,6 +669,7 @@ mod tests {
             "default".to_string(),
             endpoint_cfg,
             jms_reconnect_default(),
+            rt(),
         );
 
         // Simulate a started consumer with a task that respects cancellation.
@@ -688,6 +711,7 @@ mod tests {
             "default".to_string(),
             endpoint_cfg,
             jms_reconnect_default(),
+            rt(),
         );
 
         // Manually set a task handle that will panic.
@@ -753,6 +777,7 @@ mod tests {
             "default".to_string(),
             endpoint_cfg,
             jms_reconnect_default(),
+            rt(),
         );
 
         let (route_tx, _route_rx) = mpsc::channel(16);

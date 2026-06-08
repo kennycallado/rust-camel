@@ -1,0 +1,1 @@
+> **Note:** LogProducer at `src/lib.rs:372` is a user-output mechanism (route DSL emits at user-chosen level). Excluded from ADR-0012 scope per oracle ruling ses_16262b201ffeCmO67e3T6qa73b. The lint-log-levels skip is symbol-bound (`impl Service<Exchange> for LogProducer` body), not file-bound — see Task 14 Step 8b.

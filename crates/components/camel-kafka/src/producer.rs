@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tower::Service;
-use tracing::{debug, error};
+use tracing::{debug, warn};
 
 use crate::config::{ResolvedKafkaEndpointConfig, apply_security_config};
 
@@ -260,7 +260,8 @@ impl Service<Exchange> for KafkaProducer {
                     Ok(exchange)
                 }
                 Err((e, _)) => {
-                    error!(error = %e, topic = %topic, "Kafka delivery failed");
+                    // log-policy: handler-owned
+                    warn!(error = %e, topic = %topic, "Kafka delivery failed");
                     Err(CamelError::ProcessorError(format!(
                         "Kafka delivery failed to topic '{}': {}",
                         topic, e

@@ -596,6 +596,7 @@ impl ServerRegistry {
 
     /// Returns route registry for `port`, spawning new Axum server if
     /// none is running on that port yet.
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_or_spawn(
         &'static self,
         host: &str,
@@ -603,6 +604,8 @@ impl ServerRegistry {
         max_request_body: usize,
         max_response_body: usize,
         max_inflight_requests: usize,
+        runtime: Arc<dyn RuntimeObservability>,
+        route_id: String,
     ) -> Result<HttpRouteRegistry, CamelError> {
         let host_owned = host.to_string();
 
@@ -645,28 +648,39 @@ impl ServerRegistry {
         }
 
         let handle = cell
-            .get_or_try_init(|| async {
-                let addr = format!("{host_owned}:{port}");
-                let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-                    CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
-                })?;
-                let registry = HttpRouteRegistry::new();
-                let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
-                let task = tokio::spawn(run_axum_server(
-                    listener,
-                    registry.clone(),
-                    max_request_body,
-                    max_response_body,
-                    Arc::clone(&inflight),
-                ));
-                let addr_for_monitor = format!("{host_owned}:{port}");
-                tokio::spawn(monitor_axum_task(task, addr_for_monitor));
-                Ok::<ServerHandle, CamelError>(ServerHandle {
-                    registry,
-                    max_request_body,
-                    max_response_body,
-                    max_inflight_requests,
-                })
+            .get_or_try_init(|| {
+                let rt = Arc::clone(&runtime);
+                let rid = route_id.clone();
+                async move {
+                    let addr = format!("{host_owned}:{port}");
+                    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                        CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
+                    })?;
+                    let registry = HttpRouteRegistry::new();
+                    let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
+                    let task = tokio::spawn(run_axum_server(
+                        listener,
+                        registry.clone(),
+                        max_request_body,
+                        max_response_body,
+                        Arc::clone(&inflight),
+                        Arc::clone(&rt),
+                        rid.clone(),
+                    ));
+                    let addr_for_monitor = format!("{host_owned}:{port}");
+                    tokio::spawn(monitor_axum_task(
+                        task,
+                        addr_for_monitor,
+                        Arc::clone(&rt),
+                        rid,
+                    ));
+                    Ok::<ServerHandle, CamelError>(ServerHandle {
+                        registry,
+                        max_request_body,
+                        max_response_body,
+                        max_inflight_requests,
+                    })
+                }
             })
             .await?;
 
@@ -716,6 +730,8 @@ async fn run_axum_server(
     max_request_body: usize,
     max_response_body: usize,
     inflight: Arc<tokio::sync::Semaphore>,
+    runtime: Arc<dyn RuntimeObservability>,
+    route_id: String,
 ) {
     let state = AppState {
         registry,
@@ -726,6 +742,10 @@ async fn run_axum_server(
     let app = Router::new().fallback(dispatch_handler).with_state(state);
 
     axum::serve(listener, app).await.unwrap_or_else(|e| {
+        runtime
+            .metrics()
+            .increment_errors(&route_id, "e:http:accept");
+        // log-policy: outside-contract
         tracing::error!(error = %e, "Axum server error");
     });
 }
@@ -737,12 +757,21 @@ async fn run_axum_server(
 /// The HTTP server is shared across all routes on a port. Full per-route
 /// CrashNotification propagation is deferred — this provides observable
 /// structured logging as a first guard.
-async fn monitor_axum_task(handle: tokio::task::JoinHandle<()>, addr: String) {
+async fn monitor_axum_task(
+    handle: tokio::task::JoinHandle<()>,
+    addr: String,
+    runtime: Arc<dyn RuntimeObservability>,
+    route_id: String,
+) {
     match handle.await {
         Ok(()) => {
             // Clean exit (process shutdown or normal stop)
         }
         Err(join_err) => {
+            runtime
+                .metrics()
+                .increment_errors(&route_id, "e:http:server-task-exited");
+            // log-policy: outside-contract
             tracing::error!(
                 addr = %addr,
                 error = %join_err,
@@ -903,9 +932,7 @@ fn title_case_header(name: &str) -> String {
 
 pub struct HttpConsumer {
     config: HttpServerConfig,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
+    /// Runtime observability handle for ADR-0012 metrics and health calls.
     runtime: Arc<dyn RuntimeObservability>,
 }
 
@@ -927,6 +954,8 @@ impl Consumer for HttpConsumer {
                 self.config.max_request_body,
                 self.config.max_response_body,
                 self.config.max_inflight_requests,
+                self.runtime.clone(),
+                ctx.route_id().to_string(),
             )
             .await?;
 
@@ -1076,6 +1105,7 @@ impl Consumer for HttpConsumer {
                                                 ct,
                                             ),
                                             None => {
+                                                // log-policy: system-broken
                                                 tracing::error!(
                                                     "Body::Stream already consumed before HTTP reply — returning 500"
                                                 );
@@ -1177,7 +1207,8 @@ impl Consumer for HttpConsumer {
                                 }
                             }
                             Err(e) => {
-                                tracing::error!(error = %e, path = %path_clone, "Pipeline error processing HTTP request");
+                                // log-policy: handler-owned
+                                tracing::warn!(error = %e, path = %path_clone, "Pipeline error processing HTTP request");
                                 HttpReply {
                                     status: 500,
                                     headers: vec![],
@@ -1859,12 +1890,15 @@ pub(crate) static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::
 
 #[cfg(test)]
 mod tests {
-    use camel_component_api::test_support::PanicRuntimeObservability;
+    use camel_component_api::test_support::{NoopRuntimeObservability, PanicRuntimeObservability};
     fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
     }
     fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
+    }
+    fn noop_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+        std::sync::Arc::new(NoopRuntimeObservability)
     }
 
     use super::*;
@@ -2916,7 +2950,15 @@ mod tests {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
                 let registry = ServerRegistry::global()
-                    .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
+                    .get_or_spawn(
+                        "127.0.0.1",
+                        port,
+                        2 * 1024 * 1024,
+                        10 * 1024 * 1024,
+                        1024,
+                        test_rt(),
+                        "test-route".into(),
+                    )
                     .await
                     .unwrap();
                 results.lock().unwrap().push(registry);
@@ -2947,10 +2989,26 @@ mod tests {
             // Port 0 is acceptable here because the registry key uses the configured
             // tuple, not the OS-assigned ephemeral port.
             let d1 = registry
-                .get_or_spawn("127.0.0.1", 0, 1024 * 1024, 10 * 1024 * 1024, 1024)
+                .get_or_spawn(
+                    "127.0.0.1",
+                    0,
+                    1024 * 1024,
+                    10 * 1024 * 1024,
+                    1024,
+                    test_rt(),
+                    "test-route-1".into(),
+                )
                 .await;
             let d2 = registry
-                .get_or_spawn("0.0.0.0", 0, 1024 * 1024, 10 * 1024 * 1024, 1024)
+                .get_or_spawn(
+                    "0.0.0.0",
+                    0,
+                    1024 * 1024,
+                    10 * 1024 * 1024,
+                    1024,
+                    test_rt(),
+                    "test-route-2".into(),
+                )
                 .await;
             assert!(d1.is_ok());
             assert!(d2.is_ok());
@@ -2965,14 +3023,30 @@ mod tests {
         let registry = ServerRegistry::global();
         // First registration: maxRequestBody = 1 MB
         let d1 = registry
-            .get_or_spawn("127.0.0.1", 9991, 1024 * 1024, 10 * 1024 * 1024, 1024)
+            .get_or_spawn(
+                "127.0.0.1",
+                9991,
+                1024 * 1024,
+                10 * 1024 * 1024,
+                1024,
+                test_rt(),
+                "test-route".into(),
+            )
             .await;
         assert!(d1.is_ok());
 
         // Second registration on same (host,port): maxRequestBody = 2 MB
         // Expected: explicit EndpointCreationFailed about incompatible maxRequestBody
         let d2 = registry
-            .get_or_spawn("127.0.0.1", 9991, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
+            .get_or_spawn(
+                "127.0.0.1",
+                9991,
+                2 * 1024 * 1024,
+                10 * 1024 * 1024,
+                1024,
+                test_rt(),
+                "test-route-2".into(),
+            )
             .await;
         assert!(d2.is_err());
         let err = d2.unwrap_err();
@@ -2990,7 +3064,15 @@ mod tests {
         rt.block_on(async {
             // Register something on a unique port
             let d1 = ServerRegistry::global()
-                .get_or_spawn("127.0.0.1", 9992, 1024 * 1024, 10 * 1024 * 1024, 1024)
+                .get_or_spawn(
+                    "127.0.0.1",
+                    9992,
+                    1024 * 1024,
+                    10 * 1024 * 1024,
+                    1024,
+                    test_rt(),
+                    "test-route".into(),
+                )
                 .await;
             assert!(d1.is_ok());
 
@@ -3028,6 +3110,8 @@ mod tests {
             2 * 1024 * 1024,
             10 * 1024 * 1024,
             Arc::new(tokio::sync::Semaphore::new(1024)),
+            test_rt(),
+            "test-route".into(),
         ));
 
         // Wait for server to start
@@ -4527,7 +4611,13 @@ mod tests {
     async fn monitor_task_silent_on_clean_exit() {
         let handle: tokio::task::JoinHandle<()> = tokio::spawn(async {});
         // Clean exit should complete without panicking or logging errors
-        monitor_axum_task(handle, "127.0.0.1:0".to_string()).await;
+        monitor_axum_task(
+            handle,
+            "127.0.0.1:0".to_string(),
+            noop_rt(),
+            "test-monitor".into(),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -4536,7 +4626,13 @@ mod tests {
             panic!("simulated server crash");
         });
         // Should complete without panicking even though the inner task panicked
-        monitor_axum_task(handle, "127.0.0.1:9999".to_string()).await;
+        monitor_axum_task(
+            handle,
+            "127.0.0.1:9999".to_string(),
+            noop_rt(),
+            "test-monitor".into(),
+        )
+        .await;
     }
 
     // -----------------------------------------------------------------------

@@ -438,6 +438,7 @@ impl CxfBridgePool {
                             break;
                         }
                         if attempt >= MAX_RESTART_ATTEMPTS {
+                            // log-policy: system-broken
                             error!(
                                 "Max restart attempts ({}) reached — staying degraded",
                                 attempt

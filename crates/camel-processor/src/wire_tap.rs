@@ -84,7 +84,8 @@ impl Service<Exchange> for WireTapService {
                 return;
             }
             if let Err(e) = tap_endpoint.call(tap_exchange).await {
-                tracing::error!("WireTap processing error: {}", e);
+                // log-policy: handler-owned
+                tracing::warn!("WireTap processing error: {}", e);
             }
         });
 

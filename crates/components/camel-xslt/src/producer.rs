@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::OnceCell;
 use tower::Service;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Tower `Service` that applies an XSLT 3.0 transformation to each exchange.
 ///
@@ -150,7 +150,8 @@ impl Service<Exchange> for XsltProducer {
                     })
                     .await
                     .map_err(|err| {
-                        error!(error = %err, "stylesheet compilation failed");
+                        // log-policy: handler-owned
+                        warn!(error = %err, "stylesheet compilation failed");
                         err
                     })?;
 
@@ -174,7 +175,8 @@ impl Service<Exchange> for XsltProducer {
                 .await
                 .map_err(|e| {
                     let err = CamelError::ProcessorError(e.to_string());
-                    error!(error = %err, "xslt transform failed");
+                    // log-policy: handler-owned
+                    warn!(error = %err, "xslt transform failed");
                     err
                 })?;
 

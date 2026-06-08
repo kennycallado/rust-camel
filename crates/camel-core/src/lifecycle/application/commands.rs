@@ -158,6 +158,7 @@ pub(crate) async fn handle_register_internal(
         if let Some(execution) = &deps.execution
             && let Err(rollback_err) = execution.remove_route(&route_id).await
         {
+            // log-policy: system-broken
             tracing::error!(
                 route_id = %route_id,
                 persist_error = %persist_err,

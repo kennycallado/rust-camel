@@ -58,6 +58,35 @@ impl RuntimeObservability for PanicRuntimeObservability {
     }
 }
 
+/// `RuntimeObservability` stub that silently ignores all calls.
+///
+/// Use for tests that exercise observability paths (e.g., metrics or health
+/// calls on error paths) without needing to assert on the values.
+/// Contrast with `PanicRuntimeObservability` which panics on any invocation.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopRuntimeObservability;
+
+impl MetricsCollector for NoopRuntimeObservability {
+    fn record_exchange_duration(&self, _: &str, _: Duration) {}
+    fn increment_errors(&self, _: &str, _: &str) {}
+    fn increment_exchanges(&self, _: &str) {}
+    fn set_queue_depth(&self, _: &str, _: usize) {}
+    fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+}
+
+impl HealthCheckRegistry for NoopRuntimeObservability {
+    fn force_unhealthy_for_route(&self, _: &str, _: &str, _: &str) {}
+}
+
+impl RuntimeObservability for NoopRuntimeObservability {
+    fn metrics(&self) -> Arc<dyn MetricsCollector> {
+        Arc::new(*self)
+    }
+    fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+        Arc::new(*self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +95,24 @@ mod tests {
     fn panic_runtime_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<PanicRuntimeObservability>();
+    }
+
+    #[test]
+    fn noop_runtime_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<NoopRuntimeObservability>();
+    }
+
+    #[test]
+    fn noop_runtime_metrics_does_not_panic() {
+        let rt = NoopRuntimeObservability;
+        rt.metrics().increment_errors("any-route", "any-label");
+    }
+
+    #[test]
+    fn noop_runtime_health_does_not_panic() {
+        let rt = NoopRuntimeObservability;
+        rt.health()
+            .force_unhealthy_for_route("any-route", "any-name", "any-reason");
     }
 }

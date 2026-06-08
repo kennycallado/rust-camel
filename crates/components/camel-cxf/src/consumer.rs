@@ -146,6 +146,7 @@ impl Consumer for CxfConsumer {
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
 
+        let runtime = Arc::clone(&self.runtime);
         let handle: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
             let mut consecutive_transport_failures: u32 = 0;
             let mut reconnect_attempt: u32 = 0;
@@ -268,6 +269,8 @@ impl Consumer for CxfConsumer {
                                                     security_profile,
                                                 },
                                                 Err(e) => {
+                                                    runtime.metrics().increment_errors(ctx.route_id(), "b-prime:cxf:response-marshalling");
+                                                    // log-policy: outside-contract
                                                     error!("CXF consumer response body error: {e}");
                                                     ConsumerResponse {
                                                         request_id,
@@ -281,7 +284,8 @@ impl Consumer for CxfConsumer {
                                             }
                                         }
                                         Err(e) => {
-                                            error!("CXF consumer route error: {e}");
+                                            // log-policy: handler-owned
+                                            warn!("CXF consumer route error: {e}");
                                             ConsumerResponse {
                                                 request_id,
                                                 payload: vec![],

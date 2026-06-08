@@ -57,6 +57,9 @@ pub struct KafkaConsumer {
     task_handle: Option<JoinHandle<Result<(), CamelError>>>,
     /// Notified once the consumer has received its first partition assignment.
     ready: Arc<Notify>,
+    /// Set from ConsumerContext in `start()`; used for ADR-0012
+    /// `increment_errors(route_id, …)` calls in `stop()`.
+    route_id: Option<String>,
     /// Phase B will use this for `rt.metrics().increment_errors(...)` and
     /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
     #[allow(dead_code)]
@@ -73,6 +76,7 @@ impl KafkaConsumer {
             cancel_token: None,
             task_handle: None,
             ready: Arc::new(Notify::new()),
+            route_id: None,
             runtime,
         }
     }
@@ -97,8 +101,13 @@ impl Consumer for KafkaConsumer {
         let cancel_token = CancellationToken::new();
         self.cancel_token = Some(cancel_token.clone());
 
+        // Capture route_id for ADR-0012 metrics in stop().
+        self.route_id = Some(ctx.route_id().to_string());
+
         let config = self.config.clone();
         let ready = self.ready.clone();
+        let runtime = self.runtime.clone();
+        let route_id = ctx.route_id().to_string();
 
         info!(
             topic = %config.topic,
@@ -107,7 +116,14 @@ impl Consumer for KafkaConsumer {
             "Starting Kafka consumer"
         );
 
-        let handle = tokio::spawn(run_consumer_loop(config, ctx, cancel_token, ready));
+        let handle = tokio::spawn(run_consumer_loop(
+            config,
+            ctx,
+            cancel_token,
+            ready,
+            runtime,
+            route_id,
+        ));
         self.task_handle = Some(handle);
         Ok(())
     }
@@ -125,10 +141,20 @@ impl Consumer for KafkaConsumer {
                 Ok(joined) => match joined {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
+                        self.runtime.metrics().increment_errors(
+                            self.route_id.as_deref().unwrap_or("unknown-kafka"),
+                            "b-prime:kafka:poll-failed-1",
+                        );
+                        // log-policy: outside-contract
                         error!("Consumer task error: {}", e);
                         result = Err(e);
                     }
                     Err(e) => {
+                        self.runtime.metrics().increment_errors(
+                            self.route_id.as_deref().unwrap_or("unknown-kafka"),
+                            "b-prime:kafka:poll-failed-2",
+                        );
+                        // log-policy: outside-contract
                         error!("Failed to join consumer task: {}", e);
                         result = Err(CamelError::ProcessorError(format!(
                             "Consumer task panicked during shutdown: {e}"
@@ -256,6 +282,8 @@ async fn run_consumer_loop(
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
     ready: Arc<Notify>,
+    runtime: Arc<dyn RuntimeObservability>,
+    route_id: String,
 ) -> Result<(), CamelError> {
     use rdkafka::consumer::CommitMode;
 
@@ -312,6 +340,8 @@ async fn run_consumer_loop(
     // Spawn commit handler task if manual commit is enabled
     let commit_handle = if let Some(mut rx) = commit_rx {
         let consumer_for_commits = consumer.clone();
+        let commit_rt = runtime.clone();
+        let commit_route_id = route_id.clone();
         Some(tokio::spawn(async move {
             use rdkafka::TopicPartitionList;
             use rdkafka::consumer::CommitMode;
@@ -328,6 +358,10 @@ async fn run_consumer_loop(
                     if let Some(reply_tx) = req.reply_tx {
                         let _ = reply_tx.send(Err(err));
                     } else {
+                        commit_rt
+                            .metrics()
+                            .increment_errors(&commit_route_id, "b-prime:kafka:async-commit-reply");
+                        // log-policy: outside-contract
                         error!(error = %err, "Invalid topic/partition for async commit");
                     }
                     continue;
@@ -338,6 +372,10 @@ async fn run_consumer_loop(
                 if let Some(reply_tx) = req.reply_tx {
                     let _ = reply_tx.send(result);
                 } else if let Err(ref e) = result {
+                    commit_rt
+                        .metrics()
+                        .increment_errors(&commit_route_id, "b-prime:kafka:async-commit-failed");
+                    // log-policy: outside-contract
                     error!(error = %e, "Async Kafka commit failed");
                 }
             }
@@ -389,6 +427,7 @@ async fn run_consumer_loop(
                             tokio::time::sleep(delay).await;
                             attempt += 1;
                         } else {
+                            // log-policy: system-broken
                             error!(attempt, max_attempts, error = %e, "Kafka consumer exhausted reconnect attempts");
                             break;
                         }
@@ -410,11 +449,21 @@ async fn run_consumer_loop(
                             );
                             exchange.set_extension("kafka.manual_commit", Arc::new(handle));
                             if let Err(e) = ctx.send(exchange).await {
+                                runtime.metrics().increment_errors(
+                                    &route_id,
+                                    "b-prime:kafka:manual-commit-dispatch",
+                                );
+                                // log-policy: outside-contract
                                 error!(error = %e, "Failed to send exchange to pipeline");
                             }
                         } else {
                             // Auto-commit mode: dispatch then commit (at-least-once semantics)
                             if let Err(e) = ctx.send(exchange).await {
+                                runtime.metrics().increment_errors(
+                                    &route_id,
+                                    "b-prime:kafka:auto-commit-dispatch",
+                                );
+                                // log-policy: outside-contract
                                 error!(error = %e, "Failed to send exchange to pipeline");
                                 // TODO(KAFKA-012): route failed messages to DLQ after max retries.
                                 // When dlq_topic is set, produce the message to dlq_topic with
@@ -478,12 +527,27 @@ async fn run_consumer_loop(
 mod tests {
     use super::*;
     use crate::config::KafkaEndpointConfig;
-    use camel_api::{BackoffConfig, BackoffState};
-    use camel_component_api::test_support::PanicRuntimeObservability;
+    use camel_api::{BackoffConfig, BackoffState, NoOpMetrics};
+    use camel_component_api::NoOpHealthCheckRegistry;
     use rdkafka::Timestamp;
 
+    /// No-op `RuntimeObservability` for tests. Returns `NoOpMetrics` and
+    /// `NoOpHealthCheckRegistry` so `stop()` paths that call
+    /// `runtime.metrics().increment_errors(...)` do not panic.
+    struct TestRuntimeObservability;
+
+    impl camel_component_api::RuntimeObservability for TestRuntimeObservability {
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            Arc::new(NoOpMetrics)
+        }
+
+        fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {
+            Arc::new(NoOpHealthCheckRegistry)
+        }
+    }
+
     fn test_rt() -> Arc<dyn camel_component_api::RuntimeObservability> {
-        Arc::new(PanicRuntimeObservability)
+        Arc::new(TestRuntimeObservability)
     }
 
     fn make_resolved_config() -> ResolvedKafkaEndpointConfig {

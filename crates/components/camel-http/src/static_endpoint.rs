@@ -167,6 +167,8 @@ impl Consumer for HttpStaticConsumer {
                 2 * 1024 * 1024,  // max_request_body (not used for static)
                 10 * 1024 * 1024, // max_response_body (not used for static)
                 1024,             // max_inflight_requests
+                self.runtime.clone(),
+                ctx.route_id().to_string(),
             )
             .await?;
 
@@ -346,7 +348,15 @@ mod tests {
 
         // Get registry (this spawns the axum server)
         let registry = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                2 * 1024 * 1024,
+                10 * 1024 * 1024,
+                1024,
+                test_rt(),
+                "test-static".into(),
+            )
             .await
             .unwrap();
 
@@ -389,7 +399,15 @@ mod tests {
 
         // Get registry
         let registry = ServerRegistry::global()
-            .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                2 * 1024 * 1024,
+                10 * 1024 * 1024,
+                1024,
+                test_rt(),
+                "test-static".into(),
+            )
             .await
             .unwrap();
 

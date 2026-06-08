@@ -460,6 +460,7 @@ impl JmsBridgePool {
                         );
 
                         if attempt >= MAX_RESTART_ATTEMPTS {
+                            // log-policy: system-broken
                             tracing::error!(
                                 "Max restart attempts ({}) reached for broker '{}' — staying degraded",
                                 attempt,
@@ -712,13 +713,14 @@ impl Endpoint for JmsEndpoint {
 
     fn create_consumer(
         &self,
-        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(JmsConsumer::new(
             Arc::clone(&self.pool),
             self.broker_name.clone(),
             self.endpoint_config.clone(),
             self.pool.reconnect.clone(),
+            rt,
         )))
     }
 }

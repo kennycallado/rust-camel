@@ -93,6 +93,7 @@ impl OpenSearchProducer {
         let url = config.base_url();
         let parsed_url = url::Url::parse(&url).map_err(|e| {
             let err = CamelError::EndpointCreationFailed(format!("Invalid OpenSearch URL: {}", e));
+            // log-policy: system-broken
             error!(endpoint = %url, error = %e, "opensearch client init failed");
             err
         })?;
@@ -103,6 +104,7 @@ impl OpenSearchProducer {
         }
         // TODO(OS-018): AWS SigV4 signing deferred; requires AWS SDK/signing dependency.
         let transport = builder.build().map_err(|e| {
+            // log-policy: system-broken
             error!(endpoint = %url, error = %e, "opensearch client init failed");
             CamelError::EndpointCreationFailed(format!("Failed to build transport: {}", e))
         })?;

@@ -110,6 +110,7 @@ impl Lifecycle for HealthServer {
                 let _ = shutdown_rx.await;
             };
             if let Err(e) = server.with_graceful_shutdown(shutdown_future).await {
+                // log-policy: system-broken
                 tracing::error!("Health server error: {}", e);
             }
         });

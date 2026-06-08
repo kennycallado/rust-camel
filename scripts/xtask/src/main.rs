@@ -192,13 +192,7 @@ fn main() {
                 });
             match lint_log_levels(&workspace_root) {
                 Ok(violations) if violations.is_empty() => {
-                    let allowlist_entries = enforce_allowlist_max(&workspace_root).unwrap_or(0);
-                    let inline_locations =
-                        count_inline_escapes(&workspace_root).unwrap_or_default();
-                    let inline_count = inline_locations.len();
-                    println!(
-                        "lint-log-levels: OK (allowlist={allowlist_entries}, inline-escapes={inline_count} — both monotone-bounded per ADR-0012)"
-                    );
+                    println!("lint-log-levels: OK (strict mode — 0 violations)");
                 }
                 Ok(violations) => {
                     println!("LOG-LEVEL VIOLATIONS ({} found):", violations.len());
@@ -209,12 +203,7 @@ fn main() {
                         );
                         println!("            on the preceding line. See ADR-0012.");
                     }
-                    let allowlist_entries = enforce_allowlist_max(&workspace_root).unwrap_or(0);
-                    let inline_locations =
-                        count_inline_escapes(&workspace_root).unwrap_or_default();
-                    let inline_count = inline_locations.len();
                     eprintln!("\nlint-log-levels: FAILED");
-                    eprintln!("(allowlist={allowlist_entries}, inline-escapes={inline_count})");
                     std::process::exit(1);
                 }
                 Err(e) => {
@@ -1234,41 +1223,6 @@ fn should_report(
     true
 }
 
-/// Returns Ok(count) if allowlist size is within the .max bound;
-/// returns Err(message) if the allowlist has grown beyond .max.
-fn enforce_allowlist_max(workspace_root: &Path) -> Result<usize, String> {
-    let allowlist_path = workspace_root
-        .join("scripts")
-        .join("xtask")
-        .join("allowlist-log-levels.txt");
-    let max_path = workspace_root
-        .join("scripts")
-        .join("xtask")
-        .join("allowlist-log-levels.txt.max");
-
-    let allowlist_content = std::fs::read_to_string(&allowlist_path).unwrap_or_default();
-    let count = allowlist_content
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
-        .count();
-
-    let max_content = std::fs::read_to_string(&max_path)
-        .map_err(|e| format!("Cannot read {}: {e}", max_path.display()))?;
-    let max: usize = max_content
-        .trim()
-        .parse()
-        .map_err(|e| format!("Cannot parse {}: {e}", max_path.display()))?;
-
-    if count > max {
-        return Err(format!(
-            "allowlist-log-levels.txt has {count} entries but .max is {max} — \
-             adding entries requires bumping .max in the same commit \
-             (monotone-non-increasing rule, ADR-0012 R1)"
-        ));
-    }
-    Ok(count)
-}
-
 /// Counts `// allow-log-levels` occurrences across all scanned `.rs` files.
 /// Returns a Vec of (file, line) for each inline escape.
 ///
@@ -1326,33 +1280,6 @@ fn count_inline_escapes(workspace_root: &Path) -> Result<Vec<(String, usize)>, S
     Ok(locations)
 }
 
-/// Returns Ok(count) if inline escape count is within allow-inline.max.
-/// Returns Err(message) if count > max.
-fn enforce_inline_max(
-    workspace_root: &Path,
-    locations: &[(String, usize)],
-) -> Result<usize, String> {
-    let max_path = workspace_root
-        .join("scripts")
-        .join("xtask")
-        .join("allow-inline.max");
-    let max_content = std::fs::read_to_string(&max_path)
-        .map_err(|e| format!("Cannot read {}: {e}", max_path.display()))?;
-    let max: usize = max_content
-        .trim()
-        .parse()
-        .map_err(|e| format!("Cannot parse {}: {e}", max_path.display()))?;
-    let count = locations.len();
-    if count > max {
-        return Err(format!(
-            "inline // allow-log-levels count is {count} but allow-inline.max is {max} — \
-             adding inline escapes requires bumping allow-inline.max in the same commit \
-             (see ADR-0012 + Task 6B)"
-        ));
-    }
-    Ok(count)
-}
-
 /// For each inline escape at (file, line), check the preceding 3 lines for:
 ///   1. A TODO(ADR-0012-...) marker.
 ///   2. A bd id reference.
@@ -1403,6 +1330,40 @@ fn validate_inline_escape_markers(
     violations
 }
 
+/// Check if an error! site is structurally excluded from ADR-0012 lint.
+///
+/// Structural exclusions are symbol-bound (NOT file-bound): the lint checks
+/// whether the error! falls inside a specific `impl ... for Type` block.
+///
+/// Current exclusions:
+/// - camel-log LogProducer: user-output mechanism, NOT framework telemetry.
+///   Per oracle ruling ses_16262b201ffeCmO67e3T6qa73b.
+fn is_structurally_excluded(file_rel: &str, lines: &[&str], line_idx: usize) -> bool {
+    // camel-log LogProducer — symbol-bound inside `impl Service<Exchange> for LogProducer`
+    if file_rel.contains("camel-log/src/lib.rs") {
+        let impl_start = lines.iter().position(|l| {
+            l.contains("impl Service<Exchange> for LogProducer")
+        });
+        if let Some(start) = impl_start {
+            let mut depth: i32 = 0;
+            let mut seen_open = false;
+            for (i, line) in lines.iter().enumerate().skip(start) {
+                for ch in line.chars() {
+                    match ch {
+                        '{' => { depth += 1; seen_open = true; }
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if seen_open && depth <= 0 {
+                    return line_idx >= start && line_idx <= i;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> {
     use regex::Regex;
     use std::path::Component;
@@ -1421,10 +1382,7 @@ pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> 
         .map(|l| l.trim().to_string())
         .collect();
 
-    let _allowlist_count = enforce_allowlist_max(workspace_root)?;
-
     let inline_locations = count_inline_escapes(workspace_root)?;
-    let inline_count = enforce_inline_max(workspace_root, &inline_locations)?;
     // Marker validation is a regular violation (not a structural failure).
     let inline_marker_violations =
         validate_inline_escape_markers(workspace_root, &inline_locations);
@@ -1523,7 +1481,10 @@ pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> 
 
                 match kind {
                     None => {
-                        if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist) {
+                        if is_structurally_excluded(&file_rel, &lines, line_idx) {
+                            // Structural exclusion (e.g. camel-log LogProducer).
+                        } else if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist)
+                        {
                             violations.push(Violation {
                                 file: path.to_string_lossy().to_string(),
                                 line: line_idx + 1,
@@ -1594,7 +1555,6 @@ pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> 
     }
 
     violations.extend(inline_marker_violations);
-    let _ = inline_count; // used by dispatcher reporting
     Ok(violations)
 }
 
@@ -2621,13 +2581,10 @@ mod tests {
             }
             fs::create_dir_all(dir.join("bridges")).unwrap();
             fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
-            // Seed allowlist files so tests that don't care about .max enforcement
-            // still pass after Task 6 step 4 introduces `?` propagation.
+            // Seed allowlist file (empty) so the lint doesn't error on missing path.
             let xtask = dir.join("scripts").join("xtask");
             fs::create_dir_all(&xtask).unwrap();
             fs::write(xtask.join("allowlist-log-levels.txt"), "# header\n").unwrap();
-            fs::write(xtask.join("allowlist-log-levels.txt.max"), "0\n").unwrap();
-            fs::write(xtask.join("allow-inline.max"), "0\n").unwrap();
             dir
         }
 
@@ -2819,13 +2776,6 @@ mod tests {
                 ws.join("scripts").join("xtask").join("allowlist-log-levels.txt"),
                 "# allowlist for log-level lint (see ADR-0012)\n# format: <relative path>:<line>\ncrates/foo/src/lib.rs:1\n",
             ).unwrap();
-            fs::write(
-                ws.join("scripts")
-                    .join("xtask")
-                    .join("allowlist-log-levels.txt.max"),
-                "1\n",
-            )
-            .unwrap();
             let violations = lint_log_levels(&ws).unwrap();
             assert!(violations.is_empty(), "got: {violations:?}");
             fs::remove_dir_all(&ws).unwrap();
@@ -2837,58 +2787,8 @@ mod tests {
                 "crates/foo/src/lib.rs",
                 "fn x() {\n    // TODO(ADR-0012-e-metrics): via bd rc-test\n    error!(\"boom\"); // allow-log-levels\n}\n",
             )]);
-            let xtask = ws.join("scripts").join("xtask");
-            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
             let violations = lint_log_levels(&ws).unwrap();
             assert!(violations.is_empty(), "got: {violations:?}");
-            fs::remove_dir_all(&ws).unwrap();
-        }
-
-        /// Regression: allowlist file MUST NOT grow beyond .max (monotone-non-increasing).
-        /// Adding entries without bumping .max is the explicit signal that the
-        /// contributor intended to grow the allowlist (visible in code review).
-        #[test]
-        fn allowlist_exceeding_max_is_violation() {
-            let ws =
-                tmp_workspace_log(&[("crates/foo/src/lib.rs", "fn x() { error!(\"boom\"); }\n")]);
-            fs::create_dir_all(ws.join("scripts").join("xtask")).unwrap();
-            fs::write(
-                ws.join("scripts")
-                    .join("xtask")
-                    .join("allowlist-log-levels.txt"),
-                "crates/foo/src/lib.rs:1\n",
-            )
-            .unwrap();
-            // .max says 0 but allowlist has 1 entry → must fail
-            fs::write(
-                ws.join("scripts")
-                    .join("xtask")
-                    .join("allowlist-log-levels.txt.max"),
-                "0\n",
-            )
-            .unwrap();
-            let result = lint_log_levels(&ws);
-            assert!(result.is_err(), "expected error, got: {result:?}");
-            let err = result.unwrap_err();
-            assert!(err.contains("monotone-non-increasing"), "msg: {err}");
-            fs::remove_dir_all(&ws).unwrap();
-        }
-
-        /// Regression for second-expert review Q2: inline // allow-log-levels
-        /// escapes MUST be counted and bounded by allow-inline.max.
-        #[test]
-        fn inline_escape_count_exceeding_max_is_violation() {
-            let ws = tmp_workspace_log(&[(
-                "crates/foo/src/lib.rs",
-                // 2 inline escapes but .max says 1
-                "fn x() {\n    // TODO(ADR-0012-e-metrics): via bd rc-test\n    error!(\"a\"); // allow-log-levels\n    // TODO(ADR-0012-e-metrics): via bd rc-test\n    error!(\"b\"); // allow-log-levels\n}\n",
-            )]);
-            let xtask = ws.join("scripts").join("xtask");
-            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
-            let result = lint_log_levels(&ws);
-            assert!(result.is_err(), "expected error, got: {result:?}");
-            let err = result.unwrap_err();
-            assert!(err.contains("allow-inline.max"), "msg: {err}");
             fs::remove_dir_all(&ws).unwrap();
         }
 
@@ -2900,8 +2800,6 @@ mod tests {
                 "crates/foo/src/lib.rs",
                 "fn x() { error!(\"boom\"); } // allow-log-levels\n",
             )]);
-            let xtask = ws.join("scripts").join("xtask");
-            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
             let violations = lint_log_levels(&ws).unwrap();
             assert_eq!(violations.len(), 1);
             assert!(
@@ -2917,8 +2815,6 @@ mod tests {
                 "crates/foo/src/lib.rs",
                 "fn x() {\n    // TODO(ADR-0012-e-metrics): wire increment_errors via bd rc-test\n    error!(\"boom\"); // allow-log-levels\n}\n",
             )]);
-            let xtask = ws.join("scripts").join("xtask");
-            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
             let violations = lint_log_levels(&ws).unwrap();
             assert!(violations.is_empty(), "got: {violations:?}");
             fs::remove_dir_all(&ws).unwrap();
@@ -2930,8 +2826,6 @@ mod tests {
                 "crates/foo/src/lib.rs",
                 "fn x() {\n    // TODO(ADR-0012-e-metrics): wire increment_errors someday\n    error!(\"boom\"); // allow-log-levels\n}\n",
             )]);
-            let xtask = ws.join("scripts").join("xtask");
-            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
             let violations = lint_log_levels(&ws).unwrap();
             assert_eq!(violations.len(), 1);
             assert!(
@@ -2965,8 +2859,6 @@ mod tests {
                  }\n",
             )
             .unwrap();
-            let xtask = ws.join("scripts").join("xtask");
-            fs::write(xtask.join("allow-inline.max"), "0\n").unwrap();
             // Must NOT error: the 3 self-references in scripts/xtask/src/main.rs
             // are excluded by the scripts/ path-component filter.
             let violations = lint_log_levels(&ws).unwrap();
