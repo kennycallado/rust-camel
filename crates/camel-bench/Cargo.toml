@@ -17,6 +17,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+camel-language-simple.workspace = true
+camel-language-api.workspace = true
 
 [[bench]]
 name = "pipeline"
@@ -32,6 +34,10 @@ harness = false
 
 [[bench]]
 name = "body_coercion"
+harness = false
+
+[[bench]]
+name = "forced_experiment"
 harness = false
 
 [lints]
