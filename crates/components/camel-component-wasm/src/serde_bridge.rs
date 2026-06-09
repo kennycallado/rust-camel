@@ -173,7 +173,10 @@ pub fn exchange_to_wasm(exchange: &Exchange) -> Result<WasmExchange, CamelError>
 pub fn wasm_to_exchange(wasm: WasmExchange, original: &mut Exchange) {
     original.input = wasm_to_message(wasm.input);
     original.output = wasm.output.map(wasm_to_message);
-    original.properties = kv_list_to_values(wasm.properties);
+    let guest_props = kv_list_to_values(wasm.properties);
+    for (key, value) in guest_props {
+        original.properties.insert(key, value);
+    }
     original.pattern = match wasm.pattern {
         WasmPattern::InOnly => ExchangePattern::InOnly,
         WasmPattern::InOut => ExchangePattern::InOut,
@@ -395,6 +398,54 @@ mod tests {
         wasm_to_exchange(wasm, &mut target);
 
         assert_eq!(target.correlation_id, original_id);
+    }
+
+    #[test]
+    fn test_wasm_to_exchange_merges_properties_guest_does_not_echo_host_props() {
+        let mut exchange = Exchange::new(Message::new("in"));
+        exchange.set_property("hasMore", Value::String("true".into()));
+        exchange.set_property("keep", Value::Number(1.into()));
+
+        let mut wasm = exchange_to_wasm(&exchange).expect("exchange_to_wasm should succeed");
+        wasm.properties = vec![("new".into(), "2".into())];
+
+        let mut target = exchange.clone();
+        wasm_to_exchange(wasm, &mut target);
+
+        assert_eq!(
+            target.properties.get("hasMore"),
+            Some(&Value::String("true".into())),
+            "host property not touched by guest must survive"
+        );
+        assert_eq!(
+            target.properties.get("keep"),
+            Some(&Value::Number(1.into())),
+            "host property not touched by guest must survive"
+        );
+        assert_eq!(
+            target.properties.get("new"),
+            Some(&Value::Number(2.into())),
+            "guest property must be added"
+        );
+    }
+
+    #[test]
+    fn test_wasm_to_exchange_guest_overrides_host_property() {
+        let mut exchange = Exchange::new(Message::new("in"));
+        exchange.set_property("hasMore", Value::Bool(true));
+
+        let mut wasm = exchange_to_wasm(&exchange).expect("exchange_to_wasm should succeed");
+        wasm.properties = vec![("hasMore".into(), "false".into())];
+
+        let mut target = exchange.clone();
+        wasm_to_exchange(wasm, &mut target);
+
+        assert_eq!(
+            target.properties.get("hasMore"),
+            Some(&Value::Bool(false)),
+            "guest property must override host on conflict"
+        );
+        assert_eq!(target.properties.len(), 1);
     }
 
     #[test]
