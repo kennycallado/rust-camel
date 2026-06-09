@@ -28,7 +28,7 @@ fn yaml_parses_enrich_step_with_kind() {
 
 #[test]
 fn yaml_parses_poll_enrich_step_with_kind() {
-    let yaml = enrich_yaml(r#"pollEnrich: "file:/tmp/inbox?timeout=5000""#);
+    let yaml = enrich_yaml(r#"poll_enrich: "file:/tmp/inbox?timeout=5000""#);
     let result = camel_dsl::yaml::parse_yaml_to_canonical(&yaml, false);
     let err = result.unwrap_err().to_string();
     assert!(
@@ -57,7 +57,7 @@ fn yaml_parses_enrich_to_declarative_kind() {
 
 #[test]
 fn yaml_parses_poll_enrich_to_declarative_kind() {
-    let yaml = enrich_yaml(r#"pollEnrich: "file:/tmp/inbox?timeout=5000""#);
+    let yaml = enrich_yaml(r#"poll_enrich: "file:/tmp/inbox?timeout=5000""#);
     let routes = camel_dsl::yaml::parse_yaml_to_declarative(&yaml).unwrap();
     assert_eq!(routes.len(), 1);
     let route = &routes[0];
@@ -104,7 +104,7 @@ routes:
   - id: test
     from: "timer:tick"
     steps:
-      - pollEnrich:
+      - poll_enrich:
           uri: "file:/tmp/inbox"
           timeout: 5000
 "#;
@@ -135,7 +135,7 @@ fn enrich_empty_uri_fails() {
 
 #[test]
 fn poll_enrich_empty_uri_fails() {
-    let yaml = enrich_yaml(r#"pollEnrich: """#);
+    let yaml = enrich_yaml(r#"poll_enrich: """#);
     let result = camel_dsl::yaml::parse_yaml_to_declarative(&yaml);
     let err = result.unwrap_err().to_string();
     assert!(

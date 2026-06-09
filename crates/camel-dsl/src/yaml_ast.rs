@@ -640,14 +640,13 @@ pub struct EnrichStep {
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct PollEnrichStep {
-    #[serde(rename = "pollEnrich")]
     pub poll_enrich: EnrichBody,
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum EnrichBody {
-    /// Shorthand: `enrich: "file:..."` or `pollEnrich: "file:..."`
+    /// Shorthand: `enrich: "file:..."` or `poll_enrich: "file:..."`
     Uri(String),
     /// Full form: `enrich: { uri: "...", strategy: "...", timeout: ... }`
     Full(EnrichConfig),

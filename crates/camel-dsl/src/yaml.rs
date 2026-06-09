@@ -1031,7 +1031,7 @@ fn unpack_poll_enrich_body(
         EnrichBody::Uri(uri) => {
             if uri.trim().is_empty() {
                 return Err(CamelError::RouteError(
-                    "pollEnrich: URI must not be empty".into(),
+                    "poll_enrich: URI must not be empty".into(),
                 ));
             }
             Ok((uri, None, None))
@@ -1039,7 +1039,7 @@ fn unpack_poll_enrich_body(
         EnrichBody::Full(config) => {
             if config.uri.trim().is_empty() {
                 return Err(CamelError::RouteError(
-                    "pollEnrich: URI must not be empty".into(),
+                    "poll_enrich: URI must not be empty".into(),
                 ));
             }
             Ok((config.uri, config.strategy, config.timeout))

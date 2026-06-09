@@ -1,4 +1,4 @@
-# EIP-7 pollEnrich example route (YAML declaration).
+# EIP-7 poll_enrich example route (YAML declaration).
 # Equivalent to the Rust builder code in src/main.rs.
 #
 # Run with:
@@ -14,9 +14,9 @@ routes:
     from:
       uri: "timer:tick?period=1000&repeatCount=3"
     steps:
-      - pollEnrich:
+      - poll_enrich:
           uri: "file:/tmp/rust-camel-pollenrich?fileName=config.json&noop=true"
           timeout: 5000
-      - streamCache:
+      - stream_cache:
           threshold: 131072
       - to: "log:enriched?showBody=true&showHeaders=true&showCorrelationId=true"
