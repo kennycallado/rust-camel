@@ -883,6 +883,8 @@ version = "0.14.0"
 dependencies = [
  "camel-api",
  "camel-core",
+ "camel-language-api",
+ "camel-language-simple",
  "camel-processor",
  "criterion",
  "serde_json",
