@@ -94,6 +94,7 @@ pub enum FileExistStrategy {
     Fail,
     /// Skip write if file already exists.
     Ignore,
+    TryRename,
 }
 
 impl FromStr for FileExistStrategy {
@@ -105,6 +106,7 @@ impl FromStr for FileExistStrategy {
             "Append" | "append" => Ok(FileExistStrategy::Append),
             "Fail" | "fail" => Ok(FileExistStrategy::Fail),
             "Ignore" | "ignore" => Ok(FileExistStrategy::Ignore),
+            "TryRename" | "tryRename" => Ok(FileExistStrategy::TryRename),
             other => Err(format!("unknown FileExistStrategy: {other}")),
         }
     }
@@ -207,6 +209,157 @@ impl FileGlobalConfig {
 }
 
 // ---------------------------------------------------------------------------
+// CompiledFilters — precompiled file selection predicates
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CompiledFilters {
+    pub include_re: Option<Regex>,
+    pub exclude_re: Option<Regex>,
+    pub ant_include_patterns: Option<Vec<glob::Pattern>>,
+    pub ant_exclude_patterns: Option<Vec<glob::Pattern>>,
+    pub include_exts: Option<Vec<String>>,
+    pub exclude_exts: Option<Vec<String>>,
+}
+
+impl CompiledFilters {
+    pub fn compile(config: &FileConfig) -> Result<Self, CamelError> {
+        let include_re = config
+            .include
+            .as_deref()
+            .map(|p| {
+                Regex::new(p).map_err(|e| CamelError::Config(format!("invalid include regex: {e}")))
+            })
+            .transpose()?;
+        let exclude_re = config
+            .exclude
+            .as_deref()
+            .map(|p| {
+                Regex::new(p).map_err(|e| CamelError::Config(format!("invalid exclude regex: {e}")))
+            })
+            .transpose()?;
+        let ant_include_patterns = config
+            .ant_include
+            .as_deref()
+            .map(|list| {
+                list.split(',')
+                    .map(|s| {
+                        s.trim().parse::<glob::Pattern>().map_err(|e| {
+                            CamelError::Config(format!("invalid antInclude pattern '{s}': {e}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let ant_exclude_patterns = config
+            .ant_exclude
+            .as_deref()
+            .map(|list| {
+                list.split(',')
+                    .map(|s| {
+                        s.trim().parse::<glob::Pattern>().map_err(|e| {
+                            CamelError::Config(format!("invalid antExclude pattern '{s}': {e}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let include_exts = config
+            .include_ext
+            .as_deref()
+            .map(|list| list.split(',').map(|s| s.trim().to_lowercase()).collect());
+        let exclude_exts = config
+            .exclude_ext
+            .as_deref()
+            .map(|list| list.split(',').map(|s| s.trim().to_lowercase()).collect());
+        Ok(Self {
+            include_re,
+            exclude_re,
+            ant_include_patterns,
+            ant_exclude_patterns,
+            include_exts,
+            exclude_exts,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SortSpec — sort order for files (file:name, file:length, file:modified)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SortField {
+    Name,
+    Length,
+    Modified,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SortGroup {
+    pub field: SortField,
+    pub reverse: bool,
+    pub ignore_case: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SortSpec {
+    pub groups: Vec<SortGroup>,
+}
+
+impl FromStr for SortSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut groups = Vec::new();
+        for raw_group in s.split(';') {
+            let trimmed = raw_group.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut reverse = false;
+            let mut ignore_case = false;
+            let mut remaining = trimmed;
+            let mut saw_ignore_case = false;
+
+            loop {
+                if let Some(rest) = remaining.strip_prefix("reverse:") {
+                    if saw_ignore_case {
+                        return Err("sortBy: reverse must precede ignoreCase".into());
+                    }
+                    reverse = true;
+                    remaining = rest;
+                    continue;
+                }
+                if let Some(rest) = remaining.strip_prefix("ignoreCase:") {
+                    ignore_case = true;
+                    saw_ignore_case = true;
+                    remaining = rest;
+                    continue;
+                }
+                break;
+            }
+
+            let field = match remaining {
+                "file:name" => SortField::Name,
+                "file:length" => SortField::Length,
+                "file:modified" => SortField::Modified,
+                other => return Err(format!("unsupported sortBy field: '{other}'")),
+            };
+
+            groups.push(SortGroup {
+                field,
+                reverse,
+                ignore_case,
+            });
+        }
+        if groups.is_empty() {
+            return Err("sortBy must have at least one group".into());
+        }
+        Ok(SortSpec { groups })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FileConfig
 // ---------------------------------------------------------------------------
 
@@ -271,6 +424,18 @@ pub struct FileConfig {
     /// Regex pattern for excluding files (consumer).
     pub exclude: Option<String>,
 
+    /// Ant-style include pattern (comma-separated).
+    pub ant_include: Option<String>,
+
+    /// Ant-style exclude pattern (comma-separated).
+    pub ant_exclude: Option<String>,
+
+    /// File extensions to include (comma-separated).
+    pub include_ext: Option<String>,
+
+    /// File extensions to exclude (comma-separated).
+    pub exclude_ext: Option<String>,
+
     /// Whether to scan directories recursively.
     pub recursive: bool,
 
@@ -311,6 +476,13 @@ pub struct FileConfig {
 
     /// Write timeout as Duration.
     pub write_timeout: Duration,
+
+    pub max_depth: usize,
+    pub min_depth: usize,
+    pub max_messages_per_poll: i64,
+    pub eager_max_messages_per_poll: bool,
+    pub shuffle: bool,
+    pub(crate) sort_spec: Option<SortSpec>,
 }
 
 impl UriConfig for FileConfig {
@@ -411,6 +583,28 @@ impl UriConfig for FileConfig {
             read_timeout: Duration::from_millis(read_timeout_ms),
             write_timeout_ms,
             write_timeout: Duration::from_millis(write_timeout_ms),
+            max_depth: parse_u64_param(params, "maxDepth", u64::MAX)? as usize,
+            min_depth: parse_u64_param(params, "minDepth", 0)? as usize,
+            max_messages_per_poll: params
+                .get("maxMessagesPerPoll")
+                .map(|v| {
+                    v.parse::<i64>().map_err(|e| {
+                        CamelError::InvalidUri(format!("invalid value for maxMessagesPerPoll: {e}"))
+                    })
+                })
+                .transpose()?
+                .unwrap_or(0),
+            eager_max_messages_per_poll: parse_bool_param(params, "eagerMaxMessagesPerPoll", true)?,
+            ant_include: params.get("antInclude").cloned(),
+            ant_exclude: params.get("antExclude").cloned(),
+            include_ext: params.get("includeExt").cloned(),
+            exclude_ext: params.get("excludeExt").cloned(),
+            shuffle: parse_bool_param(params, "shuffle", false)?,
+            sort_spec: params
+                .get("sortBy")
+                .map(|v| v.parse::<SortSpec>())
+                .transpose()
+                .map_err(|e| CamelError::InvalidUri(format!("invalid sortBy: {e}")))?,
         };
 
         cfg.validate()
@@ -451,6 +645,12 @@ impl UriConfig for FileConfig {
             ));
         }
 
+        if self.file_exist == FileExistStrategy::TryRename && self.temp_prefix.is_none() {
+            return Err(CamelError::Config(
+                "fileExist=TryRename requires tempPrefix to be set".into(),
+            ));
+        }
+
         // Reject empty file_name
         if let Some(ref file_name) = self.file_name {
             if file_name.is_empty() {
@@ -462,6 +662,12 @@ impl UriConfig for FileConfig {
                     "file_name must not contain null bytes".into(),
                 ));
             }
+        }
+
+        if self.min_depth > self.max_depth {
+            return Err(CamelError::Config(
+                "minDepth cannot be greater than maxDepth".into(),
+            ));
         }
 
         // If starting_directory_must_exist, verify directory exists
@@ -556,12 +762,14 @@ impl Component for FileComponent {
         if let Some(ref global_config) = self.config {
             config.apply_global_defaults(global_config);
         }
+        let filters = CompiledFilters::compile(&config)?;
         let dir_path = std::path::PathBuf::from(&config.directory);
         let health_check = FileHealthCheck::new(dir_path.clone());
         ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
         Ok(Box::new(FileEndpoint {
             uri: uri.to_string(),
             config,
+            filters,
             in_process_locks: std::sync::Arc::new(DashMap::new()),
             idempotent_repo: std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         }))
@@ -575,6 +783,7 @@ impl Component for FileComponent {
 struct FileEndpoint {
     uri: String,
     config: FileConfig,
+    filters: CompiledFilters,
     in_process_locks: std::sync::Arc<DashMap<PathBuf, ()>>,
     idempotent_repo: std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
 }
@@ -590,6 +799,7 @@ impl Endpoint for FileEndpoint {
     ) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(FileConsumer::new(
             self.config.clone(),
+            self.filters.clone(),
             self.in_process_locks.clone(),
             self.idempotent_repo.clone(),
             rt,
@@ -611,6 +821,7 @@ impl Endpoint for FileEndpoint {
             self.config.clone(),
             self.in_process_locks.clone(),
             self.idempotent_repo.clone(),
+            self.filters.clone(),
         )))
     }
 }
@@ -621,11 +832,10 @@ impl Endpoint for FileEndpoint {
 
 struct FileConsumer {
     config: FileConfig,
+    filters: CompiledFilters,
     seen: HashSet<PathBuf>,
     in_process_locks: std::sync::Arc<DashMap<PathBuf, ()>>,
     idempotent_repo: std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
     #[allow(dead_code)]
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
@@ -633,12 +843,14 @@ struct FileConsumer {
 impl FileConsumer {
     fn new(
         config: FileConfig,
+        filters: CompiledFilters,
         in_process_locks: std::sync::Arc<DashMap<PathBuf, ()>>,
         idempotent_repo: std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
         runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         Self {
             config,
+            filters,
             seen: HashSet::new(),
             in_process_locks,
             idempotent_repo,
@@ -651,19 +863,6 @@ impl FileConsumer {
 impl Consumer for FileConsumer {
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
         let config = self.config.clone();
-
-        let include_re = config
-            .include
-            .as_ref()
-            .map(|p| Regex::new(p))
-            .transpose()
-            .map_err(|e| CamelError::InvalidUri(format!("invalid include regex: {e}")))?;
-        let exclude_re = config
-            .exclude
-            .as_ref()
-            .map(|p| Regex::new(p))
-            .transpose()
-            .map_err(|e| CamelError::InvalidUri(format!("invalid exclude regex: {e}")))?;
 
         if !config.initial_delay.is_zero() {
             tokio::select! {
@@ -687,8 +886,7 @@ impl Consumer for FileConsumer {
                     if let Err(e) = poll_directory(
                         &config,
                         &context,
-                        &include_re,
-                        &exclude_re,
+                        &self.filters,
                         &mut self.seen,
                         &self.in_process_locks,
                         &self.idempotent_repo,
@@ -934,6 +1132,61 @@ impl Service<Exchange> for FileProducer {
 
                     file.flush().await.map_err(CamelError::from)?;
                 }
+                FileExistStrategy::TryRename => {
+                    let prefix = config.temp_prefix.as_deref().ok_or_else(|| {
+                        CamelError::Config("fileExist=TryRename requires tempPrefix".into())
+                    })?;
+                    let temp_name = format!(
+                        "{prefix}{}",
+                        target_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    );
+                    let temp_path = target_path.with_file_name(&temp_name);
+
+                    // RAII guard ensures cleanup even on panic
+                    let mut guard = TempFileGuard::new(temp_path.clone());
+
+                    let mut temp_file = tokio::time::timeout(
+                        config.write_timeout,
+                        OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&temp_path),
+                    )
+                    .await
+                    .map_err(|_| CamelError::ProcessorError("Timeout creating temp file".into()))?
+                    .map_err(CamelError::from)?;
+                    write_body_with_charset(
+                        body,
+                        &config.charset,
+                        &mut temp_file,
+                        config.write_timeout,
+                    )
+                    .await?;
+                    temp_file.flush().await.map_err(CamelError::from)?;
+
+                    let rename_result = tokio::time::timeout(
+                        config.write_timeout,
+                        fs::rename(&temp_path, &target_path),
+                    )
+                    .await;
+
+                    match rename_result {
+                        Ok(Ok(_)) => {
+                            guard.disarm();
+                        }
+                        Ok(Err(e)) => {
+                            return Err(CamelError::from(e));
+                        }
+                        Err(_) => {
+                            return Err(CamelError::ProcessorError(
+                                "Timeout renaming temp file".into(),
+                            ));
+                        }
+                    }
+                }
                 _ => {
                     // Override (or Fail when file doesn't exist): always atomic via temp file
                     let temp_name = if let Some(ref prefix) = config.temp_prefix {
@@ -1086,7 +1339,10 @@ mod tests {
     }
 
     use super::*;
-    use crate::poll_logic::{ModificationDetectingStream, list_files};
+    use crate::poll_logic::{
+        ModificationDetectingStream, apply_sort_and_limit, list_files, poll_one_file,
+        scan_candidates,
+    };
     use bytes::Bytes;
     use camel_component_api::{Message, NoOpComponentContext, StreamBody, StreamMetadata};
     use futures::StreamExt;
@@ -1162,6 +1418,18 @@ mod tests {
     fn test_file_config_wrong_scheme() {
         let result = FileConfig::from_uri("timer:tick");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_min_depth_greater_than_max_depth_rejected() {
+        let result = FileConfig::from_uri("file:///tmp?minDepth=5&maxDepth=2");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("minDepth cannot be greater")
+        );
     }
 
     #[test]
@@ -1247,8 +1515,7 @@ mod tests {
         let token = CancellationToken::new();
         let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
 
-        let include_re = None;
-        let exclude_re = None;
+        let filters = CompiledFilters::default();
         let mut seen = std::collections::HashSet::new();
         let in_process_locks = std::sync::Arc::new(DashMap::new());
         let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
@@ -1256,8 +1523,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
-            &include_re,
-            &exclude_re,
+            &filters,
             &mut seen,
             &in_process_locks,
             &idempotent_repo,
@@ -1270,8 +1536,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
-            &include_re,
-            &exclude_re,
+            &filters,
             &mut seen,
             &in_process_locks,
             &idempotent_repo,
@@ -1299,8 +1564,7 @@ mod tests {
         let token = CancellationToken::new();
         let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
 
-        let include_re = None;
-        let exclude_re = None;
+        let filters = CompiledFilters::default();
         let mut seen = std::collections::HashSet::new();
         let in_process_locks = std::sync::Arc::new(DashMap::new());
         let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
@@ -1308,8 +1572,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
-            &include_re,
-            &exclude_re,
+            &filters,
             &mut seen,
             &in_process_locks,
             &idempotent_repo,
@@ -1324,8 +1587,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
-            &include_re,
-            &exclude_re,
+            &filters,
             &mut seen,
             &in_process_locks,
             &idempotent_repo,
@@ -1435,8 +1697,7 @@ mod tests {
         let token = CancellationToken::new();
         let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
 
-        let include_re = None;
-        let exclude_re = None;
+        let filters = CompiledFilters::default();
         let mut seen = std::collections::HashSet::new();
         let in_process_locks = std::sync::Arc::new(DashMap::new());
         let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
@@ -1444,8 +1705,7 @@ mod tests {
         poll_directory(
             &config,
             &ctx,
-            &include_re,
-            &exclude_re,
+            &filters,
             &mut seen,
             &in_process_locks,
             &idempotent_repo,
@@ -2351,6 +2611,10 @@ mod tests {
             file_name: Some("ok.txt".into()),
             include: None,
             exclude: None,
+            ant_include: None,
+            ant_exclude: None,
+            include_ext: None,
+            exclude_ext: None,
             recursive: false,
             file_exist: FileExistStrategy::Override,
             read_lock_strategy: ReadLockStrategy::None,
@@ -2364,6 +2628,12 @@ mod tests {
             read_timeout_ms: 30_000,
             write_timeout: Duration::from_millis(30_000),
             write_timeout_ms: 30_000,
+            max_depth: usize::MAX,
+            min_depth: 0,
+            max_messages_per_poll: 0,
+            eager_max_messages_per_poll: true,
+            shuffle: false,
+            sort_spec: None,
         };
 
         let result = config.validate();
@@ -2386,6 +2656,10 @@ mod tests {
             file_name: Some("foo\0bar".into()),
             include: None,
             exclude: None,
+            ant_include: None,
+            ant_exclude: None,
+            include_ext: None,
+            exclude_ext: None,
             recursive: false,
             file_exist: FileExistStrategy::Override,
             read_lock_strategy: ReadLockStrategy::None,
@@ -2399,6 +2673,12 @@ mod tests {
             read_timeout_ms: 30_000,
             write_timeout: Duration::from_millis(30_000),
             write_timeout_ms: 30_000,
+            max_depth: usize::MAX,
+            min_depth: 0,
+            max_messages_per_poll: 0,
+            eager_max_messages_per_poll: true,
+            shuffle: false,
+            sort_spec: None,
         };
         let result = config.validate();
         assert!(result.is_err(), "should reject null byte in filename");
@@ -2423,6 +2703,10 @@ mod tests {
             file_name: Some("".into()),
             include: None,
             exclude: None,
+            ant_include: None,
+            ant_exclude: None,
+            include_ext: None,
+            exclude_ext: None,
             recursive: false,
             file_exist: FileExistStrategy::Override,
             read_lock_strategy: ReadLockStrategy::None,
@@ -2436,6 +2720,12 @@ mod tests {
             read_timeout_ms: 30_000,
             write_timeout: Duration::from_millis(30_000),
             write_timeout_ms: 30_000,
+            max_depth: usize::MAX,
+            min_depth: 0,
+            max_messages_per_poll: 0,
+            eager_max_messages_per_poll: true,
+            shuffle: false,
+            sort_spec: None,
         };
         let result = config.validate();
         assert!(result.is_err(), "should reject empty filename");
@@ -2599,5 +2889,775 @@ mod tests {
             all_ok,
             "stream should complete without errors when file is not modified"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SortSpec::from_str tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sort_spec_bare_field() {
+        let spec: SortSpec = "file:name".parse().unwrap();
+        assert_eq!(spec.groups.len(), 1);
+        let g = &spec.groups[0];
+        assert_eq!(g.field, SortField::Name);
+        assert!(!g.reverse);
+        assert!(!g.ignore_case);
+    }
+
+    #[test]
+    fn test_sort_spec_reverse() {
+        let spec: SortSpec = "reverse:file:length".parse().unwrap();
+        assert_eq!(spec.groups.len(), 1);
+        let g = &spec.groups[0];
+        assert_eq!(g.field, SortField::Length);
+        assert!(g.reverse);
+        assert!(!g.ignore_case);
+    }
+
+    #[test]
+    fn test_sort_spec_ignore_case() {
+        let spec: SortSpec = "ignoreCase:file:name".parse().unwrap();
+        assert_eq!(spec.groups.len(), 1);
+        let g = &spec.groups[0];
+        assert_eq!(g.field, SortField::Name);
+        assert!(!g.reverse);
+        assert!(g.ignore_case);
+    }
+
+    #[test]
+    fn test_sort_spec_reverse_ignore_case() {
+        let spec: SortSpec = "reverse:ignoreCase:file:modified".parse().unwrap();
+        assert_eq!(spec.groups.len(), 1);
+        let g = &spec.groups[0];
+        assert_eq!(g.field, SortField::Modified);
+        assert!(g.reverse);
+        assert!(g.ignore_case);
+    }
+
+    #[test]
+    fn test_sort_spec_wrong_order_rejection() {
+        let result: Result<SortSpec, _> = "ignoreCase:reverse:file:name".parse();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("reverse must precede"),
+            "expected 'reverse must precede' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_sort_spec_multi_group() {
+        let spec: SortSpec = "file:name;reverse:file:length".parse().unwrap();
+        assert_eq!(spec.groups.len(), 2);
+        assert_eq!(spec.groups[0].field, SortField::Name);
+        assert!(!spec.groups[0].reverse);
+        assert_eq!(spec.groups[1].field, SortField::Length);
+        assert!(spec.groups[1].reverse);
+    }
+
+    #[test]
+    fn test_sort_spec_unsupported_field() {
+        let result: Result<SortSpec, _> = "file:unknown".parse();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("unsupported"),
+            "expected 'unsupported' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_sort_spec_empty_string() {
+        let result: Result<SortSpec, _> = "".parse();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("at least one group"),
+            "expected 'at least one group' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_depth_limits_recursion() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::create_dir_all(base.join("sub/deep")).await.unwrap();
+        fs::write(base.join("root.txt"), b"r").await.unwrap();
+        fs::write(base.join("sub/mid.txt"), b"m").await.unwrap();
+        fs::write(base.join("sub/deep/leaf.txt"), b"l")
+            .await
+            .unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?recursive=true&maxDepth=2",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"root.txt".to_string()));
+        assert!(names.contains(&"mid.txt".to_string()));
+        assert!(!names.contains(&"leaf.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_min_depth_skips_base_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::create_dir_all(base.join("sub")).await.unwrap();
+        fs::write(base.join("root.txt"), b"r").await.unwrap();
+        fs::write(base.join("sub/deep.txt"), b"d").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?recursive=true&minDepth=2",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert!(!names.contains(&"root.txt".to_string()));
+        assert!(names.contains(&"deep.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_include_ext_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("data.txt"), b"t").await.unwrap();
+        fs::write(base.join("data.csv"), b"c").await.unwrap();
+        fs::write(base.join("data.json"), b"j").await.unwrap();
+
+        let config =
+            FileConfig::from_uri(&format!("file://{}?includeExt=txt,csv", base.display())).unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"data.txt".to_string()));
+        assert!(names.contains(&"data.csv".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_ant_include_glob() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("report.txt"), b"r").await.unwrap();
+        fs::write(base.join("data.csv"), b"d").await.unwrap();
+        fs::write(base.join("image.png"), b"i").await.unwrap();
+
+        let config =
+            FileConfig::from_uri(&format!("file://{}?antInclude=*.txt,*.csv", base.display()))
+                .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"report.txt".to_string()));
+        assert!(names.contains(&"data.csv".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_exclude_ext_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("keep.txt"), b"k").await.unwrap();
+        fs::write(base.join("skip.log"), b"s").await.unwrap();
+
+        let config =
+            FileConfig::from_uri(&format!("file://{}?excludeExt=log", base.display())).unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 1);
+        assert!(names.contains(&"keep.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_ant_exclude_glob() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("report.txt"), b"r").await.unwrap();
+        fs::write(base.join("temp.tmp"), b"t").await.unwrap();
+
+        let config =
+            FileConfig::from_uri(&format!("file://{}?antExclude=*.tmp", base.display())).unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 1);
+        assert!(names.contains(&"report.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_done_file_consumer_skips_without_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("ready.txt"), b"ready").await.unwrap();
+        fs::write(base.join("ready.txt.done"), b"").await.unwrap();
+        fs::write(base.join("pending.txt"), b"pending")
+            .await
+            .unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?doneFileName=${{file:name}}.done",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"ready.txt".to_string()));
+        assert!(!names.contains(&"pending.txt".to_string()));
+        assert!(!names.contains(&"ready.txt.done".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_done_file_static_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("data.txt"), b"d").await.unwrap();
+        fs::write(base.join("ready"), b"").await.unwrap();
+
+        let config =
+            FileConfig::from_uri(&format!("file://{}?doneFileName=ready", base.display())).unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].path.file_name().unwrap().to_str().unwrap(),
+            "data.txt"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sort + shuffle tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_sort_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("c.txt"), b"3").await.unwrap();
+        fs::write(base.join("a.txt"), b"1").await.unwrap();
+        fs::write(base.join("b.txt"), b"2").await.unwrap();
+
+        let config =
+            FileConfig::from_uri(&format!("file://{}?sortBy=file:name", base.display())).unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let mut candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        apply_sort_and_limit(&mut candidates, &config);
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[tokio::test]
+    async fn test_sort_by_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("big.txt"), b"xxx").await.unwrap();
+        fs::write(base.join("small.txt"), b"x").await.unwrap();
+
+        let config =
+            FileConfig::from_uri(&format!("file://{}?sortBy=file:length", base.display())).unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let mut candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        apply_sort_and_limit(&mut candidates, &config);
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["small.txt", "big.txt"]);
+    }
+
+    #[tokio::test]
+    async fn test_sort_by_reverse_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("a.txt"), b"1").await.unwrap();
+        fs::write(base.join("b.txt"), b"2").await.unwrap();
+        fs::write(base.join("c.txt"), b"3").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?sortBy=reverse:file:name",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let mut candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        apply_sort_and_limit(&mut candidates, &config);
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["c.txt", "b.txt", "a.txt"]);
+    }
+
+    #[tokio::test]
+    async fn test_shuffle_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("a.txt"), b"1").await.unwrap();
+        fs::write(base.join("b.txt"), b"2").await.unwrap();
+        fs::write(base.join("c.txt"), b"3").await.unwrap();
+        fs::write(base.join("d.txt"), b"4").await.unwrap();
+
+        let config =
+            FileConfig::from_uri(&format!("file://{}?shuffle=true", base.display())).unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let mut candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        crate::poll_logic::apply_sort_and_limit(&mut candidates, &config);
+
+        let mut candidates2 =
+            crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+                .await
+                .unwrap()
+                .candidates;
+        crate::poll_logic::apply_sort_and_limit(&mut candidates2, &config);
+
+        let names1: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        let names2: Vec<&str> = candidates2
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names1, names2);
+        assert_ne!(names1, vec!["a.txt", "b.txt", "c.txt", "d.txt"]);
+    }
+
+    #[tokio::test]
+    async fn test_non_eager_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("a.txt"), b"1").await.unwrap();
+        fs::write(base.join("b.txt"), b"2").await.unwrap();
+        fs::write(base.join("c.txt"), b"3").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?maxMessagesPerPoll=2&eagerMaxMessagesPerPoll=false",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let mut candidates = crate::poll_logic::scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        assert_eq!(candidates.len(), 3);
+        crate::poll_logic::apply_sort_and_limit(&mut candidates, &config);
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_poll_one_file_sets_all_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("test.txt"), b"hello world")
+            .await
+            .unwrap();
+
+        let config = FileConfig::from_uri(&format!("file:{}?noop=true", base.display())).unwrap();
+
+        let file_path = base.join("test.txt");
+        let include_re = None;
+        let exclude_re = None;
+        let mut seen = std::collections::HashSet::new();
+        let in_process_locks = std::sync::Arc::new(DashMap::new());
+        let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+
+        let result = poll_one_file(
+            &config,
+            file_path.clone(),
+            base,
+            &include_re,
+            &exclude_re,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
+
+        let exchange = result.expect("poll_one_file should return an exchange");
+
+        let camel_file_name = exchange
+            .input
+            .header("CamelFileName")
+            .and_then(|v| v.as_str().map(String::from))
+            .expect("CamelFileName header");
+        let camel_file_name_only = exchange
+            .input
+            .header("CamelFileNameOnly")
+            .and_then(|v| v.as_str().map(String::from))
+            .expect("CamelFileNameOnly header");
+        let camel_file_absolute_path = exchange
+            .input
+            .header("CamelFileAbsolutePath")
+            .and_then(|v| v.as_str().map(String::from))
+            .expect("CamelFileAbsolutePath header");
+        exchange
+            .input
+            .header("CamelFileLength")
+            .and_then(|v| v.as_u64())
+            .expect("CamelFileLength header");
+        exchange
+            .input
+            .header("CamelFileLastModified")
+            .and_then(|v| v.as_u64())
+            .expect("CamelFileLastModified header");
+        let camel_file_path = exchange
+            .input
+            .header("CamelFilePath")
+            .and_then(|v| v.as_str().map(String::from))
+            .expect("CamelFilePath header");
+        let camel_file_parent = exchange
+            .input
+            .header("CamelFileParent")
+            .and_then(|v| v.as_str().map(String::from))
+            .expect("CamelFileParent header");
+        let camel_file_canonical_path = exchange
+            .input
+            .header("CamelFileCanonicalPath")
+            .and_then(|v| v.as_str().map(String::from))
+            .expect("CamelFileCanonicalPath header");
+        let camel_file_relative_path = exchange
+            .input
+            .header("CamelFileRelativePath")
+            .and_then(|v| v.as_str().map(String::from))
+            .expect("CamelFileRelativePath header");
+
+        assert_eq!(camel_file_name, "test.txt");
+        assert_eq!(camel_file_name_only, "test.txt");
+        assert_eq!(camel_file_relative_path, camel_file_name);
+        assert_eq!(camel_file_path, base.to_string_lossy());
+        assert_eq!(camel_file_parent, base.to_string_lossy());
+        assert!(camel_file_absolute_path.ends_with("test.txt"));
+        assert!(camel_file_canonical_path.ends_with("test.txt"));
+    }
+
+    #[test]
+    fn test_try_rename_requires_temp_prefix() {
+        let result = FileConfig::from_uri("file:///tmp?fileExist=TryRename");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("TryRename requires tempPrefix")
+        );
+    }
+
+    #[test]
+    fn test_try_rename_with_temp_prefix_ok() {
+        let result = FileConfig::from_uri("file:///tmp?fileExist=TryRename&tempPrefix=tmp_");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().file_exist, FileExistStrategy::TryRename);
+    }
+
+    #[tokio::test]
+    async fn test_try_rename_producer_writes_file() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!(
+                    "file://{}?fileExist=TryRename&tempPrefix=tmp_",
+                    base.display()
+                ),
+                &ctx,
+            )
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("hello"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("output.txt".to_string()),
+        );
+
+        producer.oneshot(exchange).await.unwrap();
+
+        let target = base.join("output.txt");
+        assert!(target.exists(), "output file should exist");
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(content, "hello");
+
+        let tmp_files: Vec<_> = std::fs::read_dir(base)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("tmp_"))
+            .collect();
+        assert!(tmp_files.is_empty(), "no temp files should remain");
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests: scan_candidates + apply_sort_and_limit pipeline
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_pipeline_sort_then_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("c.txt"), b"ccc").await.unwrap();
+        fs::write(base.join("a.txt"), b"a").await.unwrap();
+        fs::write(base.join("b.txt"), b"bb").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?sortBy=file:length&maxMessagesPerPoll=2&eagerMaxMessagesPerPoll=false",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let mut candidates = scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        apply_sort_and_limit(&mut candidates, &config);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[0].path.file_name().unwrap().to_str().unwrap(),
+            "a.txt"
+        );
+        assert_eq!(
+            candidates[1].path.file_name().unwrap().to_str().unwrap(),
+            "b.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sort_reverse_ignore_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("Alpha.txt"), b"a").await.unwrap();
+        fs::write(base.join("beta.txt"), b"b").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?sortBy=reverse:ignoreCase:file:name",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let mut candidates = scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        apply_sort_and_limit(&mut candidates, &config);
+        assert_eq!(
+            candidates[0].path.file_name().unwrap().to_str().unwrap(),
+            "beta.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_done_file_noop_no_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("data.txt"), b"d").await.unwrap();
+        fs::write(base.join("done"), b"").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?doneFileName=done&noop=true",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let candidates = scan_candidates(&config, &filters, base, &mut seen)
+            .await
+            .unwrap()
+            .candidates;
+        assert_eq!(candidates.len(), 1);
+        assert!(base.join("done").exists());
+    }
+
+    #[tokio::test]
+    async fn test_static_done_file_deleted_after_all_processed() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("data.txt"), b"d").await.unwrap();
+        fs::write(base.join("ready"), b"").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?doneFileName=ready&delete=true",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let in_process_locks = std::sync::Arc::new(DashMap::new());
+        let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
+
+        poll_directory(
+            &config,
+            &ctx,
+            &filters,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
+
+        assert!(rx.try_recv().is_ok());
+        assert!(!base.join("ready").exists());
+    }
+
+    #[tokio::test]
+    async fn test_static_done_file_not_deleted_when_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("a.txt"), b"a").await.unwrap();
+        fs::write(base.join("b.txt"), b"b").await.unwrap();
+        fs::write(base.join("ready"), b"").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?doneFileName=ready&delete=true&maxMessagesPerPoll=1&eagerMaxMessagesPerPoll=true",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let in_process_locks = std::sync::Arc::new(DashMap::new());
+        let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
+
+        poll_directory(
+            &config,
+            &ctx,
+            &filters,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
+
+        let _ = rx.try_recv();
+        assert!(base.join("ready").exists());
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_done_file_deleted_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::write(base.join("data.txt"), b"d").await.unwrap();
+        fs::write(base.join("data.txt.done"), b"").await.unwrap();
+
+        let config = FileConfig::from_uri(&format!(
+            "file://{}?doneFileName=${{file:name}}.done&delete=true",
+            base.display()
+        ))
+        .unwrap();
+        let filters = CompiledFilters::compile(&config).unwrap();
+        let mut seen = HashSet::new();
+        let in_process_locks = std::sync::Arc::new(DashMap::new());
+        let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token, "file-test-route".to_string());
+
+        poll_directory(
+            &config,
+            &ctx,
+            &filters,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
+
+        assert!(rx.try_recv().is_ok());
+        assert!(!base.join("data.txt.done").exists());
     }
 }

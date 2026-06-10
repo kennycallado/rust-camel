@@ -17,6 +17,12 @@ The File component provides file system integration for rust-camel. It can read 
 - **Streaming**: Zero-copy reads (consumer) and writes (producer) via `Body::into_async_read()`
 - **Health Check**: Async directory metadata probe for consumers
 - **Security**: Path traversal protection
+- **Done file support**: Wait for marker files before processing (`doneFileName`)
+- **Depth control**: `maxDepth`, `minDepth` for recursive traversal
+- **Glob filtering**: `antInclude`/`antExclude` with glob patterns
+- **Extension filtering**: `includeExt`/`excludeExt` with compound extension support
+- **Sorting & limiting**: `sortBy` (name/length/modified), `shuffle`, `maxMessagesPerPoll`
+- **TryRename**: Atomic write-to-temp-then-rename producer strategy
 
 ## Installation
 
@@ -47,13 +53,24 @@ file:directoryPath[?options]
 | `recursive` | `false` | Scan subdirectories |
 | `fileName` | - | Only process files matching this name |
 | `readTimeout` | `30000` | Timeout for reading files (ms) |
+| `doneFileName` | - | Done file name pattern (static or dynamic with `${file:name}` / `${file:name.noext}`). Consumer only processes files whose done marker exists |
+| `maxDepth` | `MAX` | Maximum directory traversal depth |
+| `minDepth` | `0` | Minimum depth to start accepting files |
+| `maxMessagesPerPoll` | `0` | Max files per poll (0 = unlimited). Combined with `eagerMaxMessagesPerPoll` |
+| `eagerMaxMessagesPerPoll` | `true` | If true, stop walk at limit. If false, collect all then truncate after sort |
+| `antInclude` | - | Comma-separated glob patterns to include (e.g., `*.txt,*.csv`) |
+| `antExclude` | - | Comma-separated glob patterns to exclude |
+| `includeExt` | - | Comma-separated extensions to include (e.g., `txt,csv`). Supports compound extensions (`tar.gz`) |
+| `excludeExt` | - | Comma-separated extensions to exclude |
+| `shuffle` | `false` | Randomize candidate order (deterministic seed for reproducibility) |
+| `sortBy` | - | Sort specification: `file:name`, `file:length`, `file:modified`. Prefix with `reverse:` and/or `ignoreCase:`. Multi-group with `;` |
 
 ## Producer Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `fileName` | - | Output file name (or use CamelFileName header) |
-| `fileExist` | `Override` | Strategy: Override, Append, Fail |
+| `fileExist` | `Override` | Strategy: Override, Append, Fail, Ignore, TryRename. TryRename requires `tempPrefix` |
 | `tempPrefix` | - | Temp file prefix for atomic writes |
 | `autoCreate` | `true` | Create directories automatically |
 | `writeTimeout` | `30000` | Timeout for writing files (ms) |
@@ -119,12 +136,50 @@ let route = RouteBuilder::from("direct:logs")
     .build()?;
 ```
 
-### Producer: Atomic Writes
+### Producer: Atomic Writes (TryRename)
 
 ```rust
+// Atomic write: temp file then rename. No partial files visible to consumers.
 let route = RouteBuilder::from("direct:data")
     .set_header("CamelFileName", Value::String("data.json".into()))
-    .to("file:/data/output?tempPrefix=.tmp")
+    .to("file:/data/output?fileExist=TryRename&tempPrefix=.tmp")
+    .build()?;
+```
+
+### Consumer: Done File Marker
+
+```rust
+// Only process files when a .done marker exists alongside them
+let route = RouteBuilder::from("file:/data/input?doneFileName=${file:name}.done&delete=true")
+    .to("direct:process")
+    .build()?;
+```
+
+### Consumer: Sort by File Attribute
+
+```rust
+// Process oldest files first
+let route = RouteBuilder::from("file:/data/input?sortBy=file:modified&delete=true")
+    .to("direct:process")
+    .build()?;
+
+// Process largest files first, limited to 10 per poll
+let route = RouteBuilder::from("file:/data/input?sortBy=reverse:file:length&maxMessagesPerPoll=10")
+    .to("direct:process")
+    .build()?;
+```
+
+### Consumer: Extension & Glob Filtering
+
+```rust
+// Only process CSV and TXT files
+let route = RouteBuilder::from("file:/data/input?includeExt=csv,txt&recursive=true")
+    .to("direct:process")
+    .build()?;
+
+// Glob pattern filtering with depth limit
+let route = RouteBuilder::from("file:/data/input?antInclude=report-*.txt&recursive=true&maxDepth=3")
+    .to("direct:process")
     .build()?;
 ```
 
@@ -139,6 +194,10 @@ let route = RouteBuilder::from("direct:data")
 | `CamelFileAbsolutePath` | Absolute file path |
 | `CamelFileLength` | File size in bytes |
 | `CamelFileLastModified` | Last modified timestamp |
+| `CamelFilePath` | Starting directory path |
+| `CamelFileParent` | Parent directory of the file |
+| `CamelFileCanonicalPath` | Canonical (resolved) absolute path |
+| `CamelFileRelativePath` | Relative path from starting directory |
 
 ### Producer Headers
 

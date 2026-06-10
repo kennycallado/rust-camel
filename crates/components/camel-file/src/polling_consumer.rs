@@ -12,13 +12,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use regex::Regex;
 
 use camel_component_api::endpoint::PollingConsumer;
 use camel_component_api::{CamelError, Exchange};
 
+use crate::CompiledFilters;
 use crate::FileConfig;
-use crate::poll_logic::{list_files, poll_one_file};
+use crate::poll_logic::{apply_sort_and_limit, poll_one_file, scan_candidates};
 
 /// Pull-based consumer that scans the configured directory on each call
 /// to [`receive`](PollingConsumer::receive) and returns the first matching
@@ -32,8 +32,7 @@ pub(crate) struct FilePollingConsumer {
     seen: HashSet<PathBuf>,
     in_process_locks: Arc<DashMap<PathBuf, ()>>,
     idempotent_repo: Arc<tokio::sync::Mutex<HashSet<String>>>,
-    include_re: Option<Regex>,
-    exclude_re: Option<Regex>,
+    filters: CompiledFilters,
 }
 
 impl FilePollingConsumer {
@@ -41,29 +40,14 @@ impl FilePollingConsumer {
         config: FileConfig,
         in_process_locks: Arc<DashMap<PathBuf, ()>>,
         idempotent_repo: Arc<tokio::sync::Mutex<HashSet<String>>>,
+        filters: CompiledFilters,
     ) -> Self {
-        // Compile regex patterns once at construction time.
-        let include_re = config
-            .include
-            .as_ref()
-            .map(|p| Regex::new(p))
-            .transpose()
-            .expect("invalid include regex in FileConfig"); // allow-unwrap
-
-        let exclude_re = config
-            .exclude
-            .as_ref()
-            .map(|p| Regex::new(p))
-            .transpose()
-            .expect("invalid exclude regex in FileConfig"); // allow-unwrap
-
         Self {
             config,
             seen: HashSet::new(),
             in_process_locks,
             idempotent_repo,
-            include_re,
-            exclude_re,
+            filters,
         }
     }
 }
@@ -75,15 +59,19 @@ impl PollingConsumer for FilePollingConsumer {
         let base_path = Path::new(&self.config.directory);
 
         loop {
-            let files = list_files(base_path, self.config.recursive).await?;
+            let scan_result =
+                scan_candidates(&self.config, &self.filters, base_path, &mut self.seen).await?;
 
-            for file_path in &files {
+            let mut candidates = scan_result.candidates;
+            apply_sort_and_limit(&mut candidates, &self.config);
+
+            for candidate in candidates {
                 if let Some(exchange) = poll_one_file(
                     &self.config,
-                    file_path.clone(),
+                    candidate.path,
                     base_path,
-                    &self.include_re,
-                    &self.exclude_re,
+                    &self.filters.include_re,
+                    &self.filters.exclude_re,
                     &mut self.seen,
                     &self.in_process_locks,
                     &self.idempotent_repo,
@@ -94,13 +82,11 @@ impl PollingConsumer for FilePollingConsumer {
                 }
             }
 
-            // No file matched this iteration — check timeout.
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 return Ok(None);
             }
 
-            // Sleep until deadline or the configured poll delay, whichever is sooner.
             let next = deadline.min(now + self.config.delay);
             tokio::time::sleep_until(next).await;
         }

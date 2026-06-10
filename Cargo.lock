@@ -1094,6 +1094,8 @@ dependencies = [
  "camel-language-simple",
  "dashmap 6.2.1",
  "futures",
+ "glob",
+ "rand 0.10.1",
  "regex",
  "serde",
  "serde_json",
@@ -3283,6 +3285,20 @@ dependencies = [
  "portable-atomic",
  "rand 0.10.1",
  "web-time",
+]
+
+[[package]]
+name = "file-p1-features"
+version = "0.15.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-file",
+ "camel-component-log",
+ "camel-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
