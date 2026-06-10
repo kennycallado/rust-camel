@@ -104,8 +104,8 @@ pub use runtime::{
     RuntimeQueryResult, canonical_contract_rejection_reason, canonical_contract_supports_step,
 };
 pub use splitter::{
-    AggregationStrategy, SplitExpression, SplitterConfig, split_body, split_body_json_array,
-    split_body_lines,
+    AggregationStrategy, SplitExpression, SplitterConfig, StreamingSplitExpression, split_body,
+    split_body_json_array, split_body_lines,
 };
 pub use supervision::SupervisionConfig;
 pub use throttler::{ThrottleStrategy, ThrottlerConfig};

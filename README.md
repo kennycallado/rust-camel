@@ -167,7 +167,7 @@ cargo run
 | `camel-config`              | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                                                                  |
 | `camel-builder`             | Fluent `RouteBuilder` API                                                                                                                                                         |
 | `camel-component`           | `Component`, `Endpoint`, `Consumer` traits                                                                                                                                        |
-| `camel-processor`           | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody`, `Marshal`/`Unmarshal` + Tower `Layer` types                         |
+| `camel-processor`           | EIP processors: `Filter`, `Choice`, `Splitter`, `StreamingSplitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody`, `Marshal`/`Unmarshal` + Tower `Layer` types                         |
 | `camel-endpoint`            | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config                                                                                               |
 | `camel-endpoint-macros`     | Proc-macro crate backing `#[derive(UriConfig)]`                                                                                                                                   |
 | `camel-wit`                 | WIT interface definitions crate for camel plugins                                                                                                                                  |
@@ -235,10 +235,10 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 | Filter               | `.filter(predicate)`                 | Forward exchange only when predicate is true                                                                   |
 | Load Balancer        | `.load_balance()`                    | Distribute across endpoints with RoundRobin/Random/Weighted/Failover                                           |
 | Loop                 | `.loop_count(n)` / `loop:`           | Iterate a sub-pipeline N times or while a predicate holds true                                                 |
-| Marshal / Unmarshal  | `.marshal(fmt)` / `.unmarshal(fmt)`  | Serialize/deserialize bodies using pluggable data formats (JSON, XML)                                          |
+| Marshal / Unmarshal  | `.marshal(fmt)` / `.unmarshal(fmt)`  | Serialize/deserialize bodies using pluggable data formats (JSON, XML, ZIP)                                     |
 | Multicast            | `.multicast()`                       | Send the same exchange to multiple endpoints                                                                   |
 | RecipientList        | `.recipient_list(config)`            | Dynamically resolve endpoint URIs from an expression at runtime                                                |
-| Splitter             | `.split(config)`                     | Split one exchange into multiple fragments                                                                     |
+| Splitter             | `.split(config)`                     | Split one exchange into multiple fragments (body lines, ZIP entries)                                           |
 | Stream Cache         | `.stream_cache(n)` / `stream_cache:` | Materialize `Body::Stream` into `Body::Bytes` with configurable threshold (128 KB default)                     |
 | Throttler            | `.throttle(n, duration)`             | Rate limiting with Delay/Reject/Drop strategies                                                                |
 | WireTap              | `.wire_tap(uri)`                     | Fire-and-forget copy to a tap endpoint                                                                         |

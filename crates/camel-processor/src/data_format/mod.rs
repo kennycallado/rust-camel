@@ -1,8 +1,10 @@
 mod json;
 mod xml;
+mod zip;
 
 pub use json::JsonDataFormat;
 pub use xml::XmlDataFormat;
+pub use zip::ZipDataFormat;
 
 use camel_api::DataFormat;
 use std::sync::Arc;
@@ -11,6 +13,7 @@ pub fn builtin_data_format(name: &str) -> Option<Arc<dyn DataFormat>> {
     match name {
         "json" => Some(Arc::new(JsonDataFormat)),
         "xml" => Some(Arc::new(XmlDataFormat)),
+        "zip" => Some(Arc::new(ZipDataFormat::default())),
         _ => None,
     }
 }

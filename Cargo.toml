@@ -126,6 +126,8 @@ sha2 = "0.11"
 hex = "0.4"
 flate2 = "1"
 tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+async-stream = "0.3"
 dirs = "6"
 regex = "1"
 redb = "4"

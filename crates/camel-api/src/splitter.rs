@@ -1,4 +1,7 @@
+use std::pin::Pin;
 use std::sync::Arc;
+
+use futures::Stream;
 
 use crate::body::Body;
 use crate::error::CamelError;
@@ -7,6 +10,18 @@ use crate::message::Message;
 
 /// A function that splits a single exchange into multiple fragment exchanges.
 pub type SplitExpression = Arc<dyn Fn(&Exchange) -> Vec<Exchange> + Send + Sync>;
+
+/// A function that lazily produces a stream of exchange fragments.
+///
+/// Used by [`StreamingSplitterService`] for v1 sequential streaming split
+/// (e.g., ZIP entry extraction, CSV/JSON streaming in future work).
+///
+/// Each call returns a `Stream` that yields fragments one at a time.
+pub type StreamingSplitExpression = Arc<
+    dyn Fn(Exchange) -> Pin<Box<dyn Stream<Item = Result<Exchange, CamelError>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Strategy for aggregating fragment results back into a single exchange.
 #[derive(Clone, Default)]

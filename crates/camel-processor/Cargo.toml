@@ -16,6 +16,7 @@ camel-api.workspace = true
 camel-component-api.workspace = true
 camel-language-api.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 futures = "0.3"
 serde_json.workspace = true
 thiserror.workspace = true
@@ -24,9 +25,10 @@ tokio-util.workspace = true
 tower.workspace = true
 tracing.workspace = true
 rand.workspace = true
+zip.workspace = true
+async-stream.workspace = true
 
 [dev-dependencies]
-bytes.workspace = true
 criterion.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
