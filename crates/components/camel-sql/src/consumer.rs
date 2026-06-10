@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use camel_api::datasource::DatasourceCatalog;
 use futures::TryStreamExt;
 use serde_json::Value as JsonValue;
 use sqlx::AnyPool;
@@ -52,7 +53,8 @@ fn record_post_process_failure(
 
 pub struct SqlConsumer {
     pub(crate) config: SqlEndpointConfig,
-    pub(crate) pool: Arc<OnceCell<AnyPool>>,
+    pub(crate) pool: Arc<OnceCell<Arc<AnyPool>>>,
+    pub(crate) catalog: Option<Arc<dyn DatasourceCatalog>>,
     stopped: bool,
     /// Runtime observability for metrics and health — used by the
     /// `record_post_process_failure` helper for ADR-0012 (b′) metric calls.
@@ -62,12 +64,14 @@ pub struct SqlConsumer {
 impl SqlConsumer {
     pub fn new(
         config: SqlEndpointConfig,
-        pool: Arc<OnceCell<AnyPool>>,
+        pool: Arc<OnceCell<Arc<AnyPool>>>,
+        catalog: Option<Arc<dyn DatasourceCatalog>>,
         runtime: Arc<dyn RuntimeObservability>,
     ) -> Self {
         Self {
             config,
             pool,
+            catalog,
             stopped: false,
             runtime,
         }
@@ -387,13 +391,21 @@ impl Consumer for SqlConsumer {
 
         // Step 1: Initialize the connection pool
         let route_id = context.route_id().to_string();
+        let catalog = self.catalog.clone();
+        let ds_name = self.config.datasource_name.clone();
+
+        // SQL-014: resolve file-based query before pool init, regardless of pool source
+        self.config.resolve_defaults();
+        self.config.resolve_file_query().await?;
+
         let pool = self
             .pool
             .get_or_try_init(|| async {
-                // Defensive: ensure config is resolved even if caller didn't use create_endpoint
-                self.config.resolve_defaults();
-                // SQL-014: resolve file-based query asynchronously (not blocking)
-                self.config.resolve_file_query().await?;
+                // Catalog path: resolve shared pool from the datasource catalog
+                if let (Some(ref cat), Some(ref name)) = (catalog, ds_name) {
+                    let handle = cat.get_pool(name).await?;
+                    return handle.downcast::<AnyPool>();
+                }
 
                 // Install all compiled-in sqlx drivers so AnyPool can resolve them.
                 // This is idempotent; safe to call multiple times.
@@ -422,16 +434,19 @@ impl Consumer for SqlConsumer {
                     "SQL consumer pool initializing"
                 );
                 let retry_policy = &self.config.retry;
-                retry_async::<_, _, _, _, sqlx::Error>(
+                let pool = retry_async::<_, _, _, _, sqlx::Error>(
                     retry_policy,
                     Some("sql-consumer"),
                     || {
-                        AnyPoolOptions::new()
-                            .max_connections(max_conn)
-                            .min_connections(min_conn)
-                            .idle_timeout(Duration::from_secs(idle_timeout))
-                            .max_lifetime(Duration::from_secs(max_lifetime))
-                            .connect(&db_url)
+                        async {
+                            AnyPoolOptions::new()
+                                .max_connections(max_conn)
+                                .min_connections(min_conn)
+                                .idle_timeout(Duration::from_secs(idle_timeout))
+                                .max_lifetime(Duration::from_secs(max_lifetime))
+                                .connect(&db_url)
+                                .await
+                        }
                     },
                     is_retryable_sqlx_error,
                 )
@@ -448,7 +463,8 @@ impl Consumer for SqlConsumer {
                         "Failed to connect to database: {}",
                         e
                     ))
-                })
+                })?;
+                Ok(Arc::new(pool))
             })
             .await?;
 
@@ -541,7 +557,7 @@ impl Consumer for SqlConsumer {
                 }
                 _ = tokio::time::sleep(Duration::from_millis(self.config.delay_ms)) => {
                     poll_count += 1;
-                    self.handle_poll_result(pool, &context, &template).await;
+                    self.handle_poll_result(pool.as_ref(), &context, &template).await;
                 }
             }
         }
@@ -701,7 +717,7 @@ mod tests {
 
     #[test]
     fn consumer_concurrency_model() {
-        let c = SqlConsumer::new(config(), Arc::new(OnceCell::new()), test_rt());
+        let c = SqlConsumer::new(config(), Arc::new(OnceCell::new()), None, test_rt());
         assert_eq!(c.concurrency_model(), ConcurrencyModel::Sequential);
     }
 
@@ -711,7 +727,7 @@ mod tests {
             "sql:select * from t?db_url=postgres://localhost/test&delay=2000&onConsume=update t set done=true"
         ).unwrap();
         config.resolve_defaults();
-        let c = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let c = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         assert_eq!(c.config.delay_ms, 2000);
         assert!(c.config.on_consume.is_some());
     }
@@ -727,7 +743,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -772,7 +788,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -818,7 +834,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -868,7 +884,7 @@ mod tests {
         // Deliberately NOT calling resolve_defaults() — pool fields remain None
         assert!(config.max_connections.is_none());
 
-        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), test_rt());
+        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), None, test_rt());
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
             while let Some(env) = rx.recv().await {
@@ -905,9 +921,9 @@ mod tests {
         config.resolve_defaults();
 
         let pool_cell = Arc::new(OnceCell::new());
-        pool_cell.set(pool.clone()).unwrap();
+        pool_cell.set(Arc::new(pool.clone())).unwrap();
 
-        let mut consumer = SqlConsumer::new(config, pool_cell, test_rt());
+        let mut consumer = SqlConsumer::new(config, pool_cell, None, test_rt());
         consumer.stop().await.expect("stop should succeed");
 
         // After stop, the pool should be closed
@@ -928,9 +944,9 @@ mod tests {
         config.resolve_defaults();
 
         let pool_cell = Arc::new(OnceCell::new());
-        pool_cell.set(pool.clone()).unwrap();
+        pool_cell.set(Arc::new(pool.clone())).unwrap();
 
-        let mut consumer = SqlConsumer::new(config, pool_cell, test_rt());
+        let mut consumer = SqlConsumer::new(config, pool_cell, None, test_rt());
         consumer.stop().await.expect("first stop should succeed");
         consumer
             .stop()
@@ -949,9 +965,9 @@ mod tests {
         config.resolve_defaults();
 
         let pool_cell = Arc::new(OnceCell::new());
-        pool_cell.set(pool.clone()).unwrap();
+        pool_cell.set(Arc::new(pool.clone())).unwrap();
 
-        let mut consumer = SqlConsumer::new(config, pool_cell, test_rt());
+        let mut consumer = SqlConsumer::new(config, pool_cell, None, test_rt());
         consumer.stop().await.expect("stop should succeed");
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -986,7 +1002,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -1039,7 +1055,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -1085,7 +1101,7 @@ mod tests {
     async fn bridge_error_handler_routes_poll_errors_to_exchange_error() {
         let mut config = config();
         config.bridge_error_handler = true;
-        let consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), None, test_rt());
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
         tokio::spawn(async move {
@@ -1121,7 +1137,7 @@ mod tests {
         // Query a non-existent table to trigger a query-failure poll error.
         config.query = "select * from nonexistent_table".to_string();
         config.resolve_defaults();
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         // Healthy downstream — replies Ok so bridge_poll_error succeeds
@@ -1183,6 +1199,7 @@ mod tests {
         let consumer = SqlConsumer::new(
             config.clone(),
             Arc::new(OnceCell::new()),
+            None,
             Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new())))),
         );
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
@@ -1222,6 +1239,7 @@ mod tests {
         let consumer = SqlConsumer::new(
             config.clone(),
             Arc::new(OnceCell::new()),
+            None,
             Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new())))),
         );
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
@@ -1263,7 +1281,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, rx) = mpsc::channel::<ExchangeEnvelope>(8);
@@ -1338,7 +1356,7 @@ mod tests {
         .unwrap();
         config.resolve_defaults();
 
-        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), test_rt());
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
         let template = parse_query_template(&config.query, config.placeholder).unwrap();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1445,7 +1463,7 @@ mod tests {
         config.idle_timeout_secs = Some(300);
         config.max_lifetime_secs = Some(1800);
 
-        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), rt);
+        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()), None, rt);
 
         let (tx, _rx) = mpsc::channel(8);
         let ctx = ConsumerContext::new(

@@ -48,6 +48,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
         security: SecurityConfig::default(),
+        datasources: HashMap::new(),
         _extra: HashMap::new(),
     }
 }

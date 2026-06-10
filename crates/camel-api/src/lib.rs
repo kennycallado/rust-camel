@@ -13,6 +13,7 @@ pub mod body;
 pub mod body_converter;
 pub mod circuit_breaker;
 pub mod data_format;
+pub mod datasource;
 pub mod declarative;
 pub mod delayer;
 pub mod dynamic_router;
@@ -54,6 +55,9 @@ pub use body::{Body, BoxAsyncRead, StreamBody, StreamMetadata};
 pub use body_converter::{BodyType, convert as convert_body};
 pub use circuit_breaker::CircuitBreakerConfig;
 pub use data_format::DataFormat;
+pub use datasource::{
+    DatasourceCatalog, DatasourceConfig, DatasourceHandle, PoolFactory, ResourceRef,
+};
 pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use delayer::DelayConfig;
 pub use dynamic_router::{DynamicRouterConfig, RouterExpression};

@@ -1,5 +1,6 @@
 use crate::PropertiesResolver;
 use camel_api::CamelError;
+use camel_api::datasource::DatasourceConfig;
 use camel_core::TracerConfig;
 use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,9 @@ pub struct CamelConfig {
 
     #[serde(default)]
     pub security: SecurityConfig,
+
+    #[serde(default)]
+    pub datasources: HashMap<String, DatasourceConfig>,
 
     /// Catch-all for extra keys injected by config sources (e.g. CAMEL_* env vars)
     /// or unknown fields in TOML. Nested structs use `deny_unknown_fields` to
@@ -125,6 +129,7 @@ impl CamelConfigBuilder {
             stream_caching: defaults.stream_caching,
             beans: defaults.beans,
             security: defaults.security,
+            datasources: defaults.datasources,
             _extra: defaults._extra,
         }
     }
@@ -147,6 +152,7 @@ impl Default for CamelConfig {
             stream_caching: StreamCachingConfig::default(),
             beans: HashMap::new(),
             security: SecurityConfig::default(),
+            datasources: HashMap::new(),
             _extra: HashMap::new(),
         }
     }
@@ -1047,6 +1053,11 @@ impl CamelConfig {
                 return Err(CamelError::Config(
                     "platform.jitter_factor must be between 0.0 and 1.0".to_string(),
                 ));
+            }
+        }
+        for (name, ds) in &self.datasources {
+            if let Err(e) = ds.validate() {
+                return Err(CamelError::Config(format!("datasource '{}': {}", name, e)));
             }
         }
         Ok(())
@@ -2253,6 +2264,56 @@ mod config_validation_tests {
         "#;
         let cfg: BeanConfig = toml::from_str(toml_str).expect("deserialize");
         assert_eq!(cfg.limits, crate::wasm_limits::WasmLimitsConfig::default());
+    }
+
+    #[test]
+    fn test_config_invalid_datasource_rejected() {
+        let mut datasources = HashMap::new();
+        datasources.insert(
+            "bad".to_string(),
+            DatasourceConfig {
+                db_url: "  ".into(),
+                provider: None,
+                max_connections: None,
+                min_connections: None,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                ssl_mode: None,
+                ssl_root_cert: None,
+                ssl_cert: None,
+                ssl_key: None,
+            },
+        );
+        let config = CamelConfig {
+            datasources,
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_valid_datasources_pass() {
+        let mut datasources = HashMap::new();
+        datasources.insert(
+            "orders".to_string(),
+            DatasourceConfig {
+                db_url: "postgres://localhost/orders".into(),
+                provider: None,
+                max_connections: Some(20),
+                min_connections: None,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                ssl_mode: None,
+                ssl_root_cert: None,
+                ssl_cert: None,
+                ssl_key: None,
+            },
+        );
+        let config = CamelConfig {
+            datasources,
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_ok());
     }
 }
 

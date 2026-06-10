@@ -25,8 +25,8 @@ use camel_processor::data_format::ZipDataFormat;
 use camel_processor::log::LogLevel;
 use camel_processor::streaming_splitter::StreamingSplitterService;
 use camel_processor::zip_splitter::{
-    CAMEL_ZIP_ENTRY_INDEX, CAMEL_ZIP_ENTRY_NAME, CAMEL_ZIP_ENTRY_PATH,
-    CAMEL_ZIP_ENTRY_SIZE, ZipSplitConfig, zip_splitter,
+    CAMEL_ZIP_ENTRY_INDEX, CAMEL_ZIP_ENTRY_NAME, CAMEL_ZIP_ENTRY_PATH, CAMEL_ZIP_ENTRY_SIZE,
+    ZipSplitConfig, zip_splitter,
 };
 use std::io::Write;
 
@@ -39,9 +39,13 @@ fn create_multi_entry_zip() -> Vec<u8> {
         writer.start_file("hello.txt", options).unwrap(); // allow-unwrap
         writer.write_all(b"Hello from ZIP!").unwrap(); // allow-unwrap
         writer.start_file("data/report.csv", options).unwrap(); // allow-unwrap
-        writer.write_all(b"name,amount\nalice,100\nbob,200").unwrap(); // allow-unwrap
+        writer
+            .write_all(b"name,amount\nalice,100\nbob,200")
+            .unwrap(); // allow-unwrap
         writer.start_file("config.json", options).unwrap(); // allow-unwrap
-        writer.write_all(br#"{"version":"1.0","debug":true}"#).unwrap(); // allow-unwrap
+        writer
+            .write_all(br#"{"version":"1.0","debug":true}"#)
+            .unwrap(); // allow-unwrap
         writer.finish().unwrap(); // allow-unwrap
     }
     buf
@@ -80,7 +84,10 @@ async fn main() -> Result<(), CamelError> {
     // Route 2: Multi-entry ZIP split with StreamingSplitterService
     // =========================================================================
     let zip_data = create_multi_entry_zip();
-    println!("\nRoute 2: Created multi-entry ZIP ({} bytes)", zip_data.len());
+    println!(
+        "\nRoute 2: Created multi-entry ZIP ({} bytes)",
+        zip_data.len()
+    );
     println!("  Entries: hello.txt, data/report.csv, config.json\n");
 
     let config = ZipSplitConfig {
@@ -160,7 +167,10 @@ async fn main() -> Result<(), CamelError> {
         .marshal("zip")?
         .log("Route 3: After marshal to ZIP", LogLevel::Info)
         .unmarshal("zip")?
-        .log("Route 3: After unmarshal from ZIP (round-trip!)", LogLevel::Info)
+        .log(
+            "Route 3: After unmarshal from ZIP (round-trip!)",
+            LogLevel::Info,
+        )
         .to("log:zip-result?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;

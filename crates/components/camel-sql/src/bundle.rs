@@ -6,6 +6,7 @@ use crate::{SqlComponent, config::SqlGlobalConfig};
 
 pub struct SqlBundle {
     config: SqlGlobalConfig,
+    catalog: Option<Arc<dyn camel_api::datasource::DatasourceCatalog>>,
 }
 
 impl ComponentBundle for SqlBundle {
@@ -17,11 +18,34 @@ impl ComponentBundle for SqlBundle {
         let config: SqlGlobalConfig = value
             .try_into()
             .map_err(|e: toml::de::Error| CamelError::Config(e.to_string()))?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            catalog: None,
+        })
     }
 
     fn register_all(self, ctx: &mut dyn ComponentRegistrar) {
-        ctx.register_component_dyn(Arc::new(SqlComponent::with_config(self.config)));
+        let component = match self.catalog {
+            Some(catalog) => SqlComponent::with_config_and_catalog(self.config, catalog),
+            None => SqlComponent::with_config(self.config),
+        };
+        ctx.register_component_dyn(Arc::new(component));
+    }
+}
+
+impl SqlBundle {
+    pub fn with_catalog(
+        mut self,
+        catalog: Arc<dyn camel_api::datasource::DatasourceCatalog>,
+    ) -> Self {
+        if let Err(e) =
+            catalog.register_factory("sqlx", Arc::new(crate::pool_factory::SqlPoolFactory))
+        {
+            // log-policy: outside-contract
+            tracing::warn!("failed to register sqlx pool factory: {}", e);
+        }
+        self.catalog = Some(catalog);
+        self
     }
 }
 

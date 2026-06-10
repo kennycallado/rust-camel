@@ -4,12 +4,14 @@ pub mod consumer;
 pub mod endpoint;
 pub mod headers;
 pub mod health;
+pub mod pool_factory;
 pub mod producer;
 pub mod query;
 pub(crate) mod utils;
 
 use std::sync::Arc;
 
+use camel_api::datasource::DatasourceCatalog;
 use camel_component_api::CamelError;
 use camel_component_api::UriConfig;
 use camel_component_api::{Component, Endpoint};
@@ -23,23 +25,47 @@ pub use config::{
 };
 pub use health::SqlHealthCheck;
 
+type SharedPool = Arc<OnceCell<Arc<AnyPool>>>;
+
 pub struct SqlComponent {
     config: Option<SqlGlobalConfig>,
+    catalog: Option<Arc<dyn DatasourceCatalog>>,
 }
 
 impl SqlComponent {
     pub fn new() -> Self {
-        Self { config: None }
+        Self {
+            config: None,
+            catalog: None,
+        }
     }
 
     pub fn with_config(config: SqlGlobalConfig) -> Self {
         Self {
             config: Some(config),
+            catalog: None,
         }
     }
 
     pub fn with_optional_config(config: Option<SqlGlobalConfig>) -> Self {
-        Self { config }
+        Self {
+            config,
+            catalog: None,
+        }
+    }
+
+    pub fn with_config_and_catalog(
+        config: SqlGlobalConfig,
+        catalog: Arc<dyn DatasourceCatalog>,
+    ) -> Self {
+        Self {
+            config: Some(config),
+            catalog: Some(catalog),
+        }
+    }
+
+    pub fn catalog(&self) -> Option<&Arc<dyn DatasourceCatalog>> {
+        self.catalog.as_ref()
     }
 }
 
@@ -60,19 +86,46 @@ impl Component for SqlComponent {
         ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = SqlEndpointConfig::from_uri(uri)?;
+
+        if config.datasource_name.is_some() && self.catalog.is_none() {
+            return Err(CamelError::Config(
+                "datasource parameter requires catalog — no datasource catalog configured".into(),
+            ));
+        }
+
+        if let Some(ref ds_name) = config.datasource_name
+            && let Some(ref catalog) = self.catalog
+        {
+            let ds_config = catalog.get_config(ds_name).ok_or_else(|| {
+                CamelError::Config(format!("datasource '{}' not found in catalog", ds_name))
+            })?;
+            config.db_url = ds_config.db_url;
+        }
+
         if let Some(ref global_config) = self.config {
             config.apply_defaults(global_config);
         }
         config.resolve_defaults();
-        let pool = Arc::new(OnceCell::<AnyPool>::new());
+        let pool: SharedPool = Arc::new(OnceCell::new());
         let health_check = SqlHealthCheck::new(Arc::clone(&pool));
         ctx.register_current_route_health_check(Arc::new(health_check));
 
-        Ok(Box::new(endpoint::SqlEndpoint::new_with_pool(
-            uri.to_string(),
-            config,
-            pool,
-        )))
+        if config.datasource_name.is_some()
+            && let Some(ref catalog) = self.catalog
+        {
+            Ok(Box::new(endpoint::SqlEndpoint::new_with_pool_and_catalog(
+                uri.to_string(),
+                config,
+                pool,
+                Arc::clone(catalog),
+            )))
+        } else {
+            Ok(Box::new(endpoint::SqlEndpoint::new_with_pool(
+                uri.to_string(),
+                config,
+                pool,
+            )))
+        }
     }
 }
 

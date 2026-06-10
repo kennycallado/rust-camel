@@ -288,8 +288,10 @@ impl SqlGlobalConfig {
 #[derive(Clone)]
 pub struct SqlEndpointConfig {
     // Connection
-    /// Database connection URL (required).
+    /// Database connection URL (optional when datasource_name is set).
     pub db_url: String,
+    /// Named datasource reference (from CamelConfig.datasources).
+    pub datasource_name: Option<String>,
     /// Maximum connections in the pool. None = use global default.
     pub max_connections: Option<u32>,
     /// Minimum connections in the pool. None = use global default.
@@ -399,6 +401,7 @@ impl std::fmt::Debug for SqlEndpointConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SqlEndpointConfig")
             .field("db_url", &redact_db_url(&self.db_url))
+            .field("datasource_name", &self.datasource_name)
             .field("max_connections", &self.max_connections)
             .field("min_connections", &self.min_connections)
             .field("idle_timeout_secs", &self.idle_timeout_secs)
@@ -542,11 +545,27 @@ pub fn enrich_db_url_with_ssl(
     db_url: &str,
     config: &SqlEndpointConfig,
 ) -> Result<String, CamelError> {
+    enrich_db_url_with_ssl_params(
+        db_url,
+        config.ssl_mode.as_deref(),
+        config.ssl_root_cert.as_deref(),
+        config.ssl_cert.as_deref(),
+        config.ssl_key.as_deref(),
+    )
+}
+
+pub(crate) fn enrich_db_url_with_ssl_params(
+    db_url: &str,
+    ssl_mode: Option<&str>,
+    ssl_root_cert: Option<&str>,
+    ssl_cert: Option<&str>,
+    ssl_key: Option<&str>,
+) -> Result<String, CamelError> {
     let ssl_params: Vec<(&str, &str)> = [
-        config.ssl_mode.as_deref().map(|v| ("sslMode", v)),
-        config.ssl_root_cert.as_deref().map(|v| ("sslRootCert", v)),
-        config.ssl_cert.as_deref().map(|v| ("sslCert", v)),
-        config.ssl_key.as_deref().map(|v| ("sslKey", v)),
+        ssl_mode.map(|v| ("sslMode", v)),
+        ssl_root_cert.map(|v| ("sslRootCert", v)),
+        ssl_cert.map(|v| ("sslCert", v)),
+        ssl_key.map(|v| ("sslKey", v)),
     ]
     .into_iter()
     .flatten()
@@ -637,11 +656,11 @@ impl UriConfig for SqlEndpointConfig {
             (parts.path.clone(), None)
         };
 
-        // Required parameter: db_url
-        let db_url = params
-            .get("db_url")
-            .ok_or_else(|| CamelError::Config("db_url parameter is required".to_string()))?
-            .clone();
+        // Optional parameter: db_url (required when datasource is not set)
+        let db_url = params.get("db_url").cloned().unwrap_or_default();
+
+        // Named datasource reference (from CamelConfig.datasources)
+        let datasource_name = params.get("datasource").cloned();
 
         // Connection parameters - None when not set by URI param
         let max_connections = params.get("maxConnections").and_then(|v| v.parse().ok());
@@ -847,8 +866,58 @@ impl UriConfig for SqlEndpointConfig {
             retry_set_from_uri = true;
         }
 
+        if datasource_name.is_none() && db_url.is_empty() {
+            return Err(CamelError::Config(
+                "either 'datasource' or 'db_url' parameter is required".to_string(),
+            ));
+        }
+
+        if datasource_name.is_some() && !db_url.is_empty() {
+            return Err(CamelError::InvalidUri(
+                "'db_url' not allowed with named datasource — use 'datasource' alone".to_string(),
+            ));
+        }
+
+        if datasource_name.is_some() {
+            let overrides: Vec<&str> = {
+                let mut v = Vec::new();
+                if max_connections.is_some() {
+                    v.push("maxConnections");
+                }
+                if min_connections.is_some() {
+                    v.push("minConnections");
+                }
+                if idle_timeout_secs.is_some() {
+                    v.push("idleTimeoutSecs");
+                }
+                if max_lifetime_secs.is_some() {
+                    v.push("maxLifetimeSecs");
+                }
+                if ssl_mode.is_some() {
+                    v.push("sslMode");
+                }
+                if ssl_root_cert.is_some() {
+                    v.push("sslRootCert");
+                }
+                if ssl_cert.is_some() {
+                    v.push("sslCert");
+                }
+                if ssl_key.is_some() {
+                    v.push("sslKey");
+                }
+                v
+            };
+            if !overrides.is_empty() {
+                return Err(CamelError::InvalidUri(format!(
+                    "pool-affecting params not allowed with named datasource: {}",
+                    overrides.join(", ")
+                )));
+            }
+        }
+
         Ok(Self {
             db_url,
+            datasource_name,
             max_connections,
             min_connections,
             idle_timeout_secs,
@@ -1858,5 +1927,68 @@ mod tests {
         ep.apply_defaults(&global);
         // When URI has no retry params, global fills the gap
         assert_eq!(ep.retry.max_attempts, 7);
+    }
+
+    #[test]
+    fn from_uri_with_datasource_name() {
+        let cfg = SqlEndpointConfig::from_uri("sql:SELECT 1?datasource=orders").unwrap();
+        assert_eq!(cfg.datasource_name.as_deref(), Some("orders"));
+        assert!(cfg.db_url.is_empty());
+    }
+
+    #[test]
+    fn from_uri_with_datasource_and_behavior_override() {
+        let cfg =
+            SqlEndpointConfig::from_uri("sql:SELECT 1?datasource=orders&outputType=SelectOne")
+                .unwrap();
+        assert_eq!(cfg.datasource_name.as_deref(), Some("orders"));
+    }
+
+    #[test]
+    fn from_uri_datasource_rejects_pool_override() {
+        let result =
+            SqlEndpointConfig::from_uri("sql:SELECT 1?datasource=orders&maxConnections=50");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("pool-affecting"));
+    }
+
+    #[test]
+    fn from_uri_neither_datasource_nor_db_url_is_error() {
+        let result = SqlEndpointConfig::from_uri("sql:SELECT 1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_uri_db_url_inline_still_works() {
+        let cfg =
+            SqlEndpointConfig::from_uri("sql:SELECT 1?db_url=postgres://localhost/test").unwrap();
+        assert!(cfg.datasource_name.is_none());
+        assert_eq!(cfg.db_url, "postgres://localhost/test");
+    }
+
+    #[test]
+    fn from_uri_datasource_rejects_ssl_mode() {
+        let result = SqlEndpointConfig::from_uri("sql:SELECT 1?datasource=orders&sslMode=require");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("pool-affecting"));
+    }
+
+    #[test]
+    fn from_uri_datasource_rejects_ssl_root_cert() {
+        let result =
+            SqlEndpointConfig::from_uri("sql:SELECT 1?datasource=orders&sslRootCert=/ca.pem");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_uri_datasource_rejects_db_url() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:SELECT 1?datasource=orders&db_url=postgres://evil:5432/pwned",
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("db_url") && msg.contains("datasource"));
     }
 }

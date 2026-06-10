@@ -100,6 +100,7 @@ async fn test_configure_context_with_supervision() {
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
         security: SecurityConfig::default(),
+        datasources: HashMap::new(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -127,6 +128,7 @@ async fn test_configure_context_sets_shutdown_timeout() {
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
         security: SecurityConfig::default(),
+        datasources: HashMap::new(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -158,6 +160,7 @@ async fn test_configure_context_with_valid_log_level() {
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
         security: SecurityConfig::default(),
+        datasources: HashMap::new(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -185,6 +188,7 @@ async fn test_configure_context_with_invalid_log_level() {
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
         security: SecurityConfig::default(),
+        datasources: HashMap::new(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -234,6 +238,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
         security: SecurityConfig::default(),
+        datasources: HashMap::new(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -267,6 +272,7 @@ async fn test_configure_context_without_otel_no_lifecycle() {
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
         security: SecurityConfig::default(),
+        datasources: HashMap::new(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -306,6 +312,7 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
         security: SecurityConfig::default(),
+        datasources: HashMap::new(),
         _extra: HashMap::<String, Value>::new(),
     };
 

@@ -1,0 +1,3 @@
+[default.datasources.appdb]
+db_url = "sqlite:file:memdb?mode=memory&cache=shared"
+max_connections = 5

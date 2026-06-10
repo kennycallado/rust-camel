@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+use camel_api::datasource::DatasourceCatalog;
 use camel_component_api::{BodyType, BoxProcessor, CamelError, RuntimeObservability};
 use camel_component_api::{Consumer, Endpoint, ProducerContext};
 use sqlx::AnyPool;
@@ -12,7 +13,8 @@ use crate::producer::SqlProducer;
 pub(crate) struct SqlEndpoint {
     uri: String,
     pub(crate) config: SqlEndpointConfig,
-    pub(crate) pool: Arc<OnceCell<AnyPool>>,
+    pub(crate) pool: Arc<OnceCell<Arc<AnyPool>>>,
+    pub(crate) catalog: Option<Arc<dyn DatasourceCatalog>>,
 }
 
 impl SqlEndpoint {
@@ -24,9 +26,28 @@ impl SqlEndpoint {
     pub fn new_with_pool(
         uri: String,
         config: SqlEndpointConfig,
-        pool: Arc<OnceCell<AnyPool>>,
+        pool: Arc<OnceCell<Arc<AnyPool>>>,
     ) -> Self {
-        Self { uri, config, pool }
+        Self {
+            uri,
+            config,
+            pool,
+            catalog: None,
+        }
+    }
+
+    pub fn new_with_pool_and_catalog(
+        uri: String,
+        config: SqlEndpointConfig,
+        pool: Arc<OnceCell<Arc<AnyPool>>>,
+        catalog: Arc<dyn DatasourceCatalog>,
+    ) -> Self {
+        Self {
+            uri,
+            config,
+            pool,
+            catalog: Some(catalog),
+        }
     }
 }
 
@@ -44,6 +65,7 @@ impl Endpoint for SqlEndpoint {
         Ok(BoxProcessor::new(SqlProducer::new(
             self.config.clone(),
             Arc::clone(&self.pool),
+            self.catalog.clone(),
             rt,
             route_id,
         )))
@@ -56,6 +78,7 @@ impl Endpoint for SqlEndpoint {
         Ok(Box::new(SqlConsumer::new(
             self.config.clone(),
             Arc::clone(&self.pool),
+            self.catalog.clone(),
             rt,
         )))
     }

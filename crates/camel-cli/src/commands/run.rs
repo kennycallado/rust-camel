@@ -8,7 +8,9 @@
 //! bootstrap. The annotations are added in the Infra cluster task (Task 9),
 //! NOT in this split commit.
 
+use camel_api::datasource::DatasourceCatalog;
 use camel_bean::BeanProcessor;
+use camel_core::datasource::RuntimeDatasourceCatalog;
 use camel_language_js::JsLanguage;
 use camel_language_jsonpath::JsonPathLanguage;
 use camel_language_rhai::RhaiLanguage;
@@ -122,6 +124,13 @@ pub async fn run(
         Ok(svc) => ctx = ctx.with_lifecycle(svc),
         Err(e) => tracing::warn!("Function runtime disabled: {e}"),
     }
+
+    // 3a. Create datasource catalog from configured datasources, wiring health registry
+    let datasource_catalog: Arc<dyn DatasourceCatalog> = {
+        let catalog = RuntimeDatasourceCatalog::new(camel_config.datasources.clone())
+            .with_health_registry(ctx.health_registry());
+        Arc::new(catalog)
+    };
 
     // Load WASM beans after context is created (needs component registry)
     #[cfg(feature = "wasm")]
@@ -350,7 +359,26 @@ pub async fn run(
         camel_component_opensearch::OpenSearchBundle
     );
     register_bundle!(ctx, camel_config, camel_component_redis::RedisBundle);
-    register_bundle!(ctx, camel_config, camel_component_sql::SqlBundle);
+    {
+        let sql_raw = camel_config
+            .components
+            .raw
+            .get(<camel_component_sql::SqlBundle as camel_component_api::ComponentBundle>::config_key())
+            .cloned()
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        match <camel_component_sql::SqlBundle as camel_component_api::ComponentBundle>::from_toml(
+            sql_raw,
+        ) {
+            Ok(bundle) => {
+                let bundle = bundle.with_catalog(Arc::clone(&datasource_catalog));
+                <camel_component_sql::SqlBundle as camel_component_api::ComponentBundle>::register_all(bundle, &mut ctx);
+            }
+            Err(e) => {
+                // log-policy: system-broken
+                tracing::error!("failed to initialize SQL bundle: {}", e);
+            }
+        }
+    }
     #[cfg(feature = "grpc")]
     register_bundle!(ctx, camel_config, camel_component_grpc::GrpcBundle);
 

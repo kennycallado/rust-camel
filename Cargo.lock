@@ -1493,6 +1493,7 @@ dependencies = [
  "camel-processor",
  "chrono",
  "criterion",
+ "dashmap 6.2.1",
  "futures",
  "notify",
  "opentelemetry",
@@ -7651,6 +7652,25 @@ dependencies = [
  "camel-core",
  "serde_json",
  "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "sql-datasource-example"
+version = "0.15.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-log",
+ "camel-component-sql",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
  "tracing-subscriber",
 ]
 

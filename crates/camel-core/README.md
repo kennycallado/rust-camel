@@ -38,6 +38,7 @@ crates/camel-core/src/
 - **Exchange UoW layer**: `ExchangeUoWLayer` for per-route in-flight tracking and completion/failure hooks
 - **Tracer EIP**: Automatic message-flow tracing with configurable detail levels
 - **Metrics**: Pluggable `MetricsCollector` integration
+- **Datasource Catalog**: Named database connection management with shared pools, factory-based health checks, and centralized configuration
 - **Optional languages**: `lang-js` and `lang-rhai` feature flags
 
 ## Installation

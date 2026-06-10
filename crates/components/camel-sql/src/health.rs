@@ -15,11 +15,11 @@ trait SqlHealthProbe: Send + Sync {
 }
 
 struct SqlPoolProbe {
-    pool: Arc<OnceCell<AnyPool>>,
+    pool: Arc<OnceCell<Arc<AnyPool>>>,
 }
 
 impl SqlPoolProbe {
-    fn new(pool: Arc<OnceCell<AnyPool>>) -> Self {
+    fn new(pool: Arc<OnceCell<Arc<AnyPool>>>) -> Self {
         Self { pool }
     }
 }
@@ -32,9 +32,12 @@ impl SqlHealthProbe for SqlPoolProbe {
                 CamelError::ProcessorError("SQL connection pool not initialized".to_string())
             })?;
 
-            sqlx::query("SELECT 1").execute(pool).await.map_err(|e| {
-                CamelError::ProcessorError(format!("SQL health check failed: {}", e))
-            })?;
+            sqlx::query("SELECT 1")
+                .execute(pool.as_ref())
+                .await
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!("SQL health check failed: {}", e))
+                })?;
 
             Ok(())
         })
@@ -47,7 +50,7 @@ pub struct SqlHealthCheck {
 }
 
 impl SqlHealthCheck {
-    pub fn new(pool: Arc<OnceCell<AnyPool>>) -> Self {
+    pub fn new(pool: Arc<OnceCell<Arc<AnyPool>>>) -> Self {
         Self {
             probe: Arc::new(SqlPoolProbe::new(pool)),
             timeout: Duration::from_secs(2),

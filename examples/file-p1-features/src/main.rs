@@ -93,7 +93,11 @@ async fn main() -> Result<(), CamelError> {
         let path = entry.path();
         if path.is_file() && !path.file_name().unwrap().to_str().unwrap().starts_with('.') {
             let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-            println!("  {} (content: {})", path.file_name().unwrap().to_str().unwrap(), content);
+            println!(
+                "  {} (content: {})",
+                path.file_name().unwrap().to_str().unwrap(),
+                content
+            );
         }
     }
 

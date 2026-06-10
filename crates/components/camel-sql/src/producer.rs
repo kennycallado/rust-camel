@@ -6,6 +6,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use camel_api::datasource::DatasourceCatalog;
 use serde_json::json;
 use sqlx::AnyPool;
 use sqlx::any::AnyRow;
@@ -26,7 +27,8 @@ use camel_component_api::{
 #[derive(Clone)]
 pub struct SqlProducer {
     pub(crate) config: SqlEndpointConfig,
-    pub(crate) pool: Arc<OnceCell<AnyPool>>,
+    pub(crate) pool: Arc<OnceCell<Arc<AnyPool>>>,
+    pub(crate) catalog: Option<Arc<dyn DatasourceCatalog>>,
     pub(crate) stopped: Arc<AtomicBool>,
     pub(crate) runtime: Arc<dyn RuntimeObservability>,
     /// Route identifier for ADR-0012 (g) health/observability calls.
@@ -36,13 +38,15 @@ pub struct SqlProducer {
 impl SqlProducer {
     pub fn new(
         config: SqlEndpointConfig,
-        pool: Arc<OnceCell<AnyPool>>,
+        pool: Arc<OnceCell<Arc<AnyPool>>>,
+        catalog: Option<Arc<dyn DatasourceCatalog>>,
         runtime: Arc<dyn RuntimeObservability>,
         route_id: impl Into<String>,
     ) -> Self {
         Self {
             config,
             pool,
+            catalog,
             stopped: Arc::new(AtomicBool::new(false)),
             runtime,
             route_id: route_id.into(),
@@ -94,12 +98,23 @@ impl SqlProducer {
     /// Returns `Ok(())` if the database is reachable, or an error with details
     /// if the connection fails.
     pub async fn check_connection(&self) -> Result<(), CamelError> {
-        let pool = self.pool.get().ok_or_else(|| {
-            CamelError::ProcessorError("SQL connection pool not initialized".into())
-        })?;
+        let pool =
+            if let (Some(catalog), Some(ds_name)) = (&self.catalog, &self.config.datasource_name) {
+                let handle = catalog.get_pool(ds_name).await?;
+                let arc_pool: Arc<AnyPool> = handle.downcast()?;
+                // We don't cache this here — check_connection is a one-shot call
+                arc_pool
+            } else {
+                self.pool
+                    .get()
+                    .ok_or_else(|| {
+                        CamelError::ProcessorError("SQL connection pool not initialized".into())
+                    })?
+                    .clone()
+            };
 
         debug!("Running health check: SELECT 1");
-        sqlx::query("SELECT 1").execute(pool).await.map_err(|e| {
+        sqlx::query("SELECT 1").execute(&*pool).await.map_err(|e| {
             warn!(error = %e, "SQL health check failed");
             CamelError::ProcessorError(format!("SQL health check failed: {}", e))
         })?;
@@ -133,17 +148,25 @@ impl Service<Exchange> for SqlProducer {
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let mut config = self.config.clone();
         let pool_cell = Arc::clone(&self.pool);
+        let catalog = self.catalog.clone();
         let runtime = Arc::clone(&self.runtime);
         let route_id = self.route_id.clone();
 
         Box::pin(async move {
+            // SQL-014: resolve file-based query before pool init, regardless of pool source
+            config.resolve_defaults();
+            config.resolve_file_query().await?;
+
             // Get or initialize the connection pool
-            let pool: &AnyPool = pool_cell
+            let pool: &Arc<AnyPool> = pool_cell
                 .get_or_try_init(|| async {
-                    // Defensive: ensure config is resolved even if caller didn't use create_endpoint
-                    config.resolve_defaults();
-                    // SQL-014: resolve file-based query asynchronously (not blocking)
-                    config.resolve_file_query().await?;
+                    // Catalog path: resolve shared pool from the datasource catalog
+                    let ds_name = config.datasource_name.clone();
+                    if let (Some(ref cat), Some(ref name)) = (catalog, ds_name) {
+                        let handle = cat.get_pool(name).await?;
+                        return handle.downcast::<AnyPool>();
+                    }
+
                     let db_url = enrich_db_url_with_ssl(&config.db_url, &config)?;
 
                     // Install all compiled-in sqlx drivers so AnyPool can resolve them.
@@ -168,16 +191,19 @@ impl Service<Exchange> for SqlProducer {
                         "SQL producer pool initializing"
                     );
                     let retry_policy = &config.retry;
-                    retry_async::<_, _, _, _, sqlx::Error>(
+                    let pool = retry_async::<_, _, _, _, sqlx::Error>(
                         retry_policy,
                         Some("sql-producer"),
                         || {
-                            PoolOptions::new()
-                                .max_connections(max_conn)
-                                .min_connections(min_conn)
-                                .idle_timeout(Duration::from_secs(idle_timeout))
-                                .max_lifetime(Duration::from_secs(max_lifetime))
-                                .connect(&db_url)
+                            async {
+                                PoolOptions::new()
+                                    .max_connections(max_conn)
+                                    .min_connections(min_conn)
+                                    .idle_timeout(Duration::from_secs(idle_timeout))
+                                    .max_lifetime(Duration::from_secs(max_lifetime))
+                                    .connect(&db_url)
+                                    .await
+                            }
                         },
                         is_retryable_sqlx_error,
                     )
@@ -194,7 +220,8 @@ impl Service<Exchange> for SqlProducer {
                             "Failed to connect to database: {}",
                             e
                         ))
-                    })
+                    })?;
+                    Ok(Arc::new(pool))
                 })
                 .await
                 .map_err(|e: CamelError| e.clone())?;
@@ -215,7 +242,7 @@ impl Service<Exchange> for SqlProducer {
             // Execute based on mode
             if config.batch {
                 // Batch mode: execute_batch handles its own template parsing per item
-                execute_batch(pool, &config, &mut exchange).await?;
+                execute_batch(pool.as_ref(), &config, &mut exchange).await?;
             } else if config.use_placeholder {
                 // Placeholder processing enabled (default): parse template, resolve params, apply header override
                 let template = parse_query_template(&query_str, config.placeholder)?;
@@ -254,9 +281,9 @@ impl Service<Exchange> for SqlProducer {
                 );
 
                 if is_select_query(&prepared.sql) {
-                    execute_select(pool, &prepared, &config, &mut exchange).await?;
+                    execute_select(pool.as_ref(), &prepared, &config, &mut exchange).await?;
                 } else {
-                    execute_modify(pool, &prepared, &config, &mut exchange).await?;
+                    execute_modify(pool.as_ref(), &prepared, &config, &mut exchange).await?;
                 }
             } else {
                 // use_placeholder=false: execute query as-is without template parsing
@@ -267,9 +294,9 @@ impl Service<Exchange> for SqlProducer {
                 };
 
                 if is_select_query(&prepared.sql) {
-                    execute_select(pool, &prepared, &config, &mut exchange).await?;
+                    execute_select(pool.as_ref(), &prepared, &config, &mut exchange).await?;
                 } else {
-                    execute_modify(pool, &prepared, &config, &mut exchange).await?;
+                    execute_modify(pool.as_ref(), &prepared, &config, &mut exchange).await?;
                 }
             }
 
@@ -618,6 +645,7 @@ mod tests {
         let p1 = SqlProducer::new(
             config(),
             Arc::new(OnceCell::new()),
+            None,
             test_rt(),
             "sql-producer-test-route",
         );
@@ -920,6 +948,7 @@ mod tests {
         let mut producer = SqlProducer::new(
             config,
             Arc::new(OnceCell::new()),
+            None,
             test_rt(),
             "sql-producer-test-route",
         );
@@ -957,6 +986,7 @@ mod tests {
         let mut producer = SqlProducer::new(
             config,
             Arc::new(OnceCell::new()),
+            None,
             rt,
             "sql-producer-test-route",
         );
@@ -993,6 +1023,7 @@ mod tests {
         let mut producer = SqlProducer::new(
             config,
             Arc::new(OnceCell::new()),
+            None,
             test_rt(),
             "sql-producer-test-route",
         );
@@ -1012,6 +1043,7 @@ mod tests {
         let mut producer = SqlProducer::new(
             config,
             Arc::new(OnceCell::new()),
+            None,
             test_rt(),
             "sql-producer-test-route",
         );
@@ -1038,10 +1070,15 @@ mod tests {
             c
         };
         let pool_cell = Arc::new(OnceCell::new());
-        pool_cell.set(pool).unwrap();
+        pool_cell.set(Arc::new(pool)).unwrap();
 
-        let mut producer =
-            SqlProducer::new(config, pool_cell, test_rt(), "sql-producer-test-route");
+        let mut producer = SqlProducer::new(
+            config,
+            pool_cell,
+            None,
+            test_rt(),
+            "sql-producer-test-route",
+        );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Err(_))));
@@ -1063,10 +1100,15 @@ mod tests {
             c
         };
         let pool_cell = Arc::new(OnceCell::new());
-        pool_cell.set(pool).unwrap();
+        pool_cell.set(Arc::new(pool)).unwrap();
 
-        let mut producer =
-            SqlProducer::new(config, pool_cell, test_rt(), "sql-producer-test-route");
+        let mut producer = SqlProducer::new(
+            config,
+            pool_cell,
+            None,
+            test_rt(),
+            "sql-producer-test-route",
+        );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
@@ -1083,11 +1125,12 @@ mod tests {
             c
         };
         let pool_cell = Arc::new(OnceCell::new());
-        pool_cell.set(pool.clone()).unwrap();
+        pool_cell.set(Arc::new(pool.clone())).unwrap();
 
         let producer = SqlProducer::new(
             config,
             pool_cell.clone(),
+            None,
             test_rt(),
             "sql-producer-test-route",
         );
@@ -1112,6 +1155,7 @@ mod tests {
                 c
             },
             pool_cell.clone(),
+            None,
             test_rt(),
             "sql-producer-test-route",
         );
@@ -1139,11 +1183,12 @@ mod tests {
         let mut producer = SqlProducer::new(
             config,
             Arc::new(OnceCell::new()),
+            None,
             test_rt(),
             "sql-producer-test-route",
         );
         // Pre-initialize the pool so we don't hit the pool init path
-        producer.pool.set(pool.clone()).unwrap();
+        producer.pool.set(Arc::new(pool.clone())).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.call(exchange).await;
@@ -1169,10 +1214,11 @@ mod tests {
         let mut producer = SqlProducer::new(
             config,
             Arc::new(OnceCell::new()),
+            None,
             test_rt(),
             "sql-producer-test-route",
         );
-        producer.pool.set(pool.clone()).unwrap();
+        producer.pool.set(Arc::new(pool.clone())).unwrap();
 
         let msg = Message::new(Body::Json(json!([1])));
         let exchange = Exchange::new(msg);
@@ -1246,6 +1292,7 @@ mod tests {
         let mut producer = SqlProducer::new(
             config,
             Arc::new(OnceCell::new()),
+            None,
             rt,
             "sql-producer-test-route",
         );

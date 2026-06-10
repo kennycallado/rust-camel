@@ -30,13 +30,18 @@ camel-component-sql = "*"
 ## URI Format
 
 ```
+sql:<query>?datasource=<name>&options
 sql:<query>?db_url=<database-url>&options
+sql:file:<path-to-sql-file>?datasource=<name>&options
 sql:file:<path-to-sql-file>?db_url=<database-url>&options
 ```
 
 - `<query>`: SQL query with optional parameter placeholders
 - `<path-to-sql-file>`: Path to a file containing the SQL query
-- `<database-url>`: Database connection URL (required)
+- `<datasource>`: Named datasource from Camel.toml (alternative to `db_url`)
+- `<database-url>`: Database connection URL
+
+Either `datasource` or `db_url` is required (not both).
 
 ## URI Options
 
@@ -44,11 +49,47 @@ sql:file:<path-to-sql-file>?db_url=<database-url>&options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `db_url` | (required) | Database connection URL |
+| `datasource` | - | Named datasource from Camel.toml (alternative to `db_url`) |
+| `db_url` | (required if no `datasource`) | Database connection URL |
 | `maxConnections` | `5` | Maximum connections in pool |
 | `minConnections` | `1` | Minimum connections in pool |
 | `idleTimeoutSecs` | `300` | Idle connection timeout in seconds |
 | `maxLifetimeSecs` | `1800` | Maximum connection lifetime in seconds |
+
+### Named Datasources
+
+Instead of embedding `db_url` in every URI, define named datasources in `Camel.toml`:
+
+```toml
+[default.datasources.orders]
+db_url = "postgres://user:pass@db:5432/orders"
+max_connections = 20
+min_connections = 2
+
+[default.datasources.analytics]
+db_url = "postgres://user:pass@db:5432/analytics"
+max_connections = 5
+```
+
+Then reference by name in URIs:
+
+```
+sql:SELECT * FROM orders?datasource=orders
+sql:INSERT INTO events VALUES (#, #)?datasource=analytics
+```
+
+**Benefits:**
+- Shared connection pools across endpoints referencing the same datasource
+- Credentials not exposed in route URIs
+- Pool configuration centralized in one place
+- Health checks per datasource via `PoolFactory::check()`
+
+**Restrictions:** When using `datasource`, the following pool-affecting URI parameters are rejected (set them in `Camel.toml` instead):
+`maxConnections`, `minConnections`, `idleTimeoutSecs`, `maxLifetimeSecs`, `sslMode`, `sslRootCert`, `sslCert`, `sslKey`
+
+Non-pool parameters like `outputType`, `onConsume`, `delay` etc. work normally with named datasources.
+
+**Backward compatible:** Inline `db_url` continues to work as before.
 
 ### Query Options
 
