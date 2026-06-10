@@ -1,0 +1,23 @@
+[package]
+name = "zip-splitter"
+description = "ZIP splitter example — compress, split entries, process, decompress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-builder.workspace = true
+camel-core.workspace = true
+camel-processor.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+zip.workspace = true
+
+[lints]
+workspace = true

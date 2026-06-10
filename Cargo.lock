@@ -10423,6 +10423,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zip-splitter"
+version = "0.15.0"
+dependencies = [
+ "bytes",
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing-subscriber",
+ "zip",
+]
+
+[[package]]
 name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

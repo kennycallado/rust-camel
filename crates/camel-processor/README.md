@@ -26,7 +26,8 @@
 - **Delayer**: Delay message processing with fixed or dynamic (header-based) duration
 - **Stream Handling**: Processors that consume streams replace the body with a JSON placeholder `{"placeholder": true}`
 - **Security Policy Layer**: Tower middleware that enforces authorization before forwarding to the inner service
-- **Marshal / Unmarshal**: Serialize/deserialize message bodies using pluggable data formats (JSON, XML)
+- **Marshal / Unmarshal**: Serialize/deserialize message bodies using pluggable data formats (JSON, XML, ZIP)
+- **Streaming Splitter**: Split lazy streams (ZIP entries, future CSV/JSON/Tar) with one-entry lookahead and aggregation
 
 ## Installation
 
@@ -102,6 +103,7 @@ let route = RouteBuilder::from("timer:tick")
 | `SetBody` | Replace message body |
 | `MapBody` | Transform message body |
 | `SplitterService` | Split messages |
+| `StreamingSplitterService` | Split lazy streams with lookahead (ZIP, future CSV/Tar) |
 | `AggregatorService` | Combine messages |
 | `MulticastService` | Parallel routing |
 | `WireTapService` | Side-channel routing |
@@ -169,6 +171,7 @@ The `DataFormat` trait defines serialization/deserialization for message bodies:
 |--------|---------------------------|------------------------------|
 | `json` | `Body::Json` → `Body::Text` | `Body::Text`/`Body::Bytes` → `Body::Json` |
 | `xml`  | `Body::Json` → `Body::Text` | `Body::Text`/`Body::Bytes`/`Body::Xml` → `Body::Json` |
+| `zip`  | Any non-empty `Body` → `Body::Bytes` (single-entry ZIP) | `Body::Bytes`/`Body::Text` → `Body::Bytes` (decompressed) |
 
 ### Usage with RouteBuilder
 
@@ -190,6 +193,46 @@ steps:
   - unmarshal: json
   - marshal: xml
 ```
+
+## ZIP Splitter
+
+The `ZipSplitter` produces one exchange per ZIP entry using a lazy stream. It inherits the parent exchange context (headers, properties, OTel) and enforces safety limits (max entries, max decompressed size, path traversal prevention).
+
+### Usage
+
+```rust
+use camel_processor::{StreamingSplitterService, ZipSplitConfig, zip_splitter};
+use camel_api::{AggregationStrategy, Body, Exchange, Message};
+
+let config = ZipSplitConfig {
+    max_entries: 100,
+    max_total_decompressed_size: 50 * 1024 * 1024, // 50 MB
+    ..Default::default()
+};
+let expression = zip_splitter(config);
+let sub_pipeline = my_processor;
+let mut svc = StreamingSplitterService::new(
+    expression,
+    sub_pipeline,
+    AggregationStrategy::LastWins,
+    true, // stop_on_exception
+);
+```
+
+### Entry Headers
+
+Each ZIP entry exchange includes these headers:
+
+| Header | Type | Description |
+|--------|------|-------------|
+| `CamelZipEntryName` | String | Entry filename |
+| `CamelZipEntryPath` | String | Full path within archive |
+| `CamelZipEntryIndex` | u64 | Zero-based index |
+| `CamelZipEntrySize` | u64 | Uncompressed size |
+| `CamelZipEntryCompressedSize` | u64 | Compressed size |
+| `CamelZipEntryCrc32` | u32 | CRC-32 checksum |
+| `CamelZipEntryIsDirectory` | bool | True for directory entries |
+| `CamelZipEntryCompression` | String | Compression method (e.g. "Deflated") |
 
 ## Documentation
 
