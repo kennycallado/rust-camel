@@ -102,6 +102,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
         stream_caching: Default::default(),
         beans: Default::default(),
         security: SecurityConfig::default(),
+        datasources: Default::default(),
         _extra: HashMap::new(),
     };
 
