@@ -1,4 +1,4 @@
-pub use camel_api::{LanguageExpressionDef, ValueSourceDef};
+pub use camel_api::{LanguageExpressionDef, StreamSplitConfig, ValueSourceDef};
 
 #[derive(Default)]
 pub struct SecurityCompileContext {
@@ -234,6 +234,7 @@ pub enum SplitExpressionDef {
     BodyLines,
     BodyJsonArray,
     Language(LanguageExpressionDef),
+    Stream(StreamSplitConfig),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

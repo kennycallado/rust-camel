@@ -486,6 +486,14 @@ fn compile_canonical_split(
             stop_on_exception,
             steps: compiled_steps,
         }),
+        CanonicalSplitExpressionSpec::Stream(stream_config) => {
+            Ok(BuilderStep::DeclarativeStreamSplit {
+                stream_config,
+                aggregation,
+                stop_on_exception,
+                steps: compiled_steps,
+            })
+        }
     }
 }
 
@@ -1135,6 +1143,7 @@ fn compile_split_step_to_canonical(def: SplitStepDef) -> Result<CanonicalStepSpe
         SplitExpressionDef::BodyLines => CanonicalSplitExpressionSpec::BodyLines,
         SplitExpressionDef::BodyJsonArray => CanonicalSplitExpressionSpec::BodyJsonArray,
         SplitExpressionDef::Language(expr) => CanonicalSplitExpressionSpec::Language(expr),
+        SplitExpressionDef::Stream(config) => CanonicalSplitExpressionSpec::Stream(config),
     };
     let aggregation = match def.aggregation {
         SplitAggregationDef::LastWins => CanonicalSplitAggregationSpec::LastWins,
@@ -1273,6 +1282,12 @@ fn compile_split_step(
             aggregation,
             parallel: def.parallel,
             parallel_limit: def.parallel_limit,
+            stop_on_exception: def.stop_on_exception,
+            steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
+        }),
+        SplitExpressionDef::Stream(stream_config) => Ok(BuilderStep::DeclarativeStreamSplit {
+            stream_config,
+            aggregation,
             stop_on_exception: def.stop_on_exception,
             steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
         }),

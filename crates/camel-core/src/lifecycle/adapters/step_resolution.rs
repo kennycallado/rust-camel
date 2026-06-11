@@ -495,6 +495,92 @@ pub(crate) fn resolve_steps(
                     camel_processor::splitter::SplitterService::new(config, sub_pipeline)?;
                 processors.push((BoxProcessor::new(splitter), None));
             }
+            BuilderStep::DeclarativeStreamSplit {
+                stream_config,
+                aggregation,
+                stop_on_exception,
+                steps,
+            } => {
+                stream_config
+                    .validate()
+                    .map_err(|e| CamelError::Config(format!("invalid stream config: {e}")))?;
+                let sub_pairs = resolve_steps(
+                    steps,
+                    producer_ctx,
+                    Arc::clone(&rt),
+                    registry,
+                    languages,
+                    beans,
+                    function_invoker.clone(),
+                    Arc::clone(&component_ctx),
+                    route_id,
+                    staging_mode,
+                )?;
+                let sub_processors: Vec<BoxProcessor> =
+                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_pipeline = compose_pipeline(sub_processors);
+
+                let config_clone = stream_config.clone();
+                let expression: camel_api::StreamingSplitExpression =
+                    Arc::new(move |exchange: Exchange| {
+                        let config = config_clone.clone();
+                        let (stream_body, parent) = match &exchange.input.body {
+                            camel_api::Body::Stream(sb) => (sb.clone(), {
+                                let mut p = exchange.clone();
+                                p.input.body = camel_api::Body::Empty;
+                                p
+                            }),
+                            _ => {
+                                return Box::pin(futures::stream::once(async {
+                                    Err(camel_api::CamelError::ProcessorError(
+                                        "streaming split requires Body::Stream".into(),
+                                    ))
+                                }));
+                            }
+                        };
+                        let stream = match stream_body.stream.try_lock() {
+                            Ok(mut guard) => match guard.take() {
+                                Some(s) => s,
+                                None => {
+                                    return Box::pin(futures::stream::once(async {
+                                        Err(camel_api::CamelError::ProcessorError(
+                                            "stream body already consumed".into(),
+                                        ))
+                                    }));
+                                }
+                            },
+                            Err(_) => {
+                                return Box::pin(futures::stream::once(async {
+                                    Err(camel_api::CamelError::ProcessorError(
+                                        "stream body locked".into(),
+                                    ))
+                                }));
+                            }
+                        };
+                        let input = camel_processor::stream_codec::StreamSplitInput {
+                            parent,
+                            stream,
+                            metadata: stream_body.metadata,
+                        };
+                        let resolved_format = match camel_processor::stream_codec::resolve_format(
+                            &config.format,
+                            &input.metadata,
+                        ) {
+                            Ok(f) => f,
+                            Err(e) => return Box::pin(futures::stream::once(async { Err(e) })),
+                        };
+                        let codec = camel_processor::stream_codec::resolve_codec(&resolved_format);
+                        codec.split(input, config)
+                    });
+
+                let splitter = camel_processor::streaming_splitter::StreamingSplitterService::new(
+                    expression,
+                    sub_pipeline,
+                    aggregation,
+                    stop_on_exception,
+                );
+                processors.push((BoxProcessor::new(splitter), None));
+            }
             BuilderStep::Aggregate { config } => {
                 let (late_tx, _late_rx) = mpsc::channel(256);
                 let registry: SharedLanguageRegistry =

@@ -488,6 +488,23 @@ pub struct SplitData {
     pub stop_on_exception: bool,
     #[serde(default)]
     pub steps: Vec<YamlStep>,
+    #[serde(default)]
+    pub streaming: bool,
+    #[serde(default)]
+    pub stream: Option<StreamConfigYaml>,
+}
+
+#[derive(Default, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct StreamConfigYaml {
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub max_record_bytes: Option<usize>,
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+    #[serde(default)]
+    pub chunk_size: Option<usize>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

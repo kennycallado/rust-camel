@@ -79,6 +79,13 @@ pub enum BuilderStep {
         stop_on_exception: bool,
         steps: Vec<BuilderStep>,
     },
+    /// Declarative stream split using a streaming split expression, resolved at route-add time.
+    DeclarativeStreamSplit {
+        stream_config: camel_api::StreamSplitConfig,
+        aggregation: camel_api::splitter::AggregationStrategy,
+        stop_on_exception: bool,
+        steps: Vec<BuilderStep>,
+    },
     DeclarativeDynamicRouter {
         expression: LanguageExpressionDef,
         uri_delimiter: String,
@@ -246,6 +253,18 @@ impl std::fmt::Debug for BuilderStep {
                 write!(
                     f,
                     "BuilderStep::DeclarativeSplit {{ steps: {steps:?}, .. }}"
+                )
+            }
+            BuilderStep::DeclarativeStreamSplit {
+                steps,
+                stream_config,
+                ..
+            } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeStreamSplit {{ format: {:?}, steps: {} step(s) }}",
+                    stream_config.format,
+                    steps.len()
                 )
             }
             BuilderStep::DeclarativeDynamicRouter { expression, .. } => write!(

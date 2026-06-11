@@ -506,6 +506,14 @@ fn canonical_step_to_builder_step(
                         steps,
                     })
                 }
+                camel_api::runtime::CanonicalSplitExpressionSpec::Stream(stream_config) => {
+                    Ok(BuilderStep::DeclarativeStreamSplit {
+                        stream_config,
+                        aggregation,
+                        stop_on_exception,
+                        steps,
+                    })
+                }
             }
         }
         camel_api::runtime::CanonicalStepSpec::Aggregate(config) => {

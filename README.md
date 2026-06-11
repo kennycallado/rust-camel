@@ -238,7 +238,7 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 | Marshal / Unmarshal  | `.marshal(fmt)` / `.unmarshal(fmt)`  | Serialize/deserialize bodies using pluggable data formats (JSON, XML, ZIP)                                     |
 | Multicast            | `.multicast()`                       | Send the same exchange to multiple endpoints                                                                   |
 | RecipientList        | `.recipient_list(config)`            | Dynamically resolve endpoint URIs from an expression at runtime                                                |
-| Splitter             | `.split(config)`                     | Split one exchange into multiple fragments (body lines, ZIP entries)                                           |
+| Splitter             | `.split(config)`                     | Split one exchange into multiple fragments (body lines, ZIP entries, streaming)                                |
 | Stream Cache         | `.stream_cache(n)` / `stream_cache:` | Materialize `Body::Stream` into `Body::Bytes` with configurable threshold (128 KB default)                     |
 | Throttler            | `.throttle(n, duration)`             | Rate limiting with Delay/Reject/Drop strategies                                                                |
 | WireTap              | `.wire_tap(uri)`                     | Fire-and-forget copy to a tap endpoint                                                                         |

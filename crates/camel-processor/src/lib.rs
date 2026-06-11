@@ -28,6 +28,7 @@ pub mod set_property;
 pub mod splitter;
 pub mod stop;
 pub mod stream_cache;
+pub mod stream_codec;
 pub mod streaming_splitter;
 pub mod throttler;
 pub mod wire_tap;

@@ -27,7 +27,7 @@
 - **Stream Handling**: Processors that consume streams replace the body with a JSON placeholder `{"placeholder": true}`
 - **Security Policy Layer**: Tower middleware that enforces authorization before forwarding to the inner service
 - **Marshal / Unmarshal**: Serialize/deserialize message bodies using pluggable data formats (JSON, XML, ZIP)
-- **Streaming Splitter**: Split lazy streams (ZIP entries, future CSV/JSON/Tar) with one-entry lookahead and aggregation
+- **Streaming Splitter**: Split lazy streams (ZIP entries, NDJSON, text lines, binary chunks) with one-entry lookahead and aggregation. Supports `streaming: true` in YAML DSL with auto format detection from `Content-Type`
 
 ## Installation
 

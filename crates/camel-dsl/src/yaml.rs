@@ -4,7 +4,9 @@ use std::path::Path;
 
 use tracing::{debug, error, info};
 
-use camel_api::{CamelError, CanonicalLossReport, CanonicalRouteSpec};
+use camel_api::{
+    CamelError, CanonicalLossReport, CanonicalRouteSpec, StreamSplitConfig, StreamSplitFormat,
+};
 use camel_core::route::RouteDefinition;
 
 use crate::compile::{
@@ -610,35 +612,58 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             Ok(DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }))
         }
         YamlStep::Split(SplitStep { split }) => {
-            let expression = match split.expression {
-                None => SplitExpressionDef::BodyLines,
-                Some(SplitExpressionYaml::Simple(s)) => match s.as_str() {
-                    "body_lines" | "lines" => SplitExpressionDef::BodyLines,
-                    "body_json_array" | "json_array" => SplitExpressionDef::BodyJsonArray,
-                    other => {
-                        return Err(CamelError::RouteError(format!(
-                            "unsupported split.expression `{other}`"
-                        )));
-                    }
-                },
-                Some(SplitExpressionYaml::Config(SplitExpressionConfig {
-                    language,
-                    source,
-                    simple,
-                    rhai,
-                    jsonpath,
-                    xpath,
-                })) => {
-                    let expr = parse_language_expression(
+            let expression = if split.streaming {
+                let stream_cfg = split.stream.unwrap_or_default();
+                let config = StreamSplitConfig {
+                    format: match stream_cfg.format.as_deref() {
+                        Some("ndjson") => StreamSplitFormat::Ndjson,
+                        Some("lines") => StreamSplitFormat::Lines,
+                        Some("chunks") => StreamSplitFormat::Chunks,
+                        Some("auto") | None => StreamSplitFormat::Auto,
+                        Some(other) => {
+                            return Err(CamelError::RouteError(format!(
+                                "unsupported stream.format '{other}'"
+                            )));
+                        }
+                    },
+                    max_record_bytes: stream_cfg.max_record_bytes.unwrap_or(1024 * 1024),
+                    batch_size: stream_cfg.batch_size.unwrap_or(1),
+                    chunk_size: stream_cfg.chunk_size,
+                    include_origin: true,
+                };
+                config.validate()?;
+                SplitExpressionDef::Stream(config)
+            } else {
+                match split.expression {
+                    None => SplitExpressionDef::BodyLines,
+                    Some(SplitExpressionYaml::Simple(s)) => match s.as_str() {
+                        "body_lines" | "lines" => SplitExpressionDef::BodyLines,
+                        "body_json_array" | "json_array" => SplitExpressionDef::BodyJsonArray,
+                        other => {
+                            return Err(CamelError::RouteError(format!(
+                                "unsupported split.expression `{other}`"
+                            )));
+                        }
+                    },
+                    Some(SplitExpressionYaml::Config(SplitExpressionConfig {
                         language,
                         source,
                         simple,
                         rhai,
                         jsonpath,
                         xpath,
-                        "split.expression",
-                    )?;
-                    SplitExpressionDef::Language(expr)
+                    })) => {
+                        let expr = parse_language_expression(
+                            language,
+                            source,
+                            simple,
+                            rhai,
+                            jsonpath,
+                            xpath,
+                            "split.expression",
+                        )?;
+                        SplitExpressionDef::Language(expr)
+                    }
                 }
             };
 
@@ -2930,6 +2955,101 @@ routes:
 }"#;
         assert!(parse_json_templates(json).unwrap().is_empty());
         assert!(parse_json_templated_routes(json).unwrap().is_empty());
+    }
+
+    // --- Streaming split tests ---
+
+    #[test]
+    fn test_streaming_true_with_format_produces_stream_def() {
+        let yaml = r#"
+routes:
+  - id: "stream-split"
+    from: "direct:start"
+    steps:
+      - split:
+          streaming: true
+          stream:
+            format: ndjson
+          steps:
+            - to: "mock:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Split(def) => match &def.expression {
+                SplitExpressionDef::Stream(config) => {
+                    assert_eq!(
+                        config.format,
+                        camel_api::StreamSplitFormat::Ndjson,
+                        "expected Ndjson format"
+                    );
+                    assert_eq!(config.max_record_bytes, 1024 * 1024);
+                    assert_eq!(config.batch_size, 1);
+                    assert_eq!(config.chunk_size, None);
+                    assert!(config.include_origin);
+                }
+                other => panic!("expected Stream expression, got {other:?}"),
+            },
+            other => panic!("expected Split step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_streaming_true_without_stream_uses_defaults() {
+        let yaml = r#"
+routes:
+  - id: "stream-split-defaults"
+    from: "direct:start"
+    steps:
+      - split:
+          streaming: true
+          steps:
+            - to: "mock:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Split(def) => match &def.expression {
+                SplitExpressionDef::Stream(config) => {
+                    assert_eq!(
+                        config.format,
+                        camel_api::StreamSplitFormat::Auto,
+                        "expected Auto format"
+                    );
+                    assert_eq!(config.max_record_bytes, 1024 * 1024);
+                    assert_eq!(config.batch_size, 1);
+                    assert!(config.include_origin);
+                }
+                other => panic!("expected Stream expression, got {other:?}"),
+            },
+            other => panic!("expected Split step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_missing_streaming_defaults_false() {
+        let yaml = r#"
+routes:
+  - id: "no-streaming"
+    from: "direct:start"
+    steps:
+      - split:
+          expression: body_lines
+          steps:
+            - to: "mock:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Split(def) => {
+                assert_eq!(
+                    def.expression,
+                    SplitExpressionDef::BodyLines,
+                    "expected BodyLines when streaming is not set"
+                );
+            }
+            other => panic!("expected Split step, got {other:?}"),
+        }
     }
 
     #[test]

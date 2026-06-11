@@ -1087,6 +1087,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::RecipientList { .. } => "recipient_list",
         BuilderStep::DeclarativeRecipientList { .. } => "declarative_recipient_list",
         BuilderStep::DeclarativeSetProperty { .. } => "set_property",
+        BuilderStep::DeclarativeStreamSplit { .. } => "stream_split",
         BuilderStep::Enrich { .. } => "enrich",
         BuilderStep::PollEnrich { .. } => "poll_enrich",
     }

@@ -4,7 +4,29 @@ SQL component for rust-camel: query execution, streaming (StreamList), and batch
 
 ## Language
 
-(none yet — add terms specific to this component when they crystallise)
+**StreamList + streaming split**:
+SQL `outputType=StreamList` combined with the streaming split EIP enables at-least-once row-at-a-time processing:
+
+```yaml
+- from:
+    uri: "sql:SELECT * FROM users"
+    parameters:
+      outputType: StreamList
+    steps:
+      - split:
+          streaming: true
+          stream:
+            format: ndjson
+          steps:
+            - set_property:
+                name: userId
+                simple: "${body.id}"
+            - to: "sql:UPDATE users SET processed = true WHERE id = :#userId"
+```
+
+- **At-least-once semantics**: The consumer polls lazily — rows are fetched from the DB as the stream is consumed. The consumer does NOT commit/ack the batch until the entire split pipeline completes. If the pipeline crashes mid-stream, the batch re-delivers on next poll.
+- **Deadlock warning**: The sub-pipeline's SQL producer creates its own pool connection. If the pool has only 1 connection and it's held by the consumer's StreamList fetch, the producer deadlocks waiting for a connection. Configure `max_connections >= 2` in the pool when a streaming split sub-pipeline uses `sql:` as a producer.
+- **Field access**: NDJSON rows expose fields via the `:#` named parameter prefix in SQL statements (e.g., `:#userId`, `:#body.id`). These reference properties and body fields from the current fragment Exchange.
 
 ## Log-level policy
 

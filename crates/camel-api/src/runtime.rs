@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::CamelError;
 use crate::declarative::LanguageExpressionDef;
+use crate::splitter::StreamSplitConfig;
 
 pub const CANONICAL_CONTRACT_NAME: &str = "canonical-v1";
 pub const CANONICAL_CONTRACT_VERSION: u32 = 2;
@@ -180,6 +181,7 @@ pub enum CanonicalSplitExpressionSpec {
     BodyLines,
     BodyJsonArray,
     Language(LanguageExpressionDef),
+    Stream(StreamSplitConfig),
 }
 
 #[derive(

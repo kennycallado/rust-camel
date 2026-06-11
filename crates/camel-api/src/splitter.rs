@@ -37,6 +37,118 @@ pub enum AggregationStrategy {
     Custom(Arc<dyn Fn(Exchange, Exchange) -> Exchange + Send + Sync>),
 }
 
+/// The streaming format to use when splitting a stream body.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum StreamSplitFormat {
+    /// Auto-detect the format from the body content.
+    #[default]
+    Auto,
+    /// Newline-delimited JSON — each line is a complete JSON value.
+    Ndjson,
+    /// Split by newlines, each line becomes a text fragment.
+    Lines,
+    /// Split into fixed-size byte chunks.
+    Chunks,
+}
+
+/// Configuration for splitting a streaming body into fragments.
+///
+/// Controls how the stream splitter processes the body, including format
+/// detection, sizing limits, and metadata propagation.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub struct StreamSplitConfig {
+    /// The streaming format to use.
+    pub format: StreamSplitFormat,
+    /// Maximum size (in bytes) of a single record or chunk.
+    pub max_record_bytes: usize,
+    /// Number of records/chunks to collect into a single exchange batch.
+    pub batch_size: usize,
+    /// Explicit chunk size in bytes (required when format is [`Chunks`](StreamSplitFormat::Chunks)).
+    pub chunk_size: Option<usize>,
+    /// Whether to include origin metadata in each fragment.
+    pub include_origin: bool,
+}
+
+impl Default for StreamSplitConfig {
+    fn default() -> Self {
+        Self {
+            format: StreamSplitFormat::Auto,
+            max_record_bytes: 1024 * 1024,
+            batch_size: 1,
+            chunk_size: None,
+            include_origin: true,
+        }
+    }
+}
+
+impl StreamSplitConfig {
+    /// Validates the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CamelError::Config`] if:
+    /// - `batch_size` is `0`
+    /// - `max_record_bytes` is `0`
+    /// - `format` is [`Chunks`](StreamSplitFormat::Chunks) but `chunk_size` is `None`
+    /// - `chunk_size` is `Some(0)`
+    pub fn validate(&self) -> Result<(), CamelError> {
+        if self.batch_size == 0 {
+            return Err(CamelError::Config(
+                "stream split batch_size must be > 0".into(),
+            ));
+        }
+        if self.max_record_bytes == 0 {
+            return Err(CamelError::Config(
+                "stream split max_record_bytes must be > 0".into(),
+            ));
+        }
+        if self.format == StreamSplitFormat::Chunks && self.chunk_size.is_none() {
+            return Err(CamelError::Config(
+                "stream split format=Chunks requires chunk_size".into(),
+            ));
+        }
+        if let Some(cs) = self.chunk_size
+            && cs == 0
+        {
+            return Err(CamelError::Config(
+                "stream split chunk_size must be > 0".into(),
+            ));
+        }
+        if self.format == StreamSplitFormat::Chunks
+            && let Some(cs) = self.chunk_size
+            && cs > self.max_record_bytes
+        {
+            return Err(CamelError::Config(
+                "stream split chunk_size must be <= max_record_bytes".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Configuration for the Splitter EIP.
 pub struct SplitterConfig {
     /// Expression that splits an exchange into fragments.
@@ -132,7 +244,7 @@ impl SplitterConfig {
 /// This parent-child relationship is the correct semantic for message splitting,
 /// as fragments are logical subdivisions of the parent message, not independent
 /// operations that merely reference the parent (which would warrant span links).
-fn fragment_exchange(parent: &Exchange, body: Body) -> Exchange {
+pub fn fragment_exchange(parent: &Exchange, body: Body) -> Exchange {
     let mut msg = Message::new(body);
     msg.headers = parent.input.headers.clone();
     let mut ex = Exchange::new(msg);
@@ -327,6 +439,69 @@ mod tests {
                 "Fragment should have same trace ID as parent"
             );
         }
+    }
+
+    #[test]
+    fn test_stream_split_config_defaults_valid() {
+        let config = StreamSplitConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_stream_split_config_batch_size_zero_rejected() {
+        let config = StreamSplitConfig {
+            batch_size: 0,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("batch_size"));
+    }
+
+    #[test]
+    fn test_stream_split_config_max_record_bytes_zero_rejected() {
+        let config = StreamSplitConfig {
+            max_record_bytes: 0,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("max_record_bytes"));
+    }
+
+    #[test]
+    fn test_stream_split_config_chunks_requires_chunk_size() {
+        let config = StreamSplitConfig {
+            format: StreamSplitFormat::Chunks,
+            chunk_size: None,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("Chunks requires chunk_size"));
+    }
+
+    #[test]
+    fn test_stream_split_config_chunk_size_zero_rejected() {
+        let config = StreamSplitConfig {
+            format: StreamSplitFormat::Chunks,
+            chunk_size: Some(0),
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("chunk_size must be > 0"));
+    }
+
+    #[test]
+    fn test_stream_split_config_chunk_size_exceeds_max_record_bytes() {
+        let config = StreamSplitConfig {
+            format: StreamSplitFormat::Chunks,
+            chunk_size: Some(2000),
+            max_record_bytes: 1000,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("chunk_size must be <= max_record_bytes")
+        );
     }
 
     #[test]

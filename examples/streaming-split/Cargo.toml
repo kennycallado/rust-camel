@@ -1,0 +1,19 @@
+[package]
+name = "streaming-split"
+description = "Streaming Split EIP example — split Body::Stream (NDJSON) into individual exchanges"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-processor.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+bytes.workspace = true
+futures.workspace = true
+
+[lints]
+workspace = true
