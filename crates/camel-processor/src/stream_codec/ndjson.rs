@@ -36,7 +36,7 @@ impl StreamSplitCodec for NdjsonCodec {
                         let values = std::mem::take(&mut batch);
                         let batch_offset = offset - (values.len() as u64);
                         let body = if values.len() == 1 {
-                            Body::Json(values.into_iter().next().unwrap())
+                            Body::Json(values.into_iter().next().unwrap()) // allow-unwrap: len==1 guaranteed by enclosing if
                         } else {
                             Body::Json(serde_json::Value::Array(values))
                         };

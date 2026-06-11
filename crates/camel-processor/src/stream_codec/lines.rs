@@ -36,7 +36,7 @@ impl StreamSplitCodec for LinesCodec {
                         let lines = std::mem::take(&mut batch);
                         let batch_offset = offset - (lines.len() as u64);
                         let body = if lines.len() == 1 {
-                            Body::Text(lines.into_iter().next().unwrap())
+                            Body::Text(lines.into_iter().next().unwrap()) // allow-unwrap: len==1 guaranteed by enclosing if
                         } else {
                             Body::Text(lines.join("\n"))
                         };

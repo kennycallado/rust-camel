@@ -37,7 +37,7 @@ impl StreamSplitCodec for ChunksCodec {
                         let chunks = std::mem::take(&mut batch);
                         let batch_offset = offset - (chunks.len() as u64);
                         let body = if chunks.len() == 1 {
-                            Body::Bytes(chunks.into_iter().next().unwrap())
+                            Body::Bytes(chunks.into_iter().next().unwrap()) // allow-unwrap: len==1 guaranteed by enclosing if
                         } else {
                             let mut combined = BytesMut::new();
                             for c in &chunks {
