@@ -38,7 +38,7 @@ impl RuntimeDatasourceCatalog {
         &self,
         config: &DatasourceConfig,
     ) -> Result<Arc<dyn PoolFactory>, CamelError> {
-        let factories = self.factories.read().expect("factory lock poisoned");
+        let factories = self.factories.read().expect("factory lock poisoned"); // allow-unwrap
         if let Some(ref provider) = config.provider {
             let factory = factories.get(provider).ok_or_else(|| {
                 CamelError::Config(format!("unknown datasource provider '{}'", provider))
@@ -136,7 +136,7 @@ impl DatasourceCatalog for RuntimeDatasourceCatalog {
         kind: &str,
         factory: Arc<dyn PoolFactory>,
     ) -> Result<(), CamelError> {
-        let mut factories = self.factories.write().expect("factory lock poisoned");
+        let mut factories = self.factories.write().expect("factory lock poisoned"); // allow-unwrap
         if factories.contains_key(kind) {
             return Err(CamelError::Config(format!(
                 "factory '{}' already registered",

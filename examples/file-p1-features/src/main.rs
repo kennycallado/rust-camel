@@ -91,11 +91,11 @@ async fn main() -> Result<(), CamelError> {
     let mut entries = tokio::fs::read_dir(&output_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.is_file() && !path.file_name().unwrap().to_str().unwrap().starts_with('.') {
+        if path.is_file() && !path.file_name().unwrap().to_str().unwrap().starts_with('.') { // allow-unwrap
             let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
             println!(
                 "  {} (content: {})",
-                path.file_name().unwrap().to_str().unwrap(),
+                path.file_name().unwrap().to_str().unwrap(), // allow-unwrap
                 content
             );
         }
