@@ -22,7 +22,7 @@ use camel_api::metrics::MetricsCollector;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, NoOpMetrics,
     NoopPlatformService, PlatformService, ProducerContext, RouteController, RuntimeCommand,
-    RuntimeHandle,
+    RuntimeHandle, SyncBoxProcessor,
 };
 use camel_auth::TokenAuthenticator;
 use camel_component_api::{
@@ -56,23 +56,6 @@ pub struct CrashNotification {
     /// The error that caused the crash.
     pub error: String,
 }
-
-/// Newtype to make BoxProcessor Sync-safe for ArcSwap.
-///
-/// # Safety
-///
-/// BoxProcessor (BoxCloneService) is Send but not Sync because the inner
-/// Box<dyn CloneServiceInner> lacks a Sync bound. However:
-///
-/// 1. We ONLY access BoxProcessor via clone(), which is a read-only operation
-///    (creates a new boxed service from the inner clone).
-/// 2. The clone is owned by the calling thread and never shared.
-/// 3. ArcSwap guarantees we only get & references (no &mut).
-///
-/// Therefore, concurrent access to &BoxProcessor for cloning is safe because
-/// clone() does not mutate shared state and each thread gets an independent copy.
-pub(crate) struct SyncBoxProcessor(pub(crate) BoxProcessor);
-unsafe impl Sync for SyncBoxProcessor {}
 
 type SharedPipeline = Arc<ArcSwap<SyncBoxProcessor>>;
 
@@ -679,7 +662,7 @@ impl DefaultRouteController {
                     staging_mode,
                 )?;
                 let pre_procs: Vec<BoxProcessor> = pre_pairs.into_iter().map(|(p, _)| p).collect();
-                let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
+                let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor::new(
                     compose_pipeline(pre_procs),
                 )));
 
@@ -692,7 +675,7 @@ impl DefaultRouteController {
                 )?;
                 let post_procs: Vec<BoxProcessor> =
                     post_pairs.into_iter().map(|(p, _)| p).collect();
-                let post_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
+                let post_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor::new(
                     compose_pipeline(post_procs),
                 )));
 
@@ -786,7 +769,7 @@ impl DefaultRouteController {
             managed: ManagedRoute {
                 definition: definition_info,
                 from_uri,
-                pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(pipeline))),
+                pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor::new(pipeline))),
                 concurrency,
                 consumer_handle: None,
                 pipeline_handle: None,
@@ -1181,7 +1164,7 @@ impl DefaultRouteController {
 
         managed
             .pipeline
-            .store(Arc::new(SyncBoxProcessor(new_pipeline)));
+            .store(Arc::new(SyncBoxProcessor::new(new_pipeline)));
         info!(route_id = %route_id, "Pipeline swapped atomically");
         Ok(())
     }
@@ -1198,7 +1181,7 @@ impl DefaultRouteController {
     pub fn get_pipeline(&self, route_id: &str) -> Option<BoxProcessor> {
         self.routes
             .get(route_id)
-            .map(|r| r.pipeline.load().0.clone())
+            .map(|r| r.pipeline.load().clone_inner())
     }
 
     /// Internal stop implementation that can set custom status.
@@ -1357,7 +1340,7 @@ impl RouteController for DefaultRouteController {
                             match late_ex {
                                 Some(ex) => {
                                     let pipe = post_pipeline.load();
-                                    if let Err(e) = pipe.0.clone().oneshot(ex).await {
+                                    if let Err(e) = pipe.clone_inner().oneshot(ex).await {
                                         tracing::warn!(error = %e, "late exchange post-pipeline failed");
                                     }
                                 }
@@ -1370,7 +1353,7 @@ impl RouteController for DefaultRouteController {
                                 Some(envelope) => {
                                     let ExchangeEnvelope { exchange, reply_tx } = envelope;
                                     let pre_pipe = pre_pipeline.load();
-                                    let ex = match pre_pipe.0.clone().oneshot(exchange).await {
+                                    let ex = match pre_pipe.clone_inner().oneshot(exchange).await {
                                         Ok(ex) => ex,
                                         Err(e) => {
                                             if let Some(tx) = reply_tx { let _ = tx.send(Err(e)); }
@@ -1390,7 +1373,7 @@ impl RouteController for DefaultRouteController {
                                         Ok(ex) => {
                                             if !is_pending(&ex) {
                                                 let post_pipe = post_pipeline.load();
-                                                let out = post_pipe.0.clone().oneshot(ex).await;
+                                                let out = post_pipe.clone_inner().oneshot(ex).await;
                                                 if let Some(tx) = reply_tx { let _ = tx.send(out); }
                                             } else if let Some(tx) = reply_tx {
                                                 let _ = tx.send(Ok(ex));
@@ -1415,7 +1398,7 @@ impl RouteController for DefaultRouteController {
                             let mut rx_guard = late_rx.lock().await;
                             while let Ok(late_ex) = rx_guard.try_recv() {
                                 let pipe = post_pipeline.load();
-                                let _ = pipe.0.clone().oneshot(late_ex).await;
+                                let _ = pipe.clone_inner().oneshot(late_ex).await;
                             }
                             break;
                         }
@@ -1492,7 +1475,7 @@ impl RouteController for DefaultRouteController {
                         let ExchangeEnvelope { exchange, reply_tx } = envelope;
 
                         // Load current pipeline from ArcSwap (picks up hot-reloaded pipelines)
-                        let mut pipeline = pipeline.load().0.clone();
+                        let mut pipeline = pipeline.load().clone_inner();
 
                         if let Err(e) = ready_with_backoff(&mut pipeline, &pipeline_cancel).await {
                             if let Some(tx) = reply_tx {
@@ -1540,7 +1523,7 @@ impl RouteController for DefaultRouteController {
                             };
 
                             // Load current pipeline from ArcSwap
-                            let mut pipe = pipe_ref.load().0.clone();
+                            let mut pipe = pipe_ref.load().clone_inner();
 
                             // Wait for service ready with circuit breaker backoff
                             if let Err(e) = ready_with_backoff(&mut pipe, &cancel).await {

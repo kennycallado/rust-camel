@@ -4,7 +4,7 @@ use crate::shared::components::domain::Registry;
 use camel_api::function::PrepareToken;
 use camel_api::{
     ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
-    FunctionInvoker, FunctionInvokerSync, Value, ValueSourceDef,
+    FunctionInvoker, FunctionInvokerSync, SyncBoxProcessor, Value, ValueSourceDef,
 };
 
 struct NoopInvoker;
@@ -128,9 +128,9 @@ fn helper_functions_cover_non_async_branches() {
             .with_route_id("r")
             .to_info(),
         from_uri: "timer:a".into(),
-        pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(BoxProcessor::new(
-            IdentityProcessor,
-        )))),
+        pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor::new(
+            BoxProcessor::new(IdentityProcessor),
+        ))),
         concurrency: None,
         consumer_handle: None,
         pipeline_handle: None,
@@ -1295,6 +1295,29 @@ async fn aggregate_without_force_completion_on_stop_discards_pending_bucket() {
         !has_force_complete,
         "expected no force-completed exchange, but found one with CompletionReason=stop"
     );
+}
+
+#[tokio::test]
+async fn syncbox_processor_concurrent_clone_inner_via_arcswap() {
+    use arc_swap::ArcSwap;
+    use camel_api::{BoxProcessor, IdentityProcessor, SyncBoxProcessor};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    let processor = SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor));
+    let shared: Arc<ArcSwap<SyncBoxProcessor>> = Arc::new(ArcSwap::from_pointee(processor));
+
+    let mut handles = vec![];
+    for _ in 0..4 {
+        let shared = shared.clone();
+        handles.push(tokio::spawn(async move {
+            let mut cloned = shared.load().clone_inner();
+            assert!(cloned.ready().await.is_ok());
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
 }
 
 #[tokio::test]

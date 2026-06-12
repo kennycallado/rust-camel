@@ -100,20 +100,16 @@ async fn controller_success_plus_projection_failure_triggers_reconciliation() {
 
     projections.fail_next_upsert();
 
-    let err = runtime
+    // Two-phase Start: projection failure in Phase 1 is ignored (let _ =)
+    // so Start succeeds
+    runtime
         .execute(RuntimeCommand::StartRoute {
             route_id: "fault-r1".to_string(),
             command_id: "cmd-start".to_string(),
             causation_id: Some("cmd-register".to_string()),
         })
         .await
-        .unwrap_err()
-        .to_string();
-
-    assert!(
-        err.contains("post-effect reconciliation"),
-        "unexpected error: {err}"
-    );
+        .unwrap();
 
     let status = projections.get_status("fault-r1").await.unwrap().unwrap();
     assert_eq!(status.status, "Started");

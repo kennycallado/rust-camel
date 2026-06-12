@@ -181,6 +181,57 @@ impl RouteRuntimeAggregate {
         self.version += 1;
         Ok(events)
     }
+
+    // --- Two-phase lifecycle methods ---
+
+    /// Phase 1 of two-phase start: transition to Starting.
+    /// Idempotent if already Starting or Started.
+    pub fn begin_start(&mut self) -> Result<Vec<RuntimeEvent>, DomainError> {
+        match self.state {
+            RouteRuntimeState::Registered | RouteRuntimeState::Stopped => {
+                self.version += 1;
+                self.state = RouteRuntimeState::Starting;
+                Ok(vec![RuntimeEvent::RouteStartRequested {
+                    route_id: self.route_id.clone(),
+                }])
+            }
+            RouteRuntimeState::Starting | RouteRuntimeState::Started => Ok(vec![]),
+            _ => Err(DomainError::InvalidTransition {
+                from: format!("{:?}", self.state),
+                to: "Starting".to_string(),
+            }),
+        }
+    }
+
+    /// Phase 2 of two-phase start: transition from Starting to Started.
+    /// Idempotent if already Started.
+    pub fn confirm_start(&mut self) -> Result<Vec<RuntimeEvent>, DomainError> {
+        match self.state {
+            RouteRuntimeState::Starting => {
+                self.state = RouteRuntimeState::Started;
+                Ok(vec![RuntimeEvent::RouteStarted {
+                    route_id: self.route_id.clone(),
+                }])
+            }
+            RouteRuntimeState::Started => Ok(vec![]),
+            _ => Err(DomainError::InvalidTransition {
+                from: format!("{:?}", self.state),
+                to: "Started".to_string(),
+            }),
+        }
+    }
+
+    /// Transition to Failed state from any state.
+    /// Increments version to stay consistent with event replay
+    /// (the replay path increments version for RouteFailed events).
+    pub fn fail(&mut self, error: String) -> Vec<RuntimeEvent> {
+        self.state = RouteRuntimeState::Failed(error.clone());
+        self.version += 1;
+        vec![RuntimeEvent::RouteFailed {
+            route_id: self.route_id.clone(),
+            error,
+        }]
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +341,129 @@ mod tests {
         let events = agg.apply_command(RouteLifecycleCommand::Resume).unwrap();
         assert!(events.is_empty());
         assert_eq!(agg.state(), &RouteRuntimeState::Started);
+    }
+
+    // --- begin_start tests ---
+
+    #[test]
+    fn begin_start_from_registered_transitions_to_starting() {
+        let mut agg = RouteRuntimeAggregate::new("r1");
+        let version_before = agg.version();
+        let events = agg.begin_start().unwrap();
+        assert_eq!(*agg.state(), RouteRuntimeState::Starting);
+        assert_eq!(
+            events,
+            vec![RuntimeEvent::RouteStartRequested {
+                route_id: "r1".into()
+            }]
+        );
+        assert_eq!(
+            agg.version(),
+            version_before + 1,
+            "version must increment by 1 in begin_start"
+        );
+    }
+
+    #[test]
+    fn begin_start_from_stopped_transitions_to_starting() {
+        let mut agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Stopped, 1);
+        let version_before = agg.version();
+        let events = agg.begin_start().unwrap();
+        assert_eq!(*agg.state(), RouteRuntimeState::Starting);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            RuntimeEvent::RouteStartRequested { .. }
+        ));
+        assert_eq!(
+            agg.version(),
+            version_before + 1,
+            "version must increment by 1 in begin_start"
+        );
+    }
+
+    #[test]
+    fn begin_start_idempotent_on_starting() {
+        let mut agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Starting, 1);
+        let events = agg.begin_start().unwrap();
+        assert_eq!(*agg.state(), RouteRuntimeState::Starting);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn begin_start_idempotent_on_started() {
+        let mut agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Started, 2);
+        let events = agg.begin_start().unwrap();
+        assert_eq!(*agg.state(), RouteRuntimeState::Started);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn begin_start_rejects_invalid_states() {
+        for state in [
+            RouteRuntimeState::Suspended,
+            RouteRuntimeState::Failed("err".into()),
+        ] {
+            let mut agg = RouteRuntimeAggregate::from_snapshot("r1", state.clone(), 1);
+            assert!(agg.begin_start().is_err());
+        }
+    }
+
+    // --- confirm_start tests ---
+
+    #[test]
+    fn confirm_start_from_starting_transitions_to_started() {
+        let mut agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Starting, 1);
+        let events = agg.confirm_start().unwrap();
+        assert_eq!(*agg.state(), RouteRuntimeState::Started);
+        assert_eq!(
+            events,
+            vec![RuntimeEvent::RouteStarted {
+                route_id: "r1".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn confirm_start_idempotent_on_started() {
+        let mut agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Started, 2);
+        let events = agg.confirm_start().unwrap();
+        assert!(events.is_empty());
+        assert_eq!(*agg.state(), RouteRuntimeState::Started);
+    }
+
+    #[test]
+    fn confirm_start_rejects_non_starting() {
+        let mut agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Registered, 0);
+        assert!(agg.confirm_start().is_err());
+    }
+
+    // --- fail tests ---
+
+    #[test]
+    fn fail_from_any_state() {
+        for state in [
+            RouteRuntimeState::Registered,
+            RouteRuntimeState::Starting,
+            RouteRuntimeState::Started,
+            RouteRuntimeState::Stopped,
+            RouteRuntimeState::Suspended,
+            RouteRuntimeState::Stopping,
+        ] {
+            let mut agg = RouteRuntimeAggregate::from_snapshot("r1", state, 1);
+            let version_before = agg.version();
+            let events = agg.fail("crash".into());
+            assert_eq!(*agg.state(), RouteRuntimeState::Failed("crash".into()));
+            assert_eq!(
+                agg.version(),
+                version_before + 1,
+                "fail() must increment version to match replay"
+            );
+            assert_eq!(events.len(), 1);
+            assert!(
+                matches!(&events[0], RuntimeEvent::RouteFailed { route_id, error } if route_id == "r1" && error == "crash")
+            );
+        }
     }
 
     #[test]

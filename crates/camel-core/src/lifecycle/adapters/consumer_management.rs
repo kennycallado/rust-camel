@@ -213,10 +213,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::lifecycle::adapters::route_controller::SyncBoxProcessor;
     use crate::lifecycle::application::route_definition::RouteDefinition;
     use arc_swap::ArcSwap;
     use async_trait::async_trait;
+    use camel_api::SyncBoxProcessor;
     use camel_api::{BoxProcessor, IdentityProcessor};
 
     struct FailingConsumer {
@@ -244,9 +244,9 @@ mod tests {
                 .with_route_id("route-1")
                 .to_info(),
             from_uri: "timer:test".into(),
-            pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(BoxProcessor::new(
-                IdentityProcessor,
-            )))),
+            pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor::new(
+                BoxProcessor::new(IdentityProcessor),
+            ))),
             concurrency: None,
             consumer_handle,
             pipeline_handle,

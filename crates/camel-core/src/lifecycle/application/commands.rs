@@ -17,7 +17,7 @@ use crate::lifecycle::application::route_definition::{
     BuilderStep, DeclarativeWhenStep, RouteDefinition,
 };
 use crate::lifecycle::domain::{
-    DomainError, RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState,
+    DomainError, RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
 };
 use crate::lifecycle::ports::{
     EventPublisherPort, ProjectionStorePort, RouteRepositoryPort, RouteStatusProjection,
@@ -73,12 +73,9 @@ async fn handle_register(
         return Err(DomainError::AlreadyExists(route_id).into());
     }
 
-    if let Some(execution) = &deps.execution {
-        let route_definition = canonical_to_route_definition(spec)?;
-        execution.register_route(route_definition).await?;
-    }
+    // 1. Create aggregate and persist FIRST
+    let (mut aggregate, events) = RouteRuntimeAggregate::register(route_id.clone());
 
-    let (aggregate, events) = RouteRuntimeAggregate::register(route_id.clone());
     if let Some(uow) = &deps.uow {
         uow.persist_upsert(
             aggregate.clone(),
@@ -105,9 +102,84 @@ async fn handle_register(
         deps.events.publish(&events).await?;
     }
 
+    // 2. Execute runtime side effect
+    if let Some(execution) = &deps.execution {
+        let route_definition = canonical_to_route_definition(spec)?;
+        if let Err(runtime_err) = execution.register_route(route_definition).await {
+            // 3. Compensate: mark as Failed
+            let version_before_fail = aggregate.version();
+            let fail_events = aggregate.fail(runtime_err.to_string());
+            let fail_proj = project_from_aggregate(&aggregate);
+            if let Some(uow) = &deps.uow {
+                if let Err(persist_err) = uow
+                    .persist_upsert(
+                        aggregate.clone(),
+                        Some(version_before_fail),
+                        fail_proj,
+                        &fail_events,
+                    )
+                    .await
+                {
+                    // log-policy: system-broken
+                    tracing::error!(
+                        route_id = %route_id,
+                        runtime_error = %runtime_err,
+                        persist_error = %persist_err,
+                        "INCONSISTENCY: runtime register failed and Failed-state persist also failed"
+                    );
+                }
+            } else {
+                match deps
+                    .repo
+                    .save_if_version(aggregate.clone(), version_before_fail)
+                    .await
+                {
+                    Ok(()) => {
+                        if let Err(proj_err) =
+                            upsert_projection_with_reconciliation(&*deps.projections, fail_proj)
+                                .await
+                        {
+                            // log-policy: system-broken
+                            tracing::error!(
+                                route_id = %route_id,
+                                projection_error = %proj_err,
+                                "INCONSISTENCY: projection update failed after compensation persist"
+                            );
+                        }
+                        if let Err(pub_err) = deps.events.publish(&fail_events).await {
+                            // log-policy: system-broken
+                            tracing::error!(
+                                route_id = %route_id,
+                                publish_error = %pub_err,
+                                "INCONSISTENCY: failed to publish failure events during compensation"
+                            );
+                        }
+                    }
+                    Err(persist_err) => {
+                        // log-policy: system-broken
+                        tracing::error!(
+                            route_id = %route_id,
+                            persist_error = %persist_err,
+                            "INCONSISTENCY: compensation persist failed — concurrent modification, events not published"
+                        );
+                    }
+                }
+            }
+            return Err(CamelError::RouteError(format!(
+                "runtime registration failed for route '{route_id}': {runtime_err}"
+            )));
+        }
+    }
+
     Ok(RuntimeCommandResult::RouteRegistered { route_id })
 }
 
+// NOTE: handle_register_internal uses runtime-first ordering intentionally.
+// It is called from runtime_bus for internal routes where the runtime context
+// is already validated. The public handle_register uses persist-first for
+// crash-safety. See the Phase 1 remediation plan for the design rationale.
+// TODO(unify-register): After Phase 1, these two functions should be unified
+// (tracked as follow-up bd issue).
 pub(crate) async fn handle_register_internal(
     deps: &CommandDeps,
     def: RouteDefinition,
@@ -175,6 +247,7 @@ pub(crate) async fn handle_register_internal(
     Ok(RuntimeCommandResult::RouteRegistered { route_id })
 }
 
+#[allow(clippy::collapsible_if)]
 async fn handle_lifecycle(
     deps: &CommandDeps,
     route_id: String,
@@ -188,40 +261,277 @@ async fn handle_lifecycle(
     let expected_version = aggregate.version();
 
     let execution_command = command.clone();
-    let events = aggregate.apply_command(command.clone())?;
 
-    if let RouteLifecycleCommand::Fail(error) = &execution_command
-        && let Some(health_registry) = &deps.health_registry
-    {
-        health_registry.force_unhealthy_for_route(
-            &route_id,
-            &format!("route:{route_id}"),
-            format!("route failed: {error}"),
-        );
+    // Two-phase Start: dispatch to dedicated handler
+    if matches!(execution_command, RouteLifecycleCommand::Start) {
+        return handle_lifecycle_start(deps, aggregate, expected_version).await;
+    }
+    // Fail command: always handled via apply_command (no runtime side effect)
+    if let RouteLifecycleCommand::Fail(error) = &execution_command {
+        let events = aggregate.apply_command(execution_command.clone())?;
+        if let Some(health_registry) = &deps.health_registry {
+            health_registry.force_unhealthy_for_route(
+                &route_id,
+                &format!("route:{route_id}"),
+                format!("route failed: {error}"),
+            );
+        }
+        return persist_and_return(deps, aggregate, expected_version, events, route_id).await;
     }
 
-    if events.is_empty() {
-        let target = match &execution_command {
-            RouteLifecycleCommand::Start => "Started",
-            RouteLifecycleCommand::Stop => "Stopped",
-            RouteLifecycleCommand::Suspend => "Suspended",
-            RouteLifecycleCommand::Resume => "Started",
-            _ => "unknown",
-        };
-        return Err(CamelError::RouteError(format!(
-            "invalid transition: route '{}' already in {target} state",
-            aggregate.route_id()
-        )));
-    }
-
+    // Reload guard: runtime execution port required
     if matches!(execution_command, RouteLifecycleCommand::Reload) && deps.execution.is_none() {
         return Err(CamelError::RouteError(
             "reload requires connected runtime route controller".to_string(),
         ));
     }
 
+    // Pre-validate domain transition before executing runtime side effect
+    {
+        let mut validation_agg = aggregate.clone();
+        let validation_events = validation_agg.apply_command(execution_command.clone())?;
+        if validation_events.is_empty() {
+            // Idempotent: already in target state, no-op
+            return Ok(RuntimeCommandResult::RouteStateChanged {
+                route_id,
+                status: format!("{:?}", aggregate.state()),
+            });
+        }
+    }
+
+    // Stop/Suspend/Resume/Reload: execute runtime FIRST, then apply_command on success
     if let Some(execution) = &deps.execution {
-        apply_runtime_lifecycle(execution.as_ref(), &route_id, &execution_command).await?;
+        if let Err(runtime_err) =
+            apply_runtime_lifecycle(execution.as_ref(), &route_id, &execution_command).await
+        {
+            // Runtime execution failed: persist Failed state as compensation
+            let fail_events = aggregate.fail(runtime_err.to_string());
+            let fail_proj = project_from_aggregate(&aggregate);
+            if let Some(uow) = &deps.uow {
+                if let Err(persist_err) = uow
+                    .persist_upsert(
+                        aggregate.clone(),
+                        Some(expected_version),
+                        fail_proj,
+                        &fail_events,
+                    )
+                    .await
+                {
+                    // log-policy: system-broken
+                    tracing::error!(
+                        route_id = %route_id,
+                        runtime_error = %runtime_err,
+                        persist_error = %persist_err,
+                        "INCONSISTENCY: runtime operation failed and Failed-state persist also failed"
+                    );
+                }
+            } else {
+                match deps
+                    .repo
+                    .save_if_version(aggregate.clone(), expected_version)
+                    .await
+                {
+                    Ok(()) => {
+                        if let Err(proj_err) =
+                            upsert_projection_with_reconciliation(&*deps.projections, fail_proj)
+                                .await
+                        {
+                            // log-policy: system-broken
+                            tracing::error!(
+                                route_id = %route_id,
+                                projection_error = %proj_err,
+                                "INCONSISTENCY: projection update failed after compensation persist"
+                            );
+                        }
+                        if let Err(pub_err) = deps.events.publish(&fail_events).await {
+                            // log-policy: system-broken
+                            tracing::error!(
+                                route_id = %route_id,
+                                publish_error = %pub_err,
+                                "INCONSISTENCY: failed to publish failure events during compensation"
+                            );
+                        }
+                    }
+                    Err(persist_err) => {
+                        // log-policy: system-broken
+                        tracing::error!(
+                            route_id = %route_id,
+                            persist_error = %persist_err,
+                            "INCONSISTENCY: compensation persist failed — concurrent modification, events not published"
+                        );
+                    }
+                }
+            }
+            return Err(CamelError::RouteError(format!(
+                "runtime operation failed for route '{route_id}': {runtime_err}"
+            )));
+        }
+    }
+
+    // Runtime succeeded: apply command and persist
+    let events = aggregate.apply_command(execution_command.clone())?;
+    persist_and_return(deps, aggregate, expected_version, events, route_id).await
+}
+
+#[allow(clippy::collapsible_if)]
+async fn handle_lifecycle_start(
+    deps: &CommandDeps,
+    mut aggregate: RouteRuntimeAggregate,
+    expected_version: u64,
+) -> Result<RuntimeCommandResult, CamelError> {
+    let route_id = aggregate.route_id().to_string();
+
+    let intent_events = aggregate.begin_start().map_err(|_| {
+        CamelError::RouteError(format!(
+            "invalid transition: route '{}' is in {:?} state, cannot start",
+            route_id,
+            aggregate.state(),
+        ))
+    })?;
+
+    if intent_events.is_empty() {
+        return Err(CamelError::RouteError(format!(
+            "invalid transition: route '{}' is in {:?} state, cannot start",
+            route_id,
+            aggregate.state(),
+        )));
+    }
+
+    // Phase 1: persist intent (Starting state)
+    if let Some(uow) = &deps.uow {
+        uow.persist_upsert(
+            aggregate.clone(),
+            Some(expected_version),
+            project_from_aggregate(&aggregate),
+            &intent_events,
+        )
+        .await?;
+    } else {
+        deps.repo
+            .save_if_version(aggregate.clone(), expected_version)
+            .await?;
+        let _ = upsert_projection_with_reconciliation(
+            &*deps.projections,
+            project_from_aggregate(&aggregate),
+        )
+        .await?;
+        deps.events.publish(&intent_events).await?;
+    }
+
+    // Phase 2: execute runtime side effect
+    if let Some(execution) = &deps.execution {
+        if let Err(runtime_err) =
+            apply_runtime_lifecycle(execution.as_ref(), &route_id, &RouteLifecycleCommand::Start)
+                .await
+        {
+            // Compensate: mark as Failed
+            // Capture version before fail() bumps it — the stored aggregate
+            // is at version V+1 (after begin_start), and fail() increments to V+2.
+            let version_before_fail = aggregate.version();
+            let fail_events = aggregate.fail(runtime_err.to_string());
+            let fail_proj = project_from_aggregate(&aggregate);
+            if let Some(uow) = &deps.uow {
+                if let Err(persist_err) = uow
+                    .persist_upsert(
+                        aggregate.clone(),
+                        Some(version_before_fail),
+                        fail_proj,
+                        &fail_events,
+                    )
+                    .await
+                {
+                    // log-policy: system-broken
+                    tracing::error!(
+                        route_id = %route_id,
+                        runtime_error = %runtime_err,
+                        persist_error = %persist_err,
+                        "INCONSISTENCY: runtime start failed and Failed-state persist also failed -- manual reconciliation required"
+                    );
+                }
+            } else {
+                match deps
+                    .repo
+                    .save_if_version(aggregate.clone(), version_before_fail)
+                    .await
+                {
+                    Ok(()) => {
+                        if let Err(proj_err) =
+                            upsert_projection_with_reconciliation(&*deps.projections, fail_proj)
+                                .await
+                        {
+                            // log-policy: system-broken
+                            tracing::error!(
+                                route_id = %route_id,
+                                projection_error = %proj_err,
+                                "INCONSISTENCY: projection update failed after compensation persist"
+                            );
+                        }
+                        if let Err(pub_err) = deps.events.publish(&fail_events).await {
+                            // log-policy: system-broken
+                            tracing::error!(
+                                route_id = %route_id,
+                                publish_error = %pub_err,
+                                "INCONSISTENCY: failed to publish failure events during compensation"
+                            );
+                        }
+                    }
+                    Err(persist_err) => {
+                        // log-policy: system-broken
+                        tracing::error!(
+                            route_id = %route_id,
+                            persist_error = %persist_err,
+                            "INCONSISTENCY: compensation persist failed — concurrent modification, events not published"
+                        );
+                    }
+                }
+            }
+            return Err(CamelError::RouteError(format!(
+                "runtime start failed for route '{route_id}': {runtime_err}"
+            )));
+        }
+    }
+
+    // Phase 2a: confirm Started
+    let confirm_events = aggregate.confirm_start().map_err(CamelError::from)?;
+    if !confirm_events.is_empty() {
+        if let Some(uow) = &deps.uow {
+            uow.persist_upsert(
+                aggregate.clone(),
+                Some(aggregate.version()),
+                project_from_aggregate(&aggregate),
+                &confirm_events,
+            )
+            .await?;
+        } else {
+            deps.repo
+                .save_if_version(aggregate.clone(), aggregate.version())
+                .await?;
+            let _ = upsert_projection_with_reconciliation(
+                &*deps.projections,
+                project_from_aggregate(&aggregate),
+            )
+            .await?;
+            deps.events.publish(&confirm_events).await?;
+        }
+    }
+
+    Ok(RuntimeCommandResult::RouteStateChanged {
+        route_id,
+        status: "Started".to_string(),
+    })
+}
+
+/// Shared persist flow used by non-Start lifecycle commands.
+async fn persist_and_return(
+    deps: &CommandDeps,
+    aggregate: RouteRuntimeAggregate,
+    expected_version: u64,
+    events: Vec<RuntimeEvent>,
+    route_id: String,
+) -> Result<RuntimeCommandResult, CamelError> {
+    if events.is_empty() {
+        let status = state_label(aggregate.state()).to_string();
+        return Ok(RuntimeCommandResult::RouteStateChanged { route_id, status });
     }
 
     if let Some(uow) = &deps.uow {
@@ -310,12 +620,87 @@ async fn handle_remove(
         .load(&route_id)
         .await?
         .ok_or_else(|| CamelError::RouteError(format!("route '{route_id}' not found")))?;
+    let expected_version = aggregate.version();
 
-    let events = aggregate.apply_command(RouteLifecycleCommand::Remove)?;
-
-    if let Some(execution) = &deps.execution {
-        remove_runtime_route_with_recovery(execution.as_ref(), &route_id).await?;
+    // Pre-validate Remove transition on a cloned aggregate
+    {
+        let mut validation = aggregate.clone();
+        if let Err(e) = validation.apply_command(RouteLifecycleCommand::Remove) {
+            return Err(CamelError::RouteError(format!(
+                "invalid transition for route '{route_id}': {e}"
+            )));
+        }
     }
+
+    // Execute runtime stop
+    if let Some(execution) = &deps.execution
+        && let Err(stop_err) =
+            remove_runtime_route_with_recovery(execution.as_ref(), &route_id).await
+    {
+        // Stop failed: fail() on ORIGINAL aggregate (no Remove applied)
+        let fail_events = aggregate.fail(stop_err.to_string());
+        let fail_proj = project_from_aggregate(&aggregate);
+        if let Some(uow) = &deps.uow {
+            if let Err(persist_err) = uow
+                .persist_upsert(
+                    aggregate.clone(),
+                    Some(expected_version),
+                    fail_proj,
+                    &fail_events,
+                )
+                .await
+            {
+                // log-policy: system-broken
+                tracing::error!(
+                    route_id = %route_id,
+                    runtime_error = %stop_err,
+                    persist_error = %persist_err,
+                    "INCONSISTENCY: remove runtime stop failed and Failed-state persist also failed"
+                );
+            }
+        } else {
+            match deps
+                .repo
+                .save_if_version(aggregate.clone(), expected_version)
+                .await
+            {
+                Ok(()) => {
+                    if let Err(proj_err) =
+                        upsert_projection_with_reconciliation(&*deps.projections, fail_proj).await
+                    {
+                        // log-policy: system-broken
+                        tracing::error!(
+                            route_id = %route_id,
+                            projection_error = %proj_err,
+                            "INCONSISTENCY: projection update failed after compensation persist"
+                        );
+                    }
+                    if let Err(pub_err) = deps.events.publish(&fail_events).await {
+                        // log-policy: system-broken
+                        tracing::error!(
+                            route_id = %route_id,
+                            publish_error = %pub_err,
+                            "INCONSISTENCY: failed to publish failure events during compensation"
+                        );
+                    }
+                }
+                Err(persist_err) => {
+                    // log-policy: system-broken
+                    tracing::error!(
+                        route_id = %route_id,
+                        persist_error = %persist_err,
+                        "INCONSISTENCY: compensation persist failed — concurrent modification, events not published"
+                    );
+                }
+            }
+        }
+        return Err(CamelError::RouteError(format!(
+            "route '{route_id}' stop failed during removal, state persisted as Failed: {stop_err}"
+        )));
+    }
+
+    // Stop succeeded: apply Remove on real aggregate
+    let events = aggregate.apply_command(RouteLifecycleCommand::Remove)?;
 
     if let Some(uow) = &deps.uow {
         uow.persist_delete(&route_id, &events).await?;
@@ -738,6 +1123,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct ConfigurableExecutionPort {
+        fail_register: Arc<Mutex<bool>>,
         fail_start: Arc<Mutex<bool>>,
         fail_suspend_once: Arc<Mutex<bool>>,
         fail_suspend_retry: Arc<Mutex<bool>>,
@@ -748,6 +1134,13 @@ mod tests {
     }
 
     impl ConfigurableExecutionPort {
+        fn with_register_failure() -> Self {
+            Self {
+                fail_register: Arc::new(Mutex::new(true)),
+                ..Self::default()
+            }
+        }
+
         fn with_suspend_failure_once() -> Self {
             Self {
                 fail_suspend_once: Arc::new(Mutex::new(true)),
@@ -852,6 +1245,9 @@ mod tests {
     #[async_trait]
     impl RuntimeExecutionPort for ConfigurableExecutionPort {
         async fn register_route(&self, _definition: RouteDefinition) -> Result<(), DomainError> {
+            if *self.fail_register.lock().expect("fail_register") {
+                return Err(DomainError::InvalidState("register failed".into()));
+            }
             Ok(())
         }
 
@@ -1253,5 +1649,186 @@ mod tests {
             state_label(&RouteRuntimeState::Failed("e".into())),
             "Failed"
         );
+    }
+
+    // --- Two-phase Start integration tests ---
+
+    #[tokio::test]
+    async fn two_phase_start_happy_path() {
+        let execution = Arc::new(TrackingExecutionPort::new());
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+        let deps = CommandDeps {
+            repo: repo.clone(),
+            projections,
+            events,
+            uow: None,
+            execution: Some(execution),
+            health_registry: None,
+        };
+
+        // Register a route
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-start-happy");
+        handle_register_internal(&deps, def).await.unwrap();
+
+        // Start the route
+        let result = execute_command(
+            &deps,
+            RuntimeCommand::StartRoute {
+                route_id: "route-start-happy".to_string(),
+                command_id: "test".to_string(),
+                causation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, RuntimeCommandResult::RouteStateChanged { status, .. } if status == "Started")
+        );
+
+        // Verify stored aggregate is in Started state
+        let aggregate = deps.repo.load("route-start-happy").await.unwrap().unwrap();
+        assert_eq!(*aggregate.state(), RouteRuntimeState::Started);
+    }
+
+    #[tokio::test]
+    async fn two_phase_start_compensation_on_runtime_failure() {
+        let execution = Arc::new(ConfigurableExecutionPort::default());
+        *execution.fail_resume.lock().unwrap() = true;
+        *execution.fail_start.lock().unwrap() = true;
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+        let deps = CommandDeps {
+            repo: repo.clone(),
+            projections,
+            events,
+            uow: None,
+            execution: Some(execution),
+            health_registry: None,
+        };
+
+        // Register a route
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-start-fail");
+        handle_register_internal(&deps, def).await.unwrap();
+
+        // Start should fail at runtime
+        let err = execute_command(
+            &deps,
+            RuntimeCommand::StartRoute {
+                route_id: "route-start-fail".to_string(),
+                command_id: "test".to_string(),
+                causation_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("start failed"));
+
+        // Verify stored aggregate is in Failed state (compensation)
+        let aggregate = deps.repo.load("route-start-fail").await.unwrap().unwrap();
+        assert!(matches!(aggregate.state(), RouteRuntimeState::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn two_phase_start_idempotent_re_start() {
+        let execution = Arc::new(TrackingExecutionPort::new());
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+        let deps = CommandDeps {
+            repo: repo.clone(),
+            projections,
+            events,
+            uow: None,
+            execution: Some(execution),
+            health_registry: None,
+        };
+
+        // Register a route
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-start-re");
+        handle_register_internal(&deps, def).await.unwrap();
+
+        // Start the route (first time)
+        execute_command(
+            &deps,
+            RuntimeCommand::StartRoute {
+                route_id: "route-start-re".to_string(),
+                command_id: "test".to_string(),
+                causation_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Re-start should fail with state-specific error
+        let err = execute_command(
+            &deps,
+            RuntimeCommand::StartRoute {
+                route_id: "route-start-re".to_string(),
+                command_id: "test".to_string(),
+                causation_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("is in Started state, cannot start")
+        );
+
+        // Verify aggregate stays in Started state
+        let aggregate = deps.repo.load("route-start-re").await.unwrap().unwrap();
+        assert_eq!(*aggregate.state(), RouteRuntimeState::Started);
+    }
+
+    #[tokio::test]
+    async fn handle_register_compensates_to_failed_on_runtime_failure() {
+        let execution = Arc::new(ConfigurableExecutionPort::with_register_failure());
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+        let deps = CommandDeps {
+            repo: repo.clone(),
+            projections,
+            events,
+            uow: None,
+            execution: Some(execution),
+            health_registry: None,
+        };
+
+        use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
+
+        let spec = CanonicalRouteSpec {
+            route_id: "route-reg-fail".into(),
+            from: "timer:test".into(),
+            steps: vec![CanonicalStepSpec::Stop],
+            circuit_breaker: None,
+            auto_startup: None,
+            startup_order: None,
+            concurrency: None,
+            version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+        };
+
+        let result = execute_command(
+            &deps,
+            RuntimeCommand::RegisterRoute {
+                spec,
+                command_id: "test".to_string(),
+                causation_id: None,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+
+        // Verify stored aggregate is in Failed state (compensation), NOT Registered
+        let aggregate = deps.repo.load("route-reg-fail").await.unwrap().unwrap();
+        assert!(matches!(aggregate.state(), RouteRuntimeState::Failed(_)));
     }
 }
