@@ -31,7 +31,8 @@ crates/camel-core/src/
 - **CamelContextBuilder**: Fluent builder with `beans()` method for WASM bean plugin registration
 - **DDD Aggregate**: `RouteRuntimeAggregate` with state machine and optimistic locking
 - **CQRS Runtime Bus**: Separate command/query paths with projection-backed reads
-- **Event Sourcing**: Optional durable journal (redb v2) for crash recovery
+- **Event Sourcing**: Optional durable journal (redb v2) for crash recovery and replay-consistent lifecycle state
+- **Two-phase lifecycle**: Start intent projects `Starting` before runtime side effects confirm `Started` or compensate to `Failed`
 - **Hexagonal Architecture**: Clean separation via ports and adapters
 - **Hot-reload**: Live route updates with zero downtime, graceful in-flight exchange draining, and Skip optimization for unchanged routes
 - **Supervision**: Auto-recovery with configurable exponential backoff
@@ -210,7 +211,7 @@ let ctx = CamelContext::with_supervision_and_metrics_and_redb_journal(
 ).await?;
 ```
 
-Events are persisted and replayed on startup for crash recovery.
+Events are persisted and replayed on startup for crash recovery. Lifecycle writes use optimistic versions; commands that perform runtime side effects persist intent first, then confirm success or compensate to `Failed` so replay and live state converge.
 
 ## Core Types
 

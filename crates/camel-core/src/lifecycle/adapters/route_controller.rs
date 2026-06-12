@@ -40,6 +40,7 @@ pub(super) use crate::lifecycle::adapters::route_helpers::{
     emit_start_route_event, set_start_route_event_hook,
 };
 use crate::lifecycle::adapters::route_registry::RouteRegistry;
+use crate::lifecycle::adapters::route_runtime_state;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::{DetailLevel, TracerConfig};
@@ -480,8 +481,10 @@ impl DefaultRouteController {
                 in_flight: uow_counter,
                 aggregate_split,
                 agg_service: None,
-                security_policy,
-                security_authenticator,
+                compiled: route_runtime_state::CompiledRoute {
+                    security_policy,
+                    security_authenticator,
+                },
             },
         })
     }

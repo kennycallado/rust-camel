@@ -213,6 +213,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::lifecycle::adapters::route_runtime_state;
     use crate::lifecycle::application::route_definition::RouteDefinition;
     use arc_swap::ArcSwap;
     use async_trait::async_trait;
@@ -256,8 +257,10 @@ mod tests {
             in_flight: None,
             aggregate_split: None,
             agg_service: None,
-            security_policy: None,
-            security_authenticator: None,
+            compiled: route_runtime_state::CompiledRoute {
+                security_policy: None,
+                security_authenticator: None,
+            },
         }
     }
 

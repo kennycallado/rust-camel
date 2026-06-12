@@ -17,7 +17,7 @@ use crate::lifecycle::application::route_definition::{
     BuilderStep, DeclarativeWhenStep, RouteDefinition,
 };
 use crate::lifecycle::domain::{
-    DomainError, RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
+    DomainError, RouteLifecycleCommand, RouteRuntimeAggregate, RuntimeEvent,
 };
 use crate::lifecycle::ports::{
     EventPublisherPort, ProjectionStorePort, RouteRepositoryPort, RouteStatusProjection,
@@ -530,7 +530,7 @@ async fn persist_and_return(
     route_id: String,
 ) -> Result<RuntimeCommandResult, CamelError> {
     if events.is_empty() {
-        let status = state_label(aggregate.state()).to_string();
+        let status = aggregate.state_label().to_string();
         return Ok(RuntimeCommandResult::RouteStateChanged { route_id, status });
     }
 
@@ -560,7 +560,7 @@ async fn persist_and_return(
         }
     }
 
-    let status = state_label(aggregate.state()).to_string();
+    let status = aggregate.state_label().to_string();
     Ok(RuntimeCommandResult::RouteStateChanged { route_id, status })
 }
 
@@ -741,19 +741,7 @@ async fn remove_runtime_route_with_recovery(
 pub(crate) fn project_from_aggregate(aggregate: &RouteRuntimeAggregate) -> RouteStatusProjection {
     RouteStatusProjection {
         route_id: aggregate.route_id().to_string(),
-        status: state_label(aggregate.state()).to_string(),
-    }
-}
-
-fn state_label(state: &RouteRuntimeState) -> &'static str {
-    match state {
-        RouteRuntimeState::Registered => "Registered",
-        RouteRuntimeState::Starting => "Starting",
-        RouteRuntimeState::Started => "Started",
-        RouteRuntimeState::Suspended => "Suspended",
-        RouteRuntimeState::Stopping => "Stopping",
-        RouteRuntimeState::Stopped => "Stopped",
-        RouteRuntimeState::Failed(_) => "Failed",
+        status: aggregate.state_label().to_string(),
     }
 }
 
@@ -963,6 +951,7 @@ fn canonical_step_to_builder_step(
 #[cfg(test)]
 mod tests {
     use crate::lifecycle::domain::DomainError;
+    use crate::lifecycle::domain::RouteRuntimeState;
 
     use super::*;
     use crate::health_registry::HealthCheckRegistry;
@@ -1635,20 +1624,6 @@ mod tests {
             .await
             .expect_err("retry remove should fail");
         assert!(err.to_string().contains("retry_remove_error"));
-    }
-
-    #[test]
-    fn state_label_covers_all_states() {
-        assert_eq!(state_label(&RouteRuntimeState::Registered), "Registered");
-        assert_eq!(state_label(&RouteRuntimeState::Starting), "Starting");
-        assert_eq!(state_label(&RouteRuntimeState::Started), "Started");
-        assert_eq!(state_label(&RouteRuntimeState::Suspended), "Suspended");
-        assert_eq!(state_label(&RouteRuntimeState::Stopping), "Stopping");
-        assert_eq!(state_label(&RouteRuntimeState::Stopped), "Stopped");
-        assert_eq!(
-            state_label(&RouteRuntimeState::Failed("e".into())),
-            "Failed"
-        );
     }
 
     // --- Two-phase Start integration tests ---

@@ -193,6 +193,7 @@ impl RouteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::adapters::route_runtime_state;
     use crate::lifecycle::application::route_definition::RouteDefinition;
 
     fn example_managed() -> ManagedRoute {
@@ -211,8 +212,10 @@ mod tests {
             in_flight: None,
             aggregate_split: None,
             agg_service: None,
-            security_policy: None,
-            security_authenticator: None,
+            compiled: route_runtime_state::CompiledRoute {
+                security_policy: None,
+                security_authenticator: None,
+            },
         }
     }
 

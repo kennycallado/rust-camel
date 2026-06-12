@@ -33,6 +33,13 @@ Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./doc
 - [0009](./docs/adr/0009-http-co-hosting-api-and-static-routes.md) — HTTP API routes and static file mounts share one server per host/port with deterministic dispatch precedence
 - [0010](./docs/adr/0010-security-policy-pre-pipeline-authorization.md) — Route-level SecurityPolicy authorizes before normal Route Steps run, rather than as a normal Pipeline Step
 - [0011](./docs/adr/0011-canonical-route-spec-minimal-contract.md) — CanonicalRouteSpec v1 is a stable minimal route contract, not a full RouteDefinition mirror
+- [0012](./docs/adr/0012-log-level-convention-handler-contract-boundaries.md) — Log levels follow handler-contract ownership boundaries
+- [0013](./docs/adr/0013-network-retry-policy-and-migration.md) — NetworkRetryPolicy centralizes adapter retry semantics and migration boundaries
+- [0014](./docs/adr/0014-wasm-plugin-config-unification.md) — WASM plugin runtime configuration is unified across plugin types
+- [0015](./docs/adr/0015-endpoint-created-polling-consumer-for-pollenrich.md) — Endpoint-created PollingConsumer powers pollEnrich and WASM camel_poll
+- [0016](./docs/adr/0016-canonical-route-spec-v2-contract.md) — CanonicalRouteSpec v2 adds lifecycle/execution metadata with strict rejection for unsupported fields
+- [0017](./docs/adr/0017-dsl-yaml-snake-case-naming-convention.md) — DSL YAML keys use snake_case to match Rust field names and schema output
+- [0018](./docs/adr/0018-two-phase-route-lifecycle-persistence.md) — Route lifecycle commands persist intent before side effects, use optimistic versions, and compensate to Failed on side-effect failure
 
 ## Key Terms
 
@@ -52,3 +59,5 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **Bridged error** — Consumer failure converted to a synthetic error-bearing Exchange via `ConsumerContext::send_and_wait` (taxonomy b-bridged). Route's error handler owns the operational signal; the consumer's `bridge_*` path MUST log at `warn!` or below to avoid duplicate `error!`. Canonical implementation: `crates/components/camel-sql/src/consumer.rs:280-288`.
 - **PollingConsumer** — Pull-based adapter created on demand from an Endpoint, delivering one Exchange per call. Contrasts with the event-driven Consumer (push model) that drives a Route. Endpoints opt in via `Endpoint::polling_consumer`; components that are purely event-driven (HTTP server, Kafka) return `None` by default. Used by the EIP-7 `pollEnrich` DSL verb and the WASM `camel_poll` host function. Established by ADR-0015. (camel-component-api + camel-processor + camel-core)
 - **EnrichmentStrategy** — Strategy that merges the original Exchange with the enriched/polled Exchange in the EIP-7 `enrich` and `pollEnrich` verbs. Distinct from the EIP-22 `AggregateStrategyDef` family (which collides on the obvious name "AggregationStrategy"). Established by ADR-0015. (camel-processor + camel-dsl)
+- **Starting Route** — Externally observable Route lifecycle state recorded after start intent is accepted and before the Consumer/Pipeline side effect is confirmed. Operators may see `Starting` in `RouteStatusProjection`; it is not an internal-only transient. Established by ADR-0018. (camel-core)
+- **Route lifecycle compensation** — Control-plane recovery rule: if a lifecycle side effect fails after durable intent/state changed, Runtime records the Route as `Failed`, reconciles the status projection, and publishes failure events instead of rolling history back. Established by ADR-0018. (camel-core)

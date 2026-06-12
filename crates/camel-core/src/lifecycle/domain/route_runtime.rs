@@ -232,6 +232,19 @@ impl RouteRuntimeAggregate {
             error,
         }]
     }
+
+    /// Human-readable label for the current lifecycle state.
+    pub fn state_label(&self) -> &'static str {
+        match self.state {
+            RouteRuntimeState::Registered => "Registered",
+            RouteRuntimeState::Starting => "Starting",
+            RouteRuntimeState::Started => "Started",
+            RouteRuntimeState::Suspended => "Suspended",
+            RouteRuntimeState::Stopping => "Stopping",
+            RouteRuntimeState::Stopped => "Stopped",
+            RouteRuntimeState::Failed(_) => "Failed",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -464,6 +477,25 @@ mod tests {
                 matches!(&events[0], RuntimeEvent::RouteFailed { route_id, error } if route_id == "r1" && error == "crash")
             );
         }
+    }
+
+    #[test]
+    fn state_label_covers_all_states() {
+        let agg = RouteRuntimeAggregate::new("r1");
+        assert_eq!(agg.state_label(), "Registered");
+        let agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Starting, 1);
+        assert_eq!(agg.state_label(), "Starting");
+        let agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Started, 2);
+        assert_eq!(agg.state_label(), "Started");
+        let agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Suspended, 2);
+        assert_eq!(agg.state_label(), "Suspended");
+        let agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Stopping, 2);
+        assert_eq!(agg.state_label(), "Stopping");
+        let agg = RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Stopped, 2);
+        assert_eq!(agg.state_label(), "Stopped");
+        let agg =
+            RouteRuntimeAggregate::from_snapshot("r1", RouteRuntimeState::Failed("e".into()), 2);
+        assert_eq!(agg.state_label(), "Failed");
     }
 
     #[test]

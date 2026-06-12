@@ -29,6 +29,10 @@ _Avoid_: flow, pipeline (when referring to the Route as a whole)
 Route lifecycle state where Consumer intake is stopped while the Pipeline and route channel remain alive. `resume` recreates the Consumer without rebuilding the whole Route.
 _Avoid_: stopped route, paused pipeline
 
+**Starting Route**:
+Route lifecycle state where start intent has been accepted and projected, but the runtime Consumer/Pipeline side effect has not yet been confirmed. Operators can observe this state in Route status queries.
+_Avoid_: transient start flag, hidden startup state
+
 **Pipeline**:
 The compiled assembly of Processors that processes an Exchange through a Route's data plane.
 _Avoid_: chain, middleware stack
@@ -52,6 +56,14 @@ _Avoid_: transaction, scope, UnitOfWork
 **RuntimeBus**:
 CQRS façade for the Route control plane. Commands mutate Route state (start, stop, add); queries read current status from projections.
 _Avoid_: event bus, message bus, command bus (unqualified)
+
+**Route Lifecycle Projection**:
+Read-side Route status record maintained from lifecycle aggregate state. It is the source for RuntimeBus route-status queries and may show intermediate states such as `Starting`.
+_Avoid_: controller state, live route state
+
+**Route Lifecycle Compensation**:
+Control-plane recovery outcome recorded when a lifecycle side effect fails after intent or state was persisted. The Route is marked `Failed` rather than silently rolling back accepted history.
+_Avoid_: rollback, undo
 
 **ErrorHandlerConfig**:
 Runtime representation of an ErrorHandler — the compiled form of the DSL `ErrorHandler` declaration.

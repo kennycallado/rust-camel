@@ -102,8 +102,8 @@ impl camel_api::RouteController for DefaultRouteController {
 
         // Wire security context before spawning consumer
         if let (Some(sp_config), Some(authenticator)) = (
-            managed.security_policy.as_ref(),
-            managed.security_authenticator.as_ref(),
+            managed.compiled.security_policy.as_ref(),
+            managed.compiled.security_authenticator.as_ref(),
         ) {
             use camel_component_api::SecurityContext;
             let sec_ctx =
@@ -385,8 +385,8 @@ impl camel_api::RouteController for DefaultRouteController {
             .get(route_id)
             .expect("invariant: route must exist after prior existence check"); // allow-unwrap
         if let (Some(sp_config), Some(authenticator)) = (
-            managed.security_policy.as_ref(),
-            managed.security_authenticator.as_ref(),
+            managed.compiled.security_policy.as_ref(),
+            managed.compiled.security_authenticator.as_ref(),
         ) {
             use camel_component_api::SecurityContext;
             let sec_ctx =

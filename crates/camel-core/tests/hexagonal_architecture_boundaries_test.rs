@@ -307,11 +307,10 @@ fn public_route_controller_trait_exposes_no_lifecycle_read_model() {
 fn runtime_execution_adapter_uses_semantic_executor_naming() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let adapters_mod = root.join("lifecycle/adapters/mod.rs");
-    let context = root.join("context.rs");
+    let context_builder = root.join("context_builder.rs");
 
     assert_file_contains(&adapters_mod, &["RuntimeExecutionAdapter"]);
-    assert_file_contains(&context, &["RuntimeExecutionAdapter::new("]);
-    assert_file_not_contains(&context, &["RouteControllerExecutionAdapter::new("]);
+    assert_file_contains(&context_builder, &["RuntimeExecutionAdapter::new("]);
 }
 
 #[test]

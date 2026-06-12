@@ -59,6 +59,7 @@
 //! //! to avoid a circular dependency — `camel-config` depends on `camel-core`.
 //!
 pub mod context;
+mod context_builder;
 pub mod datasource;
 pub mod health_registry;
 pub(crate) mod hot_reload;

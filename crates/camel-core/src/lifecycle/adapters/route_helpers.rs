@@ -15,11 +15,11 @@ use tracing::warn;
 
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::{CamelError, Exchange, RuntimeCommand, RuntimeHandle};
-use camel_auth::TokenAuthenticator;
 use camel_component_api::{ConcurrencyModel, consumer::ExchangeEnvelope};
 use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
 
 use crate::lifecycle::adapters::pipeline_runtime::SharedPipeline;
+use crate::lifecycle::adapters::route_runtime_state;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinitionInfo};
 
 /// Notification sent when a route crashes.
@@ -91,10 +91,8 @@ pub(super) struct ManagedRoute {
     pub(super) in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
     pub(super) aggregate_split: Option<AggregateSplitInfo>,
     pub(super) agg_service: Option<Arc<std::sync::Mutex<AggregatorService>>>,
-    /// Stored security policy config for use when starting/resuming the consumer.
-    pub(super) security_policy: Option<camel_api::security_policy::SecurityPolicyConfig>,
-    /// Stored security authenticator for use when starting/resuming the consumer.
-    pub(super) security_authenticator: Option<Arc<dyn TokenAuthenticator>>,
+    /// Compiled runtime state (security artifacts captured at add time).
+    pub(super) compiled: route_runtime_state::CompiledRoute,
 }
 
 /// A prepared route (compiled but not yet inserted into the registry).
