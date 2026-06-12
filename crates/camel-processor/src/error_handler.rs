@@ -142,7 +142,15 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
+        // Preserve backpressure (Pending) but never leak readiness errors upward.
+        // Readiness errors are deferred to call(), where they go through the same
+        // retry/onException/DLC path as call() errors. This is safe because call()
+        // re-checks readiness on a fresh inner clone via inner.ready().await.
+        match self.inner.poll_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(_)) => Poll::Ready(Ok(())),
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+        }
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
@@ -156,7 +164,10 @@ where
 
         Box::pin(async move {
             let original = exchange.clone();
-            let result = inner.ready().await?.call(exchange).await;
+            let result = match inner.ready().await {
+                Ok(svc) => svc.call(exchange).await,
+                Err(e) => Err(e), // readiness error — enters retry/DLC/onException path below
+            };
 
             let err = match result {
                 Ok(ex) => return Ok(ex),
@@ -190,7 +201,11 @@ where
                             Value::Number(backoff.max_attempts.into()),
                         );
 
-                        match inner.ready().await?.call(ex).await {
+                        let result = match inner.ready().await {
+                            Ok(svc) => svc.call(ex).await,
+                            Err(e) => Err(e), // readiness error — enters retry exhaustion path
+                        };
+                        match result {
                             Ok(ex) => return Ok(ex),
                             Err(retry_err) => {
                                 if attempt + 1 == backoff.max_attempts {
@@ -647,6 +662,125 @@ mod tests {
         let ex = Exchange::default();
         let result = svc.ready().await.unwrap().call(ex).await;
         assert!(result.is_err(), "handled:false should propagate error");
+    }
+
+    // --- Readiness error capture tests ---
+    //
+    // ErrorHandlerService must capture readiness errors (poll_ready returning Err)
+    // and route them through retry/onException/DLC instead of propagating raw.
+
+    /// A service whose `poll_ready` always returns `Ready(Err(...))` but whose
+    /// `call` returns `Ok`. This simulates a permanently-not-ready endpoint.
+    #[derive(Clone)]
+    struct ReadinessFailService {
+        error: CamelError,
+    }
+
+    impl Service<Exchange> for ReadinessFailService {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Err(self.error.clone()))
+        }
+
+        fn call(&mut self, ex: Exchange) -> Self::Future {
+            // call() should never be reached if poll_ready returns Err,
+            // but Tower's ready().await on a clone will re-encounter the readiness error.
+            Box::pin(async move { Ok(ex) })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_readiness_error_goes_to_dlc() {
+        let readiness_err = CamelError::ProcessorError("readiness-fail".into());
+        let inner = ReadinessFailService {
+            error: readiness_err,
+        };
+
+        let received = Arc::new(std::sync::Mutex::new(Vec::<Exchange>::new()));
+        let received_clone = Arc::clone(&received);
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let r = Arc::clone(&received_clone);
+            Box::pin(async move {
+                r.lock().unwrap().push(ex.clone());
+                Ok(ex)
+            })
+        });
+
+        let svc = ErrorHandlerService::new(inner, Some(dlc), vec![]);
+        let result = svc.oneshot(make_exchange()).await;
+
+        // The error must be absorbed (Ok), not propagated raw (Err).
+        assert!(
+            result.is_ok(),
+            "readiness error should be captured and sent to DLC, got: {:?}",
+            result
+        );
+        let ex = result.unwrap();
+        assert!(ex.has_error(), "exchange should carry the readiness error");
+        assert_eq!(
+            received.lock().unwrap().len(),
+            1,
+            "DLC should have received the exchange exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_readiness_error_goes_to_matching_policy() {
+        let readiness_err = CamelError::ProcessorError("readiness-fail".into());
+        let inner = ReadinessFailService {
+            error: readiness_err,
+        };
+
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(|mut ex: Exchange| {
+            ex.input.body = camel_api::Body::Bytes("handled-readiness".into());
+            async move { Ok(ex) }
+        }));
+        let policy = ExceptionPolicy {
+            matches: Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            handled: true,
+        };
+
+        let svc = ErrorHandlerService::new(inner, None, vec![(policy, None)]);
+        let result = svc.oneshot(make_exchange()).await;
+
+        // The error must be absorbed and routed to the on_steps handler.
+        assert!(
+            result.is_ok(),
+            "readiness error should be captured by policy, got: {:?}",
+            result
+        );
+        let ex = result.unwrap();
+        assert!(ex.error.is_none(), "handled:true should clear error");
+        assert!(
+            matches!(ex.input.body, camel_api::Body::Bytes(_)),
+            "on_steps should have modified the body"
+        );
+    }
+
+    #[test]
+    fn test_poll_ready_converts_readiness_error_to_ok() {
+        let readiness_err = CamelError::ProcessorError("readiness-fail".into());
+        let inner = ReadinessFailService {
+            error: readiness_err,
+        };
+        let mut svc = ErrorHandlerService::new(inner, None, vec![]);
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // poll_ready must NOT propagate the readiness error — convert to Ok.
+        let poll = Pin::new(&mut svc).poll_ready(&mut cx);
+        match poll {
+            Poll::Ready(Ok(())) => { /* correct */ }
+            Poll::Ready(Err(e)) => panic!("poll_ready leaked readiness error: {:?}", e),
+            Poll::Pending => panic!("poll_ready should be Ready for readiness errors"),
+        }
     }
 
     #[tokio::test]

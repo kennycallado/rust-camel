@@ -45,15 +45,11 @@ impl Service<Exchange> for MulticastService {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Check all endpoints for readiness
-        for endpoint in &mut self.endpoints {
-            match endpoint.poll_ready(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(())) => {}
-            }
-        }
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Do NOT aggregate endpoint readiness here.
+        // Each endpoint's readiness is checked per-endpoint inside
+        // process_sequential / process_parallel where stop_on_exception
+        // is respected. Fail-fast here would bypass that logic entirely.
         Poll::Ready(Ok(()))
     }
 
@@ -158,7 +154,8 @@ async fn process_parallel(
                     None => None,
                 };
 
-                // Wait for endpoint to be ready, then call it
+                // Readiness errors propagate via `?` into the per-endpoint result;
+                // join_all ensures all endpoints run independently (no early abort).
                 tower::ServiceExt::ready(&mut endpoint).await?;
                 endpoint.call(ex).await
             }
@@ -585,30 +582,26 @@ mod tests {
         }
     }
 
-    // ── 11. poll_ready delegates to endpoints ────────────────────────────
+    // ── 11. poll_ready returns Ready immediately ───────────────────────
 
     #[tokio::test]
-    async fn test_poll_ready_delegates_to_endpoints() {
+    async fn test_poll_ready_returns_ready_immediately() {
         use std::sync::atomic::AtomicBool;
 
-        // A service that is initially not ready, then becomes ready.
+        // A service that is never ready on its own.
         #[derive(Clone)]
-        struct DelayedReady {
-            ready: Arc<AtomicBool>,
+        struct NeverReady {
+            _ready: Arc<AtomicBool>,
         }
 
-        impl Service<Exchange> for DelayedReady {
+        impl Service<Exchange> for NeverReady {
             type Response = Exchange;
             type Error = CamelError;
             type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
             fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-                if self.ready.load(Ordering::SeqCst) {
-                    Poll::Ready(Ok(()))
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
             }
 
             fn call(&mut self, exchange: Exchange) -> Self::Future {
@@ -616,31 +609,23 @@ mod tests {
             }
         }
 
-        let ready_flag = Arc::new(AtomicBool::new(false));
-        let inner = DelayedReady {
-            ready: Arc::clone(&ready_flag),
+        let inner = NeverReady {
+            _ready: Arc::new(AtomicBool::new(false)),
         };
         let boxed: BoxProcessor = BoxProcessor::new(inner);
 
         let config = MulticastConfig::new();
         let mut svc = MulticastService::new(vec![boxed], config).unwrap();
 
-        // First poll should be Pending.
+        // MulticastService::poll_ready should return Ready(Ok(())) immediately,
+        // even when the underlying endpoint is not ready. Readiness is deferred
+        // to inside call() where stop_on_exception is respected.
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         let poll = Pin::new(&mut svc).poll_ready(&mut cx);
         assert!(
-            poll.is_pending(),
-            "expected Pending when endpoint not ready"
-        );
-
-        // Mark endpoint as ready.
-        ready_flag.store(true, Ordering::SeqCst);
-
-        let poll = Pin::new(&mut svc).poll_ready(&mut cx);
-        assert!(
             matches!(poll, Poll::Ready(Ok(()))),
-            "expected Ready after endpoint becomes ready"
+            "expected Ready(Ok(())) even when endpoint is not ready"
         );
     }
 
@@ -877,6 +862,76 @@ mod tests {
         assert!(arr[0]["_stream"].is_object());
         assert_eq!(arr[0]["_stream"]["origin"], serde_json::Value::Null);
         assert_eq!(arr[0]["_stream"]["placeholder"], true);
+    }
+
+    // ── 19. poll_ready error does not poison multicast ──────────────────
+
+    #[tokio::test]
+    async fn test_poll_ready_error_does_not_poison_multicast() {
+        use std::sync::atomic::AtomicUsize;
+
+        // A service whose poll_ready always returns Ready(Err(...)).
+        #[derive(Clone)]
+        struct FailingReadyService {
+            call_count: Arc<AtomicUsize>,
+        }
+
+        impl Service<Exchange> for FailingReadyService {
+            type Response = Exchange;
+            type Error = CamelError;
+            type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Err(CamelError::ProcessorError("ready-fail".into())))
+            }
+
+            fn call(&mut self, exchange: Exchange) -> Self::Future {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(exchange) })
+            }
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let failing_svc = FailingReadyService {
+            call_count: Arc::clone(&call_count),
+        };
+        let failing_boxed: BoxProcessor = BoxProcessor::new(failing_svc);
+
+        let endpoints = vec![uppercase_processor(), failing_boxed, uppercase_processor()];
+
+        let config = MulticastConfig::new()
+            .stop_on_exception(false)
+            .aggregation(MulticastStrategy::LastWins);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
+
+        // With the fix, poll_ready returns Ready(Ok(())) so ready() succeeds.
+        // The failing endpoint's readiness error is handled inside call(),
+        // where stop_on_exception=false means processing continues.
+        let result = svc.ready().await;
+        assert!(
+            result.is_ok(),
+            "poll_ready should not fail-fast; got error: {:?}",
+            result.err()
+        );
+
+        let result = result.unwrap().call(make_exchange("hello")).await;
+        assert!(
+            result.is_ok(),
+            "LastWins with last endpoint succeeding should return Ok; got: {:?}",
+            result.err()
+        );
+
+        // The successful endpoints (0 and 2) should have been processed.
+        // The failing endpoint (1) should have had its call bypassed due to
+        // readiness failure inside process_sequential, but the others continue.
+        assert_eq!(
+            result.unwrap().input.body.as_text(),
+            Some("HELLO"),
+            "last successful endpoint should have uppercased"
+        );
+
+        // Verify the failing endpoint's call() was never invoked
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
