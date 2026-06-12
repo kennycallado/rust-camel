@@ -760,7 +760,7 @@ impl DefaultRouteController {
             let managed = self
                 .routes
                 .get_mut(route_id)
-                .expect("invariant: route must exist");
+                .expect("invariant: route must exist"); // allow-unwrap
             managed.agg_service = Some(Arc::clone(&agg));
         }
 
@@ -888,7 +888,7 @@ impl DefaultRouteController {
             let managed = self
                 .routes
                 .get_mut(route_id)
-                .expect("invariant: route must exist");
+                .expect("invariant: route must exist"); // allow-unwrap
             managed.consumer_handle = Some(consumer_handle);
             managed.pipeline_handle = Some(pipeline_handle);
             managed.channel_sender = Some(tx_for_storage);

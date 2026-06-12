@@ -424,7 +424,7 @@ impl camel_api::RouteController for DefaultRouteController {
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check"); // allow-unwind
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
         managed.consumer_handle = Some(consumer_handle);
 
         info!(route_id = %route_id, "Route resumed");
