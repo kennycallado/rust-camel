@@ -1,11 +1,14 @@
 use super::*;
+use crate::lifecycle::adapters::route_helpers::runtime_failure_command;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
 use crate::shared::components::domain::Registry;
+use arc_swap::ArcSwap;
 use camel_api::function::PrepareToken;
 use camel_api::{
     ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
-    FunctionInvoker, FunctionInvokerSync, SyncBoxProcessor, Value, ValueSourceDef,
+    FunctionInvoker, FunctionInvokerSync, RuntimeCommand, SyncBoxProcessor, Value, ValueSourceDef,
 };
+use camel_component_api::ConcurrencyModel;
 
 struct NoopInvoker;
 

@@ -13,7 +13,7 @@ use camel_component_api::{
 };
 use camel_endpoint::parse_uri;
 
-use crate::lifecycle::adapters::route_controller::{
+use crate::lifecycle::adapters::route_helpers::{
     CrashNotification, ManagedRoute, handle_is_running, publish_runtime_failure,
 };
 use crate::shared::components::domain::Registry;
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn create_route_consumer_returns_err_for_unknown_scheme() {
-        use crate::lifecycle::adapters::route_controller::ControllerComponentContext;
+        use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let component_ctx = Arc::new(ControllerComponentContext::new(
