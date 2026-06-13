@@ -60,6 +60,7 @@ camel-proto-compiler = { workspace = true, optional = true }
 camel-xslt = { workspace = true }
 camel-xj = { workspace = true }
 camel-component-wasm = { workspace = true, optional = true }
+camel-component-llm = { workspace = true, optional = true }
 camel-component-cxf = { workspace = true }
 camel-function = { workspace = true }
 camel-language-js.workspace = true
@@ -75,7 +76,7 @@ tempfile = "3"
 serde_json.workspace = true
 
 [features]
-default = ["otel", "grpc", "wasm", "http-static"]
+default = ["otel", "grpc", "wasm", "http-static", "llm"]
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # kafka activates the kafka component code only — linking strategy is orthogonal.
 # Use `kafka` alone (rdkafka will build from source via cmake by default),
@@ -89,6 +90,10 @@ grpc = [
   "camel-dsl/protobuf",
 ]
 wasm = ["dep:camel-component-wasm"]
+# LLM component. Default enables mock-only (zero extra deps).
+# For real providers: --features "llm,camel-component-llm/openai"
+# or "llm,camel-component-llm/ollama" or "llm,camel-component-llm/all-providers".
+llm = ["dep:camel-component-llm"]
 http-static = []
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]

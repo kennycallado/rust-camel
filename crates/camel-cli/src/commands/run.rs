@@ -382,6 +382,9 @@ pub async fn run(
     #[cfg(feature = "grpc")]
     register_bundle!(ctx, camel_config, camel_component_grpc::GrpcBundle);
 
+    #[cfg(feature = "llm")]
+    register_bundle!(ctx, camel_config, camel_component_llm::LlmBundle);
+
     #[cfg(feature = "wasm")]
     {
         let base_dir = std::path::Path::new(&config_path)

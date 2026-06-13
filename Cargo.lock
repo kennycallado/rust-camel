@@ -65,6 +65,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94fb8275041c72129eb51b7d0322c29b8387a0386127718b096429201a5d6ece"
+dependencies = [
+ "alloc-no-stdlib",
+]
+
+[[package]]
 name = "alloca"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -427,6 +442,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backoff"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b62ddb9cb1ec0a098ad4bbf9344d0713fa193ae1a80af55febcff2627b6a00c1"
+dependencies = [
+ "futures-core",
+ "getrandom 0.2.17",
+ "instant",
+ "pin-project-lite",
+ "rand 0.8.6",
+ "tokio",
+]
+
+[[package]]
 name = "backon"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -745,6 +774,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
+name = "brotli"
+version = "8.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8119e4516436f5708bbc474a9d395bf12f1b5395e93a92a56e647ac3388c8610"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5962523e1b92ce1b5e793d9169b9943eece10d39f62550bc04bb605d75b94924"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -950,6 +1000,7 @@ dependencies = [
  "camel-component-jms",
  "camel-component-kafka",
  "camel-component-keycloak",
+ "camel-component-llm",
  "camel-component-log",
  "camel-component-mock",
  "camel-component-opensearch",
@@ -1234,6 +1285,36 @@ dependencies = [
  "tower",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "camel-component-llm"
+version = "0.17.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-mock",
+ "camel-component-timer",
+ "camel-core",
+ "futures",
+ "serde",
+ "serde_json",
+ "siumai",
+ "siumai-core",
+ "siumai-provider-ollama",
+ "siumai-provider-openai",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
+ "tower",
+ "tracing",
+ "tracing-test",
+ "url",
 ]
 
 [[package]]
@@ -2008,6 +2089,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfb"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d38f2da7a0a2c4ccf0065be06397cc26a81f4e528be095826eee9d4adbb8c60f"
+dependencies = [
+ "byteorder",
+ "fnv",
+ "uuid",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2170,6 +2262,7 @@ version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
 dependencies = [
+ "brotli",
  "compression-core",
  "flate2",
  "memchr",
@@ -3191,6 +3284,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eventsource-stream"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
+dependencies = [
+ "futures-core",
+ "nom",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "example-master-leader"
 version = "0.17.0"
 dependencies = [
@@ -3815,6 +3919,8 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
  "serde",
  "serde_core",
@@ -4358,6 +4464,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "infer"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a588916bfdfd92e71cacef98a63d9b1f0d74d6599980d11894290e7ddefffcf7"
+dependencies = [
+ "cfb",
+]
+
+[[package]]
 name = "inotify"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4375,6 +4490,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "instant"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
@@ -5083,6 +5207,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a860605968fce16869fd239cf4237a82f3ac470723415db603b0e8b6c8d4fb9"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5206,6 +5339,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5268,6 +5407,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 dependencies = [
  "spin 0.5.2",
+]
+
+[[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
 ]
 
 [[package]]
@@ -6761,6 +6910,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -7123,6 +7273,7 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
 dependencies = [
+ "serde",
  "zeroize",
 ]
 
@@ -7289,6 +7440,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap 2.14.0",
  "itoa",
  "memchr",
  "serde",
@@ -7560,6 +7712,787 @@ name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
+name = "siumai"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "243eaccdc305abfe695ae05d6470a01796a0f3385b291922ecec42d827351b8f"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-bridge",
+ "siumai-core",
+ "siumai-protocol-anthropic",
+ "siumai-protocol-gemini",
+ "siumai-protocol-openai",
+ "siumai-provider-amazon-bedrock",
+ "siumai-provider-anthropic",
+ "siumai-provider-azure",
+ "siumai-provider-cohere",
+ "siumai-provider-deepgram",
+ "siumai-provider-deepseek",
+ "siumai-provider-elevenlabs",
+ "siumai-provider-gateway",
+ "siumai-provider-gemini",
+ "siumai-provider-google-vertex",
+ "siumai-provider-groq",
+ "siumai-provider-minimaxi",
+ "siumai-provider-ollama",
+ "siumai-provider-openai",
+ "siumai-provider-openai-compatible",
+ "siumai-provider-togetherai",
+ "siumai-provider-utils",
+ "siumai-provider-xai",
+ "siumai-registry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-bridge"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aea63302db4b17e92cb4677c0ea292a5ccc8f50424b409f958453b7b43b106c"
+dependencies = [
+ "base64",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-anthropic",
+ "siumai-protocol-gemini",
+ "siumai-protocol-openai",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-core"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f6e4551a37b6380ec67534d9cbd3650108aac1b23c6c0459126bcc55153caf4"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "bytes",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "http",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "regex",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-provider-utils",
+ "siumai-spec",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-protocol-anthropic"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c7eceae98b8c269156e58efe33c4ddb5decc9717e0aacf24b9a0119dc36149a"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-protocol-gemini"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00c45704ad94fb78ce9f10ae19ece6032dca3a84fbcb549789ae217a4c25953a"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-protocol-openai"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83c385af1d7d97df9001febe86f766086ae9aae5939f49b74265f6d9a03e143b"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-amazon-bedrock"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135f2e13ae76092ed95cd16846c2a8786a9274a4e61fa9125eae7ccc6ba275cb"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-anthropic"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4440ff1e45997d359c0bc6ebbb6de2791e5d895b3c7d46a325ffec1473dd611"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-anthropic",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-azure"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beb66b14b39dca944c05a20ec3362670c651a56064a431052fec8ce80efeb4fb"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "eventsource-stream",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-openai",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "siumai-provider-cohere"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdff6e09b0b24440d6e6b59d3ed9c3ff0fb733861bde24a25288b75a3e14cfd1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-deepgram"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b0b6f8037ffa1af3a331741461ec8a6485dd934d1e8c6506362c1b9af00e88e"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "futures-util",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "tokio",
+ "urlencoding",
+]
+
+[[package]]
+name = "siumai-provider-deepseek"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b73722a5a3c8dff59c02af2ffffa48ccb38284fe63e1437bab6da127d059a685"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-openai",
+ "siumai-provider-openai-compatible",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-elevenlabs"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a82b384fc24ca013b63258455c096af46decb05d52c8308dd38b07161dbb90a"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "futures-util",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "tokio",
+ "urlencoding",
+]
+
+[[package]]
+name = "siumai-provider-gateway"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd75418aa49892ea107d21577fdb04714a41cf471ff532306d3ba19b2f6e9f80"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "tokio",
+]
+
+[[package]]
+name = "siumai-provider-gemini"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebb7da62c3330e5fd1ef8055aaa425d1f72a61a8fe17cc59678123c6ea575012"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-gemini",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-google-vertex"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1162aeb7b188a2e8a7ca6f5e36ab1241fb20b7a22c819ff3389602e2c8f34dc"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-anthropic",
+ "siumai-protocol-gemini",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-groq"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91783c864956c4dc8e77aef1e61b609bb1ff2959bacb94bbd4ff6b46bdc59693"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-openai",
+ "siumai-provider-openai-compatible",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-minimaxi"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18b87177537bf050d86accf4a4b90173ade4df9c3e70f64d1b600b8132eff7df"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "hex",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-anthropic",
+ "siumai-protocol-openai",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-ollama"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c2f1a4013557bfb930dfa1142d25004353766a437ab2a69d831130ac107b937"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-openai"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0b7351e82c7c8b39379d833d5243ea71c4537f0d425d9d00dc56eae3d25662b"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-openai",
+ "siumai-provider-openai-compatible",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-openai-compatible"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d47f0daf3f0beb16cf54604ab4c3df3eabb19224d01b05d7fac4e08e260b0a29"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-openai",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-togetherai"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c748b14fd5957a5462f096709865941662b29eba55d94ddd581695cadca1a777"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-provider-utils"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7499c205eb97417d84c6c566543378f91eecddbd9d510909c6df7f5b4e6ba8f"
+dependencies = [
+ "base64",
+ "futures-util",
+ "infer",
+ "rand 0.10.1",
+ "regex",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "siumai-spec",
+ "tokio",
+]
+
+[[package]]
+name = "siumai-provider-xai"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ded8032b5d9bcef964082e45c6ce3881052287c973c55937f56eb4ffa70f83e"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "backoff",
+ "base64",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "infer",
+ "lru",
+ "once_cell",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-openai",
+ "siumai-provider-openai-compatible",
+ "siumai-provider-utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-registry"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6aafd57b303e1168d1aed31f5a4102f63edd77a23718bc0f3846919460adcaa"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "lru",
+ "once_cell",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "siumai-core",
+ "siumai-protocol-openai",
+ "siumai-provider-amazon-bedrock",
+ "siumai-provider-anthropic",
+ "siumai-provider-azure",
+ "siumai-provider-cohere",
+ "siumai-provider-deepgram",
+ "siumai-provider-deepseek",
+ "siumai-provider-elevenlabs",
+ "siumai-provider-gateway",
+ "siumai-provider-gemini",
+ "siumai-provider-google-vertex",
+ "siumai-provider-groq",
+ "siumai-provider-minimaxi",
+ "siumai-provider-ollama",
+ "siumai-provider-openai",
+ "siumai-provider-openai-compatible",
+ "siumai-provider-togetherai",
+ "siumai-provider-utils",
+ "siumai-provider-xai",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "siumai-spec"
+version = "0.11.0-beta.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1334f998d4b10d883a544c3c8e3680cebafa5747d29ab363c55e3c2dfc4d4006"
+dependencies = [
+ "base64",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "slab"
@@ -8902,6 +9835,12 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "utf-8"

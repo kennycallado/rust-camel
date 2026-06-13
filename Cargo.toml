@@ -91,6 +91,7 @@ camel-component-grpc = { path = "crates/components/camel-component-grpc", versio
 camel-component-opensearch = { path = "crates/components/camel-opensearch", version = "=0.17.0" }
 camel-wit = { path = "crates/camel-wit", version = "=0.17.0" }
 camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.17.0" }
+camel-component-llm = { path = "crates/components/camel-component-llm", version = "=0.17.0" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14" }

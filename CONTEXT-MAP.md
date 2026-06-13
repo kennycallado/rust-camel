@@ -5,6 +5,7 @@
 - [Runtime](./crates/camel-core/CONTEXT.md) — core execution engine: Exchange lifecycle, Route management, and component/language/function/service registries
 - [DSL](./crates/camel-dsl/CONTEXT.md) — route definition via fluent builder API and YAML/JSON configuration files
 - [Components](./crates/components/CONTEXT.md) — inbound/outbound adapters (timer, HTTP, Kafka, file, etc.) that feed Exchanges into Routes and send them to external systems
+  - [LLM Component](./crates/components/camel-component-llm/CONTEXT.md) — LLM chat and embedding component (OpenAI, Ollama, Mock) with streaming and materialized modes
 - [Languages](./crates/languages/CONTEXT.md) — expression and predicate evaluation against Exchanges (JavaScript, JSONPath, XPath, Simple, Rhai)
 - [Functions](./crates/services/camel-function/CONTEXT.md) — out-of-process executable units invoked as pipeline steps; inspired by serverless functions, running in isolated containers
 - [Services](./crates/services/CONTEXT.md) — cross-cutting infrastructure services: observability (OTel, Prometheus), auth/security, and platform integration (Kubernetes)
@@ -41,6 +42,7 @@ Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./doc
 - [0017](./docs/adr/0017-dsl-yaml-snake-case-naming-convention.md) — DSL YAML keys use snake_case to match Rust field names and schema output
 - [0018](./docs/adr/0018-two-phase-route-lifecycle-persistence.md) — Route lifecycle commands persist intent before side effects, use optimistic versions, and compensate to Failed on side-effect failure
 - [0019](./docs/adr/0019-error-disposition-pipeline-recovery.md) — Error disposition decisions moved inside the pipeline loop via RouteErrorHandler trait injection; ExceptionDisposition enum (Propagate/Handled/Continued) replaces handled:bool
+- [0020](./docs/adr/0020-llm-component-provider-adapter-boundary.md) — LLM component isolates siumai SDK behind a project-owned LlmProvider trait; all siumai imports confined to two files
 
 ## Key Terms
 
@@ -65,3 +67,5 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **ExceptionDisposition** — Enum (`Propagate | Handled | Continued`) that replaces `handled: bool`. `Propagate` returns the error upstream; `Handled` absorbs and terminates the route normally; `Continued` clears the error and advances to the next pipeline step. Established by ADR-0019. (camel-api + camel-processor + camel-dsl)
 - **RouteErrorHandler** — Trait injected into the pipeline with 4 async methods (`match_policy`, `retry_step`, `handle_step`, `handle_boundary`). The pipeline calls these after each step failure; the returned disposition drives the loop. `DefaultRouteErrorHandler` is the production implementation. Established by ADR-0019. (camel-processor + camel-core)
 - **RouteChannelService** — Service that chains Security → CircuitBreaker(`before_call`) → Pipeline(`run_steps`) → CircuitBreaker(`after_result`). Constructed only when an `errorHandler` is configured. Boundary errors from Security or CB gates go through `handle_boundary`. Established by ADR-0019. (camel-core)
+- **LlmProvider** — Trait abstraction over LLM backends (OpenAI, Ollama, Mock). Camel-shaped, not siumai-shaped. Owned by `LlmComponent` as `Arc<dyn LlmProvider>` in a `ProviderMap`. All siumai imports confined to the adapter. Established by ADR-0020. (camel-component-llm)
+- **ProviderMap** — `HashMap<String, Arc<dyn LlmProvider>>` owned by `LlmComponent`. Resolved by name from config. Not a global registry — safe for tests, hot-reload, multi-context. Established by ADR-0020. (camel-component-llm)

@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`, `llm`.
 
 ## Architecture
 
@@ -195,6 +195,7 @@ cargo run
 | `camel-xslt`                | XSLT 3.0 transformation via xml-bridge (`xslt:<stylesheet>`) — [example](examples/xslt-example/README.md)                                                                         |
 | `camel-xj`                  | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                   |
 | `camel-container`           | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                    |
+| `camel-component-llm`       | LLM chat (streaming + materialized) and embeddings via OpenAI, Ollama, or Mock. Provider trait with strict siumai adapter boundary (`llm:chat`, `llm:embed`)                      |
 | `camel-language-api`        | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                         |
 | `camel-language-simple`     | Simple Language: `${header.x}`, `${body}`, operators, `&&`/\`||\`, boolean literals, null semantics                                                                               |
 | `camel-language-js`         | JavaScript scripting language for expressions and side effects                                                                                                                    |
