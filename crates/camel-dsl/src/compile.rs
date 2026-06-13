@@ -962,7 +962,7 @@ fn compile_declarative_step_with_threshold(
             } else {
                 builtin_data_format(&format).ok_or_else(|| {
                     CamelError::RouteError(format!(
-                        "unknown data format: '{}'. Expected: json, xml, protobuf:<path>#<Message>",
+                        "unknown data format: '{}'. Expected: json, xml, zip, protobuf:<path>#<Message>",
                         format
                     ))
                 })?
@@ -987,7 +987,7 @@ fn compile_declarative_step_with_threshold(
             } else {
                 builtin_data_format(&format).ok_or_else(|| {
                     CamelError::RouteError(format!(
-                        "unknown data format: '{}'. Expected: json, xml, protobuf:<path>#<Message>",
+                        "unknown data format: '{}'. Expected: json, xml, zip, protobuf:<path>#<Message>",
                         format
                     ))
                 })?

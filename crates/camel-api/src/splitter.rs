@@ -61,6 +61,8 @@ pub enum StreamSplitFormat {
     Lines,
     /// Split into fixed-size byte chunks.
     Chunks,
+    /// ZIP archive — materialized format, each entry becomes a fragment exchange.
+    Zip,
 }
 
 /// Configuration for splitting a streaming body into fragments.
@@ -113,6 +115,7 @@ impl StreamSplitConfig {
     /// - `batch_size` is `0`
     /// - `max_record_bytes` is `0`
     /// - `format` is [`Chunks`](StreamSplitFormat::Chunks) but `chunk_size` is `None`
+    /// - `format` is [`Zip`](StreamSplitFormat::Zip) but `chunk_size` is `Some(...)`
     /// - `chunk_size` is `Some(0)`
     pub fn validate(&self) -> Result<(), CamelError> {
         if self.batch_size == 0 {
@@ -128,6 +131,13 @@ impl StreamSplitConfig {
         if self.format == StreamSplitFormat::Chunks && self.chunk_size.is_none() {
             return Err(CamelError::Config(
                 "stream split format=Chunks requires chunk_size".into(),
+            ));
+        }
+        // Zip+chunk_size check must come before the generic chunk_size zero/exceeds
+        // checks so that `Zip + Some(0)` yields the more specific error.
+        if self.format == StreamSplitFormat::Zip && self.chunk_size.is_some() {
+            return Err(CamelError::Config(
+                "stream split format=Zip does not support chunk_size".into(),
             ));
         }
         if let Some(cs) = self.chunk_size
@@ -502,6 +512,17 @@ mod tests {
             err.to_string()
                 .contains("chunk_size must be <= max_record_bytes")
         );
+    }
+
+    #[test]
+    fn test_stream_split_config_zip_rejects_chunk_size() {
+        let config = StreamSplitConfig {
+            format: StreamSplitFormat::Zip,
+            chunk_size: Some(1024),
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("Zip does not support chunk_size"));
     }
 
     #[test]

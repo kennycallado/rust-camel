@@ -270,7 +270,21 @@ steps:
 
 The `ZipSplitter` produces one exchange per ZIP entry using a lazy stream. It inherits the parent exchange context (headers, properties, OTel) and enforces safety limits (max entries, max decompressed size, path traversal prevention).
 
-### Usage
+### DSL Usage
+
+```yaml
+steps:
+  - split:
+      streaming: true
+      stream:
+        format: zip
+      steps:
+        - to: "file:output"
+```
+
+Accepts `Body::Bytes`, `Body::Text`, or `Body::Stream` — streams are materialized with a size limit before extraction. Stale `Content-Length`/`Content-Type` headers are stripped from child entries.
+
+### Programmatic API
 
 ```rust
 use camel_processor::{StreamingSplitterService, ZipSplitConfig, zip_splitter};

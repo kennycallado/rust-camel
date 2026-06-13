@@ -620,6 +620,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                         Some("ndjson") => StreamSplitFormat::Ndjson,
                         Some("lines") => StreamSplitFormat::Lines,
                         Some("chunks") => StreamSplitFormat::Chunks,
+                        Some("zip") => StreamSplitFormat::Zip,
                         Some("auto") | None => StreamSplitFormat::Auto,
                         Some(other) => {
                             return Err(CamelError::RouteError(format!(
@@ -3075,6 +3076,41 @@ routes:
                     "expected BodyLines when streaming is not set"
                 );
             }
+            other => panic!("expected Split step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_streaming_true_with_format_zip_produces_zip_def() {
+        let yaml = r#"
+routes:
+  - id: "zip-split-test"
+    from: "direct:start"
+    steps:
+      - split:
+          streaming: true
+          stream:
+            format: zip
+          steps:
+            - to: "mock:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Split(def) => match &def.expression {
+                SplitExpressionDef::Stream(config) => {
+                    assert_eq!(
+                        config.format,
+                        camel_api::StreamSplitFormat::Zip,
+                        "expected Zip format"
+                    );
+                    assert_eq!(config.max_record_bytes, 1024 * 1024);
+                    assert_eq!(config.batch_size, 1);
+                    assert_eq!(config.chunk_size, None);
+                    assert!(config.include_origin);
+                }
+                other => panic!("expected Stream expression, got {other:?}"),
+            },
             other => panic!("expected Split step, got {other:?}"),
         }
     }

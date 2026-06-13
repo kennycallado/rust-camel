@@ -45,6 +45,10 @@ pub fn resolve_format(
                 "application/x-ndjson" => Ok(StreamSplitFormat::Ndjson),
                 "text/plain" => Ok(StreamSplitFormat::Lines),
                 "application/octet-stream" => Ok(StreamSplitFormat::Chunks),
+                "application/zip" | "application/x-zip-compressed" => Err(CamelError::Config(
+                    "stream split format=Auto: ZIP archives require explicit stream.format: zip"
+                        .into(),
+                )),
                 "" => Err(CamelError::Config(
                     "stream split format=Auto but stream has no content_type".into(),
                 )),
@@ -58,12 +62,44 @@ pub fn resolve_format(
     }
 }
 
-pub fn resolve_codec(format: &StreamSplitFormat) -> Box<dyn StreamSplitCodec> {
+#[derive(Debug)]
+pub enum ArchiveSplitKind {
+    Zip,
+}
+
+pub enum ResolvedStreamSplit {
+    Incremental(Box<dyn StreamSplitCodec>),
+    MaterializedArchive(ArchiveSplitKind),
+}
+
+pub fn resolve_incremental_codec(
+    format: &StreamSplitFormat,
+) -> Result<Box<dyn StreamSplitCodec>, CamelError> {
     match format {
-        StreamSplitFormat::Ndjson => Box::new(ndjson::NdjsonCodec),
-        StreamSplitFormat::Lines => Box::new(lines::LinesCodec),
-        StreamSplitFormat::Chunks => Box::new(chunks::ChunksCodec),
-        StreamSplitFormat::Auto => unreachable!("resolve_format must be called first"),
+        StreamSplitFormat::Ndjson => Ok(Box::new(ndjson::NdjsonCodec)),
+        StreamSplitFormat::Lines => Ok(Box::new(lines::LinesCodec)),
+        StreamSplitFormat::Chunks => Ok(Box::new(chunks::ChunksCodec)),
+        StreamSplitFormat::Zip => Err(CamelError::Config(
+            "Zip is a materialized archive format, not an incremental codec".into(),
+        )),
+        StreamSplitFormat::Auto => Err(CamelError::Config(
+            "resolve_incremental_codec requires a resolved format, not Auto".into(),
+        )),
+    }
+}
+
+pub fn resolve_split(
+    format: &StreamSplitFormat,
+    metadata: &StreamMetadata,
+) -> Result<ResolvedStreamSplit, CamelError> {
+    let resolved = resolve_format(format, metadata)?;
+    match resolved {
+        StreamSplitFormat::Zip => Ok(ResolvedStreamSplit::MaterializedArchive(
+            ArchiveSplitKind::Zip,
+        )),
+        _ => Ok(ResolvedStreamSplit::Incremental(resolve_incremental_codec(
+            &resolved,
+        )?)),
     }
 }
 
@@ -72,4 +108,58 @@ pub fn fragment_stream_exchange(parent: &Exchange, body: Body) -> Exchange {
     ex.input.headers.remove("Content-Length");
     ex.input.headers.remove("Content-Type");
     ex
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_api::StreamMetadata;
+
+    fn default_metadata() -> StreamMetadata {
+        StreamMetadata::default()
+    }
+
+    #[test]
+    fn test_resolve_split_ndjson_is_incremental() {
+        let result = resolve_split(&StreamSplitFormat::Ndjson, &default_metadata()).unwrap();
+        assert!(matches!(result, ResolvedStreamSplit::Incremental(_)));
+    }
+
+    #[test]
+    fn test_resolve_split_zip_is_materialized() {
+        let result = resolve_split(&StreamSplitFormat::Zip, &default_metadata()).unwrap();
+        assert!(matches!(
+            result,
+            ResolvedStreamSplit::MaterializedArchive(ArchiveSplitKind::Zip)
+        ));
+    }
+
+    #[test]
+    fn test_resolve_incremental_codec_returns_codec_for_ndjson() {
+        let result = resolve_incremental_codec(&StreamSplitFormat::Ndjson);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_incremental_codec_rejects_zip() {
+        let result = resolve_incremental_codec(&StreamSplitFormat::Zip);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auto_application_zip_suggests_explicit_format() {
+        let meta = StreamMetadata {
+            content_type: Some("application/zip".to_string()),
+            ..Default::default()
+        };
+        let result = resolve_split(&StreamSplitFormat::Auto, &meta);
+        let msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected Err for Auto + application/zip"),
+        };
+        assert!(
+            msg.contains("format: zip"),
+            "expected suggestion in error, got: {msg}"
+        );
+    }
 }

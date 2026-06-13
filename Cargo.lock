@@ -1472,7 +1472,9 @@ name = "camel-core"
 version = "0.16.0"
 dependencies = [
  "arc-swap",
+ "async-stream",
  "async-trait",
+ "bytes",
  "camel-api",
  "camel-auth",
  "camel-bean",
@@ -1868,6 +1870,7 @@ dependencies = [
  "tower-http",
  "tracing-subscriber",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

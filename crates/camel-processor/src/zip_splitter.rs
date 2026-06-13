@@ -2,11 +2,13 @@ use bytes::Bytes;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 use camel_api::{Body, CamelError, Exchange, Message, StreamingSplitExpression, Value};
+use futures::Stream;
 
 const DEFAULT_MAX_ENTRIES: usize = 10000;
 const DEFAULT_MAX_TOTAL_DECOMPRESSED_SIZE: u64 = 1_073_741_824;
@@ -115,153 +117,170 @@ struct ZipEntryData {
     data: Vec<u8>,
 }
 
-pub fn zip_splitter(config: ZipSplitConfig) -> StreamingSplitExpression {
-    Arc::new(move |exchange: Exchange| {
-        let config = config.clone();
-        Box::pin(async_stream::stream! {
-            let raw = match &exchange.input.body {
-                Body::Bytes(b) => b.to_vec(),
-                Body::Text(s) => s.as_bytes().to_vec(),
-                _ => {
-                    yield Err(CamelError::TypeConversionFailed(
-                        "ZipSplitter requires Body::Bytes or Body::Text".to_string(),
-                    ));
+/// Split a ZIP archive's bytes into a stream of Exchanges, one per entry.
+///
+/// Takes owned `Bytes` (for `'static` lifetime), a parent `Exchange` whose headers
+/// and properties are cloned into each entry's exchange, and a `ZipSplitConfig`
+/// controlling limits and policy.
+///
+/// This is the core extraction — callers such as `zip_splitter()` or `camel-core`
+/// component code can invoke it directly with already-acquired bytes.
+pub fn split_zip_bytes(
+    parent: Exchange,
+    bytes: Bytes,
+    config: ZipSplitConfig,
+) -> Pin<Box<dyn Stream<Item = Result<Exchange, CamelError>> + Send>> {
+    Box::pin(async_stream::stream! {
+        if config.channel_capacity == 0 {
+            yield Err(CamelError::Config(
+                "ZipSplitConfig.channel_capacity must be > 0".into(),
+            ));
+            return;
+        }
+
+        if bytes.len() as u64 > config.max_compressed_size {
+            yield Err(CamelError::TypeConversionFailed(format!(
+                "ZIP compressed size {} exceeds max {}",
+                bytes.len(),
+                config.max_compressed_size
+            )));
+            return;
+        }
+
+        let (tx, mut rx) = mpsc::channel::<Result<ZipEntryData, CamelError>>(config.channel_capacity);
+
+        let total_decompressed = Arc::new(AtomicU64::new(0));
+        let entry_count = Arc::new(AtomicUsize::new(0));
+        let seen_names: Arc<std::sync::Mutex<HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(HashSet::new()));
+
+        let max_entries = config.max_entries;
+        let max_per_entry = config.max_per_entry_size;
+        let max_total = config.max_total_decompressed_size;
+        let max_path_len = config.max_path_length;
+        let allow_dirs = config.allow_empty_directories;
+        let dup_policy = config.duplicate_names_policy.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let reader = std::io::Cursor::new(bytes);
+            let mut archive = match zip::ZipArchive::new(reader) {
+                Ok(a) => a,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
+                        format!("Invalid ZIP archive: {e}"),
+                    )));
                     return;
                 }
             };
 
-            if raw.len() as u64 > config.max_compressed_size {
-                yield Err(CamelError::TypeConversionFailed(format!(
-                    "ZIP compressed size {} exceeds max {}",
-                    raw.len(),
-                    config.max_compressed_size
-                )));
-                return;
-            }
-
-            let (tx, mut rx) = mpsc::channel::<Result<ZipEntryData, CamelError>>(config.channel_capacity);
-
-            let total_decompressed = Arc::new(AtomicU64::new(0));
-            let entry_count = Arc::new(AtomicUsize::new(0));
-            let seen_names: Arc<std::sync::Mutex<HashSet<String>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
-
-            let max_entries = config.max_entries;
-            let max_per_entry = config.max_per_entry_size;
-            let max_total = config.max_total_decompressed_size;
-            let max_path_len = config.max_path_length;
-            let allow_dirs = config.allow_empty_directories;
-            let dup_policy = config.duplicate_names_policy.clone();
-
-            tokio::task::spawn_blocking(move || {
-                let reader = std::io::Cursor::new(&raw);
-                let mut archive = match zip::ZipArchive::new(reader) {
-                    Ok(a) => a,
+            for i in 0..archive.len() {
+                let mut entry = match archive.by_index(i) {
+                    Ok(e) => e,
                     Err(e) => {
                         let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
-                            format!("Invalid ZIP archive: {e}"),
+                            format!("Failed to read ZIP entry {i}: {e}"),
                         )));
                         return;
                     }
                 };
 
-                for i in 0..archive.len() {
-                    let mut entry = match archive.by_index(i) {
-                        Ok(e) => e,
-                        Err(e) => {
+                let raw_name = entry.name().to_string();
+                let is_dir = entry.is_dir();
+
+                let validated = match validate_entry_path(&raw_name, max_path_len) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(e));
+                        return;
+                    }
+                };
+
+                if is_dir {
+                    if allow_dirs {
+                        let count = entry_count.fetch_add(1, Ordering::SeqCst);
+                        if count >= max_entries {
                             let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
-                                format!("Failed to read ZIP entry {i}: {e}"),
+                                format!("ZIP exceeds max entries: {max_entries}"),
                             )));
                             return;
                         }
-                    };
-
-                    let raw_name = entry.name().to_string();
-                    let is_dir = entry.is_dir();
-
-                    let validated = match validate_entry_path(&raw_name, max_path_len) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            let _ = tx.blocking_send(Err(e));
+                        if tx.blocking_send(Ok(ZipEntryData {
+                            index: count,
+                            path: validated,
+                            size: 0,
+                            compressed_size: entry.compressed_size(),
+                            crc32: Some(entry.crc32()),
+                            is_dir: true,
+                            compression: format!("{:?}", entry.compression()),
+                            data: Vec::new(),
+                        }))
+                        .is_err()
+                        {
                             return;
                         }
-                    };
+                    }
+                    continue;
+                }
 
-                    if is_dir {
-                        if allow_dirs {
-                            let count = entry_count.fetch_add(1, Ordering::SeqCst);
-                            if count >= max_entries {
-                                let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
-                                    format!("ZIP exceeds max entries: {max_entries}"),
-                                )));
-                                return;
-                            }
-                            let _ = tx.blocking_send(Ok(ZipEntryData {
-                                index: count,
-                                path: validated,
-                                size: 0,
-                                compressed_size: entry.compressed_size(),
-                                crc32: Some(entry.crc32()),
-                                is_dir: true,
-                                compression: format!("{:?}", entry.compression()),
-                                data: Vec::new(),
-                            }));
+                let compressed_size = entry.compressed_size();
+                let crc32 = entry.crc32();
+
+                let mut data = Vec::new();
+                let mut limited =
+                    std::io::Read::take(&mut entry, max_per_entry.saturating_add(1));
+                if let Err(e) = limited.read_to_end(&mut data) {
+                    let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
+                        format!("Failed to decompress ZIP entry '{raw_name}': {e}"),
+                    )));
+                    return;
+                }
+
+                if data.len() as u64 > max_per_entry {
+                    let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
+                        format!(
+                            "ZIP entry '{raw_name}' size {} exceeds max {}",
+                            data.len(),
+                            max_per_entry
+                        ),
+                    )));
+                    return;
+                }
+
+                let entry_size = data.len() as u64;
+                let prev_total = total_decompressed.load(Ordering::SeqCst);
+                let new_total = prev_total.saturating_add(entry_size);
+                if new_total > max_total {
+                    let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
+                        format!("ZIP total decompressed size exceeds max {max_total}"),
+                    )));
+                    return;
+                }
+                total_decompressed.store(new_total, Ordering::SeqCst);
+
+                let count = entry_count.fetch_add(1, Ordering::SeqCst);
+                if count >= max_entries {
+                    let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
+                        format!("ZIP exceeds max entries: {max_entries}"),
+                    )));
+                    return;
+                }
+
+                match &dup_policy {
+                    DuplicatePolicy::Reject => {
+                        let mut seen = seen_names.lock().unwrap_or_else(|e| e.into_inner());
+                        if seen.contains(&validated) {
+                            let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
+                                format!("Duplicate ZIP entry name: {validated}"),
+                            )));
+                            return;
                         }
-                        continue;
+                        seen.insert(validated.clone());
                     }
+                    DuplicatePolicy::AllowWithIndex => {}
+                }
 
-                    let compressed_size = entry.compressed_size();
-                    let crc32 = entry.crc32();
-
-                    let mut data = Vec::new();
-                    let mut limited = std::io::Read::take(&mut entry, max_per_entry.saturating_add(1));
-                    if let Err(e) = limited.read_to_end(&mut data) {
-                        let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
-                            format!("Failed to decompress ZIP entry '{raw_name}': {e}"),
-                        )));
-                        return;
-                    }
-
-                    if data.len() as u64 > max_per_entry {
-                        let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
-                            format!("ZIP entry '{raw_name}' size {} exceeds max {}", data.len(), max_per_entry),
-                        )));
-                        return;
-                    }
-
-                    let entry_size = data.len() as u64;
-                    let prev_total = total_decompressed.load(Ordering::SeqCst);
-                    let new_total = prev_total.saturating_add(entry_size);
-                    if new_total > max_total {
-                        let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
-                            format!("ZIP total decompressed size exceeds max {max_total}"),
-                        )));
-                        return;
-                    }
-                    total_decompressed.store(new_total, Ordering::SeqCst);
-
-                    let count = entry_count.fetch_add(1, Ordering::SeqCst);
-                    if count >= max_entries {
-                        let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
-                            format!("ZIP exceeds max entries: {max_entries}"),
-                        )));
-                        return;
-                    }
-
-                    match &dup_policy {
-                        DuplicatePolicy::Reject => {
-                            let mut seen = seen_names.lock().unwrap_or_else(|e| e.into_inner());
-                            if seen.contains(&validated) {
-                                let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
-                                    format!("Duplicate ZIP entry name: {validated}"),
-                                )));
-                                return;
-                            }
-                            seen.insert(validated.clone());
-                        }
-                        DuplicatePolicy::AllowWithIndex => {}
-                    }
-
-                    let _ = tx.blocking_send(Ok(ZipEntryData {
+                if tx
+                    .blocking_send(Ok(ZipEntryData {
                         index: count,
                         path: validated,
                         size: data.len() as u64,
@@ -270,76 +289,103 @@ pub fn zip_splitter(config: ZipSplitConfig) -> StreamingSplitExpression {
                         is_dir: false,
                         compression: format!("{:?}", entry.compression()),
                         data,
-                    }));
-                }
-            });
-
-            while let Some(result) = rx.recv().await {
-                match result {
-                    Ok(entry) => {
-                        let ZipEntryData { index, path, size, compressed_size, crc32, is_dir, compression, data } = entry;
-                        let body = if is_dir {
-                            Body::Empty
-                        } else {
-                            Body::Bytes(Bytes::from(data))
-                        };
-                        let msg = Message {
-                            headers: exchange.input.headers.clone(),
-                            body,
-                        };
-                        let mut ex = Exchange::new(msg);
-                        ex.properties = exchange.properties.clone();
-                        ex.pattern = exchange.pattern;
-                        ex.otel_context = exchange.otel_context.clone();
-
-                        let entry_name = Path::new(&path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-
-                        ex.input.headers.insert(
-                            CAMEL_ZIP_ENTRY_NAME.to_string(),
-                            Value::String(entry_name),
-                        );
-                        ex.input.headers.insert(
-                            CAMEL_ZIP_ENTRY_PATH.to_string(),
-                            Value::String(path),
-                        );
-                        ex.input.headers.insert(
-                            CAMEL_ZIP_ENTRY_INDEX.to_string(),
-                            Value::from(index as u64),
-                        );
-                        ex.input.headers.insert(
-                            CAMEL_ZIP_ENTRY_SIZE.to_string(),
-                            Value::from(size),
-                        );
-                        ex.input.headers.insert(
-                            CAMEL_ZIP_ENTRY_COMPRESSED_SIZE.to_string(),
-                            Value::from(compressed_size),
-                        );
-                        if let Some(crc) = crc32 {
-                            ex.input.headers.insert(
-                                CAMEL_ZIP_ENTRY_CRC32.to_string(),
-                                Value::from(crc),
-                            );
-                        }
-                        ex.input.headers.insert(
-                            CAMEL_ZIP_ENTRY_IS_DIRECTORY.to_string(),
-                            Value::Bool(is_dir),
-                        );
-                        ex.input.headers.insert(
-                            CAMEL_ZIP_ENTRY_COMPRESSION.to_string(),
-                            Value::String(compression),
-                        );
-
-                        yield Ok(ex);
-                    }
-                    Err(e) => {
-                        yield Err(e);
-                    }
+                    }))
+                    .is_err()
+                {
+                    return;
                 }
             }
-        })
+        });
+
+        while let Some(result) = rx.recv().await {
+            match result {
+                Ok(entry) => {
+                    let ZipEntryData {
+                        index,
+                        path,
+                        size,
+                        compressed_size,
+                        crc32,
+                        is_dir,
+                        compression,
+                        data,
+                    } = entry;
+                    let body = if is_dir {
+                        Body::Empty
+                    } else {
+                        Body::Bytes(Bytes::from(data))
+                    };
+                    let msg = Message {
+                        headers: parent.input.headers.clone(),
+                        body,
+                    };
+                    let mut ex = Exchange::new(msg);
+                    // Strip parent-level content headers that are stale for individual ZIP entries
+                    ex.input.headers.remove("Content-Length");
+                    ex.input.headers.remove("Content-Type");
+                    ex.properties = parent.properties.clone();
+                    ex.pattern = parent.pattern;
+                    ex.otel_context = parent.otel_context.clone();
+
+                    let entry_name = Path::new(&path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    ex.input.headers.insert(
+                        CAMEL_ZIP_ENTRY_NAME.to_string(),
+                        Value::String(entry_name),
+                    );
+                    ex.input.headers.insert(
+                        CAMEL_ZIP_ENTRY_PATH.to_string(),
+                        Value::String(path),
+                    );
+                    ex.input.headers.insert(
+                        CAMEL_ZIP_ENTRY_INDEX.to_string(),
+                        Value::from(index as u64),
+                    );
+                    ex.input.headers
+                        .insert(CAMEL_ZIP_ENTRY_SIZE.to_string(), Value::from(size));
+                    ex.input.headers.insert(
+                        CAMEL_ZIP_ENTRY_COMPRESSED_SIZE.to_string(),
+                        Value::from(compressed_size),
+                    );
+                    if let Some(crc) = crc32 {
+                        ex.input
+                            .headers
+                            .insert(CAMEL_ZIP_ENTRY_CRC32.to_string(), Value::from(crc));
+                    }
+                    ex.input.headers.insert(
+                        CAMEL_ZIP_ENTRY_IS_DIRECTORY.to_string(),
+                        Value::Bool(is_dir),
+                    );
+                    ex.input.headers.insert(
+                        CAMEL_ZIP_ENTRY_COMPRESSION.to_string(),
+                        Value::String(compression),
+                    );
+
+                    yield Ok(ex);
+                }
+                Err(e) => {
+                    yield Err(e);
+                }
+            }
+        }
+    })
+}
+
+pub fn zip_splitter(config: ZipSplitConfig) -> StreamingSplitExpression {
+    Arc::new(move |exchange: Exchange| {
+        let config = config.clone();
+        match exchange.input.body.clone() {
+            Body::Bytes(b) => split_zip_bytes(exchange, b, config),
+            Body::Text(s) => split_zip_bytes(exchange, Bytes::from(s.as_bytes().to_vec()), config),
+            _ => Box::pin(async_stream::stream! {
+                yield Err(CamelError::TypeConversionFailed(
+                    "ZipSplitter requires Body::Bytes or Body::Text".to_string(),
+                ));
+            }),
+        }
     })
 }
 

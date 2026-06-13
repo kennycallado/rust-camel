@@ -168,7 +168,7 @@ mod tests {
     use tokio::sync::Mutex;
     use tower::ServiceExt;
 
-    use crate::stream_codec::{StreamSplitInput, resolve_codec, resolve_format};
+    use crate::stream_codec::{StreamSplitInput, resolve_format, resolve_incremental_codec};
 
     fn passthrough_pipeline() -> BoxProcessor {
         BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))
@@ -251,7 +251,11 @@ mod tests {
 
             match resolve_format(&config.format, &input.metadata) {
                 Ok(f) => {
-                    let codec = resolve_codec(&f);
+                    let codec = resolve_incremental_codec(&f);
+                    let codec = match codec {
+                        Ok(c) => c,
+                        Err(e) => return Box::pin(futures::stream::once(async { Err(e) })),
+                    };
                     codec.split(input, config)
                 }
                 Err(e) => Box::pin(futures::stream::once(async { Err(e) })),

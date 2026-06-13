@@ -14,7 +14,7 @@ use camel_api::{
     body::{Body, StreamBody, StreamMetadata},
     splitter::{AggregationStrategy, StreamSplitConfig},
 };
-use camel_processor::stream_codec::{StreamSplitInput, resolve_codec, resolve_format};
+use camel_processor::stream_codec::{StreamSplitInput, resolve_format, resolve_incremental_codec};
 use camel_processor::streaming_splitter::StreamingSplitterService;
 use tokio::sync::Mutex;
 use tower::Service;
@@ -79,7 +79,11 @@ fn make_streaming_expression() -> camel_api::StreamingSplitExpression {
             Ok(f) => f,
             Err(e) => return Box::pin(futures::stream::once(async { Err(e) })),
         };
-        let codec = resolve_codec(&resolved_format);
+        let codec = resolve_incremental_codec(&resolved_format);
+        let codec = match codec {
+            Ok(c) => c,
+            Err(e) => return Box::pin(futures::stream::once(async { Err(e) })),
+        };
         codec.split(input, config)
     })
 }

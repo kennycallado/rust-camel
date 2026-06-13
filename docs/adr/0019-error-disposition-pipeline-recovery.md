@@ -24,6 +24,22 @@ Additionally, the old layer-based composition made CircuitBreaker and SecurityPo
 
 The pipeline needs to be "recovery-aware": after a step fails, the handler must be able to say "clear the error and continue to the next step" without re-entering the failed step.
 
+## Comparison with Apache Camel 4.x
+
+Apache Camel models error handling with an outer `ErrorHandler` wrapping the route processor. After a step throws, the handler applies `onException` policies: `handled=true` absorbs the error and breaks out of the original route (optionally routing to a sub-route); `continued=true` clears the error and resumes the original route. Redeliveries retry from the point of failure. When all retries are exhausted the exchange is sent to the Dead Letter Channel. These semantics are faithfully mirrored by `ExceptionDisposition` (`Propagate`/`Handled`/`Continued`), `retry_step`, and the DLC catch-all policy.
+
+The architectural divergence is forced by Tower. Camel's JVM runtime has no readiness concept — every call is synchronous from the error handler's perspective. Tower splits `poll_ready` (readiness) from `call` (execution), and treats a readiness `Err` as a permanently broken service. This is incompatible with Camel's model where all errors are routable, retryable events. rust-camel resolves the mismatch by having `poll_ready` return `Ready(Ok(()))` unconditionally (multicast, error handler) and routing readiness errors through the same in-pipeline `RouteErrorHandler`. The consequence is that `continued=true` is implemented inside the pipeline loop rather than by an outer layer — a structural necessity, not a stylistic choice.
+
+| Concept | Apache Camel 4.x | rust-camel |
+|---|---|---|
+| Error handler placement | Outer layer wrapping route | In-pipeline `RouteErrorHandler` injection |
+| `handled=true` | Break original route; optional sub-route | `Handled`: absorb → DLC → route terminates normally |
+| `continued=true` | Resume original route after error | `Continued`: clear error → DLC → advance to next step |
+| Redelivery | Retry from point of failure | `retry_step` retries the failed step |
+| DLC default | `DeadLetterChannel` handler | Catch-all `Handled` policy when no `onException` |
+| Readiness errors | N/A (no readiness concept) | Routed through `RouteErrorHandler` (not permanent) |
+| CircuitBreaker + handled error | Separate EIP; open = `onCallNotPermitted` | `Handled` counts as CB success (handler absorbed it) |
+
 ## Considered Options
 
 ### Keep outer layer; add a "resume from step N" mechanism
