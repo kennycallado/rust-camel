@@ -13,7 +13,8 @@ fn bench_body_coercion(c: &mut Criterion) {
     let mut group = c.benchmark_group("integration/body_coercion");
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let single_contract = compose_pipeline_with_contracts(vec![(noop(), Some(BodyType::Text))]);
+    let single_contract =
+        compose_pipeline_with_contracts(vec![(noop(), Some(BodyType::Text))], None);
     group.bench_function("coerce_json_to_text_single_step", |b| {
         b.to_async(&rt).iter(|| {
             let pipeline = single_contract.clone();
@@ -22,7 +23,7 @@ fn bench_body_coercion(c: &mut Criterion) {
         })
     });
 
-    let no_contracts = compose_pipeline_with_contracts(vec![(noop(), None)]);
+    let no_contracts = compose_pipeline_with_contracts(vec![(noop(), None)], None);
     group.bench_function("pipeline_no_contracts", |b| {
         b.to_async(&rt).iter(|| {
             let pipeline = no_contracts.clone();
@@ -31,11 +32,14 @@ fn bench_body_coercion(c: &mut Criterion) {
         })
     });
 
-    let mixed_contracts = compose_pipeline_with_contracts(vec![
-        (noop(), Some(BodyType::Text)),
-        (noop(), None),
-        (noop(), None),
-    ]);
+    let mixed_contracts = compose_pipeline_with_contracts(
+        vec![
+            (noop(), Some(BodyType::Text)),
+            (noop(), None),
+            (noop(), None),
+        ],
+        None,
+    );
     group.bench_function("pipeline_mixed_contracts", |b| {
         b.to_async(&rt).iter(|| {
             let pipeline = mixed_contracts.clone();

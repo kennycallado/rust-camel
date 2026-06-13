@@ -465,12 +465,29 @@ routes:
           message_contains: "validation"
           retry:
             max_attempts: 1
+        - kind: "ProcessorError"
+          message_contains: "recoverable"
+          continued: true   # ← NEW: clear error, pipeline continues to next step
     circuit_breaker:           # Optional circuit breaker
       failure_threshold: 5
       open_duration_ms: 30000
     on_complete: "direct:on-complete"  # Optional completion hook URI
     on_failure: "direct:on-failure"    # Optional failure hook URI
 ```
+
+#### `continued` field on `on_exceptions`
+
+Each `on_exceptions` entry accepts `continued: true` to clear the error and allow the pipeline to continue to the next step after the error handler runs. It is mutually exclusive with `handled: true`.
+
+```yaml
+error_handler:
+  dead_letter_channel: "log:errors"
+  on_exceptions:
+    - kind: "ProcessorError"
+      continued: true           # ← clear error, pipeline continues
+```
+
+**Mutual exclusion** — `continued: true` and `handled: true` cannot be set simultaneously; the DSL compiler rejects both with a configuration error.
 
 ### Unit of Work Hooks (YAML)
 

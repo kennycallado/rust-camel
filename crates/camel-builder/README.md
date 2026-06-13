@@ -233,6 +233,18 @@ let route = RouteBuilder::from("direct:input")
     .unwrap();
 ```
 
+#### Exception Disposition
+
+Each `on_exception` clause has a **disposition** that controls what happens after the error handler runs:
+
+| Method | Disposition | Behavior |
+|--------|-------------|----------|
+| `.handled(true)` | `Handled` | Error absorbed as `Ok(Exchange)`. Pipeline stops — subsequent steps do NOT run. |
+| `.continued(true)` | `Continued` | Error cleared. Pipeline **continues** to the next step despite the error. |
+| *(default)* | `Propagate` | Error re-thrown to upstream after DLC/handler runs. |
+
+The `handled` and `continued` methods are available on the `ExceptionPolicyBuilder` returned by `ErrorHandlerConfig::on_exception()` (from `camel-api`). The shorthand builder's `OnExceptionBuilder` (`.on_exception()...end_on_exception()`) does not yet expose these methods — use the explicit `ErrorHandlerConfig` API instead.
+
 Shorthand route-level exception clauses:
 
 ```rust
@@ -254,6 +266,30 @@ let route = RouteBuilder::from("direct:input")
     .build()
     .unwrap();
 ```
+
+Using `.continued(true)` — the pipeline continues past the error to the next step:
+
+```rust
+use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::CamelError;
+
+let eh_config = ErrorHandlerConfig::dead_letter_channel("log:dlc")
+    .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+    .continued(true)
+    .retry(1)
+    .build();
+
+let route = RouteBuilder::from("direct:input")
+    .route_id("continued-example")
+    .error_handler(eh_config)
+    .to("log:post-error")      // ← runs even after the failed processor
+    .build()?;
+```
+
+The `ExceptionDisposition` enum in `camel-api` defines the three variants:
+- `Propagate` — re-throw to upstream (default)
+- `Handled` — absorb, pipeline stops
+- `Continued` — clear error, pipeline continues
 
 ### Circuit Breaker
 

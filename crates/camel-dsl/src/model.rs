@@ -109,6 +109,7 @@ pub struct DeclarativeOnException {
     pub retry: Option<DeclarativeRedeliveryPolicy>,
     pub steps: Vec<DeclarativeStep>,
     pub handled: Option<bool>,
+    pub continued: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

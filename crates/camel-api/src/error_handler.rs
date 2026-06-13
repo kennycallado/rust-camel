@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{BoxProcessor, CamelError, SyncBoxProcessor};
+use crate::{BoxProcessor, CamelError, Exchange, SyncBoxProcessor};
 
 /// Camel-compatible header names for redelivery state.
 pub const HEADER_REDELIVERED: &str = "CamelRedelivered";
@@ -75,6 +75,53 @@ impl RedeliveryPolicy {
     }
 }
 
+/// Configures what happens after an error handler processes a matched exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExceptionDisposition {
+    /// After retry exhaustion / on_steps / DLC, re-throw to upstream.
+    #[default]
+    Propagate,
+    /// Suppress re-throw. The handler's exchange is the final result.
+    Handled,
+    /// Clear the error. The pipeline continues to the NEXT step.
+    Continued,
+}
+
+/// Opaque identifier for a matched ExceptionPolicy within a RouteErrorHandler.
+/// Index into the policies Vec — valid only within the handler that created it.
+/// If the policies vec is reordered or filtered, indices become stale.
+/// Safe because policies are immutable after handler construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolicyId(pub usize);
+
+/// Result of Phase 1 (retry) of error handling.
+pub enum RetryOutcome {
+    /// Retry succeeded — pipeline continues normally.
+    Recovered(Exchange),
+    /// Retries exhausted or no retry configured.
+    Exhausted {
+        exchange: Exchange,
+        error: CamelError,
+        policy: Option<PolicyId>,
+    },
+}
+
+/// Result of Phase 2 (handle) of step error handling.
+/// Handled and Continued MUST have Exchange.error cleared.
+pub enum StepDisposition {
+    Propagate(CamelError),
+    Handled(Exchange),
+    Continued(Exchange),
+}
+
+/// Identifies which boundary gate produced an infrastructure error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryKind {
+    Security,
+    CircuitBreaker,
+    Readiness,
+}
+
 /// A rule that matches specific errors and defines retry + redirect behaviour.
 pub struct ExceptionPolicy {
     /// Predicate: returns `true` if this policy applies to the given error.
@@ -85,8 +132,8 @@ pub struct ExceptionPolicy {
     pub handled_by: Option<String>,
     /// Optional custom pipeline executed when this policy triggers.
     pub on_steps: Option<SyncBoxProcessor>,
-    /// Whether the exception is considered handled (suppresses re-throw).
-    pub handled: bool,
+    /// What to do after this policy's handler runs.
+    pub disposition: ExceptionDisposition,
 }
 
 impl ExceptionPolicy {
@@ -97,7 +144,7 @@ impl ExceptionPolicy {
             retry: None,
             handled_by: None,
             on_steps: None,
-            handled: false,
+            disposition: ExceptionDisposition::Propagate,
         }
     }
 }
@@ -109,7 +156,7 @@ impl Clone for ExceptionPolicy {
             retry: self.retry.clone(),
             handled_by: self.handled_by.clone(),
             on_steps: self.on_steps.clone(),
-            handled: self.handled,
+            disposition: self.disposition,
         }
     }
 }
@@ -198,7 +245,27 @@ impl ExceptionPolicyBuilder {
 
     /// Mark the exception as handled (suppresses re-throw to upstream).
     pub fn handled(mut self, handled: bool) -> Self {
-        self.policy.handled = handled;
+        self.policy.disposition = if handled {
+            ExceptionDisposition::Handled
+        } else {
+            ExceptionDisposition::Propagate
+        };
+        self
+    }
+
+    /// Mark the exception as continued (clear error, pipeline continues to next step).
+    pub fn continued(mut self, continued: bool) -> Self {
+        self.policy.disposition = if continued {
+            ExceptionDisposition::Continued
+        } else {
+            ExceptionDisposition::Propagate
+        };
+        self
+    }
+
+    /// Explicitly set disposition to Propagate (default, no-op).
+    pub fn propagate(mut self) -> Self {
+        self.policy.disposition = ExceptionDisposition::Propagate;
         self
     }
 
@@ -453,5 +520,52 @@ mod tests {
             .build();
 
         assert!(config.policies[0].retry.is_none());
+    }
+
+    #[test]
+    fn test_exception_disposition_default_is_propagate() {
+        assert_eq!(
+            ExceptionDisposition::default(),
+            ExceptionDisposition::Propagate
+        );
+    }
+
+    #[test]
+    fn test_exception_policy_new_has_propagate_disposition() {
+        let p = ExceptionPolicy::new(|_| true);
+        assert_eq!(p.disposition, ExceptionDisposition::Propagate);
+    }
+
+    #[test]
+    fn test_policy_id_equality() {
+        assert_eq!(PolicyId(0), PolicyId(0));
+        assert_ne!(PolicyId(0), PolicyId(1));
+    }
+
+    #[test]
+    fn test_builder_continued_sets_disposition() {
+        let cfg = ErrorHandlerConfig::log_only()
+            .on_exception(|_| true)
+            .continued(true)
+            .build();
+        assert_eq!(cfg.policies[0].disposition, ExceptionDisposition::Continued);
+    }
+
+    #[test]
+    fn test_builder_propagate_sets_disposition() {
+        let cfg = ErrorHandlerConfig::log_only()
+            .on_exception(|_| true)
+            .propagate()
+            .build();
+        assert_eq!(cfg.policies[0].disposition, ExceptionDisposition::Propagate);
+    }
+
+    #[test]
+    fn test_builder_handled_true_still_works() {
+        let cfg = ErrorHandlerConfig::log_only()
+            .on_exception(|_| true)
+            .handled(true)
+            .build();
+        assert_eq!(cfg.policies[0].disposition, ExceptionDisposition::Handled);
     }
 }

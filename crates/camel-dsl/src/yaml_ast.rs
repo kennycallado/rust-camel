@@ -113,6 +113,8 @@ pub struct YamlOnException {
     pub steps: Vec<YamlStep>,
     #[serde(default)]
     pub handled: Option<bool>,
+    #[serde(default)]
+    pub continued: Option<bool>,
 }
 
 #[derive(Deserialize)]

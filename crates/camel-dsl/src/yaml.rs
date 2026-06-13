@@ -209,6 +209,7 @@ pub(crate) fn yaml_route_to_declarative_route(
                                 }),
                                 steps,
                                 handled: clause.handled,
+                                continued: clause.continued,
                             })
                         })
                         .collect::<Result<Vec<_>, _>>()
@@ -1453,6 +1454,32 @@ routes:
         let retry = clauses[0].retry.as_ref().expect("retry should be present");
         assert_eq!(retry.max_attempts, 3);
         assert_eq!(retry.handled_by.as_deref(), Some("log:io"));
+    }
+
+    #[test]
+    fn test_parse_yaml_continued_true() {
+        let yaml = r#"
+routes:
+  - id: "continued-route"
+    from: "direct:start"
+    steps:
+      - to: "log:out"
+    error_handler:
+      dead_letter_channel: "log:dlq"
+      on_exceptions:
+        - kind: "ProcessorError"
+          continued: true
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let eh = routes[0]
+            .error_handler
+            .as_ref()
+            .expect("error handler should be present");
+        let on_ex = eh
+            .on_exceptions
+            .as_ref()
+            .expect("on_exceptions should be present");
+        assert_eq!(on_ex[0].continued, Some(true));
     }
 
     #[test]

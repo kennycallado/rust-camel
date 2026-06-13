@@ -251,7 +251,30 @@ routes:
       - to: "log:converted-json?showBody=true"
 
   # ===========================================================================
-  # Route 12: Marshal/Unmarshal (Data Format Conversion)
+  # Route 12: on_exceptions with `continued: true`
+  # ===========================================================================
+  # Demonstrates the `continued: true` field on on_exceptions.
+  # If a step fails with ProcessorError, the error is cleared and the pipeline
+  # continues to the next step instead of stopping.
+  #
+  - id: "continued-example"
+    from: "timer:continued?period=12000&repeatCount=1"
+    startup_order: 630
+    error_handler:
+      dead_letter_channel: "log:dead-letter"
+      on_exceptions:
+        - kind: "ProcessorError"
+          continued: true           # ← clear error, continue to next step
+    steps:
+      - log: "About to fail (continued=true in on_exceptions)"
+      - to: "log:before-error"
+      # Note: a real ProcessorError step would follow; for YAML demo purposes
+      # this route shows the configuration syntax. See examples/error-handling
+      # for a complete working example with continued=true.
+      - log: "After potential error - pipeline continues"
+
+  # ===========================================================================
+  # Route 13: Marshal/Unmarshal (Data Format Conversion)
   # ===========================================================================
   # Demonstrates marshaling and unmarshaling data between formats.
   # This route shows Text → Json (unmarshal) → Text (marshal) conversion,

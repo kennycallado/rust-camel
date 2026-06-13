@@ -320,6 +320,65 @@ let bytes = body.into_bytes(100 * 1024 * 1024).await?;   // Custom limit
 let reader = body.into_async_read();                      // Zero-copy AsyncRead (no RAM limit)
 ```
 
+## Exception Disposition & Recovery Types
+
+New in 0.16.0 — fine-grained error handling with pipeline-continuation support.
+
+### `ExceptionDisposition`
+
+Controls what happens after an error handler processes a matched exception:
+
+| Variant | Behavior |
+|---------|----------|
+| `Propagate` | Re-throw error to upstream after DLC/handler runs (default) |
+| `Handled` | Suppress re-throw. Handler's exchange is the final result. |
+| `Continued` | Clear the error. Pipeline continues to the next step. |
+
+### `ExceptionPolicy`
+
+The runtime per-error matching rule compiled from a DSL `OnException`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `matches` | `Arc<dyn Fn(&CamelError) -> bool + Send + Sync>` | Predicate: true if this policy applies |
+| `retry` | `Option<RedeliveryPolicy>` | Optional retry configuration |
+| `handled_by` | `Option<String>` | URI to route failed exchanges to |
+| `on_steps` | `Option<SyncBoxProcessor>` | Custom pipeline for this policy |
+| `disposition` | `ExceptionDisposition` | What to do after handler runs |
+
+### `PolicyId(usize)`
+
+Opaque identifier for a matched `ExceptionPolicy` within a `RouteErrorHandler`. Index into the policies Vec, valid only within the handler that created it.
+
+### `RetryOutcome`
+
+Result of the retry phase:
+
+| Variant | Description |
+|---------|-------------|
+| `Recovered(Exchange)` | Retry succeeded — pipeline continues normally |
+| `Exhausted{ exchange, error, policy }` | Retries exhausted or not configured |
+
+### `StepDisposition`
+
+Result of the handle phase for step errors. `Handled` and `Continued` variants MUST have `Exchange.error` cleared:
+
+| Variant | Description |
+|---------|-------------|
+| `Propagate(CamelError)` | Re-throw the error |
+| `Handled(Exchange)` | Error absorbed, pipeline stops |
+| `Continued(Exchange)` | Error cleared, pipeline continues |
+
+### `BoundaryKind`
+
+Identifies which infrastructure gate produced an error:
+
+| Variant | Description |
+|---------|-------------|
+| `Security` | Security policy rejection |
+| `CircuitBreaker` | Circuit breaker open |
+| `Readiness` | Readiness gate rejection |
+
 ## Core Types
 
 | Type | Description |
@@ -333,6 +392,12 @@ let reader = body.into_async_read();                      // Zero-copy AsyncRead
 | `HealthReport` | System-wide health report |
 | `ServiceStatus` | Service lifecycle status enum |
 | `HealthStatus` | Aggregated health status enum |
+| `ExceptionDisposition` | Error disposition: Propagate/Handled/Continued |
+| `ExceptionPolicy` | Per-error matching rule with disposition |
+| `PolicyId` | Opaque exception policy index |
+| `RetryOutcome` | Retry phase result |
+| `StepDisposition` | Error handle phase result |
+| `BoundaryKind` | Infrastructure gate error origin |
 
 ## Documentation
 

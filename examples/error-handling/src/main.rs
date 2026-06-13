@@ -10,6 +10,7 @@
 //! 6. **RouteBuilder shorthand** — `.dead_letter_channel().on_exception()...end_on_exception()`
 //! 7. **First-match-wins ordering** — broad clause before specific clause
 //! 8. **No-match fallback to DLC** — when no clause matches, route-level DLC is used
+//! 9. **`continued=true`** — error cleared, pipeline continues to the next step
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -257,6 +258,34 @@ async fn main() -> Result<(), CamelError> {
         .end_on_exception()
         .build()?;
 
+    // -----------------------------------------------------------------------
+    // Route 10: `continued=true` — pipeline continues past the error
+    //
+    // A timer fires once. The processor fails with a ProcessorError. The error
+    // handler has `.continued(true)`, which clears the error from the exchange
+    // and allows the pipeline to continue to the next step. A log step after
+    // the failing processor proves the pipeline continued.
+    //
+    // NOTE: `.continued(true)` is available on `ExceptionPolicyBuilder` from
+    // `ErrorHandlerConfig::on_exception()`. The shorthand builder's
+    // `OnExceptionBuilder` does not yet expose this method.
+    // -----------------------------------------------------------------------
+    let eh_config = ErrorHandlerConfig::dead_letter_channel(
+        "log:route10-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
+    )
+    .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+    .continued(true) // ← clear error, pipeline continues to next step
+    .retry(1)
+    .build();
+
+    let route10 = RouteBuilder::from("timer:route10?period=2000&repeatCount=1")
+        .route_id("continued-disposition")
+        .set_header("example", Value::String("continued-disposition".into()))
+        .process_fn(always_fail("route10: permanent failure (continued=true)"))
+        .error_handler(eh_config)
+        .to("log:route10-continued?showHeaders=true&showBody=true&showCorrelationId=true")
+        .build()?;
+
     // --- Register all routes ---
     ctx.add_route_definition(subroute_no_handler).await?;
     ctx.add_route_definition(subroute_with_handler).await?;
@@ -269,6 +298,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route7).await?;
     ctx.add_route_definition(route8).await?;
     ctx.add_route_definition(route9).await?;
+    ctx.add_route_definition(route10).await?;
 
     ctx.start().await?;
 
@@ -283,6 +313,9 @@ async fn main() -> Result<(), CamelError> {
     println!("  Route 7: Shorthand on_exception (→ log:route7-handled, else log:route7-dlc)");
     println!("  Route 8: First-match-wins (catch-all first → log:route8-catchall-first)");
     println!("  Route 9: No-match fallback (Io error + ProcessorError clause → log:route9-dlc)");
+    println!(
+        "  Route 10: continued=true (ProcessorError cleared → pipeline continues to log:route10-continued)"
+    );
     println!("\nYAML note: message_contains is demonstrated in crates/camel-dsl/README.md.");
     println!("Press Ctrl+C to stop.\n");
 

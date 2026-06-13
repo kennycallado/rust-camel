@@ -107,8 +107,8 @@ let route = RouteBuilder::from("timer:tick")
 | `AggregatorService` | Combine messages |
 | `MulticastService` | Parallel routing |
 | `WireTapService` | Side-channel routing |
-| `CircuitBreakerLayer` | Fault tolerance |
-| `ErrorHandlerLayer` | Error handling |
+| `CircuitBreakerLayer` | Fault tolerance (deprecated since 0.16.0 — use `RouteChannelService`) |
+| `ErrorHandlerLayer` | Error handling (deprecated since 0.16.0 — use `RouteChannelService`) |
 | `StopService` | Stop processing |
 | `ScriptMutator` | Execute mutating scripts that modify Exchange headers, properties, or body |
 | `MarshalService` | Marshal body using a DataFormat (e.g., Json → Text) |
@@ -118,6 +118,78 @@ let route = RouteBuilder::from("timer:tick")
 | `DynamicRouterService` | Dynamic router — resolve destination at runtime via closure; detects same-destination loops |
 | `SecurityPolicyLayer` | Tower Layer that wraps a `SecurityPolicy` for authorization checks |
 | `SecurityPolicyService` | Tower Service produced by `SecurityPolicyLayer`; evaluates the policy per exchange |
+
+## Route Error Handler
+
+The `RouteErrorHandler` trait owns ALL error handling logic — DLC, retry, and onException policies.
+It is called from `RouteChannelService` (boundary errors) and `run_steps` (step errors).
+
+### `RouteErrorHandler` trait (since 0.16.0)
+
+```rust
+#[async_trait]
+pub trait RouteErrorHandler: Send + Sync {
+    /// Match a policy for the given error. Called once before retry.
+    fn match_policy(&self, err: &CamelError) -> Option<PolicyId>;
+
+    /// Phase 1: Retry the failed step.
+    async fn retry_step(&self, policy: Option<PolicyId>,
+        step: &mut BoxProcessor, original: Exchange, error: CamelError) -> RetryOutcome;
+
+    /// Phase 2: Determine step disposition after retry exhaustion.
+    async fn handle_step(&self, policy: Option<PolicyId>,
+        exchange: Exchange, error: CamelError) -> Result<StepDisposition, CamelError>;
+
+    /// Handle boundary (infrastructure) errors.
+    async fn handle_boundary(&self, kind: BoundaryKind,
+        exchange: Exchange, error: CamelError) -> Result<Exchange, CamelError>;
+}
+```
+
+### `DefaultRouteErrorHandler`
+
+The production implementation of `RouteErrorHandler`. Encapsulates retry/onException/DLC logic.
+
+```rust
+let handler = DefaultRouteErrorHandler::new(
+    Some(dlc_producer),                        // Dead Letter Channel processor
+    vec![(exception_policy, Some(handler))],   // (ExceptionPolicy, optional handler processor)
+);
+```
+
+### `CircuitBreakerGate`
+
+A reusable circuit-breaker gate with explicit `before_call()` / `after_result()` API. Not a Tower
+Layer — it is designed to be composed inside `RouteChannelService`.
+
+```rust
+let gate = CircuitBreakerGate::new(CircuitBreakerConfig::new()
+    .failure_threshold(5)
+    .open_duration(Duration::from_secs(30))
+    .fallback(fallback_processor));
+
+// Check before calling the pipeline:
+match gate.before_call() {
+    CircuitBreakerDecision::Allow => { /* proceed */ }
+    CircuitBreakerDecision::Fallback(p) => { /* use fallback */ }
+    CircuitBreakerDecision::Reject(e) => { /* return error */ }
+}
+
+// Report result after the call:
+gate.after_result(&result);
+```
+
+### `CircuitBreakerDecision`
+
+| Variant | Description |
+|---------|-------------|
+| `Allow` | Circuit is closed or half-open — proceed with pipeline |
+| `Fallback(BoxProcessor)` | Circuit is open with a fallback processor configured |
+| `Reject(CamelError)` | Circuit is open with no fallback — reject the call |
+
+> **Deprecated:** `ErrorHandlerLayer` and `ErrorHandlerService` are deprecated since 0.16.0.
+> Use `RouteChannelService` (from `camel-core`) + `DefaultRouteErrorHandler` (from `camel-processor`)
+> instead. See the `RouteChannelService` documentation in `camel-core` for the new approach.
 
 ## Security Policy Layer
 

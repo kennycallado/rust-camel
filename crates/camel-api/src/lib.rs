@@ -64,8 +64,9 @@ pub use dynamic_router::{DynamicRouterConfig, RouterExpression};
 pub use endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, EndpointResolver};
 pub use error::CamelError;
 pub use error_handler::{
-    ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, HEADER_REDELIVERED,
-    HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER, RedeliveryPolicy,
+    BoundaryKind, ErrorHandlerConfig, ExceptionDisposition, ExceptionPolicy,
+    ExceptionPolicyBuilder, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER,
+    HEADER_REDELIVERY_MAX_COUNTER, PolicyId, RedeliveryPolicy, RetryOutcome, StepDisposition,
 };
 pub use security_policy::{
     AuthorizationDecision, PRINCIPAL_AUDIENCE_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_ISSUER_KEY,

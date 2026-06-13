@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use tower::{Layer, Service};
 
-use camel_api::{CamelError, CircuitBreakerConfig, Exchange};
+use camel_api::{BoxProcessor, CamelError, CircuitBreakerConfig, Exchange};
 
 // ── State ──────────────────────────────────────────────────────────────
 
@@ -177,6 +177,95 @@ where
 
             result
         })
+    }
+}
+
+// ── Gate ──────────────────────────────────────────────────────────────
+
+/// Decision returned by [`CircuitBreakerGate::before_call`].
+pub enum CircuitBreakerDecision {
+    /// Circuit is closed or half-open — proceed with the pipeline call.
+    Allow,
+    /// Circuit is open but a fallback processor is configured.
+    /// Call this processor instead of the main pipeline.
+    Fallback(BoxProcessor),
+    /// Circuit is open with no fallback — reject the call.
+    Reject(CamelError),
+}
+
+/// Reusable circuit-breaker gate with explicit `before_call`/`after_result` API.
+#[derive(Clone)]
+pub struct CircuitBreakerGate {
+    config: CircuitBreakerConfig,
+    state: Arc<Mutex<CircuitState>>,
+}
+
+impl CircuitBreakerGate {
+    pub fn new(config: CircuitBreakerConfig) -> Self {
+        Self {
+            config,
+            state: Arc::new(Mutex::new(CircuitState::Closed {
+                consecutive_failures: 0,
+            })),
+        }
+    }
+
+    pub fn before_call(&self) -> CircuitBreakerDecision {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match *state {
+            CircuitState::Closed { .. } => CircuitBreakerDecision::Allow,
+            CircuitState::Open { opened_at } => {
+                if opened_at.elapsed() >= self.config.open_duration {
+                    tracing::info!("Circuit breaker gate: Open → HalfOpen");
+                    *state = CircuitState::HalfOpen;
+                    CircuitBreakerDecision::Allow
+                } else if let Some(ref fallback) = self.config.fallback {
+                    CircuitBreakerDecision::Fallback(fallback.clone())
+                } else {
+                    CircuitBreakerDecision::Reject(CamelError::CircuitOpen(
+                        "circuit breaker is open".into(),
+                    ))
+                }
+            }
+            CircuitState::HalfOpen => CircuitBreakerDecision::Allow,
+        }
+    }
+
+    pub fn after_result(&self, result: &Result<Exchange, CamelError>) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let current_is_half_open = matches!(*st, CircuitState::HalfOpen);
+        match result {
+            Ok(_) => {
+                if current_is_half_open {
+                    tracing::info!("Circuit breaker gate: HalfOpen → Closed");
+                }
+                *st = CircuitState::Closed {
+                    consecutive_failures: 0,
+                };
+            }
+            Err(_) => {
+                if current_is_half_open {
+                    tracing::warn!("Circuit breaker gate: HalfOpen → Open (probe failed)");
+                    *st = CircuitState::Open {
+                        opened_at: Instant::now(),
+                    };
+                } else if let CircuitState::Closed {
+                    consecutive_failures,
+                } = &mut *st
+                {
+                    *consecutive_failures += 1;
+                    if *consecutive_failures >= self.config.failure_threshold {
+                        tracing::warn!(
+                            threshold = self.config.failure_threshold,
+                            "Circuit breaker gate: Closed → Open (failure threshold reached)"
+                        );
+                        *st = CircuitState::Open {
+                            opened_at: Instant::now(),
+                        };
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -405,5 +494,126 @@ mod tests {
         let _ = svc.ready().await.unwrap().call(make_exchange()).await;
         let result = svc.ready().await;
         assert!(matches!(result, Err(CamelError::CircuitOpen(_))));
+    }
+
+    // ── CircuitBreakerGate tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_cb_gate_before_call_closed_allows() {
+        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+            failure_threshold: 3,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: None,
+        });
+        assert!(matches!(gate.before_call(), CircuitBreakerDecision::Allow));
+    }
+
+    #[test]
+    fn test_cb_gate_records_failures_and_opens() {
+        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+            failure_threshold: 2,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: None,
+        });
+        gate.after_result(&Err(CamelError::ProcessorError("fail".into())));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "still closed after 1 failure"
+        );
+        gate.after_result(&Err(CamelError::ProcessorError("fail".into())));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Reject(_)),
+            "should be open after 2 failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cb_gate_closes_on_success() {
+        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_millis(1),
+            success_threshold: 1,
+            fallback: None,
+        });
+        gate.after_result(&Err(CamelError::ProcessorError("fail".into())));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Reject(_)),
+            "should be open"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "should transition to half-open"
+        );
+        let ex = Exchange::new(Message::new("test"));
+        gate.after_result(&Ok(ex));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "should be closed again"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cb_gate_half_open_failure_reopens() {
+        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_millis(1),
+            success_threshold: 1,
+            fallback: None,
+        });
+        // Open the circuit
+        gate.after_result(&Err(CamelError::ProcessorError("fail".into())));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Reject(_)),
+            "should be open"
+        );
+
+        // Wait for open_duration to elapse → transitions to HalfOpen
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "should be half-open now"
+        );
+
+        // Probe fails in HalfOpen → should reopen
+        gate.after_result(&Err(CamelError::ProcessorError("probe fail".into())));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Reject(_)),
+            "should be open again after probe failure"
+        );
+    }
+
+    #[test]
+    fn test_cb_gate_open_with_fallback_returns_fallback() {
+        let fallback = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
+        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: Some(fallback),
+        });
+        gate.after_result(&Err(CamelError::ProcessorError("fail".into())));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Fallback(_)),
+            "should return fallback when open"
+        );
+    }
+
+    #[test]
+    fn test_cb_gate_handled_error_counts_as_success() {
+        let gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: None,
+        });
+        let ex = Exchange::new(Message::new("test"));
+        gate.after_result(&Ok(ex));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "handled error should not trip CB"
+        );
     }
 }

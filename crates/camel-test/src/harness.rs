@@ -436,6 +436,7 @@ mod tests {
     // ── TST-006: Error handler invocation ─────────────────────────────────────
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn tst006_error_handler_invoked_on_failure() {
         use camel_api::error_handler::ExceptionPolicy;
         use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message};
@@ -479,6 +480,7 @@ mod tests {
     // ── TST-007: Dead letter channel ──────────────────────────────────────────
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn tst007_dead_letter_channel_receives_failed_exchange() {
         use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message};
         use camel_processor::ErrorHandlerService;

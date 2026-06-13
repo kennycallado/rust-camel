@@ -548,7 +548,47 @@ routes:
       - to: "direct:processor"
 ```
 
-See `examples/error-handling` for complete examples.
+### Exception Disposition — Propagate, Handled, Continued
+
+Every `on_exception` clause has a **disposition** that controls what happens after the error handler runs:
+
+| Disposition | Behavior |
+|-------------|----------|
+| `Propagate` | Error is re-thrown to upstream after DLC/handler runs (default) |
+| `Handled` | Error is absorbed as `Ok(Exchange)`. Pipeline stops — subsequent steps do NOT run |
+| `Continued` | Error is cleared from the Exchange. Pipeline **continues** to the next step — subsequent steps run normally |
+
+In the builder API, use `ErrorHandlerConfig` with `.continued(true)` or `.handled(true)`:
+
+```rust
+use camel_api::error_handler::ErrorHandlerConfig;
+
+let eh = ErrorHandlerConfig::dead_letter_channel("log:dlc")
+    .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+    .continued(true)    // ← clear error, pipeline continues
+    .retry(1)
+    .build();
+
+let route = RouteBuilder::from("direct:input")
+    .route_id("continued-example")
+    .error_handler(eh)
+    .to("log:result")       // ← runs even after the error
+    .build()?;
+```
+
+In YAML, use the `continued: true` field:
+
+```yaml
+error_handler:
+  dead_letter_channel: "log:errors"
+  on_exceptions:
+    - kind: ProcessorError
+      continued: true
+```
+
+The `continued` and `handled` fields are mutually exclusive — setting both to `true` is a compile error.
+
+See `examples/error-handling` for complete examples, including Route 10 which demonstrates `continued=true`.
 
 ## Configuration
 

@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
+#[allow(unused_imports)]
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, NoOpMetrics,
     NoopPlatformService, PlatformService, ProducerContext, RouteController, RuntimeHandle,
@@ -21,15 +22,11 @@ use camel_api::{
 use camel_component_api::{Consumer, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_processor::aggregator::AggregatorService;
 pub use camel_processor::aggregator::SharedLanguageRegistry;
-use camel_processor::circuit_breaker::CircuitBreakerLayer;
-use camel_processor::security_policy_layer::SecurityPolicyLayer;
 
 use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
-use crate::lifecycle::adapters::route_compiler::{
-    compose_pipeline, compose_traced_pipeline_with_contracts,
-};
-use crate::lifecycle::adapters::route_compiler_ext::RouteCompilerExt;
+use crate::lifecycle::adapters::route_compiler::compose_pipeline;
+use crate::lifecycle::adapters::route_compiler_ext::{RouteCompilerExt, build_eh_config_pipeline};
 pub(crate) use crate::lifecycle::adapters::route_helpers::PreparedRoute;
 use crate::lifecycle::adapters::route_helpers::{
     AggregateSplitInfo, CrashNotification, ManagedRoute, find_top_level_aggregate_requiring_split,
@@ -394,51 +391,23 @@ impl DefaultRouteController {
             )?,
         };
         let route_id_for_tracing = route_id.clone();
-        let mut pipeline = if processors_with_contracts.is_empty() {
-            BoxProcessor::new(IdentityProcessor)
-        } else {
-            compose_traced_pipeline_with_contracts(
-                processors_with_contracts,
-                &route_id_for_tracing,
-                self.tracing_enabled,
-                self.tracer_detail_level.clone(),
-                self.tracer_metrics.clone(),
-            )
-        };
-
-        if let Some(cb_config) = circuit_breaker {
-            let cb_layer = CircuitBreakerLayer::new(cb_config);
-            pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
-        }
-
-        if let Some(sp_config) = security_policy.clone() {
-            let sp_layer = SecurityPolicyLayer::new(sp_config.policy);
-            pipeline = BoxProcessor::new(sp_layer.layer(pipeline));
-        }
-
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
 
-        if let Some(config) = eh_config {
-            let component_ctx = Arc::new(ControllerComponentContext::new(
-                Arc::clone(&self.registry),
-                Arc::clone(&self.languages),
-                self.tracer_metrics
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-                Arc::clone(&self.platform_service),
-                self.health_registry(),
-                Some(route_id.clone()),
-            ));
-            let rt: Arc<dyn camel_component_api::RuntimeObservability> =
-                Arc::clone(&component_ctx) as Arc<_>;
-            let layer = super::route_compiler_ext::resolve_error_handler(
-                config,
-                &producer_ctx,
-                rt,
-                component_ctx.as_ref(),
-            )?;
-            pipeline = BoxProcessor::new(layer.layer(pipeline));
-        }
+        let mut pipeline = build_eh_config_pipeline(
+            eh_config.as_ref(),
+            Arc::clone(&self.registry),
+            Arc::clone(&self.languages),
+            self.tracer_metrics.clone(),
+            Arc::clone(&self.platform_service),
+            self.health_registry(),
+            &route_id_for_tracing,
+            &producer_ctx,
+            processors_with_contracts,
+            self.tracing_enabled,
+            self.tracer_detail_level.clone(),
+            security_policy.clone(),
+            circuit_breaker,
+        )?;
 
         let uow_counter = if let Some(uow_config) = &unit_of_work {
             let component_ctx = Arc::new(ControllerComponentContext::new(

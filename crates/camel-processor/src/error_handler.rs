@@ -5,7 +5,9 @@ use std::task::{Context, Poll};
 use tower::{Layer, Service, ServiceExt};
 
 use camel_api::error_handler::{
-    ExceptionPolicy, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER,
+    BoundaryKind, ExceptionDisposition, ExceptionPolicy, HEADER_REDELIVERED,
+    HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER, PolicyId, RetryOutcome,
+    StepDisposition,
 };
 use camel_api::{BoxProcessor, CamelError, Exchange, SyncBoxProcessor, Value};
 
@@ -13,7 +15,7 @@ async fn execute_on_steps(
     original: Exchange,
     original_err: CamelError,
     on_steps: &SyncBoxProcessor,
-    handled: bool,
+    disposition: ExceptionDisposition,
     handler: Option<BoxProcessor>,
 ) -> Result<Exchange, CamelError> {
     let snapshot = original.clone();
@@ -28,11 +30,11 @@ async fn execute_on_steps(
 
     match step_result {
         Ok(mut ex) => {
-            if handled {
+            if disposition == ExceptionDisposition::Handled {
                 ex.handle_error();
                 Ok(ex)
             } else {
-                // handled:false — steps execute for side-effects (e.g. logging) but
+                // Propagate or Continued — steps execute for side-effects (e.g. logging) but
                 // the modified exchange is discarded and the original error propagated.
                 Err(original_err)
             }
@@ -46,9 +48,330 @@ async fn execute_on_steps(
     }
 }
 
+/// Invoke a processor: readiness check + call, unified into a single Result.
+///
+/// Readiness errors and call errors are both returned as `Err(CamelError)`,
+/// allowing the pipeline's recovery loop to handle them uniformly.
+pub async fn invoke_processor(
+    svc: &mut BoxProcessor,
+    ex: Exchange,
+) -> Result<Exchange, CamelError> {
+    match svc.ready().await {
+        Ok(ready) => ready.call(ex).await,
+        Err(err) => Err(err),
+    }
+}
+
+/// Route-level error handler owning ALL error handling logic.
+///
+/// Single owner of DLC, retry, onException policies. Called from
+/// `RouteChannelService` (boundary errors) and `run_steps` (step errors).
+#[async_trait::async_trait]
+pub trait RouteErrorHandler: Send + Sync {
+    /// Match a policy for the given error. Called once before retry.
+    fn match_policy(&self, err: &CamelError) -> Option<PolicyId>;
+
+    /// Phase 1: Retry the failed step.
+    async fn retry_step(
+        &self,
+        policy: Option<PolicyId>,
+        step: &mut BoxProcessor,
+        original: Exchange,
+        error: CamelError,
+    ) -> RetryOutcome;
+
+    /// Phase 2: Determine step disposition after retry exhaustion.
+    async fn handle_step(
+        &self,
+        policy: Option<PolicyId>,
+        exchange: Exchange,
+        error: CamelError,
+    ) -> Result<StepDisposition, CamelError>;
+
+    /// Handle boundary (infrastructure) errors.
+    async fn handle_boundary(
+        &self,
+        kind: BoundaryKind,
+        exchange: Exchange,
+        error: CamelError,
+    ) -> Result<Exchange, CamelError>;
+}
+
+/// Default implementation of RouteErrorHandler.
+/// Owns DLC producer exclusively. Encapsulates retry/onException/DLC logic.
+///
+/// Uses `SyncBoxProcessor` internally so the handler is `Send + Sync` as required
+/// by the `RouteErrorHandler` trait.
+pub struct DefaultRouteErrorHandler {
+    pub(crate) dlc_producer: Option<SyncBoxProcessor>,
+    pub(crate) policies: Vec<(ExceptionPolicy, Option<SyncBoxProcessor>)>,
+}
+
+impl DefaultRouteErrorHandler {
+    pub fn new(
+        dlc_producer: Option<BoxProcessor>,
+        policies: Vec<(ExceptionPolicy, Option<BoxProcessor>)>,
+    ) -> Self {
+        Self {
+            dlc_producer: dlc_producer.map(SyncBoxProcessor::new),
+            policies: policies
+                .into_iter()
+                .map(|(p, prod)| (p, prod.map(SyncBoxProcessor::new)))
+                .collect(),
+        }
+    }
+
+    /// Resolve (disposition, producer) for a matched policy.
+    /// Shared by handle_step and handle_boundary.
+    fn resolve_producer(
+        &self,
+        policy: Option<PolicyId>,
+    ) -> (ExceptionDisposition, Option<BoxProcessor>) {
+        match policy {
+            Some(PolicyId(idx)) => match self.policies.get(idx) {
+                Some((p, prod)) => (
+                    p.disposition,
+                    prod.as_ref()
+                        .map(|p| p.clone_inner())
+                        .or_else(|| self.dlc_producer.as_ref().map(|p| p.clone_inner())),
+                ),
+                None => (
+                    ExceptionDisposition::Propagate,
+                    self.dlc_producer.as_ref().map(|p| p.clone_inner()),
+                ),
+            },
+            None => (
+                ExceptionDisposition::Propagate,
+                self.dlc_producer.as_ref().map(|p| p.clone_inner()),
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RouteErrorHandler for DefaultRouteErrorHandler {
+    fn match_policy(&self, err: &CamelError) -> Option<PolicyId> {
+        self.policies
+            .iter()
+            .position(|(p, _)| (p.matches)(err))
+            .map(PolicyId)
+    }
+
+    async fn retry_step(
+        &self,
+        policy: Option<PolicyId>,
+        step: &mut BoxProcessor,
+        original: Exchange,
+        error: CamelError,
+    ) -> RetryOutcome {
+        let Some(PolicyId(idx)) = policy else {
+            return RetryOutcome::Exhausted {
+                exchange: original,
+                error,
+                policy: None,
+            };
+        };
+        let Some((policy_def, _)) = self.policies.get(idx) else {
+            return RetryOutcome::Exhausted {
+                exchange: original,
+                error,
+                policy,
+            };
+        };
+        let Some(ref backoff) = policy_def.retry else {
+            return RetryOutcome::Exhausted {
+                exchange: original,
+                error,
+                policy,
+            };
+        };
+
+        for attempt in 0..backoff.max_attempts {
+            let delay = backoff.delay_for(attempt);
+            tokio::time::sleep(delay).await;
+
+            let mut ex = original.clone();
+            ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
+            ex.input.set_header(
+                HEADER_REDELIVERY_COUNTER,
+                Value::Number((attempt + 1).into()),
+            );
+            ex.input.set_header(
+                HEADER_REDELIVERY_MAX_COUNTER,
+                Value::Number(backoff.max_attempts.into()),
+            );
+
+            match invoke_processor(step, ex).await {
+                Ok(exchange) => return RetryOutcome::Recovered(exchange),
+                Err(retry_err) => {
+                    if attempt + 1 == backoff.max_attempts {
+                        let mut final_ex = original;
+                        final_ex
+                            .input
+                            .set_header(HEADER_REDELIVERED, Value::Bool(true));
+                        final_ex.input.set_header(
+                            HEADER_REDELIVERY_COUNTER,
+                            Value::Number(backoff.max_attempts.into()),
+                        );
+                        final_ex.input.set_header(
+                            HEADER_REDELIVERY_MAX_COUNTER,
+                            Value::Number(backoff.max_attempts.into()),
+                        );
+                        return RetryOutcome::Exhausted {
+                            exchange: final_ex,
+                            error: retry_err,
+                            policy,
+                        };
+                    }
+                }
+            }
+        }
+
+        RetryOutcome::Exhausted {
+            exchange: original,
+            error,
+            policy,
+        }
+    }
+
+    async fn handle_step(
+        &self,
+        policy: Option<PolicyId>,
+        mut exchange: Exchange,
+        error: CamelError,
+    ) -> Result<StepDisposition, CamelError> {
+        if matches!(error, CamelError::Stopped) {
+            return Ok(StepDisposition::Propagate(error));
+        }
+
+        let (disposition, producer) = self.resolve_producer(policy);
+
+        // Run on_steps if present (using the SAME policy identified by PolicyId)
+        if let Some(PolicyId(idx)) = policy
+            && let Some((p, _)) = self.policies.get(idx)
+            && let Some(ref steps) = p.on_steps
+        {
+            let snapshot = exchange.clone();
+            exchange.set_error(error.clone());
+            let mut step_pipeline = steps.clone_inner();
+            let step_result = async {
+                let svc = step_pipeline.ready().await?;
+                svc.call(exchange).await
+            }
+            .await;
+            match step_result {
+                Ok(mut ex) => match disposition {
+                    ExceptionDisposition::Handled => {
+                        ex.handle_error();
+                        return Ok(StepDisposition::Handled(ex));
+                    }
+                    ExceptionDisposition::Continued => {
+                        ex.clear_error();
+                        return Ok(StepDisposition::Continued(ex));
+                    }
+                    ExceptionDisposition::Propagate => {
+                        exchange = snapshot;
+                    }
+                },
+                Err(_) => {
+                    exchange = snapshot;
+                }
+            }
+        }
+
+        // No on_steps, on_steps failed, or Propagate — forward to DLC/handler.
+        // BIND the returned exchange (must use handler output).
+        exchange.set_error(error.clone());
+        match send_to_handler(exchange, producer).await {
+            Ok(handler_ex) => match disposition {
+                ExceptionDisposition::Propagate => Ok(StepDisposition::Propagate(error)),
+                ExceptionDisposition::Handled => {
+                    let mut ex = handler_ex;
+                    ex.clear_error();
+                    Ok(StepDisposition::Handled(ex))
+                }
+                ExceptionDisposition::Continued => {
+                    let mut ex = handler_ex;
+                    ex.clear_error();
+                    Ok(StepDisposition::Continued(ex))
+                }
+            },
+            // Dead code by construction: send_to_handler always returns Ok.
+            Err(_) => Ok(StepDisposition::Propagate(error)),
+        }
+    }
+
+    async fn handle_boundary(
+        &self,
+        _kind: BoundaryKind,
+        mut exchange: Exchange,
+        error: CamelError,
+    ) -> Result<Exchange, CamelError> {
+        // Boundary errors: match policy, run on_steps, forward to DLC.
+        // Disposition mapping:
+        //   Handled → clear error, return Ok(exchange)
+        //   Propagate | Continued → forward to DLC, return Ok(exchange_with_error)
+        //   (Continued at boundary = Propagate — no next step to continue to)
+        let policy = self.match_policy(&error);
+        let (disposition, producer) = self.resolve_producer(policy);
+
+        // Run on_steps if present (shared logic with handle_step)
+        if let Some(PolicyId(idx)) = policy
+            && let Some((p, _)) = self.policies.get(idx)
+            && let Some(ref steps) = p.on_steps
+        {
+            let snapshot = exchange.clone();
+            exchange.set_error(error.clone());
+            let mut step_pipeline = steps.clone_inner();
+            let step_result = async {
+                let svc = step_pipeline.ready().await?;
+                svc.call(exchange).await
+            }
+            .await;
+            match step_result {
+                Ok(mut ex) => match disposition {
+                    ExceptionDisposition::Handled => {
+                        ex.handle_error();
+                        return Ok(ex);
+                    }
+                    ExceptionDisposition::Propagate | ExceptionDisposition::Continued => {
+                        exchange = snapshot;
+                    }
+                },
+                Err(_) => {
+                    exchange = snapshot;
+                }
+            }
+        }
+
+        // Forward to DLC/handler — BIND returned exchange
+        exchange.set_error(error.clone());
+        match send_to_handler(exchange, producer).await {
+            Ok(handler_ex) => match disposition {
+                ExceptionDisposition::Handled => {
+                    let mut ex = handler_ex;
+                    ex.clear_error();
+                    Ok(ex)
+                }
+                ExceptionDisposition::Propagate | ExceptionDisposition::Continued => {
+                    let mut ex = handler_ex;
+                    ex.set_error(error);
+                    Ok(ex)
+                }
+            },
+            // Dead code by construction: send_to_handler always returns Ok.
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// Tower Layer that wraps a pipeline with error handling behaviour.
 ///
 /// Constructed with already-resolved producers; URI resolution happens in `camel-core`.
+#[deprecated(
+    since = "0.16.0",
+    note = "Use RouteChannelService + DefaultRouteErrorHandler instead"
+)]
 pub struct ErrorHandlerLayer {
     /// Resolved DLC producer (None = log only).
     dlc_producer: Option<BoxProcessor>,
@@ -56,6 +379,7 @@ pub struct ErrorHandlerLayer {
     policies: Vec<(ExceptionPolicy, Option<BoxProcessor>)>,
 }
 
+#[allow(deprecated)]
 impl ErrorHandlerLayer {
     /// Create the layer with pre-resolved producers.
     pub fn new(
@@ -69,6 +393,7 @@ impl ErrorHandlerLayer {
     }
 }
 
+#[allow(deprecated)]
 impl<S> Layer<S> for ErrorHandlerLayer
 where
     S: Service<Exchange, Response = Exchange, Error = CamelError> + Send + Clone + 'static,
@@ -93,12 +418,17 @@ where
 ///
 /// `call` always returns `Ok` — errors are absorbed. The returned exchange will have
 /// `has_error() == true` if the pipeline ultimately failed.
+#[deprecated(
+    since = "0.16.0",
+    note = "Use RouteChannelService + DefaultRouteErrorHandler instead"
+)]
 pub struct ErrorHandlerService<S> {
     inner: S,
     dlc_producer: Option<BoxProcessor>,
     policies: Vec<(ExceptionPolicy, Option<BoxProcessor>)>,
 }
 
+#[allow(deprecated)]
 impl<S: Clone> Clone for ErrorHandlerService<S> {
     fn clone(&self) -> Self {
         Self {
@@ -113,6 +443,7 @@ impl<S: Clone> Clone for ErrorHandlerService<S> {
     }
 }
 
+#[allow(deprecated)]
 impl<S> ErrorHandlerService<S>
 where
     S: Service<Exchange, Response = Exchange, Error = CamelError> + Send + Clone + 'static,
@@ -132,6 +463,7 @@ where
     }
 }
 
+#[allow(deprecated)]
 impl<S> Service<Exchange> for ErrorHandlerService<S>
 where
     S: Service<Exchange, Response = Exchange, Error = CamelError> + Send + Clone + 'static,
@@ -228,7 +560,7 @@ where
                                             original,
                                             retry_err,
                                             steps,
-                                            policy.handled,
+                                            policy.disposition,
                                             handler,
                                         )
                                         .await;
@@ -244,7 +576,8 @@ where
                 // No retry configured (or 0 attempts) — send to policy handler or DLC.
                 if let Some(ref steps) = policy.on_steps {
                     let handler = policy_producer.or(dlc);
-                    return execute_on_steps(original, err, steps, policy.handled, handler).await;
+                    return execute_on_steps(original, err, steps, policy.disposition, handler)
+                        .await;
                 }
                 let mut ex = original.clone();
                 ex.set_error(err);
@@ -293,6 +626,7 @@ async fn send_to_handler(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use camel_api::{
@@ -377,7 +711,7 @@ mod tests {
             }),
             handled_by: None,
             on_steps: None,
-            handled: false,
+            disposition: ExceptionDisposition::Propagate,
         };
         let svc = ErrorHandlerService::new(inner, None, vec![(policy, None)]);
         let result = svc.oneshot(make_exchange()).await;
@@ -408,7 +742,7 @@ mod tests {
             }),
             handled_by: None,
             on_steps: None,
-            handled: false,
+            disposition: ExceptionDisposition::Propagate,
         };
         let svc = ErrorHandlerService::new(inner, Some(dlc), vec![(policy, None)]);
         let result = svc.oneshot(make_exchange()).await;
@@ -512,7 +846,7 @@ mod tests {
             }),
             handled_by: None,
             on_steps: None,
-            handled: false,
+            disposition: ExceptionDisposition::Propagate,
         };
 
         let svc = ErrorHandlerService::new(inner, Some(dlc), vec![(policy, None)]);
@@ -559,7 +893,7 @@ mod tests {
             }),
             handled_by: None,
             on_steps: None,
-            handled: false,
+            disposition: ExceptionDisposition::Propagate,
         };
 
         let start = Instant::now();
@@ -628,7 +962,7 @@ mod tests {
             retry: None,
             handled_by: None,
             on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
-            handled: true,
+            disposition: ExceptionDisposition::Handled,
         };
         let inner = tower::service_fn(|_ex: Exchange| async {
             Err::<Exchange, CamelError>(CamelError::RouteError("fail".to_string()))
@@ -653,7 +987,7 @@ mod tests {
             retry: None,
             handled_by: None,
             on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
-            handled: false,
+            disposition: ExceptionDisposition::Propagate,
         };
         let inner = tower::service_fn(|_ex: Exchange| async {
             Err::<Exchange, CamelError>(CamelError::RouteError("fail".to_string()))
@@ -674,6 +1008,12 @@ mod tests {
     #[derive(Clone)]
     struct ReadinessFailService {
         error: CamelError,
+    }
+
+    impl ReadinessFailService {
+        fn new(error: CamelError) -> Self {
+            Self { error }
+        }
     }
 
     impl Service<Exchange> for ReadinessFailService {
@@ -743,7 +1083,7 @@ mod tests {
             retry: None,
             handled_by: None,
             on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
-            handled: true,
+            disposition: ExceptionDisposition::Handled,
         };
 
         let svc = ErrorHandlerService::new(inner, None, vec![(policy, None)]);
@@ -783,6 +1123,26 @@ mod tests {
         }
     }
 
+    // --- invoke_processor tests ---
+
+    #[tokio::test]
+    async fn test_invoke_processor_returns_ok_on_success() {
+        let mut svc = ok_processor();
+        let ex = make_exchange();
+        let result = invoke_processor(&mut svc, ex).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_invoke_processor_captures_readiness_error() {
+        let mut failing_ready: BoxProcessor = BoxProcessor::new(ReadinessFailService::new(
+            CamelError::ProcessorError("not ready".into()),
+        ));
+        let ex = make_exchange();
+        let result = invoke_processor(&mut failing_ready, ex).await;
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn test_on_steps_handled_true_clears_exception_properties() {
         use tower::ServiceExt;
@@ -796,7 +1156,7 @@ mod tests {
             retry: None,
             handled_by: None,
             on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
-            handled: true,
+            disposition: ExceptionDisposition::Handled,
         };
         let inner = tower::service_fn(|_ex: Exchange| async {
             Err::<Exchange, CamelError>(CamelError::RouteError("fail".to_string()))
@@ -825,6 +1185,412 @@ mod tests {
                 .get(camel_api::exchange::PROPERTY_EXCEPTION_CAUGHT)
                 .is_none(),
             "handled:true should clear exception caught property"
+        );
+    }
+
+    // ── DefaultRouteErrorHandler tests ──
+
+    #[test]
+    fn test_match_policy_returns_id_for_matching_error() {
+        let handler = DefaultRouteErrorHandler::new(
+            None,
+            vec![(
+                ExceptionPolicy::new(|e| matches!(e, CamelError::ProcessorError(_))),
+                None,
+            )],
+        );
+        let id = handler.match_policy(&CamelError::ProcessorError("test".into()));
+        assert_eq!(id, Some(PolicyId(0)));
+    }
+
+    #[test]
+    fn test_match_policy_returns_none_for_unmatched() {
+        let handler = DefaultRouteErrorHandler::new(None, vec![]);
+        let id = handler.match_policy(&CamelError::ProcessorError("test".into()));
+        assert_eq!(id, None);
+    }
+
+    // ── retry_step tests ──
+
+    #[tokio::test]
+    async fn test_retry_step_succeeds_on_second_attempt() {
+        let mut policy = ExceptionPolicy::new(|_| true);
+        policy.retry = Some(RedeliveryPolicy::new(3));
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+        let mut step = fail_n_times(1); // fails once, then succeeds
+        let ex = make_exchange();
+        let outcome = handler
+            .retry_step(
+                Some(PolicyId(0)),
+                &mut step,
+                ex,
+                CamelError::ProcessorError("attempt 0".into()),
+            )
+            .await;
+        assert!(matches!(outcome, RetryOutcome::Recovered(_)));
+    }
+
+    #[tokio::test]
+    async fn test_retry_step_exhausted_when_all_fail() {
+        let mut policy = ExceptionPolicy::new(|_| true);
+        policy.retry = Some(RedeliveryPolicy::new(3));
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+        let mut step = failing_processor();
+        let ex = make_exchange();
+        let outcome = handler
+            .retry_step(
+                Some(PolicyId(0)),
+                &mut step,
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await;
+        assert!(matches!(outcome, RetryOutcome::Exhausted { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_retry_step_no_policy_returns_exhausted_immediately() {
+        let handler = DefaultRouteErrorHandler::new(None, vec![]);
+        let mut step = ok_processor();
+        let ex = make_exchange();
+        let outcome = handler
+            .retry_step(
+                None,
+                &mut step,
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await;
+        assert!(matches!(
+            outcome,
+            RetryOutcome::Exhausted { policy: None, .. }
+        ));
+    }
+
+    // ── handle_step tests ──
+
+    #[tokio::test]
+    async fn test_handle_step_propagate_sends_to_dlc() {
+        let dlc = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
+        let handler = DefaultRouteErrorHandler::new(Some(dlc), vec![]);
+        let ex = make_exchange();
+        let result = handler
+            .handle_step(None, ex, CamelError::ProcessorError("boom".into()))
+            .await;
+        assert!(matches!(result, Ok(StepDisposition::Propagate(_))));
+    }
+
+    #[tokio::test]
+    async fn test_handle_step_handled_uses_handler_output() {
+        let handler_producer = BoxProcessor::from_fn(|mut ex| {
+            Box::pin(async move {
+                ex.input.set_header("processed_by", Value::Bool(true));
+                Ok(ex)
+            })
+        });
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Handled,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, Some(handler_producer))]);
+        let mut ex = make_exchange();
+        ex.set_error(CamelError::ProcessorError("boom".into()));
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await;
+        match result {
+            Ok(StepDisposition::Handled(ex)) => {
+                assert!(!ex.has_error(), "error should be cleared");
+                assert_eq!(
+                    ex.input.header("processed_by"),
+                    Some(&Value::Bool(true)),
+                    "should use handler's output exchange"
+                );
+            }
+            other => panic!("expected Handled, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_step_continued_clears_error() {
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Continued,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+        let mut ex = make_exchange();
+        ex.set_error(CamelError::ProcessorError("boom".into()));
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await;
+        match result {
+            Ok(StepDisposition::Continued(ex)) => assert!(!ex.has_error()),
+            other => panic!("expected Continued, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_step_stopped_propagates_immediately() {
+        let handler = DefaultRouteErrorHandler::new(None, vec![]);
+        let ex = make_exchange();
+        let result = handler.handle_step(None, ex, CamelError::Stopped).await;
+        assert!(
+            matches!(result, Ok(StepDisposition::Propagate(CamelError::Stopped))),
+            "Stopped should propagate immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_step_with_on_steps_handled() {
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(|mut ex: Exchange| {
+            ex.input.body = camel_api::Body::Bytes("on_steps_ran".into());
+            async move { Ok(ex) }
+        }));
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            disposition: ExceptionDisposition::Handled,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+        let mut ex = make_exchange();
+        ex.set_error(CamelError::ProcessorError("boom".into()));
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await;
+        match result {
+            Ok(StepDisposition::Handled(ex)) => {
+                assert!(!ex.has_error(), "error should be cleared");
+                assert!(
+                    matches!(ex.input.body, camel_api::Body::Bytes(_)),
+                    "on_steps should have modified the body"
+                );
+            }
+            other => panic!("expected Handled, got: {}", other.is_ok()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_step_with_on_steps_propagate_falls_through() {
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(|mut ex: Exchange| {
+            ex.input.body = camel_api::Body::Bytes("on_steps_ran".into());
+            async move { Ok(ex) }
+        }));
+        let dlc_called = Arc::new(AtomicU32::new(0));
+        let dlc_called_clone = dlc_called.clone();
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let c = dlc_called_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            disposition: ExceptionDisposition::Propagate,
+        };
+        let handler = DefaultRouteErrorHandler::new(Some(dlc), vec![(policy, None)]);
+        let mut ex = make_exchange();
+        ex.set_error(CamelError::ProcessorError("boom".into()));
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await;
+        assert!(
+            matches!(result, Ok(StepDisposition::Propagate(_))),
+            "Propagate disposition should return Propagate"
+        );
+        assert_eq!(
+            dlc_called.load(Ordering::SeqCst),
+            1,
+            "DLC should be called when on_steps disposition is Propagate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_step_dlc_failure_propagates() {
+        let failing_dlc = BoxProcessor::from_fn(|_| {
+            Box::pin(async { Err(CamelError::ProcessorError("dlc broken".into())) })
+        });
+        let handler = DefaultRouteErrorHandler::new(Some(failing_dlc), vec![]);
+        let ex = make_exchange();
+        let result = handler
+            .handle_step(None, ex, CamelError::ProcessorError("original".into()))
+            .await;
+        assert!(
+            matches!(result, Ok(StepDisposition::Propagate(_))),
+            "DLC failure should still return Propagate with original error"
+        );
+    }
+
+    // ── handle_boundary tests ──
+
+    #[tokio::test]
+    async fn test_handle_boundary_security_error_goes_to_dlc() {
+        let dlc_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = dlc_count.clone();
+        let dlc = BoxProcessor::from_fn(move |ex| {
+            let c = count_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+        let handler = DefaultRouteErrorHandler::new(Some(dlc), vec![]);
+        let ex = make_exchange();
+        let result = handler
+            .handle_boundary(
+                BoundaryKind::Security,
+                ex,
+                CamelError::Unauthorized("denied".into()),
+            )
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(dlc_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_boundary_handled_clears_error() {
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Handled,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+        let ex = make_exchange();
+        let result = handler
+            .handle_boundary(
+                BoundaryKind::Security,
+                ex,
+                CamelError::Unauthorized("denied".into()),
+            )
+            .await;
+        assert!(result.is_ok());
+        assert!(
+            !result.unwrap().has_error(),
+            "Handled disposition should clear error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_boundary_propagate_preserves_error() {
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Propagate,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+        let ex = make_exchange();
+        let result = handler
+            .handle_boundary(
+                BoundaryKind::CircuitBreaker,
+                ex,
+                CamelError::CircuitOpen("open".into()),
+            )
+            .await;
+        assert!(result.is_ok(), "boundary errors always return Ok");
+        assert!(
+            result.unwrap().has_error(),
+            "Propagate disposition should preserve error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_boundary_continued_preserves_error_like_propagate() {
+        let dlc_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = dlc_count.clone();
+        let dlc = BoxProcessor::from_fn(move |ex| {
+            let c = count_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Continued,
+        };
+        let handler = DefaultRouteErrorHandler::new(Some(dlc), vec![(policy, None)]);
+        let ex = make_exchange();
+        let result = handler
+            .handle_boundary(
+                BoundaryKind::Security,
+                ex,
+                CamelError::Unauthorized("denied".into()),
+            )
+            .await;
+        assert!(result.is_ok(), "boundary errors always return Ok");
+        assert!(
+            result.unwrap().has_error(),
+            "Continued at boundary should preserve error"
+        );
+        assert_eq!(
+            dlc_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "DLC should be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_boundary_with_on_steps_handled() {
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(|mut ex: Exchange| {
+            ex.input.body = camel_api::Body::Bytes("on_steps_ran".into());
+            async move { Ok(ex) }
+        }));
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            disposition: ExceptionDisposition::Handled,
+        };
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+        let ex = make_exchange();
+        let result = handler
+            .handle_boundary(
+                BoundaryKind::Security,
+                ex,
+                CamelError::Unauthorized("denied".into()),
+            )
+            .await;
+        assert!(result.is_ok(), "boundary errors always return Ok");
+        let ex = result.unwrap();
+        assert!(!ex.has_error(), "Handled disposition should clear error");
+        assert!(
+            matches!(ex.input.body, camel_api::Body::Bytes(_)),
+            "on_steps should have modified the body"
         );
     }
 }

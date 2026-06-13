@@ -36,7 +36,9 @@ pub mod zip_splitter;
 
 pub use aggregator::AggregatorService;
 pub use choice::{ChoiceService, WhenClause};
-pub use circuit_breaker::{CircuitBreakerLayer, CircuitBreakerService};
+pub use circuit_breaker::{
+    CircuitBreakerDecision, CircuitBreakerGate, CircuitBreakerLayer, CircuitBreakerService,
+};
 pub use content_enricher::{EnrichService, PollEnrichService};
 pub use convert_body::ConvertBodyTo;
 pub use data_format::{JsonDataFormat, XmlDataFormat, ZipDataFormat, builtin_data_format};
@@ -46,7 +48,12 @@ pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
 pub use dynamic_set_property::{DynamicSetProperty, DynamicSetPropertyLayer};
 pub use endpoint_pipeline::EndpointPipelineService;
 pub use enrichment_strategy::{EnrichmentStrategy, UseEnrichedBody};
-pub use error_handler::{ErrorHandlerLayer, ErrorHandlerService};
+#[rustfmt::skip]
+#[allow(deprecated)]
+pub use error_handler::{
+    DefaultRouteErrorHandler, ErrorHandlerLayer, ErrorHandlerService, RouteErrorHandler,
+    invoke_processor,
+};
 pub use filter::FilterService;
 pub use load_balancer::LoadBalancerService;
 pub use log::{LogLevel, LogProcessor};

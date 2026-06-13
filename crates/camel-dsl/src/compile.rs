@@ -566,6 +566,14 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
             let kind = clause.kind;
             let message_contains = clause.message_contains;
             let handled = clause.handled.unwrap_or(false);
+            let continued = clause.continued.unwrap_or(false);
+
+            if handled && continued {
+                return Err(CamelError::Config(
+                    "on_exceptions: handled=true and continued=true are mutually exclusive".into(),
+                ));
+            }
+
             let mut builder = config.on_exception(move |e| {
                 let kind_ok = kind
                     .as_deref()
@@ -627,13 +635,11 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                     builder = builder.on_steps(compose_pipeline(processors));
                 }
             }
-            if let Some(handled) = clause.handled {
-                if handled && !has_steps {
-                    return Err(CamelError::RouteError(
-                        "error_handler.on_exceptions: handled=true requires steps".to_string(),
-                    ));
-                }
-                builder = builder.handled(handled);
+            // Boolean precedence: continued=true → Continued; else handled=true → Handled; else Propagate
+            if continued {
+                builder = builder.continued(true);
+            } else if handled {
+                builder = builder.handled(true);
             }
 
             config = builder.build();
@@ -1642,6 +1648,7 @@ mod tests {
                     }),
                     steps: vec![],
                     handled: None,
+                    continued: None,
                 },
                 DeclarativeOnException {
                     kind: Some("ProcessorError".into()),
@@ -1656,6 +1663,7 @@ mod tests {
                     }),
                     steps: vec![],
                     handled: None,
+                    continued: None,
                 },
             ]),
         })
@@ -1683,6 +1691,7 @@ mod tests {
                 retry: None,
                 steps: vec![],
                 handled: None,
+                continued: None,
             }]),
         })
         .err()
@@ -1702,6 +1711,7 @@ mod tests {
                 retry: None,
                 steps: vec![],
                 handled: None,
+                continued: None,
             }]),
         })
         .err()
@@ -1775,6 +1785,7 @@ mod tests {
                     }),
                     steps: vec![],
                     handled: None,
+                    continued: None,
                 },
                 DeclarativeOnException {
                     kind: Some("Io".into()),
@@ -1789,6 +1800,7 @@ mod tests {
                     }),
                     steps: vec![],
                     handled: None,
+                    continued: None,
                 },
             ]),
         })
@@ -1819,6 +1831,7 @@ mod tests {
                 retry: None,
                 steps: vec![],
                 handled: None,
+                continued: None,
             }]),
         })
         .expect("compile should succeed");
@@ -1843,6 +1856,7 @@ mod tests {
                 retry: None,
                 steps: vec![],
                 handled: None,
+                continued: None,
             }]),
         })
         .expect("compile should succeed");
@@ -1866,16 +1880,20 @@ mod tests {
                     level: LogLevelDef::Info,
                 })],
                 handled: Some(true),
+                continued: None,
             }]),
         };
         let config = compile_error_handler(def).unwrap();
         assert_eq!(config.policies.len(), 1);
         assert!(config.policies[0].on_steps.is_some());
-        assert!(config.policies[0].handled);
+        assert_eq!(
+            config.policies[0].disposition,
+            camel_api::error_handler::ExceptionDisposition::Handled
+        );
     }
 
     #[test]
-    fn test_compile_error_handler_handled_without_steps_is_error() {
+    fn test_compile_error_handler_handled_without_steps_maps_to_handled() {
         let def = DeclarativeErrorHandler {
             dead_letter_channel: None,
             retry: None,
@@ -1885,10 +1903,94 @@ mod tests {
                 retry: None,
                 steps: vec![],
                 handled: Some(true),
+                continued: None,
             }]),
         };
-        let result = compile_error_handler(def);
+        let config = compile_error_handler(def).expect("compile should succeed");
+        assert_eq!(
+            config.policies[0].disposition,
+            camel_api::error_handler::ExceptionDisposition::Handled
+        );
+    }
+
+    #[test]
+    fn test_compile_continued_true_maps_to_continued_disposition() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("ProcessorError".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: Some(true),
+            }]),
+        })
+        .expect("compile should succeed");
+        assert_eq!(
+            config.policies[0].disposition,
+            camel_api::error_handler::ExceptionDisposition::Continued
+        );
+    }
+
+    #[test]
+    fn test_compile_handled_and_continued_both_true_errors() {
+        let result = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("ProcessorError".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: Some(true),
+                continued: Some(true),
+            }]),
+        });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compile_handled_true_with_continued_false_maps_to_handled() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("ProcessorError".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: Some(true),
+                continued: Some(false),
+            }]),
+        })
+        .expect("compile should succeed");
+        assert_eq!(
+            config.policies[0].disposition,
+            camel_api::error_handler::ExceptionDisposition::Handled
+        );
+    }
+
+    #[test]
+    fn test_compile_neither_handled_nor_continued_maps_to_propagate() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("ProcessorError".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+            }]),
+        })
+        .expect("compile should succeed");
+        assert_eq!(
+            config.policies[0].disposition,
+            camel_api::error_handler::ExceptionDisposition::Propagate
+        );
     }
 
     #[test]

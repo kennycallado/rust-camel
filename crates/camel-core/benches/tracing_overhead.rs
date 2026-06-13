@@ -15,7 +15,8 @@ fn bench_tracing_overhead(c: &mut Criterion) {
 
     let steps: Vec<BoxProcessor> = (0..10).map(|_| pass_through()).collect();
     let mut plain = compose_pipeline(steps.clone());
-    let mut traced = compose_traced_pipeline(steps, "bench-route", true, DetailLevel::Full, None);
+    let mut traced =
+        compose_traced_pipeline(steps, "bench-route", true, DetailLevel::Full, None, None);
 
     group.bench_function("plain_10_steps", |b| {
         b.to_async(&rt).iter(|| {
