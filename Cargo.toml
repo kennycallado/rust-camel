@@ -92,6 +92,7 @@ camel-component-opensearch = { path = "crates/components/camel-opensearch", vers
 camel-wit = { path = "crates/camel-wit", version = "=0.17.0" }
 camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.17.0" }
 camel-component-llm = { path = "crates/components/camel-component-llm", version = "=0.17.0" }
+camel-component-surrealdb = { path = "crates/components/camel-component-surrealdb", version = "=0.17.0" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14" }
@@ -105,6 +106,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 async-trait = "0.1"
 thiserror = "2"
+surrealdb = { version = "3", default-features = false, features = ["protocol-ws", "protocol-http", "rustls"] }
 anyhow = "1"
 bytes = "1"
 futures = "0.3"

@@ -1,0 +1,47 @@
+[package]
+name = "camel-component-surrealdb"
+description = "SurrealDB multi-model database component for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/camel-component-surrealdb"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api = { workspace = true }
+camel-component-api = { workspace = true }
+surrealdb = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tower = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
+camel-builder = { workspace = true }
+camel-core = { workspace = true }
+camel-component-mock = { workspace = true }
+camel-component-direct = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
+
+[features]
+default = []
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

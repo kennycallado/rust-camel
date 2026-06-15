@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -31,6 +32,11 @@ pub struct DatasourceConfig {
     pub ssl_cert: Option<String>,
     #[serde(default)]
     pub ssl_key: Option<String>,
+    /// Generic key-value pairs for database-specific configuration.
+    /// Components read their bespoke fields from here.
+    /// SQL ignores this; SurrealDB reads namespace/database/username/password.
+    #[serde(default)]
+    pub extra: HashMap<String, toml::Value>,
 }
 
 impl fmt::Debug for DatasourceConfig {
@@ -46,6 +52,7 @@ impl fmt::Debug for DatasourceConfig {
             .field("ssl_root_cert", &self.ssl_root_cert)
             .field("ssl_cert", &self.ssl_cert)
             .field("ssl_key", &self.ssl_key.as_ref().map(|_| "[REDACTED]"))
+            .field("extra", &"[REDACTED]")
             .finish()
     }
 }
@@ -159,6 +166,7 @@ mod tests {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            extra: HashMap::new(),
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -178,6 +186,7 @@ mod tests {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            extra: HashMap::new(),
         };
         assert!(config.validate().is_ok());
     }
@@ -195,6 +204,7 @@ mod tests {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            extra: HashMap::new(),
         };
         let debug_str = format!("{:?}", config);
         assert!(
@@ -248,6 +258,7 @@ mod tests {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            extra: HashMap::new(),
         };
         assert!(factory.matches(&pg_config));
 
@@ -262,7 +273,92 @@ mod tests {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            extra: HashMap::new(),
         };
         assert!(!factory.matches(&mysql_config));
+    }
+
+    #[test]
+    fn datasource_config_extra_defaults_empty() {
+        let config = DatasourceConfig {
+            db_url: "ws://localhost:8000".to_string(),
+            provider: None,
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: HashMap::new(),
+        };
+        assert!(config.extra.is_empty());
+    }
+
+    #[test]
+    fn datasource_config_extra_deserializes_from_toml() {
+        let toml_str = r#"
+db_url = "ws://localhost:8000"
+provider = "surrealdb"
+
+[extra]
+namespace = "camel"
+database = "runtime"
+"#;
+        let config: DatasourceConfig = toml::from_str(toml_str).unwrap(); // allow-unwrap
+        assert_eq!(config.db_url, "ws://localhost:8000");
+        assert_eq!(config.provider.as_deref(), Some("surrealdb"));
+        assert_eq!(config.extra.len(), 2);
+        assert_eq!(
+            config.extra.get("namespace").and_then(|v| v.as_str()),
+            Some("camel")
+        );
+    }
+
+    #[test]
+    fn datasource_config_extra_backward_compat_without_extra_block() {
+        let toml_str = r#"
+db_url = "ws://localhost:8000"
+"#;
+        let config: DatasourceConfig = toml::from_str(toml_str).unwrap(); // allow-unwrap
+        assert_eq!(config.db_url, "ws://localhost:8000");
+        assert!(
+            config.extra.is_empty(),
+            "TOML without [extra] must deserialize with empty extra (#[serde(default)])"
+        );
+    }
+
+    #[test]
+    fn datasource_config_debug_redacts_extra() {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "password".to_string(),
+            toml::Value::String("secret123".to_string()),
+        );
+        let config = DatasourceConfig {
+            db_url: "ws://localhost:8000".to_string(),
+            provider: None,
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra,
+        };
+        let debug_str = format!("{:?}", config);
+        assert!(
+            debug_str.contains("[REDACTED]"),
+            "extra should be redacted in Debug: {}",
+            debug_str
+        );
+        assert!(
+            !debug_str.contains("secret123"),
+            "password must not appear in Debug: {}",
+            debug_str
+        );
     }
 }

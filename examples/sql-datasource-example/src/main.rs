@@ -89,6 +89,7 @@ async fn main() -> Result<(), CamelError> {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            extra: std::collections::HashMap::new(),
         },
     );
     let catalog: Arc<dyn DatasourceCatalog> = Arc::new(RuntimeDatasourceCatalog::new(datasources));

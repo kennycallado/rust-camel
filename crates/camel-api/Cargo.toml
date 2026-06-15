@@ -28,6 +28,7 @@ uuid = { workspace = true, features = ["serde"] }
 opentelemetry = { workspace = true }
 quick-xml = { workspace = true }
 schemars.workspace = true
+toml = { workspace = true }
 ts-rs.workspace = true
 
 [dev-dependencies]

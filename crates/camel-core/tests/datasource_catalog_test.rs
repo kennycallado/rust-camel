@@ -41,6 +41,7 @@ fn make_config(url: &str) -> DatasourceConfig {
         ssl_root_cert: None,
         ssl_cert: None,
         ssl_key: None,
+        extra: std::collections::HashMap::new(),
     }
 }
 

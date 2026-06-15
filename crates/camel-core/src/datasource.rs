@@ -219,6 +219,7 @@ mod tests {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            extra: std::collections::HashMap::new(),
         }
     }
 
@@ -331,6 +332,7 @@ mod tests {
                 ssl_root_cert: None,
                 ssl_cert: None,
                 ssl_key: None,
+                extra: std::collections::HashMap::new(),
             },
         );
 

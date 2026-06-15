@@ -37,6 +37,8 @@ camel-component-jms = { workspace = true, optional = true }
 camel-component-cxf = { workspace = true, optional = true }
 camel-component-container = { workspace = true, optional = true }
 camel-component-opensearch = { workspace = true, optional = true }
+camel-component-surrealdb = { workspace = true, optional = true }
+surrealdb = { workspace = true, optional = true }
 bollard = { version = "0.20", optional = true }
 camel-component-validator = { workspace = true, optional = true }
 camel-xslt = { workspace = true, optional = true }
@@ -98,6 +100,8 @@ integration-tests = [
     "dep:camel-platform-kubernetes",
     "dep:kube",
     "dep:k8s-openapi",
+    "dep:camel-component-surrealdb",
+    "dep:surrealdb",
 ]
 
 [lints]

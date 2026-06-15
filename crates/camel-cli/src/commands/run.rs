@@ -379,6 +379,29 @@ pub async fn run(
             }
         }
     }
+    #[cfg(feature = "surrealdb")]
+    {
+        let surrealdb_raw = camel_config
+            .components
+            .raw
+            .get(<camel_component_surrealdb::SurrealDbBundle as camel_component_api::ComponentBundle>::config_key())
+            .cloned()
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        match <camel_component_surrealdb::SurrealDbBundle as camel_component_api::ComponentBundle>::from_toml(
+            surrealdb_raw,
+        ) {
+            Ok(bundle) => {
+                let bundle = bundle.with_catalog(Arc::clone(&datasource_catalog));
+                <camel_component_surrealdb::SurrealDbBundle as camel_component_api::ComponentBundle>::register_all(
+                    bundle, &mut ctx,
+                );
+            }
+            Err(e) => {
+                // log-policy: system-broken
+                tracing::error!("failed to initialize SurrealDB bundle: {}", e);
+            }
+        }
+    }
     #[cfg(feature = "grpc")]
     register_bundle!(ctx, camel_config, camel_component_grpc::GrpcBundle);
 

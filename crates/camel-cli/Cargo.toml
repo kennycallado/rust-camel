@@ -70,13 +70,14 @@ camel-language-xpath.workspace = true
 camel-wit.workspace = true
 camel-auth.workspace = true
 camel-component-keycloak.workspace = true
+camel-component-surrealdb = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true
 
 [features]
-default = ["otel", "grpc", "wasm", "http-static", "llm"]
+default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb"]
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # kafka activates the kafka component code only — linking strategy is orthogonal.
 # Use `kafka` alone (rdkafka will build from source via cmake by default),
@@ -98,6 +99,7 @@ http-static = []
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
 kafka-static = ["dep:camel-component-kafka", "cmake-build"]
+surrealdb = ["dep:camel-component-surrealdb"]
 
 [lints]
 workspace = true
