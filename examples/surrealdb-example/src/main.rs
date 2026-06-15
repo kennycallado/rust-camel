@@ -99,9 +99,12 @@ async fn main() -> Result<(), CamelError> {
     let mut datasources = HashMap::new();
     datasources.insert("demo".to_string(), ds_config);
     let catalog = RuntimeDatasourceCatalog::new(datasources);
-    catalog
-        .register_factory("surrealdb", std::sync::Arc::new(SurrealDbPoolFactory))
-        .expect("register factory");
+    if let Err(e) = catalog.register_factory("surrealdb", std::sync::Arc::new(SurrealDbPoolFactory))
+    {
+        return Err(CamelError::Config(format!(
+            "failed to register surrealdb pool factory: {e}"
+        )));
+    }
 
     let bundle = SurrealDbBundle::default().with_catalog(std::sync::Arc::new(catalog));
 

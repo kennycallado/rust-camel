@@ -81,21 +81,33 @@ impl Endpoint for SurrealDbEndpoint {
         Ok(Box::new(consumer))
     }
 
+    /// Declares the body shape the producer REQUIRES for this operation.
+    ///
+    /// Returns `None` (no contract) when the operation accepts input via
+    /// URI/header/config rather than the body — this lets documented flows
+    /// like `surrealdb:query?query=SELECT 1` or `CamelSurrealDbVector` headers
+    /// reach the producer without being rejected for an empty body.
+    ///
+    /// | Operation      | Body shape | Why |
+    /// |----------------|------------|-----|
+    /// | `query`        | None       | SQL can come from URI `?query=` or `CamelSurrealDbQuery` header |
+    /// | `search`       | None       | Query vector can come from `CamelSurrealDbVector` header |
+    /// | `select`, `delete`, `live` | None | Read-only, no body needed |
+    /// | `create`, `update`, `upsert`, `patch`, `vector`, `relate`, `run` | `Json` | Body drives the operation |
     fn body_contract(&self) -> Option<BodyType> {
         match self.config.operation {
-            // Query reads SQL from the body (or CamelSurrealDbQuery header).
-            SurrealDbOperation::Query => Some(BodyType::Text),
             SurrealDbOperation::Create
             | SurrealDbOperation::Update
             | SurrealDbOperation::Upsert
             | SurrealDbOperation::Patch
             | SurrealDbOperation::Relate
             | SurrealDbOperation::Vector
-            | SurrealDbOperation::Search
             | SurrealDbOperation::Run => Some(BodyType::Json),
-            SurrealDbOperation::Select | SurrealDbOperation::Delete | SurrealDbOperation::Live => {
-                None
-            }
+            SurrealDbOperation::Query
+            | SurrealDbOperation::Select
+            | SurrealDbOperation::Search
+            | SurrealDbOperation::Delete
+            | SurrealDbOperation::Live => None,
         }
     }
 
@@ -117,7 +129,7 @@ mod tests {
 
     use camel_api::datasource::{DatasourceCatalog, DatasourceConfig, GetPoolFuture, PoolFactory};
     use camel_component_api::test_support::PanicRuntimeObservability;
-    use camel_component_api::{Component, Endpoint, NoOpComponentContext};
+    use camel_component_api::{BodyType, Component, Endpoint, NoOpComponentContext};
 
     use crate::SurrealDbComponent;
     use crate::config::SurrealDbEndpointConfig;
@@ -181,6 +193,49 @@ mod tests {
         let ctx = camel_component_api::ProducerContext::new();
         let result = ep.create_producer(test_rt(), &ctx);
         assert!(result.is_ok());
+    }
+
+    // --- body_contract per operation ---
+    // Documented flows like `?query=...` or CamelSurrealDbVector header must
+    // reach the producer without being rejected for an empty body. That means
+    // body_contract returns None for query/search.
+
+    #[test]
+    fn body_contract_query_is_none_allows_uri_or_header_input() {
+        let ep = make_endpoint("surrealdb:query?datasource=main");
+        assert_eq!(ep.body_contract(), None);
+    }
+
+    #[test]
+    fn body_contract_search_is_none_allows_vector_header() {
+        let ep = make_endpoint("surrealdb:search?datasource=main&table=docs&top_k=5");
+        assert_eq!(ep.body_contract(), None);
+    }
+
+    #[test]
+    fn body_contract_create_requires_json_body() {
+        let ep = make_endpoint("surrealdb:create?datasource=main&table=docs");
+        assert_eq!(ep.body_contract(), Some(BodyType::Json));
+    }
+
+    #[test]
+    fn body_contract_update_requires_json_body() {
+        let ep = make_endpoint("surrealdb:update?datasource=main&table=docs&id=1");
+        assert_eq!(ep.body_contract(), Some(BodyType::Json));
+    }
+
+    #[test]
+    fn body_contract_select_is_none() {
+        let ep = make_endpoint("surrealdb:select?datasource=main&table=docs");
+        assert_eq!(ep.body_contract(), None);
+    }
+
+    #[test]
+    fn body_contract_relate_requires_json_body() {
+        let ep = make_endpoint(
+            "surrealdb:relate?datasource=main&table=user&edge=knows&from=user:1&to=user:2",
+        );
+        assert_eq!(ep.body_contract(), Some(BodyType::Json));
     }
 
     #[test]

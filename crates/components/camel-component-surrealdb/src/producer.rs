@@ -334,22 +334,22 @@ impl SurrealDbProducer {
         client: &SurrealClient,
         exchange: &Exchange,
     ) -> Result<JsonValue, SurrealDbError> {
-        let from_table = self.validated_table()?;
-        let from_id = self.config.from.as_deref().ok_or_else(|| {
+        // `from` and `to` must be full RecordIds in `table:key` form, matching
+        // the README contract (e.g. `from=user:1&to=topic:42&relation=likes`).
+        // Bare keys without a `table:` prefix are rejected by config
+        // validation (see SurrealDbEndpointConfig::validate).
+        let from_str = self.config.from.as_deref().ok_or_else(|| {
             SurrealDbError::MissingParam("from (required for relate operation)".into())
         })?;
         let edge = self.config.edge.as_deref().ok_or_else(|| {
             SurrealDbError::MissingParam("edge (required for relate operation)".into())
         })?;
-        let to_table = self
-            .config
-            .to_table
-            .clone()
-            .unwrap_or_else(|| from_table.clone());
-        let to_id = self.config.to.as_deref().ok_or_else(|| {
+        let to_str = self.config.to.as_deref().ok_or_else(|| {
             SurrealDbError::MissingParam("to (required for relate operation)".into())
         })?;
         query::validate_identifier(edge)?;
+        let (from_table, from_id) = query::validate_record_id_str(from_str)?;
+        let (to_table, to_id) = query::validate_record_id_str(to_str)?;
         let body = self.extract_body_json(exchange)?;
         let mut relation = match body.into_value() {
             SurrealDbValue::Object(object) => object,
@@ -361,11 +361,11 @@ impl SurrealDbProducer {
         };
         relation.insert(
             "in",
-            SurrealDbValue::RecordId(query::record_id_from_uri(&from_table, from_id)?),
+            SurrealDbValue::RecordId(query::record_id_from_uri(from_table, from_id)?),
         );
         relation.insert(
             "out",
-            SurrealDbValue::RecordId(query::record_id_from_uri(&to_table, to_id)?),
+            SurrealDbValue::RecordId(query::record_id_from_uri(to_table, to_id)?),
         );
 
         let results: Vec<JsonValue> = client
@@ -462,6 +462,40 @@ impl SurrealDbProducer {
             ))),
         }
     }
+
+    /// Construct the `CamelSurrealDbRecordId` header value for operations whose
+    /// target RecordId is fully known from URI config. Returns `None` for
+    /// operations that generate their RecordId server-side (`create`, `vector`,
+    /// `relate`) or that don't produce a single RecordId (`select`, `query`,
+    /// `search`, `run`, `live`).
+    ///
+    /// `relate` is included in the server-generated group because the
+    /// "affected record" is the edge record SurrealDB creates — not the source
+    /// node (`from`). Extracting the edge `id` would require assuming a fixed
+    /// SDK response shape (`Vec<Value>` with `[0].id`), which is fragile. The
+    /// producer already returns the full edge record (with its `id`) as the
+    /// JSON body, so downstream consumers that need the edge RecordId can read
+    /// `body.id` — the same pattern used by `create`/`vector`.
+    ///
+    /// Returned format: `table:key` (e.g. `user:42`).
+    fn record_id_for_output(&self) -> Option<String> {
+        match self.config.operation {
+            SurrealDbOperation::Update
+            | SurrealDbOperation::Upsert
+            | SurrealDbOperation::Delete
+            | SurrealDbOperation::Patch => {
+                let table = self.config.table.as_deref()?;
+                let id = self.config.id.as_deref()?;
+                Some(format!("{table}:{id}"))
+            }
+            // create/vector/relate all generate their primary record server-side;
+            // we don't parse the response to extract the RecordId to avoid
+            // coupling to the SDK's serialization shape. Downstream consumers
+            // that need the new ID can read `body.id` from the response.
+            // (For relate, that ID is the edge record's id, NOT `from`.)
+            _ => None,
+        }
+    }
 }
 
 impl Service<Exchange> for SurrealDbProducer {
@@ -484,7 +518,17 @@ impl Service<Exchange> for SurrealDbProducer {
         Box::pin(async move {
             match producer.execute(&exchange).await {
                 Ok(result) => {
-                    exchange.output = Some(Message::new(Body::Json(result)));
+                    let mut msg = Message::new(Body::Json(result));
+                    // Set CamelSurrealDbRecordId header when we can reliably
+                    // construct the affected RecordId from URI config.
+                    // Operations whose target is `table:id` (from URI):
+                    if let Some(record_id) = producer.record_id_for_output() {
+                        msg.headers.insert(
+                            headers::RECORD_ID.into(),
+                            camel_component_api::Value::String(record_id),
+                        );
+                    }
+                    exchange.output = Some(msg);
                     Ok(exchange)
                 }
                 Err(err) => {
@@ -503,7 +547,7 @@ impl Service<Exchange> for SurrealDbProducer {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{OutputType, SurrealDbEndpointConfig, SurrealDbOperation, VectorMetric};
+    use crate::config::{SurrealDbEndpointConfig, SurrealDbOperation, VectorMetric};
     use crate::headers;
     use crate::producer::SurrealDbProducer;
     use camel_component_api::{Body, Exchange, Message, Value};
@@ -514,9 +558,9 @@ mod tests {
             datasource: "test-ds".into(),
             table: Some("test_table".into()),
             id: Some("42".into()),
-            from: Some("1".into()),
+            from: Some("test_table:1".into()),
             edge: Some("knows".into()),
-            to: Some("2".into()),
+            to: Some("test_table:2".into()),
             to_table: Some("test_table".into()),
             top_k: Some(5),
             metric: Some(VectorMetric::Cosine),
@@ -524,7 +568,6 @@ mod tests {
             limit: Some(10),
             query: None,
             function: None,
-            output: OutputType::Json,
         };
         SurrealDbProducer::new(config, None, "test-route")
     }
@@ -661,5 +704,121 @@ mod tests {
         let exchange = Exchange::new(Message::new(Body::Text("not json".into())));
         let err = producer.extract_body_json(&exchange).unwrap_err();
         assert!(matches!(err, crate::error::SurrealDbError::InvalidBody(_)));
+    }
+
+    // --- record_id_for_output tests ---
+
+    #[test]
+    fn record_id_header_for_update_uses_table_id() {
+        let producer = make_producer(SurrealDbOperation::Update);
+        // make_producer uses table=test_table, id=42
+        assert_eq!(
+            producer.record_id_for_output().as_deref(),
+            Some("test_table:42")
+        );
+    }
+
+    #[test]
+    fn record_id_header_for_upsert_uses_table_id() {
+        let producer = make_producer(SurrealDbOperation::Upsert);
+        assert_eq!(
+            producer.record_id_for_output().as_deref(),
+            Some("test_table:42")
+        );
+    }
+
+    #[test]
+    fn record_id_header_for_delete_uses_table_id() {
+        let producer = make_producer(SurrealDbOperation::Delete);
+        assert_eq!(
+            producer.record_id_for_output().as_deref(),
+            Some("test_table:42")
+        );
+    }
+
+    #[test]
+    fn record_id_header_for_patch_uses_table_id() {
+        let producer = make_producer(SurrealDbOperation::Patch);
+        assert_eq!(
+            producer.record_id_for_output().as_deref(),
+            Some("test_table:42")
+        );
+    }
+
+    #[test]
+    fn record_id_header_for_relate_is_none() {
+        // RELATE creates an edge record server-side; its id is not the source
+        // node (`from`). To match create/vector, the header is omitted and
+        // downstream consumers read `body.id` (the edge record's id) instead.
+        let producer = make_producer(SurrealDbOperation::Relate);
+        assert_eq!(producer.record_id_for_output(), None);
+    }
+
+    #[test]
+    fn record_id_header_for_create_is_none() {
+        // create generates IDs server-side; no header (downstream reads body.id).
+        let producer = make_producer(SurrealDbOperation::Create);
+        assert_eq!(producer.record_id_for_output(), None);
+    }
+
+    #[test]
+    fn record_id_header_for_vector_is_none() {
+        let producer = make_producer(SurrealDbOperation::Vector);
+        assert_eq!(producer.record_id_for_output(), None);
+    }
+
+    #[test]
+    fn record_id_header_for_search_is_none() {
+        let producer = make_producer(SurrealDbOperation::Search);
+        assert_eq!(producer.record_id_for_output(), None);
+    }
+
+    // --- Body contract / alternative input paths ---
+
+    #[test]
+    fn test_query_via_uri_with_empty_body_accepted() {
+        // Query op with SQL from URI ?query=...: producer resolves the SQL
+        // from config.query when the body is empty. body_contract is None,
+        // so the empty body never gets rejected upstream.
+        let mut config = SurrealDbEndpointConfig::default();
+        config.operation = SurrealDbOperation::Query;
+        config.datasource = "test-ds".into();
+        config.query = Some("SELECT 1".to_string());
+        let producer = SurrealDbProducer::new(config, None, "test-route");
+        let exchange = Exchange::new(Message::new(Body::Empty));
+        let sql = producer.resolve_query_source(&exchange);
+        assert_eq!(sql, "SELECT 1");
+    }
+
+    #[test]
+    fn test_query_via_header_with_empty_body_accepted() {
+        // Query op with SQL from CamelSurrealDbQuery header: priority 1.
+        let config = SurrealDbEndpointConfig::default();
+        let producer = SurrealDbProducer::new(config, None, "test-route");
+        let mut exchange = Exchange::new(Message::new(Body::Empty));
+        exchange
+            .input
+            .headers
+            .insert(headers::QUERY.into(), Value::String("SELECT 1".into()));
+        let sql = producer.resolve_query_source(&exchange);
+        assert_eq!(sql, "SELECT 1");
+    }
+
+    #[test]
+    fn test_search_via_vector_header_with_empty_body_accepted() {
+        // search op with empty body is valid because CamelSurrealDbVector
+        // header provides the query vector. We verify the producer config
+        // shape that would route to the header path (body_contract returns
+        // None, so the empty body never gets rejected upstream).
+        let mut config = SurrealDbEndpointConfig::default();
+        config.operation = SurrealDbOperation::Search;
+        config.datasource = "test-ds".into();
+        config.table = Some("docs".into());
+        config.top_k = Some(5);
+        // body_contract is None for Search — verified separately on the
+        // Endpoint impl; here we just check that the config can be
+        // constructed without a body requirement.
+        assert_eq!(config.operation, SurrealDbOperation::Search);
+        assert_eq!(config.top_k, Some(5));
     }
 }

@@ -78,6 +78,27 @@ pub fn validate_record_key(s: &str) -> Result<(), SurrealDbError> {
     Ok(())
 }
 
+/// Validate a full RecordId string in `table:key` form (used by the RELATE
+/// operation's `from`/`to` URI parameters).
+///
+/// Splits on the first colon and validates each half:
+/// - `table` must satisfy [`validate_identifier`] (ASCII identifier).
+/// - `key` must satisfy [`validate_record_key`] (more permissive — allows
+///   digits, hyphens, UUIDs).
+///
+/// Rejects bare keys without a `table:` prefix to prevent silently coercing
+/// `from=1` into `{config.table}:1` and pointing the edge at the wrong record.
+pub fn validate_record_id_str(s: &str) -> Result<(&str, &str), SurrealDbError> {
+    let (table, key) = s.split_once(':').ok_or_else(|| {
+        SurrealDbError::InvalidIdentifier(format!(
+            "'{s}' is not a valid RecordId — expected 'table:key' form"
+        ))
+    })?;
+    validate_identifier(table)?;
+    validate_record_key(key)?;
+    Ok((table, key))
+}
+
 /// Build an SDK `RecordId` from URI text while preserving SurrealQL's common
 /// unquoted key semantics: all-digit keys are numeric, UUID-shaped keys are
 /// UUIDs, everything else is a string key.
@@ -300,6 +321,49 @@ mod tests {
     #[test]
     fn validate_record_key_rejects_quote() {
         assert!(super::validate_record_key("1'OR'1").is_err());
+    }
+
+    // =========================================================================
+    // validate_record_id_str tests (full `table:key` RecordId)
+    // =========================================================================
+
+    #[test]
+    fn record_id_str_accepts_numeric_key() {
+        let (t, k) = super::validate_record_id_str("user:1").unwrap();
+        assert_eq!(t, "user");
+        assert_eq!(k, "1");
+    }
+
+    #[test]
+    fn record_id_str_accepts_string_key() {
+        let (t, k) = super::validate_record_id_str("user:alice").unwrap();
+        assert_eq!(t, "user");
+        assert_eq!(k, "alice");
+    }
+
+    #[test]
+    fn record_id_str_accepts_uuid_key() {
+        let (t, k) =
+            super::validate_record_id_str("user:550e8400-e29b-41d4-a716-446655440000").unwrap();
+        assert_eq!(t, "user");
+        assert_eq!(k, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn record_id_str_rejects_bare_key() {
+        // Bare key without `table:` prefix must fail — prevents silently
+        // coercing `from=bare_key` into `{table}:bare_key`.
+        assert!(super::validate_record_id_str("bare_key").is_err());
+    }
+
+    #[test]
+    fn record_id_str_rejects_injection_in_table() {
+        assert!(super::validate_record_id_str("user;DROP:1").is_err());
+    }
+
+    #[test]
+    fn record_id_str_rejects_injection_in_key() {
+        assert!(super::validate_record_id_str("user:1;DROP").is_err());
     }
 
     #[test]

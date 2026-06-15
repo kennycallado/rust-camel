@@ -45,16 +45,6 @@ impl std::fmt::Display for SurrealDbOperation {
     }
 }
 
-/// Output format for query results.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum OutputType {
-    /// Materialize results as `Body::Json(Value::Array(...))`.
-    #[default]
-    Json,
-    /// Stream results as `Body::Stream(StreamBody)` — same pattern as SQL `StreamList`.
-    StreamList,
-}
-
 /// Distance metric for vector similarity search.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum VectorMetric {
@@ -92,7 +82,6 @@ pub struct SurrealDbEndpointConfig {
     pub limit: Option<usize>,
     pub query: Option<String>,
     pub function: Option<String>,
-    pub output: OutputType,
 }
 
 impl Default for SurrealDbEndpointConfig {
@@ -112,7 +101,6 @@ impl Default for SurrealDbEndpointConfig {
             limit: None,
             query: None,
             function: None,
-            output: OutputType::Json,
         }
     }
 }
@@ -172,28 +160,58 @@ impl SurrealDbEndpointConfig {
             CamelError::InvalidUri("surrealdb URI requires 'datasource' parameter".to_string())
         })?;
 
-        let output = match params.get("output").map(|s| s.as_str()) {
-            Some("stream") => OutputType::StreamList,
-            _ => OutputType::Json,
+        // `output` was a documented-but-unimplemented option (always returned
+        // Body::Json). Reject it explicitly so users do not silently get the
+        // non-streaming behavior when they ask for streaming. Multi-row results
+        // always materialize as Body::Json(Vec<Value>) — see README.
+        if let Some(value) = params.get("output") {
+            return Err(CamelError::InvalidUri(format!(
+                "surrealdb 'output' option is not supported (got '{value}'); \
+                 all results materialize as Body::Json"
+            )));
+        }
+
+        let metric = match params.get("metric") {
+            Some(s) => match s.as_str() {
+                "cosine" => Some(VectorMetric::Cosine),
+                "euclidean" => Some(VectorMetric::Euclidean),
+                "manhattan" => Some(VectorMetric::Manhattan),
+                other => {
+                    return Err(CamelError::InvalidUri(format!(
+                        "unknown surrealdb metric '{other}' \
+                         (allowed: cosine, euclidean, manhattan)"
+                    )));
+                }
+            },
+            None => None,
         };
 
-        let metric = params.get("metric").and_then(|s| match s.as_str() {
-            "cosine" => Some(VectorMetric::Cosine),
-            "euclidean" => Some(VectorMetric::Euclidean),
-            "manhattan" => Some(VectorMetric::Manhattan),
-            _ => None,
-        });
-
         let top_k = match params.get("top_k") {
-            Some(v) => Some(v.parse::<usize>().map_err(|_| {
-                CamelError::InvalidUri(format!("top_k must be a positive integer, got '{v}'"))
-            })?),
+            Some(v) => {
+                let parsed = v.parse::<usize>().map_err(|_| {
+                    CamelError::InvalidUri(format!("top_k must be a positive integer, got '{v}'"))
+                })?;
+                if parsed == 0 {
+                    return Err(CamelError::InvalidUri(
+                        "top_k must be greater than zero".to_string(),
+                    ));
+                }
+                Some(parsed)
+            }
             None => None,
         };
         let limit = match params.get("limit") {
-            Some(v) => Some(v.parse::<usize>().map_err(|_| {
-                CamelError::InvalidUri(format!("limit must be a positive integer, got '{v}'"))
-            })?),
+            Some(v) => {
+                let parsed = v.parse::<usize>().map_err(|_| {
+                    CamelError::InvalidUri(format!("limit must be a positive integer, got '{v}'"))
+                })?;
+                if parsed == 0 {
+                    return Err(CamelError::InvalidUri(
+                        "limit must be greater than zero".to_string(),
+                    ));
+                }
+                Some(parsed)
+            }
             None => None,
         };
 
@@ -222,7 +240,6 @@ impl SurrealDbEndpointConfig {
             limit,
             query,
             function,
-            output,
         })
     }
 
@@ -253,6 +270,13 @@ impl SurrealDbEndpointConfig {
                 crate::query::validate_identifier(self.edge.as_deref().unwrap_or(""))?;
                 Self::require_field(self.from.as_deref(), "from")?;
                 Self::require_field(self.to.as_deref(), "to")?;
+                // `from`/`to` must be full RecordIds in `table:key` form so
+                // that the producer emits `RELATE user:1->likes->topic:42`
+                // (matching README). Bare keys are rejected to prevent the
+                // prior behaviour of silently coercing `from=1` into
+                // `{table}:{1}` and pointing the edge at the wrong record.
+                crate::query::validate_record_id_str(self.from.as_deref().unwrap_or(""))?;
+                crate::query::validate_record_id_str(self.to.as_deref().unwrap_or(""))?;
             }
             Vector => {
                 self.validate_table_and_vector_field()?;
@@ -351,7 +375,6 @@ mod tests {
         assert_eq!(cfg.from.as_deref(), Some("user:1"));
         assert_eq!(cfg.to.as_deref(), Some("user:2"));
     }
-
     #[test]
     fn test_parse_vector() {
         let cfg =
@@ -449,17 +472,17 @@ mod tests {
     }
 
     #[test]
-    fn test_default_output_json() {
-        let cfg = SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=mydb").unwrap();
-        assert_eq!(cfg.output, OutputType::Json);
-    }
-
-    #[test]
-    fn test_output_stream_parsed() {
-        let cfg =
-            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=mydb&output=stream")
-                .unwrap();
-        assert_eq!(cfg.output, OutputType::StreamList);
+    fn test_output_option_rejected() {
+        // `output=stream` was a documented-but-unimplemented option.
+        // Parsing must now fail loudly to prevent silent misconfiguration.
+        let result =
+            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=mydb&output=stream");
+        assert!(
+            result.is_err(),
+            "output=stream must be rejected (no longer supported)"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("output"), "error must mention 'output': {msg}");
     }
 
     #[test]
@@ -469,6 +492,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.metric, Some(VectorMetric::Euclidean));
+    }
+
+    #[test]
+    fn test_unknown_metric_rejected() {
+        let result = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:search?datasource=mydb&table=t&top_k=5&metric=foo",
+        );
+        assert!(result.is_err(), "unknown metric must be rejected");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("metric") && msg.contains("foo"),
+            "error must mention metric value: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_top_k_zero_rejected() {
+        let result =
+            SurrealDbEndpointConfig::from_uri("surrealdb:search?datasource=mydb&table=t&top_k=0");
+        assert!(result.is_err(), "top_k=0 must be rejected");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("top_k"), "error must mention top_k: {msg}");
     }
 
     // --- validate() ---
@@ -500,10 +545,25 @@ mod tests {
     #[test]
     fn validate_relate_with_all_params_succeeds() {
         let cfg = SurrealDbEndpointConfig::from_uri(
-            "surrealdb:relate?datasource=main&from=1&edge=knows&to=2&table=user",
+            "surrealdb:relate?datasource=main&from=user:1&edge=knows&to=user:2&table=user",
         )
         .expect("uri parses");
         cfg.validate().expect("all relate params present");
+    }
+
+    #[test]
+    fn validate_relate_bare_key_rejected() {
+        // Bare key (no `table:` prefix) is a malformed RecordId and must fail.
+        let cfg = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:relate?datasource=main&from=bare_key&edge=knows&to=user:2&table=user",
+        )
+        .expect("uri parses");
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("RecordId") || msg.contains("record id") || msg.contains("identifier"),
+            "expected RecordId/validation error, got: {msg}"
+        );
     }
 
     #[test]

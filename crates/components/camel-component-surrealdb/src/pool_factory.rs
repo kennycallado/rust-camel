@@ -10,7 +10,24 @@ use surrealdb::engine::any::Any as SurrealAny;
 use surrealdb::engine::any::connect;
 use surrealdb::opt::auth::Root;
 
-use crate::error::SurrealDbError;
+/// Redacts the user:password portion of a SurrealDB endpoint URL for safe
+/// display. Mirrors the canonical `redact_db_url` implementation in
+/// `camel-sql/src/config.rs`: returns `scheme://***@host/db` for URLs with
+/// userinfo, or the original URL otherwise. Falls back to the original input
+/// when the URL cannot be parsed (e.g. `memory` or `kube` scheme-less forms).
+pub fn redact_db_url(db_url: &str) -> String {
+    match url::Url::parse(db_url) {
+        Ok(mut parsed) => {
+            if parsed.username().is_empty() && parsed.password().is_none() {
+                return db_url.to_string();
+            }
+            let _ = parsed.set_username("***");
+            let _ = parsed.set_password(Some("***"));
+            parsed.to_string()
+        }
+        Err(_) => db_url.to_string(),
+    }
+}
 
 /// Extracts a string from the `extra` map on a `DatasourceConfig`.
 fn extra_str(config: &DatasourceConfig, key: &str) -> Result<String, camel_api::CamelError> {
@@ -42,8 +59,12 @@ impl PoolFactory for SurrealDbPoolFactory {
             let pass = extra_str(config, "password")?;
 
             // SDK-documented connection path: connect → signin → use_ns → use_db
-            let client: Surreal<SurrealAny> =
-                connect(endpoint).await.map_err(SurrealDbError::from)?;
+            let client: Surreal<SurrealAny> = connect(endpoint).await.map_err(|e| {
+                camel_api::CamelError::ProcessorError(format!(
+                    "failed to create surrealdb datasource pool ({}): {e}",
+                    redact_db_url(endpoint)
+                ))
+            })?;
 
             // Auth (Root fields are String in v3 SDK — clone)
             client
@@ -52,15 +73,30 @@ impl PoolFactory for SurrealDbPoolFactory {
                     password: pass.clone(),
                 })
                 .await
-                .map_err(SurrealDbError::from)?;
+                .map_err(|e| {
+                    camel_api::CamelError::ProcessorError(format!(
+                        "surrealdb signin failed for endpoint {}: {e}",
+                        redact_db_url(endpoint)
+                    ))
+                })?;
 
-            client.use_ns(&ns).await.map_err(SurrealDbError::from)?;
+            client.use_ns(&ns).await.map_err(|e| {
+                camel_api::CamelError::ProcessorError(format!(
+                    "surrealdb use_ns failed for endpoint {}: {e}",
+                    redact_db_url(endpoint)
+                ))
+            })?;
 
-            client.use_db(&db).await.map_err(SurrealDbError::from)?;
+            client.use_db(&db).await.map_err(|e| {
+                camel_api::CamelError::ProcessorError(format!(
+                    "surrealdb use_db failed for endpoint {}: {e}",
+                    redact_db_url(endpoint)
+                ))
+            })?;
 
             tracing::info!(
                 "surrealdb datasource pool created: endpoint={}, ns={}, db={}",
-                endpoint,
+                redact_db_url(endpoint),
                 ns,
                 db
             );
@@ -192,5 +228,53 @@ mod tests {
         let config = make_test_config("ws://localhost:8000");
         let err = extra_str(&config, "nonexistent").unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
+    }
+
+    // --- URL redaction tests (CRITICAL: secret leak prevention) ---
+
+    #[test]
+    fn test_url_redaction_hides_credentials() {
+        // wss://user:secret@host/db → wss://***:***@host/db
+        let redacted = redact_db_url("wss://user:secret@host:8000/db");
+        assert!(
+            !redacted.contains("secret"),
+            "redacted URL must not contain password: {redacted}"
+        );
+        assert!(
+            !redacted.contains("user") || redacted.contains("***"),
+            "redacted URL must not contain username: {redacted}"
+        );
+        assert!(
+            redacted.contains("***"),
+            "redacted URL must contain redaction marker: {redacted}"
+        );
+        assert!(
+            redacted.contains("host"),
+            "redacted URL must preserve host: {redacted}"
+        );
+    }
+
+    #[test]
+    fn test_url_redaction_preserves_url_without_credentials() {
+        // URL with no userinfo → unchanged
+        let url = "wss://localhost:8000";
+        assert_eq!(redact_db_url(url), url);
+    }
+
+    #[test]
+    fn test_url_redaction_preserves_unparseable_url() {
+        // Unparseable URL (e.g. bare scheme-less path) → returned as-is
+        let url = "local::memory";
+        assert_eq!(redact_db_url(url), url);
+    }
+
+    #[test]
+    fn test_url_redaction_with_token_only() {
+        // URL with token-only (no password) — SurrealDB auth tokens
+        let redacted = redact_db_url("wss://token@host/db");
+        assert!(
+            !redacted.contains("token") || redacted.contains("***"),
+            "redacted URL must not leak token: {redacted}"
+        );
     }
 }

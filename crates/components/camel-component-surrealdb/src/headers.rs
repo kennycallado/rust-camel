@@ -20,8 +20,11 @@ pub const TABLE: &str = "CamelSurrealDbTable";
 /// Value: JSON array of floats.
 pub const VECTOR: &str = "CamelSurrealDbVector";
 
-/// Record ID of the last created/updated record (set by producer).
-/// Value: string (RecordId).
+/// Record ID set by the producer for update/upsert/delete/patch operations
+/// (when the target RecordId can be constructed from URI config). Not set for
+/// create/vector/relate (server-generated IDs — read `body.id` from the JSON
+/// response; for relate, `body.id` is the edge record's id, not the source node).
+/// Value: string (`table:id`).
 pub const RECORD_ID: &str = "CamelSurrealDbRecordId";
 
 #[cfg(test)]

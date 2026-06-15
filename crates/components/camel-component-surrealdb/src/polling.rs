@@ -108,7 +108,12 @@ impl PollingConsumer for SurrealDbPollingConsumer {
                 if results.is_empty() {
                     Ok(None)
                 } else {
-                    let record = results.into_iter().next().unwrap();
+                    let record = results.into_iter().next().ok_or_else(|| {
+                        CamelError::ProcessorError(
+                            "surrealdb polling consumer: result set reported non-empty but no row"
+                                .into(),
+                        )
+                    })?;
                     let exchange = Exchange::new(Message::new(Body::Json(record)));
                     Ok(Some(exchange))
                 }

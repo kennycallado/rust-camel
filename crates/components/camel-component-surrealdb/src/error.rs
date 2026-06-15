@@ -67,6 +67,15 @@ impl SurrealDbError {
     }
 
     /// Classifies whether this error is retryable by `NetworkRetryPolicy`.
+    ///
+    // TODO(ADR-0013): NetworkRetryPolicy is not yet wired into the surrealdb
+    // pool_factory or producer. Wiring requires:
+    //   1. Adding a `retry: NetworkRetryPolicy` field to SurrealDbEndpointConfig
+    //      and parsing it from URI params (mirror camel-sql).
+    //   2. Wrapping `SurrealDbPoolFactory::create` and the producer's
+    //      `resolve_client` / `execute` paths with a retry loop keyed on
+    //      `is_retryable()` (currently only `Connection { .. }` is retryable).
+    // The classification is correct; the consumer is missing.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Connection { .. })
     }

@@ -70,7 +70,6 @@ The `extra` map requires four fields: `namespace`, `database`, `username`, `pass
 |--------|---------|-------------|
 | `datasource` | _(required)_ | Named datasource from `Camel.toml` |
 | `table` | - | Target table name (required for most operations) |
-| `output` | `json` | Output format: `json` (materialized) or `stream` (streamed) |
 
 ### Operation-Specific Options
 
@@ -138,10 +137,15 @@ Supported operations: `add`, `remove`, `replace`, `change`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `table` | _(required)_ | Source table (used for validation) |
+| `table` | _(required)_ | Source table (informational; the actual source/target tables come from `from`/`to` RecordIds) |
 | `edge` | _(required)_ | Edge table name (the relationship) |
-| `from` | _(required)_ | Source record ID (e.g. `user:1`) |
-| `to` | _(required)_ | Target record ID (e.g. `topic:42`) |
+| `from` | _(required)_ | Full source RecordId in `table:key` form (e.g. `user:1`) |
+| `to` | _(required)_ | Full target RecordId in `table:key` form (e.g. `topic:42`) |
+
+Both `from` and `to` must be **full RecordIds** (`table:key`), not bare keys.
+Bare keys are rejected at endpoint creation with a validation error — this
+prevents silently coercing `from=1` into `{config.table}:1` and pointing the
+edge at the wrong record.
 
 Body: JSON object with edge properties.
 
@@ -197,9 +201,17 @@ Requires WebSocket protocol. Each CREATE/UPDATE/DELETE on the table pushes an Ex
 
 | Header | Operations | Description |
 |--------|------------|-------------|
-| `CamelSurrealDbRecordId` | `create`, `update` | RecordId of the affected record |
+| `CamelSurrealDbRecordId` | `update`, `upsert`, `delete`, `patch` | RecordId (`table:key`) of the affected record, constructed from URI config. `create`/`vector`/`relate` do not set this header — read `body.id` from the response instead, since the ID is generated server-side (for `relate`, `body.id` is the edge record's id, not the source node). |
 | `CamelSurrealDbAction` | `live` | Action type: `CREATE`, `UPDATE`, `DELETE` |
 | `CamelSurrealDbTable` | `live` | Table that triggered the notification |
+
+## Result Body Shape
+
+All multi-row operations (`query`, `select` without `id`, `search`) return
+results as a materialized JSON array via `Body::Json(Vec<Value>)`. There is no
+streaming output mode — SurrealDB's Rust SDK does not expose a row-at-a-time
+stream for these operations, so all results are collected before the producer
+returns.
 
 ## Usage
 
@@ -233,7 +245,8 @@ let route3 = RouteBuilder::from("direct:get-user")
 ### Graph Edge (RELATE)
 
 ```rust
-// Create a "knows" edge from user:1 to topic:42
+// Create a "knows" edge from user:1 to topic:42.
+// `from` and `to` MUST be full RecordIds in `table:key` form.
 let route = RouteBuilder::from("direct:relate")
     .set_body(json!({"since": "2024-01-15"}))
     .to("surrealdb:relate?datasource=mydb&table=user&edge=knows&from=user:1&to=topic:42")

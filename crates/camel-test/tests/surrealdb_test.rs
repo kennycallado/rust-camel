@@ -722,9 +722,10 @@ async fn producer_relate() {
         .await;
 
     // Exercise surrealdb:relate producer with JSON body for edge properties.
+    // `from` and `to` are full RecordIds (`table:key`) — see README.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(serde_json::json!({"weight": 0.9}))
-        .to("surrealdb:relate?datasource=test&table=user&from=1&edge=knows&to_table=topic&to=42")
+        .to("surrealdb:relate?datasource=test&table=user&from=user:1&edge=knows&to=topic:42")
         .to("mock:result")
         .route_id("surrealdb-relate-test")
         .build()

@@ -21,8 +21,9 @@ use camel_api::datasource::DatasourceCatalog;
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 
 pub use bundle::SurrealDbBundle;
-pub use config::{OutputType, SurrealDbEndpointConfig, SurrealDbOperation, VectorMetric};
+pub use config::{SurrealDbEndpointConfig, SurrealDbOperation, VectorMetric};
 pub use error::SurrealDbError;
+pub use pool_factory::redact_db_url;
 
 /// SurrealDB component — factory for `surrealdb:` endpoints.
 ///
@@ -86,36 +87,38 @@ impl Component for SurrealDbComponent {
 
         // Step 3: If the endpoint references a datasource name, resolve it from catalog
         if !config.datasource.is_empty() {
-            if self.catalog.is_none() {
-                return Err(CamelError::EndpointCreationFailed(
+            let catalog = self.catalog.as_ref().ok_or_else(|| {
+                CamelError::EndpointCreationFailed(
                     "datasource requires catalog — no datasource catalog configured".into(),
-                ));
-            }
+                )
+            })?;
 
-            let ds_config = self
-                .catalog
-                .as_ref()
-                .unwrap()
-                .get_config(&config.datasource)
-                .ok_or_else(|| {
-                    CamelError::EndpointCreationFailed(format!(
-                        "datasource '{}' not found in catalog",
-                        config.datasource
-                    ))
-                })?;
+            let ds_config = catalog.get_config(&config.datasource).ok_or_else(|| {
+                CamelError::EndpointCreationFailed(format!(
+                    "datasource '{}' not found in catalog",
+                    config.datasource
+                ))
+            })?;
 
             // Step 4: LIVE operation requires WebSocket protocol (ws/wss)
             if config.operation == crate::config::SurrealDbOperation::Live {
                 let url = &ds_config.db_url;
                 if !url.starts_with("ws://") && !url.starts_with("wss://") {
                     return Err(CamelError::from(SurrealDbError::LiveRequiresWebSocket(
-                        url.clone(),
+                        redact_db_url(url),
                     )));
                 }
             }
+
+            // Step 5: Return the real endpoint
+            return Ok(Box::new(endpoint::SurrealDbEndpoint::new(
+                uri.to_string(),
+                config,
+                self.catalog.clone(),
+            )));
         }
 
-        // Step 5: Return the real endpoint
+        // No datasource name: return endpoint without catalog resolution
         Ok(Box::new(endpoint::SurrealDbEndpoint::new(
             uri.to_string(),
             config,
