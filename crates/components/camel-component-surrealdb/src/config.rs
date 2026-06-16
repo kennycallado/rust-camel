@@ -186,14 +186,14 @@ impl SurrealDbEndpointConfig {
         }
 
         let metric = match params.get("metric") {
-            Some(s) => match s.as_str() {
+            Some(s) => match s.to_ascii_lowercase().as_str() {
                 "cosine" => Some(VectorMetric::Cosine),
                 "euclidean" => Some(VectorMetric::Euclidean),
                 "manhattan" => Some(VectorMetric::Manhattan),
                 other => {
                     return Err(CamelError::InvalidUri(format!(
                         "unknown surrealdb metric '{other}' \
-                         (allowed: cosine, euclidean, manhattan)"
+                         (allowed: cosine, euclidean, manhattan — case-insensitive)"
                     )));
                 }
             },
@@ -569,6 +569,26 @@ mod tests {
             msg.contains("metric") && msg.contains("foo"),
             "error must mention metric value: {msg}"
         );
+    }
+
+    #[test]
+    fn test_metric_case_insensitive() {
+        // SurrealDB emits uppercase metric names in SurrealQL (e.g. `DIST COSINE`).
+        // The component must accept any casing (lower, upper, mixed) and normalize.
+        for (raw, expected) in [
+            ("COSINE", VectorMetric::Cosine),
+            ("Cosine", VectorMetric::Cosine),
+            ("cosine", VectorMetric::Cosine),
+            ("EUCLIDEAN", VectorMetric::Euclidean),
+            ("Euclidean", VectorMetric::Euclidean),
+            ("MANHATTAN", VectorMetric::Manhattan),
+        ] {
+            let uri = format!("surrealdb:search?datasource=mydb&table=t&top_k=1&metric={raw}");
+            let cfg = SurrealDbEndpointConfig::from_uri(&uri).unwrap_or_else(|e| {
+                panic!("metric `{raw}` should parse case-insensitively: {e:?}")
+            });
+            assert_eq!(cfg.metric, Some(expected), "metric `{raw}` mis-parsed");
+        }
     }
 
     #[test]

@@ -59,6 +59,12 @@ impl SurrealDbProducer {
 
     /// Resolve the SurrealQL query source for the `query` operation.
     /// Priority: header CamelSurrealDbQuery > body text > config query.
+    ///
+    /// Body is accepted in two shapes: `Body::Text(String)` (the historical
+    /// shape produced when an upstream step sets a string body) and
+    /// `Body::Json(Value::String(...))` (the shape DSL `set_body(Value::String)`
+    /// materializes when no `Text` body_contract coerces it). Both are
+    /// treated equivalently — query is "SQL text" regardless of body variant.
     pub(crate) fn resolve_query_source(&self, exchange: &Exchange) -> String {
         // Priority 1: Header
         if let Some(query_value) = exchange.input.headers.get(headers::QUERY)
@@ -67,11 +73,14 @@ impl SurrealDbProducer {
             return query_str.to_string();
         }
 
-        // Priority 2: Body text
-        if let Some(body_text) = exchange.input.body.as_text()
-            && !body_text.is_empty()
-        {
-            return body_text.to_string();
+        // Priority 2: Body — accept Body::Text or Body::Json(Value::String).
+        let body_str: Option<&str> = match &exchange.input.body {
+            Body::Text(s) => Some(s.as_str()),
+            Body::Json(serde_json::Value::String(s)) => Some(s.as_str()),
+            _ => None,
+        };
+        if let Some(s) = body_str.filter(|s| !s.is_empty()) {
+            return s.to_string();
         }
 
         // Priority 3: Config query (from URI)
@@ -656,6 +665,21 @@ mod tests {
         let exchange = Exchange::new(Message::new(Body::Text("SELECT * FROM users".into())));
         let sql = producer.resolve_query_source(&exchange);
         assert_eq!(sql, "SELECT * FROM users");
+    }
+
+    #[test]
+    fn resolve_query_from_body_json_string() {
+        // DSL `set_body(Value::String(...))` materializes as
+        // `Body::Json(Value::String(...))` when no `Text` body_contract
+        // coerces it. Producer must still extract the SQL text. Regression
+        // test for the body_contract=None change for the `query` operation
+        // (producer_query integration test depends on this).
+        let producer = make_producer(SurrealDbOperation::Query);
+        let exchange = Exchange::new(Message::new(Body::Json(serde_json::Value::String(
+            "SELECT name, age FROM users ORDER BY name".into(),
+        ))));
+        let sql = producer.resolve_query_source(&exchange);
+        assert_eq!(sql, "SELECT name, age FROM users ORDER BY name");
     }
 
     #[test]
