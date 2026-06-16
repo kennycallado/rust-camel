@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_component_api::{
-    BoxProcessor, CamelError, Consumer, Endpoint, ProducerContext, RuntimeObservability,
+    BoxProcessor, CamelError, Consumer, Endpoint, NetworkRetryPolicy, ProducerContext,
+    RuntimeObservability,
 };
+use tokio::sync::Semaphore;
 
 use crate::LlmGlobalConfig;
 use crate::config::LlmEndpointConfig;
@@ -52,11 +55,38 @@ impl LlmEndpoint {
         }
     }
 
-    fn resolve_provider(&self) -> Result<Arc<dyn LlmProvider>, CamelError> {
+    #[allow(clippy::type_complexity)]
+    fn resolve_provider(
+        &self,
+    ) -> Result<
+        (
+            Arc<dyn LlmProvider>,
+            Option<usize>,
+            Option<u64>,
+            Option<NetworkRetryPolicy>,
+        ),
+        CamelError,
+    > {
         let name = resolve_provider_name(&self.config, &self.global_config)?;
-        self.providers.get(name).cloned().ok_or_else(|| {
+        let provider = self.providers.get(name).cloned().ok_or_else(|| {
             CamelError::InvalidUri(format!("provider '{}' not found in config", name))
-        })
+        })?;
+        let max_concurrency = self
+            .global_config
+            .providers
+            .get(name)
+            .and_then(|pc| pc.max_concurrency());
+        let provider_timeout = self
+            .global_config
+            .providers
+            .get(name)
+            .and_then(|pc| pc.timeout_secs());
+        let network_retry = self
+            .global_config
+            .providers
+            .get(name)
+            .and_then(|pc| pc.network_retry());
+        Ok((provider, max_concurrency, provider_timeout, network_retry))
     }
 }
 
@@ -70,14 +100,25 @@ impl Endpoint for LlmEndpoint {
         _rt: Arc<dyn RuntimeObservability>,
         ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
-        let provider = self.resolve_provider()?;
+        let (provider, max_concurrency, provider_timeout, network_retry) =
+            self.resolve_provider()?;
 
         let route_id = ctx.route_id().unwrap_or("unknown").to_string();
+
+        let semaphore = max_concurrency.map(|n| Arc::new(Semaphore::new(n)));
+
+        // Effective timeout: provider overrides global, None = no timeout.
+        let timeout_secs = provider_timeout.or(self.global_config.timeout_secs);
+        let timeout = timeout_secs.map(Duration::from_secs);
+
         let producer = LlmProducer::new(
             self.config.clone(),
             provider,
             self.global_config.max_prompt_bytes,
             route_id,
+            semaphore,
+            timeout,
+            network_retry,
         );
         Ok(BoxProcessor::new(producer))
     }

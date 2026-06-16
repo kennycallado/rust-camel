@@ -16,7 +16,6 @@ camel-api = { workspace = true }
 camel-component-api = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 tower = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
@@ -26,7 +25,7 @@ tracing = { workspace = true }
 bytes = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
-async-stream = { workspace = true, optional = true }
+async-stream = { workspace = true }
 
 # Provider adapters (optional) — ONLY files that import siumai
 siumai = { version = "=0.11.0-beta.9", default-features = false, optional = true }
@@ -37,14 +36,13 @@ siumai-provider-ollama = { version = "=0.11.0-beta.9", optional = true }
 [features]
 default = ["mock"]
 mock = []
-openai = ["siumai/openai", "siumai-core", "siumai-provider-openai", "async-stream"]
-ollama = ["siumai/ollama", "siumai-core", "siumai-provider-ollama", "async-stream"]
+openai = ["siumai/openai", "siumai-core", "siumai-provider-openai"]
+ollama = ["siumai/ollama", "siumai-core", "siumai-provider-ollama"]
 all-providers = [
     "siumai/all-providers",
     "siumai-core",
     "siumai-provider-openai",
     "siumai-provider-ollama",
-    "async-stream",
 ]
 
 [dev-dependencies]

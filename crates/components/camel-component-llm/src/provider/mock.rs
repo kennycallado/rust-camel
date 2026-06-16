@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream::BoxStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use crate::error::LlmError;
 use crate::provider::{
@@ -24,10 +27,79 @@ pub enum MockMode {
 /// - `Echo`: streams back the concatenation of all user messages.
 /// - `Fixed(String)`: streams back the given canned text.
 /// - `Error(LlmError)`: sends one Delta event, then the error.
+///
+/// # Deterministic test controls
+/// All optional, all default-off. Chain builder methods to configure:
+/// - `with_delay`: sleep before emitting any events.
+/// - `with_fail_after`: fail on the Nth call.
+/// - `with_rate_limit`: always emit a RateLimit error.
+/// - `call_count`: query how many times `chat_stream` has been called (always tracked).
+/// - `with_concurrent_tracker`: track max in-flight `chat_stream`.
+/// - `with_cancellation_tracking`: record whether a stream was dropped early.
 pub struct MockProvider {
     id: String,
     mode: MockMode,
     default_model: String,
+    /// Delay before emitting events.
+    delay: Option<Duration>,
+    /// Fail on the Nth invocation (1-based) with the given error.
+    fail_after: Option<(usize, LlmError)>,
+    /// Always emit a RateLimit error (after any delay), carrying retry_after.
+    rate_limit: Option<Option<Duration>>,
+    /// Call counter.
+    calls: AtomicUsize,
+    /// In-flight concurrent counter and peak.
+    concurrent: Arc<AtomicUsize>,
+    max_concurrent: Arc<AtomicUsize>,
+    track_concurrent: bool,
+    /// Whether any stream was cancelled (dropped before completion).
+    cancelled: Arc<AtomicBool>,
+    track_cancel: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Drop guard that records cancellation when a stream is dropped mid-flight
+// ---------------------------------------------------------------------------
+
+struct CancelGuard {
+    cancelled: Option<Arc<AtomicBool>>,
+    finished: Arc<AtomicBool>,
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        let Some(b) = &self.cancelled else { return };
+        if !self.finished.load(Ordering::SeqCst) {
+            b.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RAII guard that increments concurrent on construction and decrements on Drop
+// ---------------------------------------------------------------------------
+
+struct ConcurrentGuard {
+    concurrent: Arc<AtomicUsize>,
+    track: bool,
+}
+
+impl ConcurrentGuard {
+    fn new(concurrent: Arc<AtomicUsize>, max_concurrent: Arc<AtomicUsize>, track: bool) -> Self {
+        if track {
+            let cur = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+            max_concurrent.fetch_max(cur, Ordering::SeqCst);
+        }
+        Self { concurrent, track }
+    }
+}
+
+impl Drop for ConcurrentGuard {
+    fn drop(&mut self) {
+        if self.track {
+            self.concurrent.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl MockProvider {
@@ -39,6 +111,15 @@ impl MockProvider {
             id: id.into(),
             mode,
             default_model: "mock-model".to_string(),
+            delay: None,
+            fail_after: None,
+            rate_limit: None,
+            calls: AtomicUsize::new(0),
+            concurrent: Arc::new(AtomicUsize::new(0)),
+            max_concurrent: Arc::new(AtomicUsize::new(0)),
+            track_concurrent: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            track_cancel: false,
         }
     }
 
@@ -51,6 +132,59 @@ impl MockProvider {
     /// Shortcut for `MockProvider::new("mock", MockMode::Echo)`.
     pub fn echo() -> Self {
         Self::new("mock", MockMode::Echo)
+    }
+
+    // -----------------------------------------------------------------------
+    // Deterministic test controls
+    // -----------------------------------------------------------------------
+
+    /// Add a delay before emitting any events.
+    pub fn with_delay(mut self, d: Duration) -> Self {
+        self.delay = Some(d);
+        self
+    }
+
+    /// Fail on the Nth invocation (1-based) with the given error.
+    pub fn with_fail_after(mut self, n: usize, e: LlmError) -> Self {
+        self.fail_after = Some((n, e));
+        self
+    }
+
+    /// Always emit a `RateLimit` error.  `retry_after` is the duration the
+    /// caller should wait before retrying (`None` means the provider did not
+    /// specify a wait).
+    pub fn with_rate_limit(mut self, retry_after: Option<Duration>) -> Self {
+        self.rate_limit = Some(retry_after);
+        self
+    }
+
+    /// Track the number of in-flight `chat_stream` invocations and the
+    /// peak concurrent count.
+    pub fn with_concurrent_tracker(mut self) -> Self {
+        self.track_concurrent = true;
+        self
+    }
+
+    /// Track whether any stream produced by this provider was dropped
+    /// (cancelled) before reaching a terminal event.
+    pub fn with_cancellation_tracking(mut self) -> Self {
+        self.track_cancel = true;
+        self
+    }
+
+    /// Number of times `chat_stream` has been called.
+    pub fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    /// Peak number of concurrent `chat_stream` invocations.
+    pub fn max_concurrent(&self) -> usize {
+        self.max_concurrent.load(Ordering::SeqCst)
+    }
+
+    /// Whether any stream was cancelled (dropped before completion).
+    pub fn was_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 }
 
@@ -65,46 +199,110 @@ impl LlmProvider for MockProvider {
     }
 
     fn chat_stream(&self, req: ChatRequest) -> BoxStream<'static, Result<ChatEvent, LlmError>> {
-        let text = match &self.mode {
-            MockMode::Echo => req
-                .messages
-                .iter()
-                .filter(|m| matches!(m.role, ChatRole::User))
-                .map(|m| m.content.as_str())
-                .collect::<Vec<_>>()
-                .join(" "),
-            MockMode::Fixed(t) => t.clone(),
-            MockMode::Error(e) => {
-                let stream = stream::iter(vec![
-                    Ok(ChatEvent::Delta {
-                        text: "partial".into(),
-                    }),
-                    Err(e.clone()),
-                ]);
-                return Box::pin(stream);
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let delay = self.delay;
+        let fail = self
+            .fail_after
+            .as_ref()
+            .and_then(|(at, e)| if n == *at { Some(e.clone()) } else { None });
+        let rl = self
+            .rate_limit
+            .map(|retry_after| LlmError::RateLimit { retry_after });
+
+        let concurrent = Arc::clone(&self.concurrent);
+        let max_concurrent = Arc::clone(&self.max_concurrent);
+        let cancelled = Arc::clone(&self.cancelled);
+        let track_concurrent = self.track_concurrent;
+        let track_cancel = self.track_cancel;
+        let mode = self.mode.clone();
+        let model = req.model.clone();
+
+        let s = async_stream::stream! {
+            // Guards at the TOP so they cover delay and every exit path.
+            let _conc_guard = ConcurrentGuard::new(
+                Arc::clone(&concurrent),
+                Arc::clone(&max_concurrent),
+                track_concurrent,
+            );
+            let finished = Arc::new(AtomicBool::new(false));
+            let _cancel_guard = CancelGuard {
+                cancelled: track_cancel.then(|| Arc::clone(&cancelled)),
+                finished: Arc::clone(&finished),
+            };
+
+            if let Some(d) = delay {
+                tokio::time::sleep(d).await;
             }
-        };
 
-        let prompt_tokens = text.len() as u32 / 4;
-        let completion_tokens = text.len() as u32 / 4;
+            // Rate-limit simulation (always fires if configured)
+            if let Some(e) = rl {
+                finished.store(true, Ordering::SeqCst);
+                yield Err(e);
+                return;
+            }
 
-        let stream = stream::iter(vec![
-            Ok(ChatEvent::Delta { text: text.clone() }),
-            Ok(ChatEvent::Finished {
+            // Fail-after simulation
+            if let Some(e) = fail {
+                finished.store(true, Ordering::SeqCst);
+                yield Err(e);
+                return;
+            }
+
+            let text = match &mode {
+                MockMode::Echo => req
+                    .messages
+                    .iter()
+                    .filter(|m| matches!(m.role, ChatRole::User))
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                MockMode::Fixed(t) => t.clone(),
+                MockMode::Error(e) => {
+                    yield Ok(ChatEvent::Delta { text: "partial".into() });
+                    finished.store(true, Ordering::SeqCst);
+                    yield Err(e.clone());
+                    return;
+                }
+            };
+
+            let pt = text.len() as u32 / 4;
+            yield Ok(ChatEvent::Delta { text });
+            finished.store(true, Ordering::SeqCst);
+            yield Ok(ChatEvent::Finished {
                 usage: Some(LlmUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
+                    prompt_tokens: pt,
+                    completion_tokens: pt,
+                    total_tokens: pt * 2,
                 }),
-                model: Some(req.model.clone()),
+                model: Some(model),
                 finish_reason: Some(FinishReason::Stop),
                 metadata: serde_json::Map::new(),
-            }),
-        ]);
-        Box::pin(stream)
+            });
+        };
+        Box::pin(s)
     }
 
     async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse, LlmError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // Delay before error checks (same ordering as chat_stream —
+        // simulates network latency before the response is determined).
+        if let Some(d) = self.delay {
+            tokio::time::sleep(d).await;
+        }
+
+        // Rate-limit simulation (always fires if configured).
+        if let Some(retry_after) = self.rate_limit {
+            return Err(LlmError::RateLimit { retry_after });
+        }
+
+        // Check fail_after (same semantics as chat_stream).
+        if let Some((at, ref e)) = self.fail_after
+            && n == at
+        {
+            return Err(e.clone());
+        }
+
         let embeddings: Vec<Vec<f32>> = req
             .inputs
             .iter()
@@ -135,6 +333,8 @@ mod tests {
     use super::*;
     use crate::provider::ChatMessage;
     use futures::StreamExt;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn echo_provider_streams_prompt_back() {
@@ -228,5 +428,94 @@ mod tests {
             }
         }
         assert!(found_usage);
+    }
+
+    #[tokio::test]
+    async fn delay_mode_emits_events_after_delay() {
+        let provider = MockProvider::new("t", MockMode::Fixed("hi".into()))
+            .with_delay(Duration::from_millis(50));
+        let start = std::time::Instant::now();
+        let mut s = provider.chat_stream(ChatRequest::new("m", vec![ChatMessage::user("x")]));
+        while s.next().await.is_some() {}
+        assert!(start.elapsed() >= Duration::from_millis(45));
+    }
+
+    #[tokio::test]
+    async fn fail_after_succeeds_then_fails_at_n() {
+        let provider = MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_fail_after(2, LlmError::Network("boom".into()));
+        let r1 = collect_chat(&provider).await;
+        let r2 = collect_chat(&provider).await;
+        assert!(r1.is_ok());
+        assert!(matches!(r2.unwrap_err(), LlmError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_mode_carries_retry_after() {
+        let provider = MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_rate_limit(Some(Duration::from_millis(10)));
+        let err = collect_chat(&provider).await.unwrap_err();
+        assert!(matches!(
+            err,
+            LlmError::RateLimit {
+                retry_after: Some(_)
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn call_count_tracks_invocations() {
+        let provider = MockProvider::echo();
+        let _ = collect_chat(&provider).await;
+        let _ = collect_chat(&provider).await;
+        assert_eq!(provider.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_tracker_peaks_at_inflight() {
+        let provider = MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_delay(Duration::from_millis(50))
+            .with_concurrent_tracker();
+        let p = Arc::new(provider);
+        let mut handles = vec![];
+        for _ in 0..3 {
+            let p = Arc::clone(&p);
+            handles.push(tokio::spawn(async move { collect_chat(&p).await }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+        assert!(p.max_concurrent() >= 2);
+    }
+
+    #[tokio::test]
+    async fn cancellation_tracker_records_drop() {
+        let provider = MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_delay(Duration::from_millis(100))
+            .with_cancellation_tracking();
+        let mut s = provider.chat_stream(ChatRequest::new("m", vec![ChatMessage::user("x")]));
+        let _ = s.next().await;
+        drop(s);
+        assert!(provider.was_cancelled());
+    }
+
+    #[tokio::test]
+    async fn completed_stream_not_marked_cancelled() {
+        let provider =
+            MockProvider::new("t", MockMode::Fixed("ok".into())).with_cancellation_tracking();
+        let mut s = provider.chat_stream(ChatRequest::new("m", vec![ChatMessage::user("x")]));
+        while let Some(_) = s.next().await {} // drain to completion
+        assert!(
+            !provider.was_cancelled(),
+            "a fully-consumed stream must NOT report cancellation"
+        );
+    }
+
+    async fn collect_chat(p: &MockProvider) -> Result<(), LlmError> {
+        let mut s = p.chat_stream(ChatRequest::new("m", vec![ChatMessage::user("x")]));
+        while let Some(ev) = s.next().await {
+            ev?;
+        }
+        Ok(())
     }
 }

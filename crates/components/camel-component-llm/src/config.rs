@@ -2,10 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use camel_component_api::CamelError;
-
-fn default_timeout() -> u64 {
-    30
-}
+use camel_component_api::NetworkRetryPolicy;
 
 fn default_max_prompt_bytes() -> usize {
     32768
@@ -26,11 +23,9 @@ pub struct LlmGlobalConfig {
     #[serde(default)]
     pub default_provider: Option<String>,
 
-    /// Default timeout in seconds for LLM operations.
-    ///
-    /// **Note:** Parsed and stored but not yet enforced. Deferred to post-MVP.
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
+    /// Default timeout in seconds for LLM operations. `None` means no timeout.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 
     /// Maximum prompt size in bytes before truncation or rejection.
     #[serde(default = "default_max_prompt_bytes")]
@@ -45,7 +40,7 @@ impl Default for LlmGlobalConfig {
     fn default() -> Self {
         Self {
             default_provider: None,
-            timeout_secs: default_timeout(),
+            timeout_secs: None,
             max_prompt_bytes: default_max_prompt_bytes(),
             providers: HashMap::new(),
         }
@@ -64,6 +59,38 @@ pub enum LlmProviderConfig {
     Mock(MockProviderConfig),
 }
 
+impl LlmProviderConfig {
+    /// Extract the `max_concurrency` from whichever provider variant,
+    /// returning `None` if the variant doesn't support it (e.g. Mock).
+    pub fn max_concurrency(&self) -> Option<usize> {
+        match self {
+            LlmProviderConfig::Openai(c) => c.max_concurrency,
+            LlmProviderConfig::Ollama(c) => c.max_concurrency,
+            LlmProviderConfig::Mock(_) => None,
+        }
+    }
+
+    /// Extract the `timeout_secs` from whichever provider variant,
+    /// returning `None` if the variant doesn't support it (e.g. Mock).
+    pub fn timeout_secs(&self) -> Option<u64> {
+        match self {
+            LlmProviderConfig::Openai(c) => c.timeout_secs,
+            LlmProviderConfig::Ollama(c) => c.timeout_secs,
+            LlmProviderConfig::Mock(_) => None,
+        }
+    }
+
+    /// Extract the `network_retry` from whichever provider variant,
+    /// returning `None` if the variant doesn't support it (e.g. Mock).
+    pub fn network_retry(&self) -> Option<NetworkRetryPolicy> {
+        match self {
+            LlmProviderConfig::Openai(c) => c.network_retry.clone(),
+            LlmProviderConfig::Ollama(c) => c.network_retry.clone(),
+            LlmProviderConfig::Mock(_) => None,
+        }
+    }
+}
+
 impl fmt::Debug for LlmProviderConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -74,6 +101,7 @@ impl fmt::Debug for LlmProviderConfig {
                 .field("default_model", &c.default_model)
                 .field("timeout_secs", &c.timeout_secs)
                 .field("max_concurrency", &c.max_concurrency)
+                .field("network_retry", &c.network_retry)
                 .finish(),
             LlmProviderConfig::Ollama(c) => f
                 .debug_struct("Ollama")
@@ -81,6 +109,7 @@ impl fmt::Debug for LlmProviderConfig {
                 .field("default_model", &c.default_model)
                 .field("timeout_secs", &c.timeout_secs)
                 .field("max_concurrency", &c.max_concurrency)
+                .field("network_retry", &c.network_retry)
                 .finish(),
             LlmProviderConfig::Mock(c) => f
                 .debug_struct("Mock")
@@ -106,16 +135,17 @@ pub struct OpenaiProviderConfig {
     pub default_model: String,
 
     /// Optional per-provider timeout override (seconds).
-    ///
-    /// **Note:** Parsed and stored but not yet enforced. Deferred to post-MVP.
+    /// Overrides global `timeout_secs` when set.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 
     /// Optional max concurrency for this provider.
-    ///
-    /// **Note:** Parsed and stored but not yet enforced. Deferred to post-MVP.
     #[serde(default)]
     pub max_concurrency: Option<usize>,
+
+    /// Optional network retry policy for transient failures.
+    #[serde(default)]
+    pub network_retry: Option<NetworkRetryPolicy>,
 }
 
 /// Configuration for an Ollama (local) provider.
@@ -128,16 +158,17 @@ pub struct OllamaProviderConfig {
     pub default_model: String,
 
     /// Optional per-provider timeout override (seconds).
-    ///
-    /// **Note:** Parsed and stored but not yet enforced. Deferred to post-MVP.
+    /// Overrides global `timeout_secs` when set.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 
     /// Optional max concurrency for this provider.
-    ///
-    /// **Note:** Parsed and stored but not yet enforced. Deferred to post-MVP.
     #[serde(default)]
     pub max_concurrency: Option<usize>,
+
+    /// Optional network retry policy for transient failures.
+    #[serde(default)]
+    pub network_retry: Option<NetworkRetryPolicy>,
 }
 
 /// Configuration for the mock testing provider.
@@ -163,6 +194,40 @@ pub enum LlmOperation {
     Chat,
     /// Text embedding generation.
     Embed,
+}
+
+impl LlmGlobalConfig {
+    /// Validate the configuration, rejecting `Some(0)` for `timeout_secs` and
+    /// `Some(0)` for `max_concurrency` on both global and per-provider levels.
+    ///
+    /// Phase 2 fields (`cache_ttl_secs`, `cache_max_entries`, `pricing`) are
+    /// validated in Plan 2 and are NOT checked here.
+    pub fn validate(&self) -> Result<(), CamelError> {
+        // Global timeout_secs: Some(0) is a misconfiguration
+        if self.timeout_secs == Some(0) {
+            return Err(CamelError::Config(
+                "global timeout_secs must be > 0 when set (got 0)".into(),
+            ));
+        }
+
+        for (name, provider) in &self.providers {
+            // Provider-level timeout_secs: Some(0) is invalid
+            if provider.timeout_secs() == Some(0) {
+                return Err(CamelError::Config(format!(
+                    "provider '{name}' timeout_secs must be > 0 when set (got 0)"
+                )));
+            }
+
+            // Provider-level max_concurrency: Some(0) is invalid
+            if provider.max_concurrency() == Some(0) {
+                return Err(CamelError::Config(format!(
+                    "provider '{name}' max_concurrency must be > 0 when set (got 0)"
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Parsed endpoint configuration derived from a URI like `llm:chat?provider=...`.
@@ -262,6 +327,165 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rejects_zero_global_timeout() {
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: Some(0), // Some(0) is invalid; None is valid
+            max_prompt_bytes: 32768,
+            providers: HashMap::new(),
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "Some(0) global timeout_secs must be rejected"
+        );
+    }
+
+    #[test]
+    fn accepts_none_global_timeout() {
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: None, // None = no timeout, valid
+            max_prompt_bytes: 32768,
+            providers: HashMap::new(),
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "None global timeout_secs must be valid"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_provider_timeout() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "bad".into(),
+            LlmProviderConfig::Openai(OpenaiProviderConfig {
+                api_key: "sk-test".into(),
+                base_url: None,
+                default_model: "gpt-4o".into(),
+                timeout_secs: Some(0), // invalid
+                max_concurrency: None,
+                network_retry: None,
+            }),
+        );
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: None,
+            max_prompt_bytes: 32768,
+            providers,
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "Some(0) provider timeout_secs must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_max_concurrency() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "bad".into(),
+            LlmProviderConfig::Openai(OpenaiProviderConfig {
+                api_key: "sk-test".into(),
+                base_url: None,
+                default_model: "gpt-4o".into(),
+                timeout_secs: None,
+                max_concurrency: Some(0), // invalid
+                network_retry: None,
+            }),
+        );
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: None,
+            max_prompt_bytes: 32768,
+            providers,
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "Some(0) max_concurrency must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_ollama_timeout() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "bad".into(),
+            LlmProviderConfig::Ollama(OllamaProviderConfig {
+                base_url: "http://localhost:11434".into(),
+                default_model: "llama3".into(),
+                timeout_secs: Some(0), // invalid
+                max_concurrency: None,
+                network_retry: None,
+            }),
+        );
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: None,
+            max_prompt_bytes: 32768,
+            providers,
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "Some(0) Ollama timeout_secs must be rejected"
+        );
+    }
+
+    #[test]
+    fn accepts_valid_provider_config() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "valid".into(),
+            LlmProviderConfig::Openai(OpenaiProviderConfig {
+                api_key: "sk-test".into(),
+                base_url: None,
+                default_model: "gpt-4o".into(),
+                timeout_secs: Some(30),
+                max_concurrency: Some(5),
+                network_retry: None,
+            }),
+        );
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: Some(60),
+            max_prompt_bytes: 32768,
+            providers,
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "Valid config with non-zero timeouts and concurrency must pass"
+        );
+    }
+
+    #[test]
+    fn validate_error_contains_provider_name() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "my-openai".into(),
+            LlmProviderConfig::Openai(OpenaiProviderConfig {
+                api_key: "sk-test".into(),
+                base_url: None,
+                default_model: "gpt-4o".into(),
+                timeout_secs: Some(0),
+                max_concurrency: None,
+                network_retry: None,
+            }),
+        );
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: None,
+            max_prompt_bytes: 32768,
+            providers,
+        };
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("my-openai"),
+            "validation error should include provider name: {msg}"
+        );
+    }
+
+    #[test]
     fn deserialize_global_config_with_providers() {
         let toml_str = r#"
 default_provider = "my-openai"
@@ -299,7 +523,7 @@ default_model = "mock-model"
     fn default_config_has_no_providers() {
         let cfg = LlmGlobalConfig::default();
         assert!(cfg.providers.is_empty());
-        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.timeout_secs, None);
         assert_eq!(cfg.max_prompt_bytes, 32768);
     }
 
@@ -311,6 +535,7 @@ default_model = "mock-model"
             default_model: "gpt-4o".into(),
             timeout_secs: None,
             max_concurrency: None,
+            network_retry: None,
         });
         let debug_str = format!("{:?}", cfg);
         assert!(debug_str.contains("[REDACTED]"));

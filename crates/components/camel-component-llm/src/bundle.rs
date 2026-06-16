@@ -20,6 +20,8 @@ impl ComponentBundle for LlmBundle {
         let config: LlmGlobalConfig = value
             .try_into()
             .map_err(|e: toml::de::Error| CamelError::Config(e.to_string()))?;
+        // Validate config semantics (reject zero timeouts/concurrency)
+        config.validate()?;
         // Fail-fast: validate all providers can be constructed at startup
         let providers = build_provider_map(&config).map_err(CamelError::from)?;
         Ok(Self { config, providers })

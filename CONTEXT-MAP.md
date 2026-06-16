@@ -43,6 +43,7 @@ Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./doc
 - [0018](./docs/adr/0018-two-phase-route-lifecycle-persistence.md) — Route lifecycle commands persist intent before side effects, use optimistic versions, and compensate to Failed on side-effect failure
 - [0019](./docs/adr/0019-error-disposition-pipeline-recovery.md) — Error disposition decisions moved inside the pipeline loop via RouteErrorHandler trait injection; ExceptionDisposition enum (Propagate/Handled/Continued) replaces handled:bool
 - [0020](./docs/adr/0020-llm-component-provider-adapter-boundary.md) — LLM component isolates siumai SDK behind a project-owned LlmProvider trait; all siumai imports confined to two files
+- [0021](./docs/adr/0021-llm-retry-retry-after-manual-loop.md) — LLM retry honors provider retry_after via manual loop, diverging from ADR-0013 helpers
 
 ## Key Terms
 

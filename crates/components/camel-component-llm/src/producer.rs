@@ -1,16 +1,22 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
+use async_stream::stream;
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, StreamBody, StreamMetadata};
+use camel_component_api::NetworkRetryPolicy;
 use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tower::Service;
 
 use crate::config::{LlmEndpointConfig, LlmOperation};
 use crate::error::LlmError;
+use crate::error::is_retryable;
 use crate::headers::*;
 use crate::provider::{ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, LlmProvider};
 
@@ -20,6 +26,16 @@ pub struct LlmProducer {
     provider: Arc<dyn LlmProvider>,
     max_prompt_bytes: usize,
     route_id: String,
+    /// Semaphore to bound concurrency to the provider. If `None`, unbounded.
+    /// For streaming, the permit lives inside the returned `Body::Stream` so
+    /// that max_concurrency is real for streaming — not vacuous (see ADR-0021).
+    semaphore: Option<Arc<Semaphore>>,
+    /// Total deadline for the entire operation (materialized) or per-`next()`
+    /// activity timeout (streaming). `None` means no timeout enforcement.
+    timeout: Option<Duration>,
+    /// Optional network retry policy for transient failures.
+    /// Only applies to materialized mode (chat + embed).
+    retry: Option<NetworkRetryPolicy>,
 }
 
 impl LlmProducer {
@@ -28,12 +44,18 @@ impl LlmProducer {
         provider: Arc<dyn LlmProvider>,
         max_prompt_bytes: usize,
         route_id: String,
+        semaphore: Option<Arc<Semaphore>>,
+        timeout: Option<Duration>,
+        retry: Option<NetworkRetryPolicy>,
     ) -> Self {
         Self {
             config,
             provider,
             max_prompt_bytes,
             route_id,
+            semaphore,
+            timeout,
+            retry,
         }
     }
 
@@ -124,6 +146,98 @@ impl LlmProducer {
         }
     }
 
+    /// Wrap a future with the configured total deadline timeout.
+    /// When `self.timeout` is `None`, runs without wrapping.
+    ///
+    /// ## Composition: single total deadline (no nested timeouts)
+    /// This helper wraps ONCE. The retry loop is wrapped inside
+    /// `with_timeout`, so do NOT nest timeouts (see ADR-0021).
+    async fn with_timeout<F, T>(&self, fut: F) -> Result<T, LlmError>
+    where
+        F: std::future::Future<Output = Result<T, LlmError>>,
+    {
+        match self.timeout {
+            Some(d) => match tokio::time::timeout(d, fut).await {
+                Ok(inner) => inner,
+                Err(_) => Err(LlmError::Timeout(d)),
+            },
+            None => fut.await,
+        }
+    }
+
+    /// Manual retry loop that honors `RateLimit.retry_after` over exponential
+    /// backoff. Only runs when `retry` is `Some`. Does NOT retry after
+    /// content-start (first non-empty Delta).
+    ///
+    /// ## Composition
+    /// - NO inner timeout — the total deadline wraps `run_with_retry`
+    ///   from outside, so one deadline covers all attempts + backoff.
+    /// - Semaphore permit is acquired PER ATTEMPT and released during backoff
+    ///   sleep (see ADR-0021).
+    ///
+    /// This is an associated function (not `&self`) so the returned future
+    /// does not borrow `self`, allowing it to be passed to `with_timeout`.
+    async fn run_with_retry<F, Fut, T>(
+        semaphore: Option<Arc<Semaphore>>,
+        retry: Option<NetworkRetryPolicy>,
+        content_started: Arc<AtomicBool>,
+        route_id: &str,
+        mut op: F,
+    ) -> Result<T, LlmError>
+    where
+        F: FnMut(Arc<AtomicBool>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, LlmError>>,
+    {
+        let policy = retry;
+        let mut attempt: u32 = 0;
+        loop {
+            // Acquire permit per attempt — released during backoff (dropped
+            // before sleep). Using .ok() is intentional (lint-unwrap gate).
+            // Permit is acquired even when retry is disabled (semaphore lives
+            // outside the retry decision).
+            let _permit = match &semaphore {
+                Some(sem) => sem.clone().acquire_owned().await.ok(),
+                None => None,
+            };
+            let result = op(Arc::clone(&content_started)).await;
+            match result {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    // No retry policy configured — surface error immediately.
+                    let Some(ref policy) = policy else {
+                        return Err(e);
+                    };
+                    // Do not retry after content-started (first non-empty Delta).
+                    if content_started.load(Ordering::SeqCst) {
+                        return Err(e);
+                    }
+                    // 0-indexed: attempt 0 = first try. should_retry(attempt+1) per ADR-0013.
+                    if !is_retryable(&e) || !policy.should_retry(attempt + 1) {
+                        return Err(e);
+                    }
+                    // Compute delay: retry_after wins over exponential backoff.
+                    let delay = match &e {
+                        LlmError::RateLimit {
+                            retry_after: Some(ra),
+                        } => *ra,
+                        _ => policy.delay_for(attempt),
+                    };
+                    tracing::warn!(
+                        route_id = %route_id,
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %e,
+                        "llm: transient error — retrying"
+                    );
+                    // Release permit during backoff (dropped here; re-acquired next loop).
+                    drop(_permit);
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
     async fn handle_chat(&self, exchange: &mut Exchange) -> Result<(), LlmError> {
         let prompt = self
             .extract_prompt(exchange)
@@ -131,56 +245,141 @@ impl LlmProducer {
         let request = self.build_chat_request(&prompt, exchange);
         self.set_start_headers(exchange);
 
+        // Semaphore permit:
+        //   - Streaming: acquired BEFORE with_timeout (by design — streaming
+        //     uses per-next() activity timeout, not total deadline). The
+        //     permit is moved into PermitStream so it lives until the byte
+        //     stream is fully consumed or dropped (see ADR-0021).
+        //   - Materialized: acquired INSIDE with_timeout so the permit wait
+        //     is covered by the total deadline timeout (review finding).
+        // The semaphore is never explicitly closed in this crate; .ok() is
+        // defensive only — a closed semaphore would mean the producer is
+        // shutting down, so allowing the call through (fail-open) is
+        // acceptable.
         if self.config.stream {
+            // Acquire semaphore permit before building the stream. Wrapped in
+            // the configured timeout so a saturated semaphore cannot block
+            // indefinitely — the streaming activity timeout (per-next()) only
+            // starts AFTER the stream exists, so the permit wait needs its own
+            // bound.
+            let permit = match &self.semaphore {
+                Some(sem) => {
+                    let acquired = sem.clone().acquire_owned();
+                    match self.timeout {
+                        Some(d) => match tokio::time::timeout(d, acquired).await {
+                            Ok(Ok(p)) => Some(p),
+                            Ok(Err(_)) => None, // semaphore closed — fail-open
+                            Err(_) => return Err(LlmError::Timeout(d)),
+                        },
+                        None => acquired.await.ok(),
+                    }
+                }
+                None => None,
+            };
+
             let route_id = self.route_id.clone();
             let stream = self.provider.chat_stream(request);
+            let timeout = self.timeout;
 
-            let byte_stream = stream.map(move |event| match event {
-                Ok(ChatEvent::Delta { text }) => Ok(Bytes::from(text)),
-                Ok(ChatEvent::Finished { usage, .. }) => {
-                    if let Some(u) = usage {
-                        tracing::info!(
-                            route_id = %route_id,
-                            prompt_tokens = u.prompt_tokens,
-                            completion_tokens = u.completion_tokens,
-                            "llm stream finished"
-                        );
-                    }
-                    Ok(Bytes::new())
+            let byte_stream = stream! {
+                let mut s = stream;
+                loop {
+                    let next = match timeout {
+                        Some(d) => match tokio::time::timeout(d, s.next()).await {
+                            Ok(Some(ev)) => Some(ev),
+                            Ok(None) => None,
+                            Err(_) => {
+                                yield Err(CamelError::from(LlmError::Timeout(d)));
+                                return;
+                            }
+                        },
+                        None => s.next().await,
+                    };
+                    let mapped = match next {
+                        Some(Ok(ChatEvent::Delta { text })) => Ok(Bytes::from(text)),
+                        Some(Ok(ChatEvent::Finished { usage, .. })) => {
+                            if let Some(u) = usage {
+                                tracing::info!(
+                                    route_id = %route_id,
+                                    prompt_tokens = u.prompt_tokens,
+                                    completion_tokens = u.completion_tokens,
+                                    "llm stream finished"
+                                );
+                            }
+                            Ok(Bytes::new())
+                        }
+                        Some(Err(e)) => {
+                            // log-policy: handler-owned
+                            tracing::warn!(route_id = %route_id, error = %e, "llm stream error");
+                            Err(CamelError::from(e))
+                        }
+                        None => return,
+                    };
+                    yield mapped;
                 }
-                Err(e) => {
-                    // log-policy: handler-owned
-                    tracing::warn!(route_id = %route_id, error = %e, "llm stream error");
-                    Err(CamelError::from(e))
-                }
-            });
+            };
+
+            // Wrap the byte stream in PermitStream so the semaphore permit
+            // outlives `call()` — it is released when the Body::Stream is
+            // consumed / dropped.
+            let with_permit = PermitStream {
+                inner: byte_stream.boxed(),
+                _permit: permit,
+            };
 
             exchange.input.body = Body::Stream(StreamBody {
-                stream: Arc::new(Mutex::new(Some(Box::pin(byte_stream)))),
+                stream: Arc::new(Mutex::new(Some(Box::pin(with_permit)))),
                 metadata: StreamMetadata::default(),
             });
         } else {
-            let mut full_text = String::new();
-            let mut final_usage = None;
-            let mut finish_reason = None;
-            let mut final_model = None;
+            // Materialized mode: compose retry loop inside total deadline.
+            // The retry loop acquires its own permit per attempt (released
+            // during backoff) and is wrapped by with_timeout so one total
+            // deadline covers all attempts + backoff.
+            let provider = Arc::clone(&self.provider);
+            let content_started = Arc::new(AtomicBool::new(false));
 
-            let mut stream = self.provider.chat_stream(request);
-            while let Some(event) = stream.next().await {
-                match event? {
-                    ChatEvent::Delta { text } => full_text.push_str(&text),
-                    ChatEvent::Finished {
-                        usage,
-                        finish_reason: fr,
-                        model,
-                        ..
-                    } => {
-                        final_usage = usage;
-                        finish_reason = fr;
-                        final_model = model;
+            let op = move |cs: Arc<AtomicBool>| {
+                let req = request.clone();
+                let p = Arc::clone(&provider);
+                async move {
+                    let mut stream = p.chat_stream(req);
+                    let mut full_text = String::new();
+                    let mut final_usage = None;
+                    let mut finish_reason = None;
+                    let mut final_model = None;
+
+                    while let Some(event) = stream.next().await {
+                        match event? {
+                            ChatEvent::Delta { text } => {
+                                if !text.is_empty() {
+                                    cs.store(true, Ordering::SeqCst);
+                                }
+                                full_text.push_str(&text);
+                            }
+                            ChatEvent::Finished {
+                                usage,
+                                finish_reason: fr,
+                                model,
+                                ..
+                            } => {
+                                final_usage = usage;
+                                finish_reason = fr;
+                                final_model = model;
+                            }
+                        }
                     }
+
+                    Ok::<_, LlmError>((full_text, final_usage, finish_reason, final_model))
                 }
-            }
+            };
+
+            let semaphore = self.semaphore.clone();
+            let retry = self.retry.clone();
+            let fut = Self::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
+            let result = self.with_timeout(fut).await?;
+
+            let (full_text, final_usage, finish_reason, final_model) = result;
 
             exchange.input.body = Body::Text(full_text);
             let headers = &mut exchange.input.headers;
@@ -219,7 +418,24 @@ impl LlmProducer {
             .unwrap_or_else(|| self.provider.default_model().to_string());
         let request = EmbedRequest::new(model, vec![prompt]);
 
-        let response = self.provider.embed(request).await?;
+        // Embed uses the retry loop (materialized). content_started is
+        // intentionally never set: embed is a single-shot idempotent operation
+        // with no streaming content to corrupt, so retry on transient failure
+        // is always safe (no "partial output" to protect).
+        let provider = Arc::clone(&self.provider);
+        let op = move |_content_started: Arc<AtomicBool>| {
+            // _content_started ignored: embed has no Delta-based content
+            // tracking — every failed embed is a clean retry.
+            let req = request.clone();
+            let p = Arc::clone(&provider);
+            async move { p.embed(req).await }
+        };
+
+        let semaphore = self.semaphore.clone();
+        let retry = self.retry.clone();
+        let content_started = Arc::new(AtomicBool::new(false));
+        let fut = Self::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
+        let response = self.with_timeout(fut).await?;
 
         exchange.input.body = Body::Json(
             serde_json::to_value(&response.embeddings)
@@ -239,6 +455,33 @@ impl LlmProducer {
         }
         headers.insert(CAMEL_LLM_MODEL.to_string(), Value::String(response.model));
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PermitStream — holds the semaphore permit for streaming responses
+// ---------------------------------------------------------------------------
+
+/// A Stream wrapper that holds an optional semaphore permit until the
+/// stream is consumed or dropped. Concrete (not generic) — uses `BoxStream`
+/// for the inner field so that it remains `Unpin` for use inside the
+/// `async_stream::stream!` macro without a `S: Unpin` bound.
+///
+/// Dropping PermitStream drops the inner provider stream, cancelling
+/// upstream work via standard Rust future-drop semantics — no explicit
+/// CancellationToken needed (drop IS cancellation).
+struct PermitStream {
+    inner: futures::stream::BoxStream<'static, Result<Bytes, CamelError>>,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl futures::Stream for PermitStream {
+    type Item = Result<Bytes, CamelError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Safe: PermitStream is Unpin (all fields are Unpin).
+        let this = self.get_mut();
+        this.inner.as_mut().poll_next(cx)
     }
 }
 
@@ -272,377 +515,5 @@ impl Service<Exchange> for LlmProducer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider::mock::{MockMode, MockProvider};
-    use camel_api::Message;
-
-    fn make_producer(stream: bool, operation: LlmOperation) -> LlmProducer {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hello".into())));
-        let config = LlmEndpointConfig {
-            operation,
-            stream,
-            ..Default::default()
-        };
-        LlmProducer::new(config, provider, 32768, "test-route".into())
-    }
-
-    fn make_exchange(body: Body) -> Exchange {
-        Exchange::new(Message::new(body))
-    }
-
-    // ---- handle_chat (materialized) ----
-
-    #[tokio::test]
-    async fn chat_materialized_returns_text() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer.handle_chat(&mut exchange).await.expect("chat ok");
-        match &exchange.input.body {
-            Body::Text(s) => assert_eq!(s, "hello"),
-            other => panic!("expected Text, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn chat_materialized_sets_usage_available_true() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Text("prompt".into()));
-        producer.handle_chat(&mut exchange).await.expect("chat ok");
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_USAGE_AVAILABLE),
-            Some(&Value::Bool(true))
-        );
-    }
-
-    #[tokio::test]
-    async fn chat_materialized_sets_token_headers() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer.handle_chat(&mut exchange).await.expect("chat ok");
-        assert!(exchange.input.headers.contains_key(CAMEL_LLM_TOKENS_IN));
-        assert!(exchange.input.headers.contains_key(CAMEL_LLM_TOKENS_OUT));
-    }
-
-    #[tokio::test]
-    async fn chat_materialized_sets_finish_reason() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer.handle_chat(&mut exchange).await.expect("chat ok");
-        assert!(exchange.input.headers.contains_key(CAMEL_LLM_FINISH_REASON));
-    }
-
-    // ---- handle_chat (streaming) ----
-
-    #[tokio::test]
-    async fn chat_streaming_sets_stream_body() {
-        let producer = make_producer(true, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer.handle_chat(&mut exchange).await.expect("chat ok");
-        assert!(matches!(exchange.input.body, Body::Stream(_)));
-    }
-
-    #[tokio::test]
-    async fn chat_streaming_sets_stream_header() {
-        let producer = make_producer(true, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer.handle_chat(&mut exchange).await.expect("chat ok");
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_STREAM),
-            Some(&Value::Bool(true))
-        );
-    }
-
-    #[tokio::test]
-    async fn chat_streaming_sets_usage_available_false() {
-        let producer = make_producer(true, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer.handle_chat(&mut exchange).await.expect("chat ok");
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_USAGE_AVAILABLE),
-            Some(&Value::Bool(false))
-        );
-    }
-
-    #[tokio::test]
-    async fn chat_streaming_sets_provider_header() {
-        let producer = make_producer(true, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer.handle_chat(&mut exchange).await.expect("chat ok");
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_PROVIDER),
-            Some(&Value::String("test".into()))
-        );
-    }
-
-    // ---- handle_embed ----
-
-    #[tokio::test]
-    async fn embed_returns_json() {
-        let producer = make_producer(false, LlmOperation::Embed);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer
-            .handle_embed(&mut exchange)
-            .await
-            .expect("embed ok");
-        assert!(matches!(exchange.input.body, Body::Json(_)));
-    }
-
-    #[tokio::test]
-    async fn embed_sets_model_header() {
-        let producer = make_producer(false, LlmOperation::Embed);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer
-            .handle_embed(&mut exchange)
-            .await
-            .expect("embed ok");
-        assert!(exchange.input.headers.contains_key(CAMEL_LLM_MODEL));
-    }
-
-    #[tokio::test]
-    async fn embed_sets_usage_available() {
-        let producer = make_producer(false, LlmOperation::Embed);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer
-            .handle_embed(&mut exchange)
-            .await
-            .expect("embed ok");
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_USAGE_AVAILABLE),
-            Some(&Value::Bool(true))
-        );
-    }
-
-    #[tokio::test]
-    async fn embed_sets_tokens_in_header() {
-        let producer = make_producer(false, LlmOperation::Embed);
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        producer
-            .handle_embed(&mut exchange)
-            .await
-            .expect("embed ok");
-        assert!(exchange.input.headers.contains_key(CAMEL_LLM_TOKENS_IN));
-    }
-
-    // ---- extract_prompt ----
-
-    #[test]
-    fn extract_prompt_from_text() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let exchange = make_exchange(Body::Text("hello".into()));
-        let prompt = producer.extract_prompt(&exchange).expect("extract ok");
-        assert_eq!(prompt, "hello");
-    }
-
-    #[test]
-    fn extract_prompt_from_bytes() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let exchange = make_exchange(Body::Bytes(Bytes::from("hello")));
-        let prompt = producer.extract_prompt(&exchange).expect("extract ok");
-        assert_eq!(prompt, "hello");
-    }
-
-    #[test]
-    fn extract_prompt_from_json() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let exchange = make_exchange(Body::Json(serde_json::json!("hello")));
-        let prompt = producer.extract_prompt(&exchange).expect("extract ok");
-        assert_eq!(prompt, "\"hello\"");
-    }
-
-    #[test]
-    fn extract_prompt_from_empty_errors() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let exchange = make_exchange(Body::Empty);
-        assert!(producer.extract_prompt(&exchange).is_err());
-    }
-
-    #[test]
-    fn extract_prompt_from_stream_errors() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let stream_body = StreamBody {
-            stream: Arc::new(Mutex::new(None)),
-            metadata: StreamMetadata::default(),
-        };
-        let exchange = make_exchange(Body::Stream(stream_body));
-        assert!(producer.extract_prompt(&exchange).is_err());
-    }
-
-    #[test]
-    fn extract_prompt_enforces_max_bytes() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig::default();
-        let producer = LlmProducer::new(config, provider, 3, "route".into());
-        let exchange = make_exchange(Body::Text("hello world".into()));
-        assert!(producer.extract_prompt(&exchange).is_err());
-    }
-
-    #[test]
-    fn extract_prompt_allows_at_max_bytes() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig::default();
-        let producer = LlmProducer::new(config, provider, 5, "route".into());
-        let exchange = make_exchange(Body::Text("hello".into()));
-        assert!(producer.extract_prompt(&exchange).is_ok());
-    }
-
-    // ---- build_chat_request ----
-
-    #[test]
-    fn build_chat_request_falls_back_to_provider_model() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig::default();
-        let producer = LlmProducer::new(config, provider, 32768, "route".into());
-        let exchange = make_exchange(Body::Text("hello".into()));
-        let req = producer.build_chat_request("hello", &exchange);
-        assert_eq!(req.model, "mock-model");
-    }
-
-    #[test]
-    fn build_chat_request_uses_config_model() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig {
-            model: Some("gpt-4o".into()),
-            ..Default::default()
-        };
-        let producer = LlmProducer::new(config, provider, 32768, "route".into());
-        let exchange = make_exchange(Body::Text("hello".into()));
-        let req = producer.build_chat_request("hello", &exchange);
-        assert_eq!(req.model, "gpt-4o");
-    }
-
-    #[test]
-    fn build_chat_request_uses_header_model() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig::default();
-        let producer = LlmProducer::new(config, provider, 32768, "route".into());
-        let mut exchange = make_exchange(Body::Text("hello".into()));
-        exchange
-            .input
-            .headers
-            .insert(CAMEL_LLM_MODEL.into(), Value::String("header-model".into()));
-        let req = producer.build_chat_request("hello", &exchange);
-        assert_eq!(req.model, "header-model");
-    }
-
-    #[test]
-    fn build_chat_request_uses_temperature_from_config() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig {
-            temperature: Some(0.5),
-            ..Default::default()
-        };
-        let producer = LlmProducer::new(config, provider, 32768, "route".into());
-        let exchange = make_exchange(Body::Text("hello".into()));
-        let req = producer.build_chat_request("hello", &exchange);
-        assert_eq!(req.temperature, Some(0.5));
-    }
-
-    #[test]
-    fn build_chat_request_uses_max_tokens_from_config() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig {
-            max_tokens: Some(100),
-            ..Default::default()
-        };
-        let producer = LlmProducer::new(config, provider, 32768, "route".into());
-        let exchange = make_exchange(Body::Text("hello".into()));
-        let req = producer.build_chat_request("hello", &exchange);
-        assert_eq!(req.max_tokens, Some(100));
-    }
-
-    #[test]
-    fn build_chat_request_respects_system_prompt_from_config() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig {
-            system_prompt: Some("be helpful".into()),
-            ..Default::default()
-        };
-        let producer = LlmProducer::new(config, provider, 32768, "route".into());
-        let exchange = make_exchange(Body::Text("hello".into()));
-        let req = producer.build_chat_request("hello", &exchange);
-        assert_eq!(req.system_prompt.as_deref(), Some("be helpful"));
-    }
-
-    #[test]
-    fn build_chat_request_includes_user_message() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig::default();
-        let producer = LlmProducer::new(config, provider, 32768, "route".into());
-        let exchange = make_exchange(Body::Text("hello".into()));
-        let req = producer.build_chat_request("hello", &exchange);
-        assert_eq!(req.messages.len(), 1);
-        assert_eq!(req.messages[0].content, "hello");
-        assert_eq!(req.messages[0].role, ChatRole::User);
-    }
-
-    // ---- set_start_headers ----
-
-    #[test]
-    fn set_start_headers_sets_provider() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Empty);
-        producer.set_start_headers(&mut exchange);
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_PROVIDER),
-            Some(&Value::String("test".into()))
-        );
-    }
-
-    #[test]
-    fn set_start_headers_sets_stream_false() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Empty);
-        producer.set_start_headers(&mut exchange);
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_STREAM),
-            Some(&Value::Bool(false))
-        );
-    }
-
-    #[test]
-    fn set_start_headers_sets_stream_true() {
-        let producer = make_producer(true, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Empty);
-        producer.set_start_headers(&mut exchange);
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_STREAM),
-            Some(&Value::Bool(true))
-        );
-    }
-
-    #[test]
-    fn set_start_headers_usage_available_starts_false() {
-        let producer = make_producer(true, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Empty);
-        producer.set_start_headers(&mut exchange);
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_USAGE_AVAILABLE),
-            Some(&Value::Bool(false))
-        );
-    }
-
-    #[test]
-    fn set_start_headers_skips_model_when_not_configured() {
-        let producer = make_producer(false, LlmOperation::Chat);
-        let mut exchange = make_exchange(Body::Empty);
-        producer.set_start_headers(&mut exchange);
-        assert!(!exchange.input.headers.contains_key(CAMEL_LLM_MODEL));
-    }
-
-    #[test]
-    fn set_start_headers_sets_model_when_configured() {
-        let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
-        let config = LlmEndpointConfig {
-            model: Some("gpt-4o".into()),
-            ..Default::default()
-        };
-        let producer = LlmProducer::new(config, provider, 32768, "route".into());
-        let mut exchange = make_exchange(Body::Empty);
-        producer.set_start_headers(&mut exchange);
-        assert_eq!(
-            exchange.input.headers.get(CAMEL_LLM_MODEL),
-            Some(&Value::String("gpt-4o".into()))
-        );
-    }
-}
+#[path = "producer_tests.rs"]
+mod tests;

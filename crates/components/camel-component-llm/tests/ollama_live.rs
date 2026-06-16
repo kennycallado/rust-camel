@@ -33,6 +33,7 @@ fn make_ollama_component() -> LlmComponent {
             default_model: CHAT_MODEL.into(),
             timeout_secs: None,
             max_concurrency: None,
+            network_retry: None,
         }),
     );
     LlmComponent::new(LlmGlobalConfig {

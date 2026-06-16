@@ -10,10 +10,32 @@
 //! This avoids panics when the builder is called from within a tokio runtime.
 
 use std::sync::Arc;
-use std::time::Duration;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+
+// ============================================================================
+// Test-only overrides — inject stub builders to avoid network I/O
+// ============================================================================
+
+/// Test-only builder: a closure that produces a fully-initialized client pair
+/// without network access.
+#[cfg(test)]
+type BuildOverride = std::sync::Arc<
+    dyn Fn() -> BoxFuture<
+            'static,
+            Result<(Arc<dyn ChatCapability>, Arc<dyn EmbeddingCapability>), LlmError>,
+        > + Send
+        + Sync,
+>;
 use futures::stream::{BoxStream, StreamExt};
+
+#[cfg(test)]
+use futures::future::BoxFuture;
+
+use tokio::sync::OnceCell;
 
 #[cfg(any(feature = "ollama", feature = "all-providers"))]
 use crate::config::OllamaProviderConfig;
@@ -27,6 +49,8 @@ use crate::provider::{
 
 use siumai_core::builder::BuilderBase;
 use siumai_core::error::LlmError as SiumaiLlmError;
+#[cfg(test)]
+use siumai_core::traits::EmbeddingExtensions;
 use siumai_core::traits::{ChatCapability, EmbeddingCapability};
 use siumai_core::types::{
     ChatMessage as SiumaiChatMessage, ChatRequest as SiumaiChatRequest, CommonParams,
@@ -59,14 +83,28 @@ enum SiumaiConfig {
 // Provider struct
 // ============================================================================
 
-/// A provider backed by a siumai client, constructed lazily.
+/// Cached siumai trait-object pair.
 ///
-/// Holds the raw config and builds a fresh siumai client on each operation.
-/// This is the simplest correct approach for MVP — correctness over performance.
+/// `build_client_from_config` returns a tuple `(Arc<dyn ChatCapability>, Arc<dyn EmbeddingCapability>)`.
+/// `OnceCell` requires a single type, so we wrap them in a struct.
+struct CachedClient {
+    chat: Arc<dyn ChatCapability>,
+    embed: Arc<dyn EmbeddingCapability>,
+}
+
+/// A provider backed by a siumai client, constructed lazily and cached.
+///
+/// The siumai client is built exactly once via `tokio::sync::OnceCell`.
+/// Concurrent calls share the same cached client.
 struct SiumaiProvider {
     id: String,
     default_model: String,
     config: SiumaiConfig,
+    client: Arc<OnceCell<CachedClient>>,
+    #[cfg(test)]
+    client_builds: Arc<AtomicUsize>,
+    #[cfg(test)]
+    build_override: Option<BuildOverride>,
 }
 
 impl SiumaiProvider {
@@ -75,6 +113,29 @@ impl SiumaiProvider {
             id: id.into(),
             default_model: default_model.into(),
             config,
+            client: Arc::new(OnceCell::new()),
+            #[cfg(test)]
+            client_builds: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            build_override: None,
+        }
+    }
+
+    /// Test-only constructor that injects a build override to avoid network I/O.
+    #[cfg(test)]
+    fn new_with_build_override(
+        id: impl Into<String>,
+        default_model: impl Into<String>,
+        config: SiumaiConfig,
+        override_: BuildOverride,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            default_model: default_model.into(),
+            config,
+            client: Arc::new(OnceCell::new()),
+            client_builds: Arc::new(AtomicUsize::new(0)),
+            build_override: Some(override_),
         }
     }
 }
@@ -92,10 +153,22 @@ impl LlmProvider for SiumaiProvider {
     fn chat_stream(&self, req: ChatRequest) -> BoxStream<'static, Result<ChatEvent, LlmError>> {
         let config = self.config.clone();
         let default_model = self.default_model.clone();
+        let client_cell = Arc::clone(&self.client);
+        #[cfg(test)]
+        let builds = Arc::clone(&self.client_builds);
+        #[cfg(test)]
+        let override_ = self.build_override.clone();
 
         let stream = async_stream::try_stream! {
-            // Build client lazily — first time in async context
-            let (chat, _embed) = build_client_from_config(&config).await?;
+            // Build/retrieve cached client
+            let cached = client_cell.get_or_try_init(|| async {
+                build_cached_client(
+                    &config,
+                    #[cfg(test)] override_.as_ref(),
+                    #[cfg(test)] &builds,
+                ).await
+            }).await?;
+            let chat = Arc::clone(&cached.chat);
 
             let siumai_req = convert_chat_request(req, &default_model);
 
@@ -123,7 +196,26 @@ impl LlmProvider for SiumaiProvider {
     }
 
     async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse, LlmError> {
-        let (_, embed) = build_client_from_config(&self.config).await?;
+        let config = self.config.clone();
+        #[cfg(test)]
+        let builds = Arc::clone(&self.client_builds);
+        #[cfg(test)]
+        let override_ = self.build_override.clone();
+
+        let cached = self
+            .client
+            .get_or_try_init(|| async {
+                build_cached_client(
+                    &config,
+                    #[cfg(test)]
+                    override_.as_ref(),
+                    #[cfg(test)]
+                    &builds,
+                )
+                .await
+            })
+            .await?;
+        let embed = Arc::clone(&cached.embed);
 
         // Thread the per-request model into the siumai request. Calling
         // `embed(Vec<String>)` would use the client's default model, which may
@@ -154,6 +246,32 @@ impl LlmProvider for SiumaiProvider {
 
         Ok(convert_embed_response(response))
     }
+}
+
+// ============================================================================
+// Helper: build cached client (shared by chat_stream and embed)
+// ============================================================================
+
+/// Build a `CachedClient`, respecting the test-only override when present.
+///
+/// This is the single point of client construction used by both `chat_stream`
+/// and `embed`. Keeping it as a free function (not a method) allows it to be
+/// called inside `async_stream::try_stream!` without borrowing `self`.
+async fn build_cached_client(
+    config: &SiumaiConfig,
+    #[cfg(test)] override_: Option<&BuildOverride>,
+    #[cfg(test)] builds: &AtomicUsize,
+) -> Result<CachedClient, LlmError> {
+    #[cfg(test)]
+    {
+        builds.fetch_add(1, Ordering::SeqCst);
+        if let Some(builder) = override_ {
+            let (chat, embed) = builder().await?;
+            return Ok(CachedClient { chat, embed });
+        }
+    }
+    let (chat, embed) = build_client_from_config(config).await?;
+    Ok(CachedClient { chat, embed })
 }
 
 // ============================================================================
@@ -439,8 +557,11 @@ fn map_siumai_error(e: SiumaiLlmError) -> LlmError {
             LlmError::Network(e.to_string())
         }
 
-        // Timeout
-        SiumaiLlmError::TimeoutError(_) => LlmError::Timeout(Duration::from_secs(0)),
+        // Timeout — siumai doesn't expose the elapsed duration, so we cannot
+        // populate LlmError::Timeout(duration) honestly. Map to Network
+        // instead: both are retryable, and "network error" avoids the
+        // misleading "timeout after 0s" Display.
+        SiumaiLlmError::TimeoutError(_) => LlmError::Network("provider request timed out".into()),
 
         // Model not found or not supported
         SiumaiLlmError::ModelNotSupported(_) | SiumaiLlmError::NotFound(_) => {
@@ -470,5 +591,115 @@ fn map_siumai_error(e: SiumaiLlmError) -> LlmError {
 
         // Catch-all for remaining variants
         _ => LlmError::provider(e.to_string()),
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(all(test, feature = "openai"))]
+mod tests {
+    use super::*;
+    use futures::future::join_all;
+    use siumai_core::error::LlmError as SiumaiLlmError;
+    use siumai_core::streaming::ChatStream;
+    use siumai_core::types::{
+        ChatMessage as SiumaiChatMessage, ChatResponse, EmbeddingResponse, Tool,
+    };
+
+    /// Stub chat capability — never called by `embed()` but must be constructable
+    /// so it can be placed in `CachedClient` inside the build override.
+    struct StubChat;
+
+    #[async_trait::async_trait]
+    impl ChatCapability for StubChat {
+        async fn chat_with_tools(
+            &self,
+            _messages: Vec<SiumaiChatMessage>,
+            _tools: Option<Vec<Tool>>,
+        ) -> Result<ChatResponse, SiumaiLlmError> {
+            unreachable!("StubChat should not be called in OnceCell dedup test")
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: Vec<SiumaiChatMessage>,
+            _tools: Option<Vec<Tool>>,
+        ) -> Result<ChatStream, SiumaiLlmError> {
+            unreachable!("StubChat should not be called in OnceCell dedup test")
+        }
+    }
+
+    /// Stub embedding capability — returns a valid embedding response so the
+    /// production `embed()` method can complete successfully.
+    struct StubEmbed;
+
+    #[async_trait::async_trait]
+    impl EmbeddingCapability for StubEmbed {
+        async fn embed(&self, _input: Vec<String>) -> Result<EmbeddingResponse, SiumaiLlmError> {
+            Ok(EmbeddingResponse::new(
+                vec![vec![1.0, 2.0, 3.0]],
+                "stub-model".into(),
+            ))
+        }
+
+        fn as_embedding_extensions(&self) -> Option<&dyn EmbeddingExtensions> {
+            Some(self)
+        }
+
+        fn embedding_dimension(&self) -> usize {
+            3
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingExtensions for StubEmbed {}
+
+    /// Verifies that the production `embed()` method constructs the client
+    /// exactly once under 8-way concurrency.
+    ///
+    /// Uses a build override to avoid network I/O while exercising the real
+    /// `build_cached_client` → `OnceCell::get_or_try_init` code path.
+    #[tokio::test]
+    async fn client_built_once_under_concurrency() {
+        let stub_builder: BuildOverride = Arc::new(|| {
+            Box::pin(async {
+                Ok::<_, LlmError>((
+                    Arc::new(StubChat) as Arc<dyn ChatCapability>,
+                    Arc::new(StubEmbed) as Arc<dyn EmbeddingCapability>,
+                ))
+            })
+        });
+
+        let provider = Arc::new(SiumaiProvider::new_with_build_override(
+            "test",
+            "gpt-4",
+            SiumaiConfig::OpenAi {
+                api_key: "sk-test".into(),
+                base_url: Some("http://127.0.0.1:1".into()),
+                model: "gpt-4".into(),
+            },
+            stub_builder,
+        ));
+        let builds = Arc::clone(&provider.client_builds);
+
+        // 8 concurrent calls to the PRODUCTION `embed()` method — exercises
+        // the real `OnceCell::get_or_try_init` path inside `build_cached_client`.
+        let mut futs = vec![];
+        for _ in 0..8 {
+            let p = Arc::clone(&provider);
+            futs.push(async move {
+                let _ = p
+                    .embed(EmbedRequest::new("gpt-4", vec!["hello".into()]))
+                    .await;
+            });
+        }
+        join_all(futs).await;
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "OnceCell must construct the client exactly once across concurrent embed() calls"
+        );
     }
 }

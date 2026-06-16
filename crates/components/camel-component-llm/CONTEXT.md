@@ -38,6 +38,24 @@ _Avoid_: async mode (ambiguous with async runtime)
 Whether token counts are knowable at Exchange return time. Streaming: `false` (arrives at stream end → metrics). Materialized: `true` (in headers). Stored in `CamelLlmUsageAvailable` header.
 _Avoid_: token tracking, billing
 
+**Activity timeout**:
+Streaming `timeout_secs` covers every `stream.next()`. If no event arrives within the deadline, the stream yields a `Timeout` error. Contrasts with materialized total-deadline timeout.
+_Avoid_: connection timeout, idle timeout
+
+**Producer semaphore**:
+Wraps provider work to enforce `max_concurrency`. For streaming, the permit is held by `PermitStream` inside the returned `Body::Stream` and released when the stream is consumed/dropped.
+_Avoid_: connection pool, rate limiter
+
+**Retry-after honoring**:
+The manual retry loop (ADR-0021) uses `RateLimit.retry_after` over exponential backoff when present. Materialized-only; no retry after content-start.
+_Avoid_: backoff override, provider delay
+
+## Breaking changes (0.x)
+
+- `LlmGlobalConfig.timeout_secs`: `u64` → `Option<u64>` (use `None` for no timeout)
+- `OpenaiProviderConfig`/`OllamaProviderConfig`: new `network_retry` field (`Option<NetworkRetryPolicy>`)
+- `LlmProducer::new`: expanded signature — added `semaphore: Option<Arc<Semaphore>>`, `timeout: Option<Duration>`, `retry: Option<NetworkRetryPolicy>` parameters
+
 ## Log-level policy
 
 | Site | Level | Rationale |
@@ -46,3 +64,5 @@ _Avoid_: token tracking, billing
 | ProviderFactory fails to construct provider | `error!` | Startup failure; no route handler running |
 | Stream finished with usage | `info!` | Observability for token consumption |
 | Config validation error | `error!` | Startup, fatal |
+| Retry attempt fired | `warn!` | Transient error, operational signal |
+| Timeout fired | `warn!` | Total deadline elapse, operational signal |
