@@ -5,10 +5,13 @@ use std::sync::Arc;
 
 use camel_api::datasource::{CheckFuture, CreatePoolFuture, DatasourceConfig, PoolFactory};
 use camel_api::lifecycle::HealthStatus;
+use camel_component_api::{NetworkRetryPolicy, retry_async};
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any as SurrealAny;
 use surrealdb::engine::any::connect;
 use surrealdb::opt::auth::Root;
+
+use crate::error::SurrealDbError;
 
 /// Redacts the user:password portion of a SurrealDB endpoint URL for safe
 /// display. Mirrors the canonical `redact_db_url` implementation in
@@ -47,6 +50,28 @@ fn extra_str(config: &DatasourceConfig, key: &str) -> Result<String, camel_api::
 ///
 /// Auth order (per SDK examples + spike): connect → signin → use_ns → use_db.
 /// Root fields are `String` (v3 SDK), not `&str`.
+///
+/// # Retry semantics
+///
+/// Only the `connect(endpoint)` transport-establishment call is wrapped in
+/// `retry_async` (using [`NetworkRetryPolicy::default()`], the canonical
+/// enabled-with-backoff policy). Connection setup is idempotent — reconnecting
+/// twice is harmless — so transient failures (connection refused, DNS hiccup,
+/// TLS negotiation drop) retry with capped exponential backoff per ADR-0013.
+///
+/// The post-connect steps (`signin`, `use_ns`, `use_db`) are NOT retried: auth
+/// failures are permanent (bad credentials), and namespace/database selection
+/// failures on an already-established transport surface as pool-unhealthy via
+/// the `check()` health probe rather than as pool-creation failures.
+///
+/// This mirrors `camel-sql/src/consumer.rs` (which retries `pool.connect()`)
+/// but differs in policy source: SQL reads `retry` from its endpoint config
+/// (SQL creates pools per-endpoint), whereas surrealdb pools are
+/// datasource-scoped and the pool factory receives only `DatasourceConfig` —
+/// so the default policy is used here. This is the only load-bearing retry
+/// site in the surrealdb component today. `SurrealDbEndpointConfig::retry`
+/// remains as the public contract for future producer-side retry (none of
+/// today's producer paths emit a retryable variant; see ADR-0013).
 pub struct SurrealDbPoolFactory;
 
 impl PoolFactory for SurrealDbPoolFactory {
@@ -58,15 +83,32 @@ impl PoolFactory for SurrealDbPoolFactory {
             let user = extra_str(config, "username")?;
             let pass = extra_str(config, "password")?;
 
-            // SDK-documented connection path: connect → signin → use_ns → use_db
-            let client: Surreal<SurrealAny> = connect(endpoint).await.map_err(|e| {
+            // Retry only the transport-establishment call (idempotent).
+            // Per ADR-0013 security note: `connect` operates on the
+            // creds-free `db_url` (credentials live in the `extra` map and
+            // are passed separately via `signin`), so the error Display
+            // logged by `retry_async` at WARN does not leak credentials.
+            let policy = NetworkRetryPolicy::default();
+            let client: Surreal<SurrealAny> = retry_async::<_, _, _, _, SurrealDbError>(
+                &policy,
+                Some("surrealdb-pool"),
+                || async {
+                    connect(endpoint)
+                        .await
+                        .map_err(|source| SurrealDbError::Connection { source })
+                },
+                SurrealDbError::is_retryable,
+            )
+            .await
+            .map_err(|e| {
                 camel_api::CamelError::ProcessorError(format!(
                     "failed to create surrealdb datasource pool ({}): {e}",
                     redact_db_url(endpoint)
                 ))
             })?;
 
-            // Auth (Root fields are String in v3 SDK — clone)
+            // Auth (Root fields are String in v3 SDK — clone). Not retried:
+            // see struct-level retry-semantics comment.
             client
                 .signin(Root {
                     username: user.clone(),

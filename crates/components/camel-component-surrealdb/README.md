@@ -70,6 +70,37 @@ The `extra` map requires four fields: `namespace`, `database`, `username`, `pass
 |--------|---------|-------------|
 | `datasource` | _(required)_ | Named datasource from `Camel.toml` |
 | `table` | - | Target table name (required for most operations) |
+| `retryEnabled` | `true` | Enable retry with capped exponential backoff (see [Retry](#retry) below). Currently consumed at pool-create; producer-level retry is reserved for future use. |
+| `retryMaxAttempts` | `10` | Max retry attempts (`0` = unlimited) |
+| `retryInitialDelayMs` | `100` | Initial backoff delay in ms |
+| `retryMultiplier` | `2.0` | Exponential backoff multiplier |
+| `retryMaxDelayMs` | `30000` | Cap on per-attempt delay |
+| `retryJitter` | `0.2` | Jitter factor in `[0.0, 1.0]` |
+
+<a name="retry"></a>
+
+#### Retry
+
+The `retry*` URI params configure a [`NetworkRetryPolicy`](https://docs.rs/camel-component-api)
+that is stored on the endpoint config as a public contract (parameter names
+mirror `camel-sql` exactly).
+
+**Current consumption:**
+
+- **Datasource pool creation** (`SurrealDbPoolFactory::create`) retries the
+  `connect()` transport-establishment call using `NetworkRetryPolicy::default()`.
+  Only `Connection`-class errors are retried. Post-connect steps (`signin`,
+  `use_ns`, `use_db`) are not retried — auth failures are permanent.
+
+**Not yet consumed:**
+
+- **Producer operations** are not currently wrapped in per-operation retry.
+  Today's producer paths map SDK errors to non-retryable `Query` variants
+  (see ADR-0013 — resending a non-idempotent write that may have reached the
+  server would risk duplicates). The `retry` field on the endpoint config is
+  the public contract for when a future classifier refinement distinguishes
+  transport-drop from query-rejected on read operations, at which point
+  producer-side retry can be wired without breaking the URI contract.
 
 ### Operation-Specific Options
 
@@ -201,7 +232,7 @@ Requires WebSocket protocol. Each CREATE/UPDATE/DELETE on the table pushes an Ex
 
 | Header | Operations | Description |
 |--------|------------|-------------|
-| `CamelSurrealDbRecordId` | `update`, `upsert`, `delete`, `patch` | RecordId (`table:key`) of the affected record, constructed from URI config. `create`/`vector`/`relate` do not set this header — read `body.id` from the response instead, since the ID is generated server-side (for `relate`, `body.id` is the edge record's id, not the source node). |
+| `CamelSurrealDbRecordId` | all | RecordId (`table:key`) of the affected record, when one can be determined. For `update`/`upsert`/`delete`/`patch` it is constructed from URI `table`+`id` config; for `create`/`vector`/`relate` (and any write op whose URI config omits `id`) it is extracted from the response `body.id`. For `relate`, the value is the EDGE record's id (not the source node). Skipped (logged at `debug!`) when no id can be determined. |
 | `CamelSurrealDbAction` | `live` | Action type: `CREATE`, `UPDATE`, `DELETE` |
 | `CamelSurrealDbTable` | `live` | Table that triggered the notification |
 

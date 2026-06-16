@@ -1,8 +1,10 @@
 //! Endpoint configuration types and URI parser for the SurrealDB component.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use camel_api::CamelError;
+use camel_component_api::NetworkRetryPolicy;
 use url::form_urlencoded;
 
 use crate::error::SurrealDbError;
@@ -82,6 +84,16 @@ pub struct SurrealDbEndpointConfig {
     pub limit: Option<usize>,
     pub query: Option<String>,
     pub function: Option<String>,
+    /// Retry policy for transient failures. Currently consumed by
+    /// `SurrealDbPoolFactory` for connection establishment. Producer paths
+    /// map SDK errors to non-retryable `Query` variants today (ADR-0013
+    /// safety); this field is the public contract for when future read-side
+    /// retry is wired.
+    pub retry: NetworkRetryPolicy,
+    /// Whether `retry` was explicitly set via URI params. Tracking flag, not
+    /// serialized. Mirrors `camel-sql`'s `retry_set_from_uri`. `pub(crate)` so
+    /// same-crate tests can construct configs via struct-update syntax.
+    pub(crate) retry_set_from_uri: bool,
 }
 
 impl Default for SurrealDbEndpointConfig {
@@ -101,6 +113,8 @@ impl Default for SurrealDbEndpointConfig {
             limit: None,
             query: None,
             function: None,
+            retry: NetworkRetryPolicy::default(),
+            retry_set_from_uri: false,
         }
     }
 }
@@ -225,6 +239,47 @@ impl SurrealDbEndpointConfig {
         let query = params.get("query").cloned();
         let function = params.get("function").cloned();
 
+        // Parse retry policy from URI params (mirrors camel-sql exactly:
+        // same param names, same parsing rules, same defaults).
+        let mut retry = NetworkRetryPolicy::default();
+        let mut retry_set_from_uri = false;
+        if let Some(raw) = params.get("retryEnabled") {
+            retry.enabled = raw.parse::<bool>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryEnabled must be a boolean, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryMaxAttempts") {
+            retry.max_attempts = raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMaxAttempts must be a u32, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryInitialDelayMs") {
+            retry.initial_delay = Duration::from_millis(raw.parse::<u64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryInitialDelayMs must be a u64, got '{raw}'"))
+            })?);
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryMultiplier") {
+            retry.multiplier = raw.parse::<f64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMultiplier must be a f64, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryMaxDelayMs") {
+            retry.max_delay = Duration::from_millis(raw.parse::<u64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMaxDelayMs must be a u64, got '{raw}'"))
+            })?);
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryJitter") {
+            retry.jitter_factor = raw.parse::<f64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryJitter must be a f64, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+
         Ok(Self {
             operation,
             datasource,
@@ -240,12 +295,21 @@ impl SurrealDbEndpointConfig {
             limit,
             query,
             function,
+            retry,
+            retry_set_from_uri,
         })
+    }
+
+    /// Sets the retry policy (builder style). Mirrors `camel-sql`'s `with_retry`.
+    #[must_use]
+    pub fn with_retry(mut self, value: NetworkRetryPolicy) -> Self {
+        self.retry = value;
+        self.retry_set_from_uri = true;
+        self
     }
 
     /// Validate that required parameters for the operation are present.
     /// Called during `create_endpoint` (fail-fast).
-    ///
     /// Applies identifier validation to `table`, `edge`, and `vector_field` parameters
     /// (they must be valid ASCII identifiers — no injection/unicode).
     /// Record key fields (`id`, `from`, `to`) are NOT validated as identifiers
@@ -648,5 +712,123 @@ mod tests {
         .expect("uri parses");
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("identifier") || err.to_string().contains("invalid"));
+    }
+
+    // --- Retry policy (NetworkRetryPolicy wiring, mirrors camel-sql) ---
+
+    #[test]
+    fn retry_defaults_match_network_retry_policy_default() {
+        // Matches camel-sql: default retry = NetworkRetryPolicy::default()
+        // (enabled, 10 attempts, 100ms initial delay, 2.0 multiplier).
+        let cfg =
+            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=main").expect("uri");
+        assert_eq!(cfg.retry, NetworkRetryPolicy::default());
+        assert!(cfg.retry.enabled);
+        assert_eq!(cfg.retry.max_attempts, 10);
+        assert!(!cfg.retry_set_from_uri);
+    }
+
+    #[test]
+    fn retry_parsed_from_uri_enabled_true() {
+        let cfg =
+            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=main&retryEnabled=true")
+                .expect("uri");
+        assert!(cfg.retry.enabled);
+        assert!(cfg.retry_set_from_uri);
+    }
+
+    #[test]
+    fn retry_parsed_from_uri_enabled_false() {
+        let cfg =
+            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=main&retryEnabled=false")
+                .expect("uri");
+        assert!(!cfg.retry.enabled);
+        assert!(cfg.retry_set_from_uri);
+    }
+
+    #[test]
+    fn retry_parsed_from_uri_max_attempts() {
+        let cfg = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:query?datasource=main&retryMaxAttempts=5&retryInitialDelayMs=250",
+        )
+        .expect("uri");
+        assert_eq!(cfg.retry.max_attempts, 5);
+        assert_eq!(
+            cfg.retry.initial_delay,
+            std::time::Duration::from_millis(250)
+        );
+        assert!(cfg.retry_set_from_uri);
+    }
+
+    #[test]
+    fn retry_parsed_from_uri_all_params() {
+        let cfg = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:query?datasource=main\
+             &retryEnabled=true&retryMaxAttempts=7&retryInitialDelayMs=1000\
+             &retryMultiplier=3.0&retryMaxDelayMs=60000&retryJitter=0.5",
+        )
+        .expect("uri");
+        assert!(cfg.retry.enabled);
+        assert_eq!(cfg.retry.max_attempts, 7);
+        assert_eq!(
+            cfg.retry.initial_delay,
+            std::time::Duration::from_millis(1000)
+        );
+        assert!((cfg.retry.multiplier - 3.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.retry.max_delay, std::time::Duration::from_millis(60000));
+        assert!((cfg.retry.jitter_factor - 0.5).abs() < f64::EPSILON);
+        assert!(cfg.retry_set_from_uri);
+    }
+
+    #[test]
+    fn retry_invalid_bool_rejected() {
+        let result =
+            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=main&retryEnabled=maybe");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, CamelError::InvalidUri(_)));
+        assert!(
+            err.to_string().contains("retryEnabled"),
+            "must mention retryEnabled: {err}"
+        );
+    }
+
+    #[test]
+    fn retry_invalid_u32_rejected() {
+        let result = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:query?datasource=main&retryMaxAttempts=notanumber",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, CamelError::InvalidUri(_)));
+        assert!(
+            err.to_string().contains("retryMaxAttempts"),
+            "must mention retryMaxAttempts: {err}"
+        );
+    }
+
+    #[test]
+    fn retry_invalid_u64_delay_rejected() {
+        let result = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:query?datasource=main&retryInitialDelayMs=abc",
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("retryInitialDelayMs")
+        );
+    }
+
+    #[test]
+    fn with_retry_builder_sets_policy_and_flag() {
+        let policy = NetworkRetryPolicy {
+            max_attempts: 3,
+            ..NetworkRetryPolicy::default()
+        };
+        let cfg = SurrealDbEndpointConfig::default().with_retry(policy.clone());
+        assert_eq!(cfg.retry.max_attempts, 3);
+        assert!(cfg.retry_set_from_uri);
     }
 }

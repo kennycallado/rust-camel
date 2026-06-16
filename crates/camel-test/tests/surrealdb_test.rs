@@ -759,6 +759,114 @@ async fn producer_relate() {
     );
 }
 
+/// Regression for the RELATE body.id + CamelSurrealDbRecordId contract
+/// (Follow-ups #2 + #3):
+///
+/// The producer's output body `id` MUST be the EDGE record's id (table `knows`),
+/// never the source node (`user:1`) or the target (`topic:42`). And, per
+/// Option B, the `CamelSurrealDbRecordId` header MUST be set to that same
+/// edge id (extracted from `body.id`).
+///
+/// Handles both SurrealDB RecordId serializations: a flat `table:key` string
+/// or a `{"tb":..,"id":..}` object.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_relate_body_and_header_carry_edge_id() {
+    let (_container, endpoint) = start_surrealdb().await;
+    let db = direct_client(&endpoint).await;
+
+    db.query("CREATE user:1 SET name = 'Alice'")
+        .await
+        .expect("create alice");
+    db.query("CREATE topic:42 SET title = 'Rust'")
+        .await
+        .expect("create topic");
+
+    let h = setup_harness(&endpoint).await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .set_body(serde_json::json!({"weight": 0.9}))
+        .to("surrealdb:relate?datasource=test&table=user&from=user:1&edge=knows&to=topic:42")
+        .to("mock:result")
+        .route_id("surrealdb-relate-edge-id-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("Route had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let endpoint_ep = h.mock().get_endpoint("result").unwrap();
+    endpoint_ep.assert_exchange_count(1).await;
+    let exchanges = endpoint_ep.get_received_exchanges().await;
+    let output = exchanges[0]
+        .output
+        .as_ref()
+        .expect("expected output message");
+    let body = match &output.body {
+        Body::Json(v) => v,
+        other => panic!("expected Body::Json on relate output, got {other:?}"),
+    };
+
+    // Extract the record id from body.id, accepting either the flat string
+    // form (`knows:xxx`) or the object form (`{"tb":"knows","id":...}`).
+    let id_as_string = |v: &serde_json::Value| -> Option<String> {
+        match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Object(obj) => {
+                let tb = obj.get("tb").and_then(|x| x.as_str())?;
+                let key = match obj.get("id")? {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    _ => return None,
+                };
+                Some(format!("{tb}:{key}"))
+            }
+            _ => None,
+        }
+    };
+
+    let body_id = body
+        .get("id")
+        .and_then(|v| id_as_string(v))
+        .expect("body.id must be present as a RecordId");
+
+    // The edge record lives in the `knows` table, never the source/target.
+    assert!(
+        body_id.starts_with("knows:"),
+        "body.id must be an edge record id (knows:...), got: {body_id}"
+    );
+    assert_ne!(body_id, "user:1", "body.id must NOT be the source node id");
+    assert_ne!(
+        body_id, "topic:42",
+        "body.id must NOT be the target node id"
+    );
+
+    // Option B: CamelSurrealDbRecordId header MUST be set to the same edge id.
+    let header = output
+        .headers
+        .get("CamelSurrealDbRecordId")
+        .and_then(|v| v.as_str())
+        .expect("CamelSurrealDbRecordId header must be set for relate (Option B)");
+    assert_eq!(
+        header, body_id,
+        "CamelSurrealDbRecordId header must equal the edge record body.id"
+    );
+}
+
 // ===========================================================================
 // Vector tests
 // ===========================================================================

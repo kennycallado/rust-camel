@@ -68,14 +68,20 @@ impl SurrealDbError {
 
     /// Classifies whether this error is retryable by `NetworkRetryPolicy`.
     ///
-    // TODO(ADR-0013): NetworkRetryPolicy is not yet wired into the surrealdb
-    // pool_factory or producer. Wiring requires:
-    //   1. Adding a `retry: NetworkRetryPolicy` field to SurrealDbEndpointConfig
-    //      and parsing it from URI params (mirror camel-sql).
-    //   2. Wrapping `SurrealDbPoolFactory::create` and the producer's
-    //      `resolve_client` / `execute` paths with a retry loop keyed on
-    //      `is_retryable()` (currently only `Connection { .. }` is retryable).
-    // The classification is correct; the consumer is missing.
+    /// Only `Connection { .. }` is retryable: transient transport/setup
+    /// failures (connection refused, DNS hiccup, TLS negotiation drop) that
+    /// can resolve on the next attempt. `Query { .. }` errors are never
+    /// retried — a query that reached the server and was rejected (syntax,
+    /// permission, constraint) will not succeed on resend, and resending a
+    /// non-idempotent write after an ambiguous transport failure risks
+    /// duplicates (ADR-0013).
+    ///
+    /// Currently consumed only by `SurrealDbPoolFactory::create` for retrying
+    /// transport establishment. Producer paths map SDK errors to
+    /// non-retryable `Query` variants (see ADR-0013); when read-side
+    /// operations distinguish transport-drop from query-rejected, this
+    /// classifier will need a matching variant and the producer can start
+    /// consuming this policy.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Connection { .. })
     }

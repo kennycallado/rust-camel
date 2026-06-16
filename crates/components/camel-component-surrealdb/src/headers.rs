@@ -20,10 +20,13 @@ pub const TABLE: &str = "CamelSurrealDbTable";
 /// Value: JSON array of floats.
 pub const VECTOR: &str = "CamelSurrealDbVector";
 
-/// Record ID set by the producer for update/upsert/delete/patch operations
-/// (when the target RecordId can be constructed from URI config). Not set for
-/// create/vector/relate (server-generated IDs — read `body.id` from the JSON
-/// response; for relate, `body.id` is the edge record's id, not the source node).
+/// Record ID set by the producer on all operations when a record id can be
+/// determined. Resolution order: URI config (`table`+`id`) first
+/// (`update`/`upsert`/`delete`/`patch`), then server-generated id extracted
+/// from the response `body.id` (covers `create`/`vector`/`relate`, and any
+/// write op whose URI config omits `id`). When no id can be determined the
+/// header is skipped (logged at `debug!`). For `relate`, the id is the EDGE
+/// record's id (not the source node).
 /// Value: string (`table:id`).
 pub const RECORD_ID: &str = "CamelSurrealDbRecordId";
 

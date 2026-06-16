@@ -115,6 +115,20 @@ impl SurrealDbProducer {
     }
 
     /// Execute the operation against SurrealDB.
+    ///
+    /// No per-operation retry is applied here. Today's producer CRUD paths
+    /// map SDK errors to `SurrealDbError::Query` (via `map_err(SurrealDbError::query)`),
+    /// which `SurrealDbError::is_retryable` classifies as non-retryable, and
+    /// no producer path currently produces `SurrealDbError::Connection`. A
+    /// `retry_async` wrapper here would therefore be inert. Transient-failure
+    /// retry for this component is handled at pool-create time in
+    /// `pool_factory.rs` (the only load-bearing site today).
+    ///
+    /// `SurrealDbEndpointConfig::retry` remains on the public config struct
+    /// as the contract for when a future read-side operation starts emitting
+    /// a retryable variant — wiring it would require distinguishing
+    /// transport-drop from query-rejected in the classifier (ADR-0013),
+    /// which is not implemented.
     pub(crate) async fn execute(&self, exchange: &Exchange) -> Result<JsonValue, SurrealDbError> {
         let client = self.resolve_client().await?;
 
@@ -463,19 +477,16 @@ impl SurrealDbProducer {
         }
     }
 
-    /// Construct the `CamelSurrealDbRecordId` header value for operations whose
-    /// target RecordId is fully known from URI config. Returns `None` for
-    /// operations that generate their RecordId server-side (`create`, `vector`,
-    /// `relate`) or that don't produce a single RecordId (`select`, `query`,
-    /// `search`, `run`, `live`).
+    /// Construct the `CamelSurrealDbRecordId` header value from URI config for
+    /// operations whose target RecordId is fully known up front
+    /// (`update`/`upsert`/`delete`/`patch`). Returns `None` for operations
+    /// that generate their RecordId server-side (`create`/`vector`/`relate`)
+    /// or that don't produce a single RecordId (`select`/`query`/`search`/
+    /// `run`/`live`).
     ///
-    /// `relate` is included in the server-generated group because the
-    /// "affected record" is the edge record SurrealDB creates — not the source
-    /// node (`from`). Extracting the edge `id` would require assuming a fixed
-    /// SDK response shape (`Vec<Value>` with `[0].id`), which is fragile. The
-    /// producer already returns the full edge record (with its `id`) as the
-    /// JSON body, so downstream consumers that need the edge RecordId can read
-    /// `body.id` — the same pattern used by `create`/`vector`.
+    /// Server-generated ids (and the edge id for `relate`) are recovered from
+    /// the response body by [`record_id_from_body`]; see the `call` site for
+    /// the URI-config-first, body-fallback ordering.
     ///
     /// Returned format: `table:key` (e.g. `user:42`).
     fn record_id_for_output(&self) -> Option<String> {
@@ -488,11 +499,49 @@ impl SurrealDbProducer {
                 let id = self.config.id.as_deref()?;
                 Some(format!("{table}:{id}"))
             }
-            // create/vector/relate all generate their primary record server-side;
-            // we don't parse the response to extract the RecordId to avoid
-            // coupling to the SDK's serialization shape. Downstream consumers
-            // that need the new ID can read `body.id` from the response.
-            // (For relate, that ID is the edge record's id, NOT `from`.)
+            _ => None,
+        }
+    }
+
+    /// Extract a `table:key` RecordId from the operation's response body for
+    /// the `CamelSurrealDbRecordId` header. Used as a fallback when URI config
+    /// does not supply a target id (covers `create`/`vector`/`relate`, whose
+    /// ids are generated server-side).
+    ///
+    /// Accepts either:
+    /// - a JSON object with an `id` field whose value is a valid `table:key`
+    ///   string, OR a SurrealDB-serialized RecordId object `{"tb":..,"id":..}`,
+    /// - a JSON array with at least one element; the first element is then
+    ///   inspected under the same rule.
+    ///
+    /// Returns `None` (and the caller logs at `debug!`) when the shape is
+    /// unexpected, `id` is missing, or the value is not a valid RecordId.
+    /// This is intentionally defensive: body-id extraction MUST NOT fail the
+    /// producer call.
+    fn record_id_from_body(&self, body: &JsonValue) -> Option<String> {
+        let candidate = match body {
+            JsonValue::Object(_) => body,
+            JsonValue::Array(arr) if !arr.is_empty() => &arr[0],
+            _ => return None,
+        };
+        let id_value = candidate.get("id")?;
+        match id_value {
+            JsonValue::String(s) => query::validate_record_id_str(s).ok().map(|_| s.clone()),
+            JsonValue::Object(obj) => {
+                // SurrealDB may serialize a RecordId as {"tb": <table>, "id": <key>}.
+                let tb = obj.get("tb").and_then(|v| v.as_str())?;
+                let key = match obj.get("id")? {
+                    JsonValue::String(s) => s.clone(),
+                    JsonValue::Number(n) => n.to_string(),
+                    _ => return None,
+                };
+                let reconstructed = format!("{tb}:{key}");
+                if query::validate_record_id_str(&reconstructed).is_ok() {
+                    Some(reconstructed)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -518,11 +567,23 @@ impl Service<Exchange> for SurrealDbProducer {
         Box::pin(async move {
             match producer.execute(&exchange).await {
                 Ok(result) => {
+                    // Determine the CamelSurrealDbRecordId header BEFORE moving
+                    // the result into the message: URI-config first, then
+                    // body extraction (covers create/vector/relate, whose ids
+                    // are server-generated, and update/upsert/delete/patch when
+                    // URI config is absent).
+                    let record_id = producer
+                        .record_id_for_output()
+                        .or_else(|| producer.record_id_from_body(&result));
+                    if record_id.is_none() {
+                        tracing::debug!(
+                            route_id = %producer.route_id,
+                            operation = %producer.config.operation,
+                            "CamelSurrealDbRecordId header not set (no URI config and no extractable body.id)"
+                        );
+                    }
                     let mut msg = Message::new(Body::Json(result));
-                    // Set CamelSurrealDbRecordId header when we can reliably
-                    // construct the affected RecordId from URI config.
-                    // Operations whose target is `table:id` (from URI):
-                    if let Some(record_id) = producer.record_id_for_output() {
+                    if let Some(record_id) = record_id {
                         msg.headers.insert(
                             headers::RECORD_ID.into(),
                             camel_component_api::Value::String(record_id),
@@ -568,6 +629,7 @@ mod tests {
             limit: Some(10),
             query: None,
             function: None,
+            ..Default::default()
         };
         SurrealDbProducer::new(config, None, "test-route")
     }
@@ -746,31 +808,124 @@ mod tests {
     }
 
     #[test]
-    fn record_id_header_for_relate_is_none() {
-        // RELATE creates an edge record server-side; its id is not the source
-        // node (`from`). To match create/vector, the header is omitted and
-        // downstream consumers read `body.id` (the edge record's id) instead.
+    fn record_id_for_output_for_relate_is_none() {
+        // record_id_for_output (URI-config path) is None for relate: the edge
+        // id is server-generated. After Option B, the CamelSurrealDbRecordId
+        // header is instead set by extracting the edge id from the response
+        // body — see record_id_from_body_for_relate_extracts_edge_id.
         let producer = make_producer(SurrealDbOperation::Relate);
         assert_eq!(producer.record_id_for_output(), None);
     }
 
     #[test]
-    fn record_id_header_for_create_is_none() {
-        // create generates IDs server-side; no header (downstream reads body.id).
+    fn record_id_from_body_for_relate_extracts_edge_id() {
+        // After Option B: the CamelSurrealDbRecordId header IS set for relate
+        // by extracting the EDGE record's id (not the source node) from the
+        // response body.
+        let producer = make_producer(SurrealDbOperation::Relate);
+        let body = serde_json::json!({
+            "id": "knows:abc123",
+            "in": "user:1",
+            "out": "topic:42",
+            "weight": 0.9
+        });
+        assert_eq!(
+            producer.record_id_from_body(&body).as_deref(),
+            Some("knows:abc123")
+        );
+    }
+
+    #[test]
+    fn record_id_for_output_for_create_is_none() {
+        // record_id_for_output (URI-config path) is None for create: the id is
+        // server-generated. The header is set via record_id_from_body instead.
         let producer = make_producer(SurrealDbOperation::Create);
         assert_eq!(producer.record_id_for_output(), None);
     }
 
     #[test]
-    fn record_id_header_for_vector_is_none() {
+    fn record_id_for_output_for_vector_is_none() {
         let producer = make_producer(SurrealDbOperation::Vector);
         assert_eq!(producer.record_id_for_output(), None);
     }
 
     #[test]
-    fn record_id_header_for_search_is_none() {
+    fn record_id_for_output_for_search_is_none() {
         let producer = make_producer(SurrealDbOperation::Search);
         assert_eq!(producer.record_id_for_output(), None);
+    }
+
+    // --- record_id_from_body tests (Option B: extract id from response body) ---
+
+    #[test]
+    fn record_id_from_body_extracts_object_id() {
+        let producer = make_producer(SurrealDbOperation::Create);
+        let body = serde_json::json!({"id": "user:42", "name": "alice"});
+        assert_eq!(
+            producer.record_id_from_body(&body).as_deref(),
+            Some("user:42")
+        );
+    }
+
+    #[test]
+    fn record_id_from_body_extracts_first_array_element_id() {
+        let producer = make_producer(SurrealDbOperation::Create);
+        let body = serde_json::json!([
+            {"id": "user:1", "name": "a"},
+            {"id": "user:2", "name": "b"}
+        ]);
+        assert_eq!(
+            producer.record_id_from_body(&body).as_deref(),
+            Some("user:1")
+        );
+    }
+
+    #[test]
+    fn record_id_from_body_extracts_object_form_record_id() {
+        // SurrealDB may serialize a RecordId as {"tb": <table>, "id": <key>}.
+        let producer = make_producer(SurrealDbOperation::Create);
+        let body = serde_json::json!({"id": {"tb": "user", "id": 42}, "name": "alice"});
+        assert_eq!(
+            producer.record_id_from_body(&body).as_deref(),
+            Some("user:42")
+        );
+    }
+
+    #[test]
+    fn record_id_from_body_returns_none_when_id_missing() {
+        let producer = make_producer(SurrealDbOperation::Create);
+        let body = serde_json::json!({"name": "alice"});
+        assert_eq!(producer.record_id_from_body(&body), None);
+    }
+
+    #[test]
+    fn record_id_from_body_returns_none_when_id_invalid_record_id() {
+        let producer = make_producer(SurrealDbOperation::Create);
+        // Bare key (no `table:` prefix) is not a valid RecordId.
+        let body = serde_json::json!({"id": "barekey"});
+        assert_eq!(producer.record_id_from_body(&body), None);
+    }
+
+    #[test]
+    fn record_id_from_body_returns_none_for_empty_array() {
+        let producer = make_producer(SurrealDbOperation::Create);
+        let body = serde_json::json!([]);
+        assert_eq!(producer.record_id_from_body(&body), None);
+    }
+
+    #[test]
+    fn record_id_from_body_returns_none_for_non_object_non_array() {
+        let producer = make_producer(SurrealDbOperation::Create);
+        let body = serde_json::json!("just a string");
+        assert_eq!(producer.record_id_from_body(&body), None);
+    }
+
+    #[test]
+    fn record_id_from_body_returns_none_when_id_is_not_string_or_object() {
+        let producer = make_producer(SurrealDbOperation::Create);
+        let body = serde_json::json!({"id": 42});
+        // A bare number is not a valid table:key RecordId string form.
+        assert_eq!(producer.record_id_from_body(&body), None);
     }
 
     // --- Body contract / alternative input paths ---
