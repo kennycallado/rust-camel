@@ -563,6 +563,7 @@ impl LlmProducer {
                                 name,
                                 arguments,
                             } => {
+                                cs.store(true, Ordering::SeqCst);
                                 tool_calls.push(EmittedToolCall {
                                     id,
                                     name,

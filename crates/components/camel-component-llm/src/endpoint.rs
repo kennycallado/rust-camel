@@ -143,7 +143,7 @@ impl Endpoint for LlmEndpoint {
         // Build cache from config, if configured.
         let cache = cache_info.map(|(ttl_secs, max_entries)| {
             if max_entries.is_some() {
-                tracing::debug!(
+                tracing::warn!(
                     route_id = %route_id,
                     "cache_max_entries is configured but NOT yet enforced (LRU eviction deferred)"
                 );

@@ -137,13 +137,12 @@ impl ProducerCache {
 
     /// Look up a cached entry by key.
     /// Returns `None` if the key is absent or the entry has expired (TTL).
+    /// Expired entries are removed lazily on access.
     pub fn get(&self, key: &str) -> Option<(String, Option<LlmUsage>)> {
         let e = self.entries.get(key)?;
         if e.stored_at.elapsed() > self.ttl {
-            // Entry expired — drop it.
-            // We cannot remove inside a read guard; dropping the guard
-            // and removing separately is racy but harmless (next miss
-            // will overwrite).
+            drop(e);
+            self.entries.remove(key);
             return None;
         }
         Some((e.text.clone(), e.usage))
