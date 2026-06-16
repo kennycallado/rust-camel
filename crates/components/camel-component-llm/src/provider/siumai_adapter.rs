@@ -9,6 +9,7 @@
 //! rather than synchronously via `block_on` at `build_openai`/`build_ollama` time.
 //! This avoids panics when the builder is called from within a tokio runtime.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -42,9 +43,11 @@ use crate::config::OllamaProviderConfig;
 #[cfg(any(feature = "openai", feature = "all-providers"))]
 use crate::config::OpenaiProviderConfig;
 use crate::error::LlmError;
+#[cfg(test)]
+use crate::provider::EmittedToolCall;
 use crate::provider::{
     ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmbedResponse, FinishReason,
-    LlmProvider, LlmUsage,
+    LlmProvider, LlmUsage, ToolChoice, ToolDefinition,
 };
 
 use siumai_core::builder::BuilderBase;
@@ -53,8 +56,8 @@ use siumai_core::error::LlmError as SiumaiLlmError;
 use siumai_core::traits::EmbeddingExtensions;
 use siumai_core::traits::{ChatCapability, EmbeddingCapability};
 use siumai_core::types::{
-    ChatMessage as SiumaiChatMessage, ChatRequest as SiumaiChatRequest, CommonParams,
-    EmbeddingRequest as SiumaiEmbeddingRequest,
+    ChatMessage as SiumaiChatMessage, ChatRequest as SiumaiChatRequest, CommonParams, ContentPart,
+    EmbeddingRequest as SiumaiEmbeddingRequest, Tool as SiumaiTool, ToolChoice as SiumaiToolChoice,
 };
 
 // ============================================================================
@@ -178,13 +181,22 @@ impl LlmProvider for SiumaiProvider {
                 .map_err(map_siumai_error)?;
 
             let mut stream = siumai_stream;
+            // Tool-call accumulator: tool_call_id -> (tool_name, accumulated_args)
+            let mut tool_call_buffers: HashMap<String, (String, String)> = HashMap::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok(event) => match convert_stream_event(event) {
-                        Ok(Some(our_event)) => yield our_event,
-                        Ok(None) => {} // skip metadata-only events
-                        Err(e) => Err(e)?,
-                    },
+                    Ok(event) => {
+                        // Check for tool-call streaming deltas first (stateful).
+                        if let Some(tc_event) = extract_tool_call_event(&event, &mut tool_call_buffers) {
+                            yield tc_event;
+                            continue;
+                        }
+                        match convert_stream_event(event) {
+                            Ok(Some(our_event)) => yield our_event,
+                            Ok(None) => {} // skip metadata-only events
+                            Err(e) => Err(e)?,
+                        }
+                    }
                     Err(e) => {
                         Err(map_siumai_error(e))?;
                     }
@@ -367,6 +379,70 @@ pub fn build_ollama(
 // Type conversions
 // ============================================================================
 
+/// Convert a Camel `ToolDefinition` to a siumai `Tool`.
+fn map_tool_definition(def: ToolDefinition) -> SiumaiTool {
+    SiumaiTool::function(
+        def.name,
+        def.description,
+        serde_json::Value::Object(def.parameters),
+    )
+}
+
+/// Convert a Camel `ToolChoice` to a siumai `ToolChoice`.
+fn map_tool_choice(choice: ToolChoice) -> SiumaiToolChoice {
+    match choice {
+        ToolChoice::Auto => SiumaiToolChoice::Auto,
+        ToolChoice::None => SiumaiToolChoice::None,
+        ToolChoice::Specific(name) => SiumaiToolChoice::tool(name),
+    }
+}
+
+/// Extract a completed `ChatEvent::ToolCall` from siumai tool-input stream deltas.
+///
+/// Maintains an accumulator buffer keyed by tool-call id. Returns `Some(ChatEvent::ToolCall)`
+/// only when a `ToolInputEnd` is seen. `ToolInputStart` initialises the buffer and returns
+/// `None` (no emission until the call is complete). `ToolInputDelta` appends to the buffer
+/// and returns `None`.
+fn extract_tool_call_event(
+    event: &siumai_core::streaming::ChatStreamEvent,
+    buffers: &mut HashMap<String, (String, String)>,
+) -> Option<ChatEvent> {
+    let part = match event {
+        siumai_core::streaming::ChatStreamEvent::Part { part } => part,
+        siumai_core::streaming::ChatStreamEvent::PartWithReplay { part, .. } => part,
+        _ => return None,
+    };
+
+    match part {
+        siumai_core::types::ChatStreamPart::ToolInputStart { id, tool_name, .. } => {
+            buffers.insert(id.clone(), (tool_name.clone(), String::new()));
+            // Buffer initialised — no event emitted. Wait for ToolInputEnd.
+            None
+        }
+        siumai_core::types::ChatStreamPart::ToolInputDelta { id, delta, .. } => {
+            if let Some((_, args)) = buffers.get_mut(id) {
+                args.push_str(delta);
+            } else {
+                tracing::warn!("tool call delta without prior start: id={}", id);
+            }
+            None
+        }
+        siumai_core::types::ChatStreamPart::ToolInputEnd { id, .. } => {
+            if let Some((name, args)) = buffers.remove(id) {
+                Some(ChatEvent::ToolCall {
+                    id: id.clone(),
+                    name,
+                    arguments: args,
+                })
+            } else {
+                tracing::warn!("tool call end without prior start: id={}", id);
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Convert our `ChatRequest` to a siumai `ChatRequest`.
 fn convert_chat_request(req: ChatRequest, default_model: &str) -> SiumaiChatRequest {
     // Move model instead of cloning — it's only used once.
@@ -396,6 +472,12 @@ fn convert_chat_request(req: ChatRequest, default_model: &str) -> SiumaiChatRequ
         messages,
         common_params,
         stream: true,
+        tools: if req.tools.is_empty() {
+            None
+        } else {
+            Some(req.tools.into_iter().map(map_tool_definition).collect())
+        },
+        tool_choice: req.tool_choice.map(map_tool_choice),
         ..Default::default()
     }
 }
@@ -407,7 +489,28 @@ fn convert_chat_message(msg: ChatMessage) -> SiumaiChatMessage {
     match msg.role {
         ChatRole::System => SiumaiChatMessage::system(msg.content).build(),
         ChatRole::User => SiumaiChatMessage::user(msg.content).build(),
-        ChatRole::Assistant => SiumaiChatMessage::assistant(msg.content).build(),
+        ChatRole::Assistant => {
+            if let Some(tool_calls) = msg.tool_calls
+                && !tool_calls.is_empty()
+            {
+                let mut parts = Vec::with_capacity(tool_calls.len() + 1);
+                if !msg.content.is_empty() {
+                    parts.push(ContentPart::text(msg.content));
+                }
+                for tc in tool_calls {
+                    let args =
+                        serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+                    parts.push(ContentPart::tool_call(tc.id, tc.name, args, None));
+                }
+                return SiumaiChatMessage::assistant_with_content(parts).build();
+            }
+            SiumaiChatMessage::assistant(msg.content).build()
+        }
+        ChatRole::Tool { tool_call_id } => {
+            // Tool result messages: content is the tool output.
+            // Tool name is not available at this level, pass empty string.
+            SiumaiChatMessage::tool_result_text(tool_call_id, "", msg.content).build()
+        }
     }
 }
 
@@ -461,6 +564,11 @@ fn convert_stream_part(part: siumai_core::types::ChatStreamPart) -> Option<ChatE
                 metadata: serde_json::Map::new(),
             })
         }
+        siumai_core::types::ChatStreamPart::ToolCall(call) => Some(ChatEvent::ToolCall {
+            id: call.tool_call_id.clone(),
+            name: call.tool_name.clone(),
+            arguments: call.input.clone(),
+        }),
         _ => None,
     }
 }
@@ -595,111 +703,9 @@ fn map_siumai_error(e: SiumaiLlmError) -> LlmError {
 }
 
 // ============================================================================
-// Tests
+// Tests — extracted to separate file to keep main file under 1000 lines
 // ============================================================================
 
 #[cfg(all(test, feature = "openai"))]
-mod tests {
-    use super::*;
-    use futures::future::join_all;
-    use siumai_core::error::LlmError as SiumaiLlmError;
-    use siumai_core::streaming::ChatStream;
-    use siumai_core::types::{
-        ChatMessage as SiumaiChatMessage, ChatResponse, EmbeddingResponse, Tool,
-    };
-
-    /// Stub chat capability — never called by `embed()` but must be constructable
-    /// so it can be placed in `CachedClient` inside the build override.
-    struct StubChat;
-
-    #[async_trait::async_trait]
-    impl ChatCapability for StubChat {
-        async fn chat_with_tools(
-            &self,
-            _messages: Vec<SiumaiChatMessage>,
-            _tools: Option<Vec<Tool>>,
-        ) -> Result<ChatResponse, SiumaiLlmError> {
-            unreachable!("StubChat should not be called in OnceCell dedup test")
-        }
-
-        async fn chat_stream(
-            &self,
-            _messages: Vec<SiumaiChatMessage>,
-            _tools: Option<Vec<Tool>>,
-        ) -> Result<ChatStream, SiumaiLlmError> {
-            unreachable!("StubChat should not be called in OnceCell dedup test")
-        }
-    }
-
-    /// Stub embedding capability — returns a valid embedding response so the
-    /// production `embed()` method can complete successfully.
-    struct StubEmbed;
-
-    #[async_trait::async_trait]
-    impl EmbeddingCapability for StubEmbed {
-        async fn embed(&self, _input: Vec<String>) -> Result<EmbeddingResponse, SiumaiLlmError> {
-            Ok(EmbeddingResponse::new(
-                vec![vec![1.0, 2.0, 3.0]],
-                "stub-model".into(),
-            ))
-        }
-
-        fn as_embedding_extensions(&self) -> Option<&dyn EmbeddingExtensions> {
-            Some(self)
-        }
-
-        fn embedding_dimension(&self) -> usize {
-            3
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl EmbeddingExtensions for StubEmbed {}
-
-    /// Verifies that the production `embed()` method constructs the client
-    /// exactly once under 8-way concurrency.
-    ///
-    /// Uses a build override to avoid network I/O while exercising the real
-    /// `build_cached_client` → `OnceCell::get_or_try_init` code path.
-    #[tokio::test]
-    async fn client_built_once_under_concurrency() {
-        let stub_builder: BuildOverride = Arc::new(|| {
-            Box::pin(async {
-                Ok::<_, LlmError>((
-                    Arc::new(StubChat) as Arc<dyn ChatCapability>,
-                    Arc::new(StubEmbed) as Arc<dyn EmbeddingCapability>,
-                ))
-            })
-        });
-
-        let provider = Arc::new(SiumaiProvider::new_with_build_override(
-            "test",
-            "gpt-4",
-            SiumaiConfig::OpenAi {
-                api_key: "sk-test".into(),
-                base_url: Some("http://127.0.0.1:1".into()),
-                model: "gpt-4".into(),
-            },
-            stub_builder,
-        ));
-        let builds = Arc::clone(&provider.client_builds);
-
-        // 8 concurrent calls to the PRODUCTION `embed()` method — exercises
-        // the real `OnceCell::get_or_try_init` path inside `build_cached_client`.
-        let mut futs = vec![];
-        for _ in 0..8 {
-            let p = Arc::clone(&provider);
-            futs.push(async move {
-                let _ = p
-                    .embed(EmbedRequest::new("gpt-4", vec!["hello".into()]))
-                    .await;
-            });
-        }
-        join_all(futs).await;
-        assert_eq!(
-            builds.load(Ordering::SeqCst),
-            1,
-            "OnceCell must construct the client exactly once across concurrent embed() calls"
-        );
-    }
-}
+#[path = "siumai_adapter_tests.rs"]
+mod tests;

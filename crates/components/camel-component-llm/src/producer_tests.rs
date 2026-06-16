@@ -21,6 +21,8 @@ fn make_producer_with_retry(
         None,
         None,
         retry,
+        None,
+        None,
     )
 }
 
@@ -44,6 +46,8 @@ fn make_producer_with_timeout_and_retry(
         None,
         Some(timeout),
         retry,
+        None,
+        None,
     )
 }
 
@@ -67,6 +71,8 @@ fn make_producer_with_concurrency_and_retry(
         semaphore,
         None,
         retry,
+        None,
+        None,
     )
 }
 
@@ -85,11 +91,41 @@ fn make_producer(stream: bool, operation: LlmOperation) -> LlmProducer {
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
 fn make_exchange(body: Body) -> Exchange {
     Exchange::new(Message::new(body))
+}
+
+/// Helper: create a producer with pricing configured for materialized mode.
+fn make_producer_with_pricing(
+    provider: Arc<dyn LlmProvider>,
+    input_price: f64,
+    output_price: f64,
+) -> LlmProducer {
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let pricing = Arc::new(crate::cost::PricingTable {
+        input_per_1k_tokens: input_price,
+        output_per_1k_tokens: output_price,
+    });
+    LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "test-route".into(),
+        None,
+        None,
+        None,
+        Some(pricing),
+        None,
+    )
 }
 
 // ---- handle_chat (materialized) ----
@@ -131,6 +167,27 @@ async fn chat_materialized_sets_finish_reason() {
     let mut exchange = make_exchange(Body::Text("hello".into()));
     producer.handle_chat(&mut exchange).await.expect("chat ok");
     assert!(exchange.input.headers.contains_key(CAMEL_LLM_FINISH_REASON));
+}
+
+#[tokio::test]
+async fn cost_header_set_from_pricing_materialized() {
+    let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
+    let mut producer = make_producer_with_pricing(provider, 0.0025, 0.01);
+    let out = producer
+        .call(make_exchange(Body::Text("x".into())))
+        .await
+        .unwrap();
+    assert!(out.input.headers.contains_key(CAMEL_LLM_ESTIMATED_COST_USD));
+}
+
+#[tokio::test]
+async fn missing_pricing_no_cost_no_failure() {
+    let mut producer = make_producer(false, LlmOperation::Chat);
+    let out = producer
+        .call(make_exchange(Body::Text("x".into())))
+        .await
+        .unwrap();
+    assert!(!out.input.headers.contains_key(CAMEL_LLM_ESTIMATED_COST_USD));
 }
 
 // ---- handle_chat (streaming) ----
@@ -273,7 +330,17 @@ fn extract_prompt_from_stream_errors() {
 fn extract_prompt_enforces_max_bytes() {
     let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
     let config = LlmEndpointConfig::default();
-    let producer = LlmProducer::new(config, provider, 3, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        3,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let exchange = make_exchange(Body::Text("hello world".into()));
     assert!(producer.extract_prompt(&exchange).is_err());
 }
@@ -282,7 +349,17 @@ fn extract_prompt_enforces_max_bytes() {
 fn extract_prompt_allows_at_max_bytes() {
     let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
     let config = LlmEndpointConfig::default();
-    let producer = LlmProducer::new(config, provider, 5, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        5,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let exchange = make_exchange(Body::Text("hello".into()));
     assert!(producer.extract_prompt(&exchange).is_ok());
 }
@@ -293,9 +370,21 @@ fn extract_prompt_allows_at_max_bytes() {
 fn build_chat_request_falls_back_to_provider_model() {
     let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
     let config = LlmEndpointConfig::default();
-    let producer = LlmProducer::new(config, provider, 32768, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let exchange = make_exchange(Body::Text("hello".into()));
-    let req = producer.build_chat_request("hello", &exchange);
+    let req = producer
+        .build_chat_request("hello", &exchange)
+        .expect("build ok");
     assert_eq!(req.model, "mock-model");
 }
 
@@ -306,9 +395,21 @@ fn build_chat_request_uses_config_model() {
         model: Some("gpt-4o".into()),
         ..Default::default()
     };
-    let producer = LlmProducer::new(config, provider, 32768, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let exchange = make_exchange(Body::Text("hello".into()));
-    let req = producer.build_chat_request("hello", &exchange);
+    let req = producer
+        .build_chat_request("hello", &exchange)
+        .expect("build ok");
     assert_eq!(req.model, "gpt-4o");
 }
 
@@ -316,13 +417,25 @@ fn build_chat_request_uses_config_model() {
 fn build_chat_request_uses_header_model() {
     let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
     let config = LlmEndpointConfig::default();
-    let producer = LlmProducer::new(config, provider, 32768, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let mut exchange = make_exchange(Body::Text("hello".into()));
     exchange
         .input
         .headers
         .insert(CAMEL_LLM_MODEL.into(), Value::String("header-model".into()));
-    let req = producer.build_chat_request("hello", &exchange);
+    let req = producer
+        .build_chat_request("hello", &exchange)
+        .expect("build ok");
     assert_eq!(req.model, "header-model");
 }
 
@@ -333,9 +446,21 @@ fn build_chat_request_uses_temperature_from_config() {
         temperature: Some(0.5),
         ..Default::default()
     };
-    let producer = LlmProducer::new(config, provider, 32768, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let exchange = make_exchange(Body::Text("hello".into()));
-    let req = producer.build_chat_request("hello", &exchange);
+    let req = producer
+        .build_chat_request("hello", &exchange)
+        .expect("build ok");
     assert_eq!(req.temperature, Some(0.5));
 }
 
@@ -346,9 +471,21 @@ fn build_chat_request_uses_max_tokens_from_config() {
         max_tokens: Some(100),
         ..Default::default()
     };
-    let producer = LlmProducer::new(config, provider, 32768, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let exchange = make_exchange(Body::Text("hello".into()));
-    let req = producer.build_chat_request("hello", &exchange);
+    let req = producer
+        .build_chat_request("hello", &exchange)
+        .expect("build ok");
     assert_eq!(req.max_tokens, Some(100));
 }
 
@@ -359,9 +496,21 @@ fn build_chat_request_respects_system_prompt_from_config() {
         system_prompt: Some("be helpful".into()),
         ..Default::default()
     };
-    let producer = LlmProducer::new(config, provider, 32768, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let exchange = make_exchange(Body::Text("hello".into()));
-    let req = producer.build_chat_request("hello", &exchange);
+    let req = producer
+        .build_chat_request("hello", &exchange)
+        .expect("build ok");
     assert_eq!(req.system_prompt.as_deref(), Some("be helpful"));
 }
 
@@ -369,9 +518,21 @@ fn build_chat_request_respects_system_prompt_from_config() {
 fn build_chat_request_includes_user_message() {
     let provider = Arc::new(MockProvider::new("test", MockMode::Fixed("hi".into())));
     let config = LlmEndpointConfig::default();
-    let producer = LlmProducer::new(config, provider, 32768, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let exchange = make_exchange(Body::Text("hello".into()));
-    let req = producer.build_chat_request("hello", &exchange);
+    let req = producer
+        .build_chat_request("hello", &exchange)
+        .expect("build ok");
     assert_eq!(req.messages.len(), 1);
     assert_eq!(req.messages[0].content, "hello");
     assert_eq!(req.messages[0].role, ChatRole::User);
@@ -438,7 +599,17 @@ fn set_start_headers_sets_model_when_configured() {
         model: Some("gpt-4o".into()),
         ..Default::default()
     };
-    let producer = LlmProducer::new(config, provider, 32768, "route".into(), None, None, None);
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let mut exchange = make_exchange(Body::Empty);
     producer.set_start_headers(&mut exchange);
     assert_eq!(
@@ -469,6 +640,8 @@ fn make_producer_with_semaphore(
         32768,
         "test-route".into(),
         semaphore,
+        None,
+        None,
         None,
         None,
     )
@@ -603,6 +776,8 @@ fn make_producer_with_timeout(
         None,
         Some(timeout),
         None,
+        None,
+        None,
     )
 }
 
@@ -664,6 +839,8 @@ async fn materialized_no_timeout_does_not_fire() {
         provider,
         32768,
         "test-route".into(),
+        None,
+        None,
         None,
         None,
         None,
@@ -888,6 +1065,172 @@ async fn permit_released_during_retry_backoff() {
 // -----------------------------------------------------------------------
 
 /// Verifies that embed retries on transient failure.
+// -----------------------------------------------------------------------
+// Multi-turn messages header test
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn messages_header_parsed_into_request() {
+    let provider = Arc::new(MockProvider::new("test", MockMode::Echo));
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "test-route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let mut exchange = make_exchange(Body::Text("latest prompt".into()));
+
+    // Set a multi-turn messages header
+    exchange.input.headers.insert(
+        CAMEL_LLM_MESSAGES.to_string(),
+        serde_json::json!([
+            {
+                "role": "User",
+                "content": "what's the temperature?",
+                "tool_calls": null,
+            },
+            {
+                "role": "Assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "get_temperature",
+                        "arguments": r#"{"city":"London"}"#,
+                    }
+                ],
+            },
+            {
+                "role": {"Tool": {"tool_call_id": "call_1"}},
+                "content": "22°C",
+                "tool_calls": null,
+            },
+        ]),
+    );
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+    // Body should be from the echo of multi-turn user messages.
+    // Echo mode concatenates only User-role messages.
+    match &exchange.input.body {
+        Body::Text(s) => {
+            assert!(s.contains("what's the temperature"), "text: {s}");
+        }
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+// -----------------------------------------------------------------------
+// Tool call parsing tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn tools_header_is_parsed_into_request() {
+    let mock = Arc::new(
+        MockProvider::new("test", MockMode::Fixed("dummy".into())).with_tool_call(
+            "call_1",
+            "get_weather",
+            r#"{"city":"London"}"#,
+        ),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: true,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "test-route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let mut exchange = make_exchange(Body::Text("what's the weather?".into()));
+
+    // Set tools header
+    exchange.input.headers.insert(
+        CAMEL_LLM_TOOLS.to_string(),
+        serde_json::json!([
+            {
+                "name": "get_weather",
+                "description": "Get weather for a city",
+                "parameters": {}
+            }
+        ]),
+    );
+
+    producer.handle_chat(&mut exchange).await.expect("chat ok");
+
+    // Consume the stream — should get a tool call JSON chunk
+    let body = std::mem::replace(&mut exchange.input.body, Body::Empty);
+    assert!(matches!(body, Body::Stream(_)), "expected stream body");
+    let sb = match body {
+        Body::Stream(sb) => sb,
+        _ => unreachable!(),
+    };
+    let mut guard = sb.stream.lock().await;
+    let stream = guard
+        .as_mut()
+        .expect("stream must be present after handle_chat");
+    let chunk = stream.next().await.unwrap().expect("chunk ok");
+    let text = String::from_utf8_lossy(&chunk);
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json chunk");
+    assert_eq!(parsed["type"], "tool_call");
+    assert_eq!(parsed["id"], "call_1");
+    assert_eq!(parsed["name"], "get_weather");
+    assert_eq!(parsed["arguments"], r#"{"city":"London"}"#);
+}
+
+#[tokio::test]
+async fn malformed_tools_header_errors_before_provider_call() {
+    let mock = Arc::new(MockProvider::new("test", MockMode::Fixed("dummy".into())));
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Chat,
+        stream: false,
+        ..Default::default()
+    };
+    let producer = LlmProducer::new(
+        config,
+        provider,
+        32768,
+        "test-route".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let mut exchange = make_exchange(Body::Text("hello".into()));
+
+    exchange.input.headers.insert(
+        CAMEL_LLM_TOOLS.to_string(),
+        Value::String("not valid json".into()),
+    );
+
+    let result = producer.handle_chat(&mut exchange).await;
+    assert!(result.is_err(), "malformed tools header should error");
+    assert_eq!(
+        mock.call_count(),
+        0,
+        "provider must not be called when tools header is malformed"
+    );
+}
+
 #[tokio::test]
 async fn embed_retries_on_transient_failure() {
     let mock = Arc::new(
@@ -916,6 +1259,8 @@ async fn embed_retries_on_transient_failure() {
         None,
         None,
         Some(policy),
+        None,
+        None,
     );
     let _ = producer.call(make_exchange(Body::Text("x".into()))).await;
     assert_eq!(mock.call_count(), 2, "embed must retry transient failures");

@@ -55,6 +55,8 @@ pub struct MockProvider {
     /// Whether any stream was cancelled (dropped before completion).
     cancelled: Arc<AtomicBool>,
     track_cancel: bool,
+    /// Optional tool call to emit (id, name, arguments).
+    tool_call: Option<(String, String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +122,7 @@ impl MockProvider {
             track_concurrent: false,
             cancelled: Arc::new(AtomicBool::new(false)),
             track_cancel: false,
+            tool_call: None,
         }
     }
 
@@ -162,6 +165,18 @@ impl MockProvider {
     /// peak concurrent count.
     pub fn with_concurrent_tracker(mut self) -> Self {
         self.track_concurrent = true;
+        self
+    }
+
+    /// Emit a `ChatEvent::ToolCall` followed by `ChatEvent::Finished`
+    /// with `FinishReason::ToolCall` instead of a text delta.
+    pub fn with_tool_call(
+        mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        args: impl Into<String>,
+    ) -> Self {
+        self.tool_call = Some((id.into(), name.into(), args.into()));
         self
     }
 
@@ -216,6 +231,7 @@ impl LlmProvider for MockProvider {
         let track_cancel = self.track_cancel;
         let mode = self.mode.clone();
         let model = req.model.clone();
+        let tool_call = self.tool_call.clone();
 
         let s = async_stream::stream! {
             // Guards at the TOP so they cover delay and every exit path.
@@ -245,6 +261,27 @@ impl LlmProvider for MockProvider {
             if let Some(e) = fail {
                 finished.store(true, Ordering::SeqCst);
                 yield Err(e);
+                return;
+            }
+
+            // Tool call mode — emit ToolCall then Finished with ToolCall reason
+            if let Some((ref tc_id, ref tc_name, ref tc_args)) = tool_call {
+                yield Ok(ChatEvent::ToolCall {
+                    id: tc_id.clone(),
+                    name: tc_name.clone(),
+                    arguments: tc_args.clone(),
+                });
+                finished.store(true, Ordering::SeqCst);
+                yield Ok(ChatEvent::Finished {
+                    usage: Some(LlmUsage {
+                        prompt_tokens: 1,
+                        completion_tokens: 0,
+                        total_tokens: 1,
+                    }),
+                    model: Some(model),
+                    finish_reason: Some(FinishReason::ToolCall),
+                    metadata: serde_json::Map::new(),
+                });
                 return;
             }
 
@@ -346,6 +383,7 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.expect("stream ok") {
                 ChatEvent::Delta { text: t } => text.push_str(&t),
+                ChatEvent::ToolCall { .. } => {}
                 ChatEvent::Finished { .. } => {}
             }
         }
@@ -362,6 +400,7 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.expect("stream ok") {
                 ChatEvent::Delta { text: t } => text.push_str(&t),
+                ChatEvent::ToolCall { .. } => {}
                 ChatEvent::Finished { .. } => {}
             }
         }

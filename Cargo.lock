@@ -1500,6 +1500,7 @@ dependencies = [
  "camel-component-mock",
  "camel-component-timer",
  "camel-core",
+ "dashmap 6.2.1",
  "futures",
  "serde",
  "serde_json",

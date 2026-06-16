@@ -38,6 +38,7 @@ pub trait LlmProvider: Send + Sync {
 
 /// An event in a chat completion stream.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ChatEvent {
     /// A partial text delta from the stream.
     Delta {
@@ -54,6 +55,15 @@ pub enum ChatEvent {
         finish_reason: Option<FinishReason>,
         /// Provider-specific metadata.
         metadata: serde_json::Map<String, serde_json::Value>,
+    },
+    /// An intermediate tool call emitted during streaming.
+    ToolCall {
+        /// Tool call identifier.
+        id: String,
+        /// Name of the tool to invoke.
+        name: String,
+        /// JSON arguments for the tool.
+        arguments: String,
     },
 }
 
@@ -83,6 +93,39 @@ pub enum FinishReason {
     Other(String),
 }
 
+/// Definition of a tool the model may call.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolDefinition {
+    /// Name of the tool (e.g., "get_weather").
+    pub name: String,
+    /// Description of what the tool does.
+    pub description: String,
+    /// JSON Schema parameters for the tool.
+    pub parameters: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Controls how the model chooses which tool to call.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ToolChoice {
+    /// Model may decide to call zero or more tools.
+    Auto,
+    /// Model must not call any tool.
+    None,
+    /// Model must call the named tool.
+    Specific(String),
+}
+
+/// A tool call emitted by the model as part of an assistant message.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EmittedToolCall {
+    /// Unique identifier for this tool call.
+    pub id: String,
+    /// Name of the tool to invoke.
+    pub name: String,
+    /// JSON string of arguments for the tool.
+    pub arguments: String,
+}
+
 /// A request to a chat completion model.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
@@ -98,6 +141,10 @@ pub struct ChatRequest {
     pub stop: Option<Vec<String>>,
     /// System prompt override.
     pub system_prompt: Option<String>,
+    /// Tools available for the model to call.
+    pub tools: Vec<ToolDefinition>,
+    /// Controls tool selection behaviour.
+    pub tool_choice: Option<ToolChoice>,
     /// Additional provider-specific parameters.
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -112,18 +159,22 @@ impl ChatRequest {
             max_tokens: None,
             stop: None,
             system_prompt: None,
+            tools: Vec::new(),
+            tool_choice: None,
             extra: serde_json::Map::new(),
         }
     }
 }
 
 /// A single message in a chat conversation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     /// Role of the message author.
     pub role: ChatRole,
     /// Content of the message.
     pub content: String,
+    /// Tool calls made by the assistant, if any.
+    pub tool_calls: Option<Vec<EmittedToolCall>>,
 }
 
 impl ChatMessage {
@@ -132,12 +183,14 @@ impl ChatMessage {
         Self {
             role: ChatRole::User,
             content: content.into(),
+            tool_calls: None,
         }
     }
 }
 
 /// Role of a chat message author.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum ChatRole {
     /// System instruction.
     System,
@@ -145,6 +198,11 @@ pub enum ChatRole {
     User,
     /// Assistant response.
     Assistant,
+    /// Tool result message carrying the output of a tool call.
+    Tool {
+        /// The identifier of the tool call this result belongs to.
+        tool_call_id: String,
+    },
 }
 
 /// A request to generate embeddings.
@@ -192,5 +250,59 @@ mod tests {
         assert_eq!(req.model, "gpt-4o");
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, ChatRole::User);
+    }
+
+    #[test]
+    fn chat_request_accepts_tools() {
+        let tool = ToolDefinition {
+            name: "get_weather".into(),
+            description: "Get weather for a city".into(),
+            parameters: serde_json::Map::new(),
+        };
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![ChatMessage::user("what's the weather?")],
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            system_prompt: None,
+            extra: serde_json::Map::new(),
+            tools: vec![tool],
+            tool_choice: Some(ToolChoice::Auto),
+        };
+        assert_eq!(req.tools.len(), 1);
+        assert_eq!(req.tools[0].name, "get_weather");
+        assert_eq!(req.tool_choice, Some(ToolChoice::Auto));
+    }
+
+    #[test]
+    fn tool_message_carries_tool_call_id() {
+        let msg = ChatMessage {
+            role: ChatRole::Tool {
+                tool_call_id: "call_123".into(),
+            },
+            content: "weather result".into(),
+            tool_calls: None,
+        };
+        match &msg.role {
+            ChatRole::Tool { tool_call_id } => assert_eq!(tool_call_id, "call_123"),
+            _ => panic!("expected Tool role"),
+        }
+    }
+
+    #[test]
+    fn assistant_message_carries_prior_tool_calls() {
+        let tool_call = EmittedToolCall {
+            id: "call_123".into(),
+            name: "get_weather".into(),
+            arguments: r#"{"city":"London"}"#.into(),
+        };
+        let msg = ChatMessage {
+            role: ChatRole::Assistant,
+            content: "I'll check the weather".into(),
+            tool_calls: Some(vec![tool_call]),
+        };
+        assert_eq!(msg.tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(msg.tool_calls.as_ref().unwrap()[0].id, "call_123");
     }
 }

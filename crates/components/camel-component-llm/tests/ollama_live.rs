@@ -34,6 +34,9 @@ fn make_ollama_component() -> LlmComponent {
             timeout_secs: None,
             max_concurrency: None,
             network_retry: None,
+            pricing: None,
+            cache_ttl_secs: None,
+            cache_max_entries: None,
         }),
     );
     LlmComponent::new(LlmGlobalConfig {

@@ -5,7 +5,11 @@ use std::path::PathBuf;
 #[test]
 fn no_siumai_imports_outside_adapter() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let allowed_files = ["provider/siumai_adapter.rs", "provider_factory.rs"];
+    let allowed_files = [
+        "provider/siumai_adapter.rs",
+        "provider/siumai_adapter_tests.rs",
+        "provider_factory.rs",
+    ];
 
     let mut violations = Vec::new();
 

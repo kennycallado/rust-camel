@@ -10,6 +10,12 @@ pub const CAMEL_LLM_TOKENS_IN: &str = "CamelLlmTokensIn";
 pub const CAMEL_LLM_TOKENS_OUT: &str = "CamelLlmTokensOut";
 pub const CAMEL_LLM_FINISH_REASON: &str = "CamelLlmFinishReason";
 pub const CAMEL_LLM_USAGE_AVAILABLE: &str = "CamelLlmUsageAvailable";
+pub const CAMEL_LLM_TOOLS: &str = "CamelLlmTools";
+pub const CAMEL_LLM_TOOL_CHOICE: &str = "CamelLlmToolChoice";
+pub const CAMEL_LLM_TOOL_CALLS: &str = "CamelLlmToolCalls";
+pub const CAMEL_LLM_ESTIMATED_COST_USD: &str = "CamelLlmEstimatedCostUsd";
+pub const CAMEL_LLM_MESSAGES: &str = "CamelLlmMessages";
+pub const CAMEL_LLM_TEXT: &str = "CamelLlmText";
 
 #[cfg(test)]
 mod tests {
@@ -27,5 +33,11 @@ mod tests {
         assert_eq!(CAMEL_LLM_TOKENS_OUT, "CamelLlmTokensOut");
         assert_eq!(CAMEL_LLM_FINISH_REASON, "CamelLlmFinishReason");
         assert_eq!(CAMEL_LLM_USAGE_AVAILABLE, "CamelLlmUsageAvailable");
+        assert_eq!(CAMEL_LLM_TOOLS, "CamelLlmTools");
+        assert_eq!(CAMEL_LLM_TOOL_CHOICE, "CamelLlmToolChoice");
+        assert_eq!(CAMEL_LLM_TOOL_CALLS, "CamelLlmToolCalls");
+        assert_eq!(CAMEL_LLM_ESTIMATED_COST_USD, "CamelLlmEstimatedCostUsd");
+        assert_eq!(CAMEL_LLM_MESSAGES, "CamelLlmMessages");
+        assert_eq!(CAMEL_LLM_TEXT, "CamelLlmText");
     }
 }

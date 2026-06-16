@@ -6,10 +6,12 @@
 
 pub mod bundle;
 pub mod config;
+pub mod cost;
 pub mod endpoint;
 pub mod error;
 pub mod headers;
 pub mod producer;
+pub mod producer_cache;
 pub mod provider;
 pub mod provider_factory;
 
@@ -18,10 +20,11 @@ pub use config::{
     LlmEndpointConfig, LlmGlobalConfig, LlmOperation, LlmProviderConfig, MockProviderConfig,
     OllamaProviderConfig, OpenaiProviderConfig,
 };
+pub use cost::PricingTable;
 pub use error::LlmError;
 pub use provider::{
-    ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmbedResponse, FinishReason,
-    LlmProvider, LlmUsage,
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmbedResponse, EmittedToolCall,
+    FinishReason, LlmProvider, LlmUsage, ToolChoice, ToolDefinition,
 };
 
 use std::sync::Arc;

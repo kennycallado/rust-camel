@@ -50,11 +50,29 @@ _Avoid_: connection pool, rate limiter
 The manual retry loop (ADR-0021) uses `RateLimit.retry_after` over exponential backoff when present. Materialized-only; no retry after content-start.
 _Avoid_: backoff override, provider delay
 
+**ToolDefinition / ToolChoice / ToolCall**:
+Tools the model may call, passed via `CamelLlmTools` header (JSON array). Component emits tool-call intent via `ChatEvent::ToolCall` — it NEVER executes tools (the route owns dispatch). Multi-turn: `ChatRole::Tool { tool_call_id }` carries prior tool results; assistant messages carry `tool_calls` for conversation history.
+_Avoid_: tool executor, tool runner
+
+**ProducerCache**:
+Materialized-only response cache at the producer level (not a provider decorator). Single-flight via `tokio::sync::watch` — leader detected by dashmap `Entry::Vacant`; waiters hold zero permits. Lookup before semaphore/retry/timeout. TTL-based; LRU eviction deferred. Stores usage (not cost).
+_Avoid_: response cache, query cache
+
+**PricingTable / cost observability**:
+Config-driven pricing (input/output per 1k tokens). Producer computes cost from final usage and emits `CamelLlmEstimatedCostUsd` header (materialized) + `tracing::info!` (both modes). Missing pricing → no cost, no failure.
+_Avoid_: billing, accounting
+
 ## Breaking changes (0.x)
 
 - `LlmGlobalConfig.timeout_secs`: `u64` → `Option<u64>` (use `None` for no timeout)
 - `OpenaiProviderConfig`/`OllamaProviderConfig`: new `network_retry` field (`Option<NetworkRetryPolicy>`)
 - `LlmProducer::new`: expanded signature — added `semaphore: Option<Arc<Semaphore>>`, `timeout: Option<Duration>`, `retry: Option<NetworkRetryPolicy>` parameters
+- `ChatRole`: dropped `Copy` (Tool variant holds a `String`); added `#[non_exhaustive]`
+- `ChatEvent`: added `#[non_exhaustive]`; new `ToolCall` variant
+- `ChatRequest`: new fields `tools: Vec<ToolDefinition>`, `tool_choice: Option<ToolChoice>`
+- `ChatMessage`: new field `tool_calls: Option<Vec<EmittedToolCall>>`
+- `build_chat_request`: return type changed from `ChatRequest` to `Result<ChatRequest, LlmError>`
+- `LlmProducer::new`: expanded to 9 params (added `pricing: Option<Arc<PricingTable>>`, `cache: Option<Arc<ProducerCache>>`)
 
 ## Log-level policy
 
@@ -66,3 +84,9 @@ _Avoid_: backoff override, provider delay
 | Config validation error | `error!` | Startup, fatal |
 | Retry attempt fired | `warn!` | Transient error, operational signal |
 | Timeout fired | `warn!` | Total deadline elapse, operational signal |
+| Tool call emitted (streaming) | `info!` | Observability for tool dispatch |
+| Tool call collected (materialized) | `info!` | Observability for tool dispatch |
+| Cost computed | `info!` | Cost observability per request |
+| Cache hit | `debug!` | Operational signal, not route-relevant |
+| Cache miss | `debug!` | Operational signal, not route-relevant |
+| Tool call delta without prior start | `warn!` | Provider protocol violation |

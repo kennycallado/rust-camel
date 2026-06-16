@@ -4,6 +4,8 @@ use std::fmt;
 use camel_component_api::CamelError;
 use camel_component_api::NetworkRetryPolicy;
 
+use crate::cost::PricingTable;
+
 fn default_max_prompt_bytes() -> usize {
     32768
 }
@@ -89,6 +91,36 @@ impl LlmProviderConfig {
             LlmProviderConfig::Mock(_) => None,
         }
     }
+
+    /// Extract the `pricing` from whichever provider variant,
+    /// returning `None` if the variant doesn't support it (e.g. Mock).
+    pub fn pricing(&self) -> Option<PricingTable> {
+        match self {
+            LlmProviderConfig::Openai(c) => c.pricing.clone(),
+            LlmProviderConfig::Ollama(c) => c.pricing.clone(),
+            LlmProviderConfig::Mock(_) => None,
+        }
+    }
+
+    /// Extract the `cache_ttl_secs` from whichever provider variant,
+    /// returning `None` if the variant doesn't support it (e.g. Mock).
+    pub fn cache_ttl_secs(&self) -> Option<u64> {
+        match self {
+            LlmProviderConfig::Openai(c) => c.cache_ttl_secs,
+            LlmProviderConfig::Ollama(c) => c.cache_ttl_secs,
+            LlmProviderConfig::Mock(_) => None,
+        }
+    }
+
+    /// Extract the `cache_max_entries` from whichever provider variant,
+    /// returning `None` if the variant doesn't support it (e.g. Mock).
+    pub fn cache_max_entries(&self) -> Option<usize> {
+        match self {
+            LlmProviderConfig::Openai(c) => c.cache_max_entries,
+            LlmProviderConfig::Ollama(c) => c.cache_max_entries,
+            LlmProviderConfig::Mock(_) => None,
+        }
+    }
 }
 
 impl fmt::Debug for LlmProviderConfig {
@@ -102,6 +134,9 @@ impl fmt::Debug for LlmProviderConfig {
                 .field("timeout_secs", &c.timeout_secs)
                 .field("max_concurrency", &c.max_concurrency)
                 .field("network_retry", &c.network_retry)
+                .field("pricing", &c.pricing)
+                .field("cache_ttl_secs", &c.cache_ttl_secs)
+                .field("cache_max_entries", &c.cache_max_entries)
                 .finish(),
             LlmProviderConfig::Ollama(c) => f
                 .debug_struct("Ollama")
@@ -110,6 +145,9 @@ impl fmt::Debug for LlmProviderConfig {
                 .field("timeout_secs", &c.timeout_secs)
                 .field("max_concurrency", &c.max_concurrency)
                 .field("network_retry", &c.network_retry)
+                .field("pricing", &c.pricing)
+                .field("cache_ttl_secs", &c.cache_ttl_secs)
+                .field("cache_max_entries", &c.cache_max_entries)
                 .finish(),
             LlmProviderConfig::Mock(c) => f
                 .debug_struct("Mock")
@@ -146,6 +184,21 @@ pub struct OpenaiProviderConfig {
     /// Optional network retry policy for transient failures.
     #[serde(default)]
     pub network_retry: Option<NetworkRetryPolicy>,
+
+    /// Optional pricing table for cost estimation.
+    #[serde(default)]
+    pub pricing: Option<PricingTable>,
+
+    /// Optional response cache TTL in seconds (materialized-only).
+    /// Absent = cache disabled for this provider.
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
+
+    /// Optional maximum cache entries (LRU eviction boundary).
+    /// Parsed but NOT yet enforced — LRU eviction is deferred.
+    /// A `tracing::warn!` is emitted at startup if this is set.
+    #[serde(default)]
+    pub cache_max_entries: Option<usize>,
 }
 
 /// Configuration for an Ollama (local) provider.
@@ -169,6 +222,21 @@ pub struct OllamaProviderConfig {
     /// Optional network retry policy for transient failures.
     #[serde(default)]
     pub network_retry: Option<NetworkRetryPolicy>,
+
+    /// Optional pricing table for cost estimation.
+    #[serde(default)]
+    pub pricing: Option<PricingTable>,
+
+    /// Optional response cache TTL in seconds (materialized-only).
+    /// Absent = cache disabled for this provider.
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
+
+    /// Optional maximum cache entries (LRU eviction boundary).
+    /// Parsed but NOT yet enforced — LRU eviction is deferred.
+    /// A `tracing::warn!` is emitted at startup if this is set.
+    #[serde(default)]
+    pub cache_max_entries: Option<usize>,
 }
 
 /// Configuration for the mock testing provider.
@@ -197,11 +265,10 @@ pub enum LlmOperation {
 }
 
 impl LlmGlobalConfig {
-    /// Validate the configuration, rejecting `Some(0)` for `timeout_secs` and
-    /// `Some(0)` for `max_concurrency` on both global and per-provider levels.
-    ///
-    /// Phase 2 fields (`cache_ttl_secs`, `cache_max_entries`, `pricing`) are
-    /// validated in Plan 2 and are NOT checked here.
+    /// Validate the configuration, rejecting `Some(0)` for `timeout_secs`,
+    /// `Some(0)` for `max_concurrency`, `Some(0)` for `cache_ttl_secs`, and
+    /// `Some(0)` for `cache_max_entries` on both global and per-provider
+    /// levels.
     pub fn validate(&self) -> Result<(), CamelError> {
         // Global timeout_secs: Some(0) is a misconfiguration
         if self.timeout_secs == Some(0) {
@@ -222,6 +289,30 @@ impl LlmGlobalConfig {
             if provider.max_concurrency() == Some(0) {
                 return Err(CamelError::Config(format!(
                     "provider '{name}' max_concurrency must be > 0 when set (got 0)"
+                )));
+            }
+
+            // Provider-level pricing: negative values are invalid
+            if let Some(p) = provider.pricing()
+                && (p.input_per_1k_tokens < 0.0 || p.output_per_1k_tokens < 0.0)
+            {
+                return Err(CamelError::Config(format!(
+                    "provider '{name}' pricing has negative values: input={}, output={}",
+                    p.input_per_1k_tokens, p.output_per_1k_tokens
+                )));
+            }
+
+            // Provider-level cache_ttl_secs: Some(0) is invalid
+            if provider.cache_ttl_secs() == Some(0) {
+                return Err(CamelError::Config(format!(
+                    "provider '{name}' cache_ttl_secs must be > 0 when set (got 0)"
+                )));
+            }
+
+            // Provider-level cache_max_entries: Some(0) is invalid
+            if provider.cache_max_entries() == Some(0) {
+                return Err(CamelError::Config(format!(
+                    "provider '{name}' cache_max_entries must be > 0 when set (got 0)"
                 )));
             }
         }
@@ -366,6 +457,9 @@ mod tests {
                 timeout_secs: Some(0), // invalid
                 max_concurrency: None,
                 network_retry: None,
+                pricing: None,
+                cache_ttl_secs: None,
+                cache_max_entries: None,
             }),
         );
         let cfg = LlmGlobalConfig {
@@ -392,6 +486,9 @@ mod tests {
                 timeout_secs: None,
                 max_concurrency: Some(0), // invalid
                 network_retry: None,
+                pricing: None,
+                cache_ttl_secs: None,
+                cache_max_entries: None,
             }),
         );
         let cfg = LlmGlobalConfig {
@@ -417,6 +514,9 @@ mod tests {
                 timeout_secs: Some(0), // invalid
                 max_concurrency: None,
                 network_retry: None,
+                pricing: None,
+                cache_ttl_secs: None,
+                cache_max_entries: None,
             }),
         );
         let cfg = LlmGlobalConfig {
@@ -432,6 +532,96 @@ mod tests {
     }
 
     #[test]
+    fn rejects_negative_pricing() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "bad".into(),
+            LlmProviderConfig::Openai(OpenaiProviderConfig {
+                api_key: "sk-test".into(),
+                base_url: None,
+                default_model: "gpt-4o".into(),
+                timeout_secs: None,
+                max_concurrency: None,
+                network_retry: None,
+                pricing: Some(PricingTable {
+                    input_per_1k_tokens: -0.01,
+                    output_per_1k_tokens: 0.03,
+                }),
+                cache_ttl_secs: None,
+                cache_max_entries: None,
+            }),
+        );
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: None,
+            max_prompt_bytes: 32768,
+            providers,
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "Negative input_per_1k_tokens must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_cache_ttl() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "bad-cache".into(),
+            LlmProviderConfig::Openai(OpenaiProviderConfig {
+                api_key: "sk-test".into(),
+                base_url: None,
+                default_model: "gpt-4o".into(),
+                timeout_secs: None,
+                max_concurrency: None,
+                network_retry: None,
+                pricing: None,
+                cache_ttl_secs: Some(0), // invalid
+                cache_max_entries: None,
+            }),
+        );
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: None,
+            max_prompt_bytes: 32768,
+            providers,
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "Some(0) cache_ttl_secs must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_cache_max_entries() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "bad-entries".into(),
+            LlmProviderConfig::Openai(OpenaiProviderConfig {
+                api_key: "sk-test".into(),
+                base_url: None,
+                default_model: "gpt-4o".into(),
+                timeout_secs: None,
+                max_concurrency: None,
+                network_retry: None,
+                pricing: None,
+                cache_ttl_secs: None,
+                cache_max_entries: Some(0), // invalid
+            }),
+        );
+        let cfg = LlmGlobalConfig {
+            default_provider: None,
+            timeout_secs: None,
+            max_prompt_bytes: 32768,
+            providers,
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "Some(0) cache_max_entries must be rejected"
+        );
+    }
+
+    #[test]
     fn accepts_valid_provider_config() {
         let mut providers = HashMap::new();
         providers.insert(
@@ -443,6 +633,9 @@ mod tests {
                 timeout_secs: Some(30),
                 max_concurrency: Some(5),
                 network_retry: None,
+                pricing: None,
+                cache_ttl_secs: None,
+                cache_max_entries: None,
             }),
         );
         let cfg = LlmGlobalConfig {
@@ -469,6 +662,9 @@ mod tests {
                 timeout_secs: Some(0),
                 max_concurrency: None,
                 network_retry: None,
+                pricing: None,
+                cache_ttl_secs: None,
+                cache_max_entries: None,
             }),
         );
         let cfg = LlmGlobalConfig {
@@ -536,6 +732,9 @@ default_model = "mock-model"
             timeout_secs: None,
             max_concurrency: None,
             network_retry: None,
+            pricing: None,
+            cache_ttl_secs: None,
+            cache_max_entries: None,
         });
         let debug_str = format!("{:?}", cfg);
         assert!(debug_str.contains("[REDACTED]"));

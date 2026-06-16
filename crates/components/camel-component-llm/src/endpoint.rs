@@ -9,7 +9,9 @@ use tokio::sync::Semaphore;
 
 use crate::LlmGlobalConfig;
 use crate::config::LlmEndpointConfig;
+use crate::cost::PricingTable;
 use crate::producer::LlmProducer;
+use crate::producer_cache::ProducerCache;
 use crate::provider::LlmProvider;
 use crate::provider_factory::ProviderMap;
 
@@ -64,6 +66,8 @@ impl LlmEndpoint {
             Option<usize>,
             Option<u64>,
             Option<NetworkRetryPolicy>,
+            Option<PricingTable>,
+            Option<(u64, Option<usize>)>, // (cache_ttl_secs, cache_max_entries)
         ),
         CamelError,
     > {
@@ -86,7 +90,30 @@ impl LlmEndpoint {
             .providers
             .get(name)
             .and_then(|pc| pc.network_retry());
-        Ok((provider, max_concurrency, provider_timeout, network_retry))
+        let pricing = self
+            .global_config
+            .providers
+            .get(name)
+            .and_then(|pc| pc.pricing());
+        let cache_ttl = self
+            .global_config
+            .providers
+            .get(name)
+            .and_then(|pc| pc.cache_ttl_secs());
+        let cache_max = self
+            .global_config
+            .providers
+            .get(name)
+            .and_then(|pc| pc.cache_max_entries());
+        let cache_info = cache_ttl.map(|ttl| (ttl, cache_max));
+        Ok((
+            provider,
+            max_concurrency,
+            provider_timeout,
+            network_retry,
+            pricing,
+            cache_info,
+        ))
     }
 }
 
@@ -100,7 +127,7 @@ impl Endpoint for LlmEndpoint {
         _rt: Arc<dyn RuntimeObservability>,
         ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
-        let (provider, max_concurrency, provider_timeout, network_retry) =
+        let (provider, max_concurrency, provider_timeout, network_retry, pricing, cache_info) =
             self.resolve_provider()?;
 
         let route_id = ctx.route_id().unwrap_or("unknown").to_string();
@@ -111,6 +138,19 @@ impl Endpoint for LlmEndpoint {
         let timeout_secs = provider_timeout.or(self.global_config.timeout_secs);
         let timeout = timeout_secs.map(Duration::from_secs);
 
+        let pricing = pricing.map(Arc::new);
+
+        // Build cache from config, if configured.
+        let cache = cache_info.map(|(ttl_secs, max_entries)| {
+            if max_entries.is_some() {
+                tracing::debug!(
+                    route_id = %route_id,
+                    "cache_max_entries is configured but NOT yet enforced (LRU eviction deferred)"
+                );
+            }
+            Arc::new(ProducerCache::new(Duration::from_secs(ttl_secs)))
+        });
+
         let producer = LlmProducer::new(
             self.config.clone(),
             provider,
@@ -119,6 +159,8 @@ impl Endpoint for LlmEndpoint {
             semaphore,
             timeout,
             network_retry,
+            pricing,
+            cache,
         );
         Ok(BoxProcessor::new(producer))
     }
