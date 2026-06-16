@@ -124,7 +124,7 @@ impl Endpoint for LlmEndpoint {
 
     fn create_producer(
         &self,
-        _rt: Arc<dyn RuntimeObservability>,
+        rt: Arc<dyn RuntimeObservability>,
         ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
         let (provider, max_concurrency, provider_timeout, network_retry, pricing, cache_info) =
@@ -142,13 +142,13 @@ impl Endpoint for LlmEndpoint {
 
         // Build cache from config, if configured.
         let cache = cache_info.map(|(ttl_secs, max_entries)| {
-            if max_entries.is_some() {
+            if max_entries.is_none() {
                 tracing::warn!(
                     route_id = %route_id,
-                    "cache_max_entries is configured but NOT yet enforced (LRU eviction deferred)"
+                    "cache_max_entries is not set — cache is unbounded (high-cardinality prompts may cause memory growth)"
                 );
             }
-            Arc::new(ProducerCache::new(Duration::from_secs(ttl_secs)))
+            Arc::new(ProducerCache::new(Duration::from_secs(ttl_secs), max_entries))
         });
 
         let producer = LlmProducer::new(
@@ -156,12 +156,14 @@ impl Endpoint for LlmEndpoint {
             provider,
             self.global_config.max_prompt_bytes,
             route_id,
-            semaphore,
-            timeout,
-            network_retry,
-            pricing,
-            cache,
-        );
+        )
+        .with_semaphore(semaphore)
+        .with_timeout(timeout)
+        .with_retry(network_retry)
+        .with_pricing(pricing)
+        .with_cache(cache)
+        .with_observability(Some(rt))
+        .build();
         Ok(BoxProcessor::new(producer))
     }
 

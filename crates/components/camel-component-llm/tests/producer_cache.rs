@@ -23,18 +23,10 @@ fn make_producer_with_cache(provider: Arc<dyn LlmProvider>, cache_ttl: Duration)
         stream: false,
         ..Default::default()
     };
-    let cache = Arc::new(ProducerCache::new(cache_ttl));
-    LlmProducer::new(
-        config,
-        provider,
-        32768,
-        "test-route".into(),
-        None, // semaphore
-        None, // timeout
-        None, // retry
-        None, // pricing
-        Some(cache),
-    )
+    let cache = Arc::new(ProducerCache::new(cache_ttl, None));
+    LlmProducer::new(config, provider, 32768, "test-route".into())
+        .with_cache(Some(cache))
+        .build()
 }
 
 /// Build a producer with cache + pricing + timeout enabled.
@@ -51,23 +43,18 @@ fn make_producer_with_cache_pricing_timeout(
         stream: false,
         ..Default::default()
     };
-    let cache = Arc::new(ProducerCache::new(cache_ttl));
+    let cache = Arc::new(ProducerCache::new(cache_ttl, None));
     let pricing = Arc::new(PricingTable {
         input_per_1k_tokens: input_price,
         output_per_1k_tokens: output_price,
     });
     let semaphore = max_concurrency.map(|n| Arc::new(Semaphore::new(n)));
-    LlmProducer::new(
-        config,
-        provider,
-        32768,
-        "test-route".into(),
-        semaphore,
-        timeout,
-        None,
-        Some(pricing),
-        Some(cache),
-    )
+    LlmProducer::new(config, provider, 32768, "test-route".into())
+        .with_semaphore(semaphore)
+        .with_timeout(timeout)
+        .with_pricing(Some(pricing))
+        .with_cache(Some(cache))
+        .build()
 }
 
 /// If the exchange body is Text, strip the wrapping quotes if present
@@ -111,7 +98,7 @@ async fn cache_hit_skips_provider() {
 async fn cache_miss_for_streaming_same_prompt() {
     let mock = Arc::new(MockProvider::new("t", MockMode::Fixed("hello".into())));
     let provider = Arc::clone(&mock) as Arc<dyn LlmProvider>;
-    let cache = Arc::new(ProducerCache::new(Duration::from_secs(60)));
+    let cache = Arc::new(ProducerCache::new(Duration::from_secs(60), None));
 
     // Materialized call — caches the result
     let cfg_mat = LlmEndpointConfig {
@@ -119,17 +106,10 @@ async fn cache_miss_for_streaming_same_prompt() {
         stream: false,
         ..Default::default()
     };
-    let mut mat_producer = LlmProducer::new(
-        cfg_mat,
-        Arc::clone(&provider),
-        32768,
-        "test-route".into(),
-        None,
-        None,
-        None,
-        None,
-        Some(Arc::clone(&cache)),
-    );
+    let mut mat_producer =
+        LlmProducer::new(cfg_mat, Arc::clone(&provider), 32768, "test-route".into())
+            .with_cache(Some(Arc::clone(&cache)))
+            .build();
     let out1 = mat_producer
         .call(make_exchange(Body::Text("hello".into())))
         .await
@@ -142,17 +122,9 @@ async fn cache_miss_for_streaming_same_prompt() {
         stream: true,
         ..Default::default()
     };
-    let mut stream_producer = LlmProducer::new(
-        cfg_stream,
-        provider,
-        32768,
-        "test-route".into(),
-        None,
-        None,
-        None,
-        None,
-        Some(cache),
-    );
+    let mut stream_producer = LlmProducer::new(cfg_stream, provider, 32768, "test-route".into())
+        .with_cache(Some(cache))
+        .build();
     let out2 = stream_producer
         .call(make_exchange(Body::Text("hello".into())))
         .await
@@ -237,7 +209,7 @@ async fn single_flight_waiter_timeout_abandons_leader_keeps_running() {
         MockProvider::new("t", MockMode::Fixed("ok".into())).with_delay(Duration::from_millis(200)),
     );
     let provider = Arc::clone(&mock) as Arc<dyn LlmProvider>;
-    let cache = Arc::new(ProducerCache::new(Duration::from_secs(60)));
+    let cache = Arc::new(ProducerCache::new(Duration::from_secs(60), None));
 
     // Leader: no timeout so it can complete and cache the result.
     let config_leader = LlmEndpointConfig {
@@ -250,12 +222,9 @@ async fn single_flight_waiter_timeout_abandons_leader_keeps_running() {
         Arc::clone(&provider),
         32768,
         "test-route".into(),
-        None,
-        None, // no timeout — leader runs to completion
-        None,
-        None,
-        Some(Arc::clone(&cache)),
-    );
+    )
+    .with_cache(Some(Arc::clone(&cache)))
+    .build();
 
     // Spawn the leader first
     let leader_task = tokio::spawn(async move {
@@ -278,12 +247,10 @@ async fn single_flight_waiter_timeout_abandons_leader_keeps_running() {
         Arc::clone(&provider),
         32768,
         "test-route".into(),
-        None,
-        Some(Duration::from_millis(50)), // short timeout — waiter abandons
-        None,
-        None,
-        Some(Arc::clone(&cache)),
-    );
+    )
+    .with_timeout(Some(Duration::from_millis(50))) // short timeout — waiter abandons
+    .with_cache(Some(Arc::clone(&cache)))
+    .build();
     let waiter_task = tokio::spawn(async move {
         waiter_producer
             .call(make_exchange(Body::Text("x".into())))
@@ -317,12 +284,9 @@ async fn single_flight_waiter_timeout_abandons_leader_keeps_running() {
             as Arc<dyn LlmProvider>,
         32768,
         "test-route".into(),
-        None,
-        None,
-        None,
-        None,
-        Some(Arc::clone(&cache)),
-    );
+    )
+    .with_cache(Some(Arc::clone(&cache)))
+    .build();
     let out3 = hit_producer
         .call(make_exchange(Body::Text("x".into())))
         .await
@@ -336,7 +300,7 @@ async fn leader_drop_does_not_strand_waiters() {
         MockProvider::new("t", MockMode::Fixed("ok".into())).with_delay(Duration::from_millis(500)),
     );
     let provider = Arc::clone(&mock) as Arc<dyn LlmProvider>;
-    let cache = Arc::new(ProducerCache::new(Duration::from_secs(60)));
+    let cache = Arc::new(ProducerCache::new(Duration::from_secs(60), None));
     let config = LlmEndpointConfig {
         operation: camel_component_llm::config::LlmOperation::Chat,
         stream: false,
@@ -349,12 +313,9 @@ async fn leader_drop_does_not_strand_waiters() {
         Arc::clone(&provider),
         32768,
         "test-route".into(),
-        None,
-        None, // no timeout — leader runs until aborted
-        None,
-        None,
-        Some(Arc::clone(&cache)),
-    );
+    )
+    .with_cache(Some(Arc::clone(&cache)))
+    .build();
 
     // Spawn the leader
     let leader_task = tokio::spawn(async move {
@@ -374,12 +335,10 @@ async fn leader_drop_does_not_strand_waiters() {
             as Arc<dyn LlmProvider>,
         32768,
         "test-route".into(),
-        None,
-        Some(Duration::from_millis(500)), // enough time to receive the cancellation error
-        None,
-        None,
-        Some(Arc::clone(&cache)),
-    );
+    )
+    .with_timeout(Some(Duration::from_millis(500))) // enough time to receive the cancellation error
+    .with_cache(Some(Arc::clone(&cache)))
+    .build();
     let waiter_task = tokio::spawn(async move {
         waiter_producer
             .call(make_exchange(Body::Text("x".into())))
@@ -463,4 +422,55 @@ async fn cache_hit_restores_usage_for_cost() {
         out2.input.headers.get(CAMEL_LLM_TOKENS_IN),
         "token counts must match between cached and fresh responses"
     );
+}
+
+// -----------------------------------------------------------------------
+// High-load single-flight stress test
+// -----------------------------------------------------------------------
+
+/// Verifies that 100 concurrent identical requests coalesce into exactly 1
+/// provider call, all 100 waiters receive the same cached response, and
+/// there are no panics or deadlocks.
+#[tokio::test]
+async fn single_flight_high_load_coalesces() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("cached response".into()))
+            .with_delay(Duration::from_millis(100)),
+    );
+    let provider = Arc::clone(&mock) as Arc<dyn LlmProvider>;
+    let producer = make_producer_with_cache(provider, Duration::from_secs(60));
+
+    let n = 100;
+    let mut handles = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut p = producer.clone();
+        handles.push(tokio::spawn(async move {
+            p.call(make_exchange(Body::Text("identical prompt".into())))
+                .await
+        }));
+    }
+
+    let mut results = Vec::with_capacity(n);
+    for h in handles {
+        let out = h.await.expect("join ok").expect("call ok");
+        assert_eq!(body_text(&out), "cached response");
+        results.push(out);
+    }
+
+    // Exactly 1 provider call despite 100 concurrent requests
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "single-flight must coalesce 100 concurrent requests into 1 provider call"
+    );
+
+    // All 100 results must have identical token counts (same cached entry)
+    let tokens_in = results[0].input.headers.get(CAMEL_LLM_TOKENS_IN).cloned();
+    for (i, out) in results.iter().enumerate() {
+        assert_eq!(
+            out.input.headers.get(CAMEL_LLM_TOKENS_IN),
+            tokens_in.as_ref(),
+            "all results must have identical tokens_in at index {i}"
+        );
+    }
 }

@@ -17,6 +17,10 @@ pub trait MetricsCollector: Send + Sync {
 
     /// Record circuit breaker state change
     fn record_circuit_breaker_change(&self, route_id: &str, from: &str, to: &str);
+
+    /// Record a histogram observation (e.g., cost, latency distribution).
+    /// Default: no-op (backward-compatible).
+    fn record_histogram(&self, _name: &str, _value: f64, _labels: &[(&str, &str)]) {}
 }
 
 /// No-op metrics collector for default behavior

@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_stream::stream;
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, StreamBody, StreamMetadata};
-use camel_component_api::NetworkRetryPolicy;
+use camel_component_api::{NetworkRetryPolicy, RuntimeObservability};
 use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -19,10 +19,10 @@ use crate::cost::PricingTable;
 use crate::error::LlmError;
 use crate::error::is_retryable;
 use crate::headers::*;
-use crate::producer_cache::{self as cache_mod, ProducerCache, Slot, canonical_key};
+use crate::producer_cache::{self as cache_mod, LeaderHandle, ProducerCache, Slot, canonical_key};
 use crate::provider::{
-    ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmittedToolCall, LlmProvider,
-    ToolChoice, ToolDefinition,
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmittedToolCall, FinishReason,
+    LlmProvider, LlmUsage, ToolChoice, ToolDefinition,
 };
 
 #[derive(Clone)]
@@ -48,32 +48,92 @@ pub struct LlmProducer {
     /// Lookup happens BEFORE semaphore/retry/timeout.
     /// Single-flight waiters hold zero permits.
     cache: Option<Arc<ProducerCache>>,
+    /// Optional runtime observability handle for metrics/tracing.
+    rt: Option<Arc<dyn RuntimeObservability>>,
+}
+
+/// The collected result of a materialized (non-streaming) provider call.
+struct MaterializedResult {
+    full_text: String,
+    final_usage: Option<LlmUsage>,
+    finish_reason: Option<FinishReason>,
+    final_model: Option<String>,
+    tool_calls: Vec<EmittedToolCall>,
+}
+
+/// Emit a cost histogram metric through the runtime observability system.
+///
+/// Called from both materialized (`apply_usage_and_cost`) and streaming
+/// (`handle_chat_streaming`) paths when pricing is configured and usage
+/// is available. Skipped silently when `rt` is `None`.
+fn emit_cost_metric(
+    rt: &Option<Arc<dyn RuntimeObservability>>,
+    provider_id: &str,
+    route_id: &str,
+    cost: f64,
+) {
+    if let Some(rt) = rt {
+        rt.metrics().record_histogram(
+            "llm_request_cost_usd",
+            cost,
+            &[("provider", provider_id), ("route", route_id)],
+        );
+    }
 }
 
 impl LlmProducer {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: LlmEndpointConfig,
         provider: Arc<dyn LlmProvider>,
         max_prompt_bytes: usize,
         route_id: String,
-        semaphore: Option<Arc<Semaphore>>,
-        timeout: Option<Duration>,
-        retry: Option<NetworkRetryPolicy>,
-        pricing: Option<Arc<PricingTable>>,
-        cache: Option<Arc<ProducerCache>>,
     ) -> Self {
         Self {
             config,
             provider,
             max_prompt_bytes,
             route_id,
-            semaphore,
-            timeout,
-            retry,
-            pricing,
-            cache,
+            semaphore: None,
+            timeout: None,
+            retry: None,
+            pricing: None,
+            cache: None,
+            rt: None,
         }
+    }
+
+    pub fn with_semaphore(mut self, semaphore: Option<Arc<Semaphore>>) -> Self {
+        self.semaphore = semaphore;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn with_retry(mut self, retry: Option<NetworkRetryPolicy>) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    pub fn with_pricing(mut self, pricing: Option<Arc<PricingTable>>) -> Self {
+        self.pricing = pricing;
+        self
+    }
+
+    pub fn with_cache(mut self, cache: Option<Arc<ProducerCache>>) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    pub fn with_observability(mut self, rt: Option<Arc<dyn RuntimeObservability>>) -> Self {
+        self.rt = rt;
+        self
+    }
+
+    pub fn build(self) -> Self {
+        self
     }
 
     fn build_chat_request(
@@ -108,9 +168,15 @@ impl LlmProducer {
             .or_else(|| self.config.system_prompt.clone());
 
         let messages = if let Some(msgs_val) = headers.get(CAMEL_LLM_MESSAGES) {
-            serde_json::from_value(msgs_val.clone()).map_err(|e| {
+            let msgs: Vec<ChatMessage> = serde_json::from_value(msgs_val.clone()).map_err(|e| {
                 LlmError::InvalidRequest(format!("CamelLlmMessages header is malformed: {e}"))
-            })?
+            })?;
+            if msgs.is_empty() {
+                return Err(LlmError::InvalidRequest(
+                    "CamelLlmMessages must be non-empty".into(),
+                ));
+            }
+            msgs
         } else {
             vec![ChatMessage {
                 role: ChatRole::User,
@@ -203,13 +269,51 @@ impl LlmProducer {
         }
     }
 
+    /// Apply usage headers + compute/set cost header + emit tracing log.
+    /// Called from cache-hit, waiter, and leader materialized paths.
+    /// NOTE: Does NOT set CamelLlmFinishReason — that only exists on the
+    /// leader's ChatEvent::Finished, not in LlmUsage.
+    fn apply_usage_and_cost(
+        &self,
+        exchange: &mut Exchange,
+        usage: Option<LlmUsage>,
+        log_event: &str,
+    ) {
+        let headers = &mut exchange.input.headers;
+        headers.insert(CAMEL_LLM_USAGE_AVAILABLE.to_string(), Value::Bool(true));
+        if let Some(u) = usage {
+            headers.insert(
+                CAMEL_LLM_TOKENS_IN.to_string(),
+                Value::from(u.prompt_tokens),
+            );
+            headers.insert(
+                CAMEL_LLM_TOKENS_OUT.to_string(),
+                Value::from(u.completion_tokens),
+            );
+            if let Some(ref pricing) = self.pricing
+                && let Some(cost) = pricing.cost_usd(u.prompt_tokens, u.completion_tokens)
+            {
+                headers.insert(CAMEL_LLM_ESTIMATED_COST_USD.to_string(), Value::from(cost));
+                tracing::info!(
+                    route_id = %self.route_id,
+                    prompt_tokens = u.prompt_tokens,
+                    completion_tokens = u.completion_tokens,
+                    cost_usd = cost,
+                    "llm {} cost estimated",
+                    log_event,
+                );
+                emit_cost_metric(&self.rt, self.provider.id(), &self.route_id, cost);
+            }
+        }
+    }
+
     /// Wrap a future with the configured total deadline timeout.
     /// When `self.timeout` is `None`, runs without wrapping.
     ///
     /// ## Composition: single total deadline (no nested timeouts)
     /// This helper wraps ONCE. The retry loop is wrapped inside
-    /// `with_timeout`, so do NOT nest timeouts (see ADR-0021).
-    async fn with_timeout<F, T>(&self, fut: F) -> Result<T, LlmError>
+    /// `apply_timeout`, so do NOT nest timeouts (see ADR-0021).
+    async fn apply_timeout<F, T>(&self, fut: F) -> Result<T, LlmError>
     where
         F: std::future::Future<Output = Result<T, LlmError>>,
     {
@@ -233,7 +337,7 @@ impl LlmProducer {
     ///   sleep (see ADR-0021).
     ///
     /// This is an associated function (not `&self`) so the returned future
-    /// does not borrow `self`, allowing it to be passed to `with_timeout`.
+    /// does not borrow `self`, allowing it to be passed to `apply_timeout`.
     async fn run_with_retry<F, Fut, T>(
         semaphore: Option<Arc<Semaphore>>,
         retry: Option<NetworkRetryPolicy>,
@@ -302,377 +406,357 @@ impl LlmProducer {
         let request = self.build_chat_request(&prompt, exchange)?;
         self.set_start_headers(exchange);
 
+        if self.config.stream {
+            self.handle_chat_streaming(exchange, &request).await
+        } else {
+            self.handle_chat_materialized(exchange, request).await
+        }
+    }
+
+    async fn handle_chat_streaming(
+        &self,
+        exchange: &mut Exchange,
+        request: &ChatRequest,
+    ) -> Result<(), LlmError> {
         // Semaphore permit:
-        //   - Streaming: acquired BEFORE with_timeout (by design — streaming
-        //     uses per-next() activity timeout, not total deadline). The
-        //     permit is moved into PermitStream so it lives until the byte
-        //     stream is fully consumed or dropped (see ADR-0021).
-        //   - Materialized: acquired INSIDE with_timeout so the permit wait
-        //     is covered by the total deadline timeout (review finding).
+        //   Streaming: acquired BEFORE apply_timeout (by design — streaming
+        //   uses per-next() activity timeout, not total deadline). The
+        //   permit is moved into PermitStream so it lives until the byte
+        //   stream is fully consumed or dropped (see ADR-0021).
         // The semaphore is never explicitly closed in this crate; .ok() is
         // defensive only — a closed semaphore would mean the producer is
         // shutting down, so allowing the call through (fail-open) is
         // acceptable.
-        if self.config.stream {
-            // Acquire semaphore permit before building the stream. Wrapped in
-            // the configured timeout so a saturated semaphore cannot block
-            // indefinitely — the streaming activity timeout (per-next()) only
-            // starts AFTER the stream exists, so the permit wait needs its own
-            // bound.
-            let permit = match &self.semaphore {
-                Some(sem) => {
-                    let acquired = sem.clone().acquire_owned();
-                    match self.timeout {
-                        Some(d) => match tokio::time::timeout(d, acquired).await {
-                            Ok(Ok(p)) => Some(p),
-                            Ok(Err(_)) => None, // semaphore closed — fail-open
-                            Err(_) => return Err(LlmError::Timeout(d)),
-                        },
-                        None => acquired.await.ok(),
-                    }
+        //
+        // Acquire semaphore permit before building the stream. Wrapped in
+        // the configured timeout so a saturated semaphore cannot block
+        // indefinitely — the streaming activity timeout (per-next()) only
+        // starts AFTER the stream exists, so the permit wait needs its own
+        // bound.
+        let permit = match &self.semaphore {
+            Some(sem) => {
+                let acquired = sem.clone().acquire_owned();
+                match self.timeout {
+                    Some(d) => match tokio::time::timeout(d, acquired).await {
+                        Ok(Ok(p)) => Some(p),
+                        Ok(Err(_)) => None, // semaphore closed — fail-open
+                        Err(_) => return Err(LlmError::Timeout(d)),
+                    },
+                    None => acquired.await.ok(),
                 }
-                None => None,
-            };
+            }
+            None => None,
+        };
 
-            let route_id = self.route_id.clone();
-            let stream = self.provider.chat_stream(request);
-            let timeout = self.timeout;
-            let pricing = self.pricing.clone();
+        let route_id = self.route_id.clone();
+        let rt_clone = self.rt.clone();
+        let provider_id = self.provider.id().to_string();
+        let stream = self.provider.chat_stream(request.clone());
+        let timeout = self.timeout;
+        let pricing = self.pricing.clone();
 
-            let byte_stream = stream! {
-                let mut s = stream;
-                loop {
-                    let next = match timeout {
-                        Some(d) => match tokio::time::timeout(d, s.next()).await {
-                            Ok(Some(ev)) => Some(ev),
-                            Ok(None) => None,
-                            Err(_) => {
-                                yield Err(CamelError::from(LlmError::Timeout(d)));
-                                return;
+        let byte_stream = stream! {
+            let mut s = stream;
+            loop {
+                let next = match timeout {
+                    Some(d) => match tokio::time::timeout(d, s.next()).await {
+                        Ok(Some(ev)) => Some(ev),
+                        Ok(None) => None,
+                        Err(_) => {
+                            yield Err(CamelError::from(LlmError::Timeout(d)));
+                            return;
+                        }
+                    },
+                    None => s.next().await,
+                };
+                let mapped = match next {
+                    Some(Ok(ChatEvent::Delta { text })) => Ok(Bytes::from(text)),
+                    Some(Ok(ChatEvent::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    })) => {
+                        tracing::info!(
+                            route_id = %route_id,
+                            tool_name = %name,
+                            "llm tool call emitted"
+                        );
+                        let obj = serde_json::json!({
+                            "type": "tool_call",
+                            "id": id,
+                            "name": name,
+                            "arguments": arguments,
+                        });
+                        let json = serde_json::to_string(&obj).unwrap(); // allow-unwrap: json!() Value is always serializable
+                        Ok(Bytes::from(json))
+                    }
+                    Some(Ok(ChatEvent::Finished { usage, .. })) => {
+                        if let Some(u) = usage {
+                            tracing::info!(
+                                route_id = %route_id,
+                                prompt_tokens = u.prompt_tokens,
+                                completion_tokens = u.completion_tokens,
+                                "llm stream finished"
+                            );
+                            if let Some(cost) = pricing
+                                .as_ref()
+                                .and_then(|p| p.cost_usd(u.prompt_tokens, u.completion_tokens))
+                            {
+                                tracing::info!(
+                                    route_id = %route_id,
+                                    cost_usd = cost,
+                                    "llm stream cost estimated"
+                                );
+                                emit_cost_metric(&rt_clone, &provider_id, &route_id, cost);
                             }
-                        },
-                        None => s.next().await,
-                    };
-                    let mapped = match next {
-                        Some(Ok(ChatEvent::Delta { text })) => Ok(Bytes::from(text)),
-                        Some(Ok(ChatEvent::ToolCall {
+                        }
+                        Ok(Bytes::new())
+                    }
+                    Some(Err(e)) => {
+                        // log-policy: handler-owned
+                        tracing::warn!(route_id = %route_id, error = %e, "llm stream error");
+                        Err(CamelError::from(e))
+                    }
+                    None => return,
+                };
+                yield mapped;
+            }
+        };
+
+        // Wrap the byte stream in PermitStream so the semaphore permit
+        // outlives `call()` — it is released when the Body::Stream is
+        // consumed / dropped.
+        let with_permit = PermitStream {
+            inner: byte_stream.boxed(),
+            _permit: permit,
+        };
+
+        exchange.input.body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(with_permit)))),
+            metadata: StreamMetadata::default(),
+        });
+
+        Ok(())
+    }
+
+    async fn handle_chat_materialized(
+        &self,
+        exchange: &mut Exchange,
+        request: ChatRequest,
+    ) -> Result<(), LlmError> {
+        // Materialized mode: compose retry loop inside total deadline.
+        // The retry loop acquires its own permit per attempt (released
+        // during backoff) and is wrapped by apply_timeout so one total
+        // deadline covers all attempts + backoff.
+        //
+        // Cache integration: lookup BEFORE semaphore/retry/timeout.
+        // Single-flight waiters hold ZERO permits.
+        // -----------------------------------------------------------------
+        // Cache key computation (needed before cache check and before
+        // the provider-work closure that captures `request`).
+        // Skip cache entirely when the request has tools — tool-call
+        // responses are actionable intents, not idempotent text, and
+        // must NOT be stored or replayed from cache.
+        let cache = if request.tools.is_empty() {
+            self.cache.as_ref().map(|c| {
+                let key = canonical_key(self.provider.id(), &request);
+                let cache_ref = Arc::clone(c);
+                (cache_ref, key)
+            })
+        } else {
+            tracing::debug!(
+                route_id = %self.route_id,
+                "llm: skipping cache because request has tools"
+            );
+            None
+        };
+
+        let mut leader_handle: Option<LeaderHandle> = None;
+
+        if let Some((ref cache, ref key)) = cache {
+            // Cache hit — apply cached response, return early.
+            if let Some(result) = self.try_cache_hit(exchange, cache, key) {
+                return result;
+            }
+
+            // Cache miss: acquire single-flight slot.
+            match Arc::clone(cache).acquire(key) {
+                Slot::Waiter { mut rx } => {
+                    tracing::debug!(route_id = %self.route_id, "llm cache waiter");
+                    let entry = match self.timeout {
+                        Some(d) => tokio::time::timeout(d, cache_mod::wait(&mut rx))
+                            .await
+                            .map_err(|_| LlmError::Timeout(d))?,
+                        None => cache_mod::wait(&mut rx).await,
+                    }?;
+                    // Apply the leader's cached result.
+                    exchange.input.body = Body::Text(entry.text.clone());
+                    self.apply_usage_and_cost(exchange, entry.usage, "cache waiter");
+                    return Ok(());
+                }
+                Slot::Leader(handle) => {
+                    tracing::debug!(route_id = %self.route_id, "llm cache leader");
+                    leader_handle = Some(handle);
+                }
+            }
+        }
+
+        // Provider work (leader path, or no-cache path when cache is None).
+        let result = self.run_provider_work(request, leader_handle).await?;
+        self.apply_materialized_result(exchange, result);
+        Ok(())
+    }
+
+    /// Cache lookup — applies cached response body and headers to the
+    /// exchange, returning `Some(Ok(()))` on hit or `None` on miss.
+    fn try_cache_hit(
+        &self,
+        exchange: &mut Exchange,
+        cache: &Arc<ProducerCache>,
+        key: &str,
+    ) -> Option<Result<(), LlmError>> {
+        if let Some((text, usage)) = cache.get(key) {
+            exchange.input.body = Body::Text(text);
+            self.apply_usage_and_cost(exchange, usage, "cache hit");
+            tracing::debug!(route_id = %self.route_id, "llm cache hit");
+            Some(Ok(()))
+        } else {
+            None
+        }
+    }
+
+    /// Leader path: run the provider with retry+timeout, collect all
+    /// ChatEvents into a `MaterializedResult`, and complete the
+    /// single-flight handle.
+    async fn run_provider_work(
+        &self,
+        request: ChatRequest,
+        handle: Option<LeaderHandle>,
+    ) -> Result<MaterializedResult, LlmError> {
+        let provider = Arc::clone(&self.provider);
+        let content_started = Arc::new(AtomicBool::new(false));
+        let route_id = self.route_id.clone();
+
+        let op = move |cs: Arc<AtomicBool>| {
+            let req = request.clone();
+            let p = Arc::clone(&provider);
+            let rid = route_id.clone();
+            async move {
+                let mut stream = p.chat_stream(req);
+                let mut full_text = String::new();
+                let mut final_usage = None;
+                let mut finish_reason = None;
+                let mut final_model = None;
+                let mut tool_calls: Vec<EmittedToolCall> = Vec::new();
+
+                while let Some(event) = stream.next().await {
+                    match event? {
+                        ChatEvent::Delta { text } => {
+                            if !text.is_empty() {
+                                cs.store(true, Ordering::SeqCst);
+                            }
+                            full_text.push_str(&text);
+                        }
+                        ChatEvent::ToolCall {
                             id,
                             name,
                             arguments,
-                        })) => {
-                            tracing::info!(
-                                route_id = %route_id,
-                                tool_name = %name,
-                                "llm tool call emitted"
-                            );
-                            let obj = serde_json::json!({
-                                "type": "tool_call",
-                                "id": id,
-                                "name": name,
-                                "arguments": arguments,
-                            });
-                            let json = serde_json::to_string(&obj).unwrap(); // allow-unwrap: json!() Value is always serializable
-                            Ok(Bytes::from(json))
-                        }
-                        Some(Ok(ChatEvent::Finished { usage, .. })) => {
-                            if let Some(u) = usage {
-                                tracing::info!(
-                                    route_id = %route_id,
-                                    prompt_tokens = u.prompt_tokens,
-                                    completion_tokens = u.completion_tokens,
-                                    "llm stream finished"
-                                );
-                                if let Some(cost) = pricing
-                                    .as_ref()
-                                    .and_then(|p| p.cost_usd(u.prompt_tokens, u.completion_tokens))
-                                {
-                                    tracing::info!(
-                                        route_id = %route_id,
-                                        cost_usd = cost,
-                                        "llm stream cost estimated"
-                                    );
-                                }
-                            }
-                            Ok(Bytes::new())
-                        }
-                        Some(Err(e)) => {
-                            // log-policy: handler-owned
-                            tracing::warn!(route_id = %route_id, error = %e, "llm stream error");
-                            Err(CamelError::from(e))
-                        }
-                        None => return,
-                    };
-                    yield mapped;
-                }
-            };
-
-            // Wrap the byte stream in PermitStream so the semaphore permit
-            // outlives `call()` — it is released when the Body::Stream is
-            // consumed / dropped.
-            let with_permit = PermitStream {
-                inner: byte_stream.boxed(),
-                _permit: permit,
-            };
-
-            exchange.input.body = Body::Stream(StreamBody {
-                stream: Arc::new(Mutex::new(Some(Box::pin(with_permit)))),
-                metadata: StreamMetadata::default(),
-            });
-        } else {
-            // Materialized mode: compose retry loop inside total deadline.
-            // The retry loop acquires its own permit per attempt (released
-            // during backoff) and is wrapped by with_timeout so one total
-            // deadline covers all attempts + backoff.
-            //
-            // Cache integration: lookup BEFORE semaphore/retry/timeout.
-            // Single-flight waiters hold ZERO permits.
-            // -----------------------------------------------------------------
-            // Cache key computation (needed before cache check and before
-            // the provider-work closure that captures `request`).
-            // Skip cache entirely when the request has tools — tool-call
-            // responses are actionable intents, not idempotent text, and
-            // must NOT be stored or replayed from cache.
-            let cache = if request.tools.is_empty() {
-                self.cache.as_ref().map(|c| {
-                    let key = canonical_key(self.provider.id(), &request);
-                    let cache_ref = Arc::clone(c);
-                    (cache_ref, key)
-                })
-            } else {
-                tracing::debug!(
-                    route_id = %self.route_id,
-                    "llm: skipping cache because request has tools"
-                );
-                None
-            };
-
-            let mut leader_handle: Option<crate::producer_cache::LeaderHandle> = None;
-
-            if let Some((ref cache, ref key)) = cache {
-                // Cache hit — set body/headers from cached entry, return early.
-                if let Some((text, usage)) = cache.get(key) {
-                    exchange.input.body = Body::Text(text);
-                    let headers = &mut exchange.input.headers;
-                    headers.insert(CAMEL_LLM_USAGE_AVAILABLE.to_string(), Value::Bool(true));
-                    if let Some(u) = usage {
-                        headers.insert(
-                            CAMEL_LLM_TOKENS_IN.to_string(),
-                            Value::from(u.prompt_tokens),
-                        );
-                        headers.insert(
-                            CAMEL_LLM_TOKENS_OUT.to_string(),
-                            Value::from(u.completion_tokens),
-                        );
-                        if let Some(ref pricing) = self.pricing
-                            && let Some(cost) =
-                                pricing.cost_usd(u.prompt_tokens, u.completion_tokens)
-                        {
-                            headers.insert(
-                                CAMEL_LLM_ESTIMATED_COST_USD.to_string(),
-                                Value::from(cost),
-                            );
-                            tracing::info!(
-                                route_id = %self.route_id,
-                                prompt_tokens = u.prompt_tokens,
-                                completion_tokens = u.completion_tokens,
-                                cost_usd = cost,
-                                "llm cache hit cost estimated"
-                            );
-                        }
-                    }
-                    tracing::debug!(route_id = %self.route_id, "llm cache hit");
-                    return Ok(());
-                }
-
-                // Cache miss: acquire single-flight slot.
-                match Arc::clone(cache).acquire(key) {
-                    Slot::Waiter { mut rx } => {
-                        tracing::debug!(route_id = %self.route_id, "llm cache waiter");
-                        let entry = match self.timeout {
-                            Some(d) => tokio::time::timeout(d, cache_mod::wait(&mut rx))
-                                .await
-                                .map_err(|_| LlmError::Timeout(d))?,
-                            None => cache_mod::wait(&mut rx).await,
-                        }?;
-                        // Apply the leader's cached result.
-                        exchange.input.body = Body::Text(entry.text.clone());
-                        let headers = &mut exchange.input.headers;
-                        headers.insert(CAMEL_LLM_USAGE_AVAILABLE.to_string(), Value::Bool(true));
-                        if let Some(u) = entry.usage {
-                            headers.insert(
-                                CAMEL_LLM_TOKENS_IN.to_string(),
-                                Value::from(u.prompt_tokens),
-                            );
-                            headers.insert(
-                                CAMEL_LLM_TOKENS_OUT.to_string(),
-                                Value::from(u.completion_tokens),
-                            );
-                            if let Some(ref pricing) = self.pricing
-                                && let Some(cost) =
-                                    pricing.cost_usd(u.prompt_tokens, u.completion_tokens)
-                            {
-                                headers.insert(
-                                    CAMEL_LLM_ESTIMATED_COST_USD.to_string(),
-                                    Value::from(cost),
-                                );
-                                tracing::info!(
-                                    route_id = %self.route_id,
-                                    prompt_tokens = u.prompt_tokens,
-                                    completion_tokens = u.completion_tokens,
-                                    cost_usd = cost,
-                                    "llm cache waiter cost estimated"
-                                );
-                            }
-                        }
-                        return Ok(());
-                    }
-                    Slot::Leader(handle) => {
-                        tracing::debug!(route_id = %self.route_id, "llm cache leader");
-                        leader_handle = Some(handle);
-                    }
-                }
-            }
-
-            // Provider work (leader path, or no-cache path when cache is None).
-            let provider = Arc::clone(&self.provider);
-            let content_started = Arc::new(AtomicBool::new(false));
-            let route_id = self.route_id.clone();
-
-            let op = move |cs: Arc<AtomicBool>| {
-                let req = request.clone();
-                let p = Arc::clone(&provider);
-                let rid = route_id.clone();
-                async move {
-                    let mut stream = p.chat_stream(req);
-                    let mut full_text = String::new();
-                    let mut final_usage = None;
-                    let mut finish_reason = None;
-                    let mut final_model = None;
-                    let mut tool_calls: Vec<EmittedToolCall> = Vec::new();
-
-                    while let Some(event) = stream.next().await {
-                        match event? {
-                            ChatEvent::Delta { text } => {
-                                if !text.is_empty() {
-                                    cs.store(true, Ordering::SeqCst);
-                                }
-                                full_text.push_str(&text);
-                            }
-                            ChatEvent::ToolCall {
+                        } => {
+                            cs.store(true, Ordering::SeqCst);
+                            tool_calls.push(EmittedToolCall {
                                 id,
                                 name,
                                 arguments,
-                            } => {
-                                cs.store(true, Ordering::SeqCst);
-                                tool_calls.push(EmittedToolCall {
-                                    id,
-                                    name,
-                                    arguments,
-                                });
-                            }
-                            ChatEvent::Finished {
-                                usage,
-                                finish_reason: fr,
-                                model,
-                                ..
-                            } => {
-                                final_usage = usage;
-                                finish_reason = fr;
-                                final_model = model;
-                            }
+                            });
+                        }
+                        ChatEvent::Finished {
+                            usage,
+                            finish_reason: fr,
+                            model,
+                            ..
+                        } => {
+                            final_usage = usage;
+                            finish_reason = fr;
+                            final_model = model;
                         }
                     }
-
-                    if !tool_calls.is_empty() {
-                        tracing::info!(
-                            route_id = rid.as_str(),
-                            tool_count = tool_calls.len(),
-                            "llm tool calls collected"
-                        );
-                    }
-
-                    Ok::<_, LlmError>((
-                        full_text,
-                        final_usage,
-                        finish_reason,
-                        final_model,
-                        tool_calls,
-                    ))
                 }
-            };
 
-            let semaphore = self.semaphore.clone();
-            let retry = self.retry.clone();
-            let fut = Self::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
-            let result = self.with_timeout(fut).await;
-
-            // Leader handle: complete BEFORE propagating to caller.
-            // Do NOT use `?` before this — the Drop guard would send a
-            // spurious cancellation error instead of the real result.
-            if let Some(handle) = leader_handle {
-                match &result {
-                    Ok((text, usage, _, _, _)) => {
-                        handle.complete(Ok((text.clone(), *usage)));
-                    }
-                    Err(e) => {
-                        handle.complete(Err(e.clone()));
-                    }
-                }
-            }
-
-            // Now propagate the result to the caller.
-            let (full_text, final_usage, finish_reason, final_model, tool_calls) = result?;
-
-            let headers = &mut exchange.input.headers;
-            if tool_calls.is_empty() {
-                exchange.input.body = Body::Text(full_text);
-            } else {
-                if !full_text.is_empty() {
-                    headers.insert(CAMEL_LLM_TEXT.to_string(), Value::String(full_text));
-                }
-                exchange.input.body = Body::Empty;
-                headers.insert(
-                    CAMEL_LLM_TOOL_CALLS.to_string(),
-                    serde_json::to_value(&tool_calls).map_err(|e| {
-                        LlmError::Protocol(format!("failed to serialize tool calls: {e}"))
-                    })?,
-                );
-            }
-            headers.insert(CAMEL_LLM_USAGE_AVAILABLE.to_string(), Value::Bool(true));
-            if let Some(u) = final_usage {
-                headers.insert(
-                    CAMEL_LLM_TOKENS_IN.to_string(),
-                    Value::from(u.prompt_tokens),
-                );
-                headers.insert(
-                    CAMEL_LLM_TOKENS_OUT.to_string(),
-                    Value::from(u.completion_tokens),
-                );
-                // Cost observability: compute estimated cost from pricing
-                if let Some(ref pricing) = self.pricing
-                    && let Some(cost) = pricing.cost_usd(u.prompt_tokens, u.completion_tokens)
-                {
-                    headers.insert(CAMEL_LLM_ESTIMATED_COST_USD.to_string(), Value::from(cost));
+                if !tool_calls.is_empty() {
                     tracing::info!(
-                        route_id = %self.route_id,
-                        prompt_tokens = u.prompt_tokens,
-                        completion_tokens = u.completion_tokens,
-                        cost_usd = cost,
-                        "llm request cost estimated"
+                        route_id = rid.as_str(),
+                        tool_count = tool_calls.len(),
+                        "llm tool calls collected"
                     );
                 }
+
+                Ok::<_, LlmError>(MaterializedResult {
+                    full_text,
+                    final_usage,
+                    finish_reason,
+                    final_model,
+                    tool_calls,
+                })
             }
-            if let Some(fr) = finish_reason {
-                headers.insert(
-                    CAMEL_LLM_FINISH_REASON.to_string(),
-                    Value::String(format!("{:?}", fr)),
-                );
-            }
-            if let Some(m) = final_model {
-                headers.insert(CAMEL_LLM_MODEL.to_string(), Value::from(m));
+        };
+
+        let semaphore = self.semaphore.clone();
+        let retry = self.retry.clone();
+        let fut = Self::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
+        let result = self.apply_timeout(fut).await;
+
+        // Leader handle: complete BEFORE propagating to caller.
+        // Do NOT use `?` before this — the Drop guard would send a
+        // spurious cancellation error instead of the real result.
+        if let Some(handle) = handle {
+            match &result {
+                Ok(r) => {
+                    handle.complete(Ok((r.full_text.clone(), r.final_usage)));
+                }
+                Err(e) => {
+                    handle.complete(Err(e.clone()));
+                }
             }
         }
-        Ok(())
+
+        result
+    }
+
+    /// Apply a fully-materialized provider result to the exchange body
+    /// and headers (usage, finish_reason, tool_calls, model).
+    fn apply_materialized_result(&self, exchange: &mut Exchange, result: MaterializedResult) {
+        let MaterializedResult {
+            full_text,
+            final_usage,
+            finish_reason,
+            final_model,
+            tool_calls,
+        } = result;
+
+        if tool_calls.is_empty() {
+            exchange.input.body = Body::Text(full_text);
+        } else {
+            let headers = &mut exchange.input.headers;
+            if !full_text.is_empty() {
+                headers.insert(CAMEL_LLM_TEXT.to_string(), Value::String(full_text));
+            }
+            exchange.input.body = Body::Empty;
+            headers.insert(
+                CAMEL_LLM_TOOL_CALLS.to_string(),
+                serde_json::to_value(&tool_calls).unwrap(), // allow-unwrap: EmittedToolCall impl Serialize, always succeeds
+            );
+        }
+        self.apply_usage_and_cost(exchange, final_usage, "request");
+        let headers = &mut exchange.input.headers;
+        if let Some(fr) = finish_reason {
+            headers.insert(
+                CAMEL_LLM_FINISH_REASON.to_string(),
+                Value::String(format!("{:?}", fr)),
+            );
+        }
+        if let Some(m) = final_model {
+            headers.insert(CAMEL_LLM_MODEL.to_string(), Value::from(m));
+        }
     }
 
     async fn handle_embed(&self, exchange: &mut Exchange) -> Result<(), LlmError> {
@@ -703,7 +787,7 @@ impl LlmProducer {
         let retry = self.retry.clone();
         let content_started = Arc::new(AtomicBool::new(false));
         let fut = Self::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
-        let response = self.with_timeout(fut).await?;
+        let response = self.apply_timeout(fut).await?;
 
         exchange.input.body = Body::Json(
             serde_json::to_value(&response.embeddings)

@@ -1,8 +1,13 @@
 //! camel-component-llm — LLM integration component for rust-camel.
 //!
-//! Provides chat and embedding operations through multiple LLM providers
-//! (OpenAI, Ollama, Mock). Uses a provider trait abstraction with strict
-//! adapter boundary isolating the siumai SDK.
+//! Provides chat (streaming + materialized), embeddings, tool calling, and
+//! multi-turn conversations through multiple LLM providers (OpenAI, Ollama,
+//! Mock). Features include response caching with single-flight, cost
+//! observability (config-driven pricing tables), retry with per-attempt delay
+//! override (ADR-0021), and concurrency control via producer semaphore.
+//!
+//! Uses a project-owned `LlmProvider` trait with strict adapter boundary
+//! isolating the siumai SDK to exactly two production files (ADR-0020).
 
 pub mod bundle;
 pub mod config;

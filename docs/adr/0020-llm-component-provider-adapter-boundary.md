@@ -5,10 +5,9 @@
 
 ## Decision
 
-Define a project-owned `LlmProvider` trait with Camel-shaped request/response types. Confine all siumai imports to exactly two files:
+Define a project-owned `LlmProvider` trait with Camel-shaped request/response types. Confine all siumai imports to **exactly two production files** (`provider/siumai_adapter.rs` and `provider_factory.rs`) plus one **test-only** file (`provider/siumai_adapter_tests.rs`, gated by `#[cfg(all(test, feature = "openai"))]`).
 
-- `provider/siumai_adapter.rs` — the adapter implementing `LlmProvider` over siumai clients
-- `provider_factory.rs` — constructs siumai clients from config
+Test fixtures legitimately need siumai types (`StubChat`, `StubEmbed` implement siumai traits) and cannot be expressed through the public adapter API.
 
 No other file in the crate may import siumai. A test (`tests/boundary.rs`) enforces this by scanning all `.rs` files for `use siumai` or `siumai::` references outside the allowed files.
 

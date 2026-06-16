@@ -195,8 +195,8 @@ pub struct OpenaiProviderConfig {
     pub cache_ttl_secs: Option<u64>,
 
     /// Optional maximum cache entries (LRU eviction boundary).
-    /// Parsed but NOT yet enforced — LRU eviction is deferred.
-    /// A `tracing::warn!` is emitted at startup if this is set.
+    /// When set, oldest entries are evicted when the cache exceeds this
+    /// size. When absent, the cache is unbounded.
     #[serde(default)]
     pub cache_max_entries: Option<usize>,
 }
@@ -233,8 +233,8 @@ pub struct OllamaProviderConfig {
     pub cache_ttl_secs: Option<u64>,
 
     /// Optional maximum cache entries (LRU eviction boundary).
-    /// Parsed but NOT yet enforced — LRU eviction is deferred.
-    /// A `tracing::warn!` is emitted at startup if this is set.
+    /// When set, oldest entries are evicted when the cache exceeds this
+    /// size. When absent, the cache is unbounded.
     #[serde(default)]
     pub cache_max_entries: Option<usize>,
 }

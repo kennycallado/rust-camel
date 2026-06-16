@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -104,6 +105,7 @@ struct SiumaiProvider {
     default_model: String,
     config: SiumaiConfig,
     client: Arc<OnceCell<CachedClient>>,
+    configured_timeout: Duration,
     #[cfg(test)]
     client_builds: Arc<AtomicUsize>,
     #[cfg(test)]
@@ -111,12 +113,18 @@ struct SiumaiProvider {
 }
 
 impl SiumaiProvider {
-    fn new(id: impl Into<String>, default_model: impl Into<String>, config: SiumaiConfig) -> Self {
+    fn new(
+        id: impl Into<String>,
+        default_model: impl Into<String>,
+        config: SiumaiConfig,
+        configured_timeout: Duration,
+    ) -> Self {
         Self {
             id: id.into(),
             default_model: default_model.into(),
             config,
             client: Arc::new(OnceCell::new()),
+            configured_timeout,
             #[cfg(test)]
             client_builds: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
@@ -130,6 +138,7 @@ impl SiumaiProvider {
         id: impl Into<String>,
         default_model: impl Into<String>,
         config: SiumaiConfig,
+        configured_timeout: Duration,
         override_: BuildOverride,
     ) -> Self {
         Self {
@@ -137,6 +146,7 @@ impl SiumaiProvider {
             default_model: default_model.into(),
             config,
             client: Arc::new(OnceCell::new()),
+            configured_timeout,
             client_builds: Arc::new(AtomicUsize::new(0)),
             build_override: Some(override_),
         }
@@ -157,6 +167,7 @@ impl LlmProvider for SiumaiProvider {
         let config = self.config.clone();
         let default_model = self.default_model.clone();
         let client_cell = Arc::clone(&self.client);
+        let configured_timeout = self.configured_timeout;
         #[cfg(test)]
         let builds = Arc::clone(&self.client_builds);
         #[cfg(test)]
@@ -167,6 +178,7 @@ impl LlmProvider for SiumaiProvider {
             let cached = client_cell.get_or_try_init(|| async {
                 build_cached_client(
                     &config,
+                    configured_timeout,
                     #[cfg(test)] override_.as_ref(),
                     #[cfg(test)] &builds,
                 ).await
@@ -178,7 +190,7 @@ impl LlmProvider for SiumaiProvider {
             let siumai_stream = chat
                 .chat_stream_request(siumai_req)
                 .await
-                .map_err(map_siumai_error)?;
+                .map_err(|e| map_siumai_error(e, configured_timeout))?;
 
             let mut stream = siumai_stream;
             // Tool-call accumulator: tool_call_id -> (tool_name, accumulated_args)
@@ -198,7 +210,7 @@ impl LlmProvider for SiumaiProvider {
                         }
                     }
                     Err(e) => {
-                        Err(map_siumai_error(e))?;
+                        Err(map_siumai_error(e, configured_timeout))?;
                     }
                 }
             }
@@ -209,6 +221,7 @@ impl LlmProvider for SiumaiProvider {
 
     async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse, LlmError> {
         let config = self.config.clone();
+        let configured_timeout = self.configured_timeout;
         #[cfg(test)]
         let builds = Arc::clone(&self.client_builds);
         #[cfg(test)]
@@ -219,6 +232,7 @@ impl LlmProvider for SiumaiProvider {
             .get_or_try_init(|| async {
                 build_cached_client(
                     &config,
+                    configured_timeout,
                     #[cfg(test)]
                     override_.as_ref(),
                     #[cfg(test)]
@@ -254,7 +268,7 @@ impl LlmProvider for SiumaiProvider {
         let response = extensions
             .embed_with_config(siumai_req)
             .await
-            .map_err(map_siumai_error)?;
+            .map_err(|e| map_siumai_error(e, configured_timeout))?;
 
         Ok(convert_embed_response(response))
     }
@@ -271,6 +285,7 @@ impl LlmProvider for SiumaiProvider {
 /// called inside `async_stream::try_stream!` without borrowing `self`.
 async fn build_cached_client(
     config: &SiumaiConfig,
+    configured_timeout: Duration,
     #[cfg(test)] override_: Option<&BuildOverride>,
     #[cfg(test)] builds: &AtomicUsize,
 ) -> Result<CachedClient, LlmError> {
@@ -282,7 +297,7 @@ async fn build_cached_client(
             return Ok(CachedClient { chat, embed });
         }
     }
-    let (chat, embed) = build_client_from_config(config).await?;
+    let (chat, embed) = build_client_from_config(config, configured_timeout).await?;
     Ok(CachedClient { chat, embed })
 }
 
@@ -296,6 +311,7 @@ async fn build_cached_client(
 /// without borrowing `self` across a yield point.
 async fn build_client_from_config(
     config: &SiumaiConfig,
+    configured_timeout: Duration,
 ) -> Result<(Arc<dyn ChatCapability>, Arc<dyn EmbeddingCapability>), LlmError> {
     match config {
         #[cfg(any(feature = "openai", feature = "all-providers"))]
@@ -311,7 +327,10 @@ async fn build_client_from_config(
             if let Some(url) = base_url {
                 builder = builder.base_url(url);
             }
-            let client = builder.build().await.map_err(map_siumai_error)?;
+            let client = builder
+                .build()
+                .await
+                .map_err(|e| map_siumai_error(e, configured_timeout))?;
             let client = Arc::new(client);
             let chat: Arc<dyn ChatCapability> = client.clone();
             let embed: Arc<dyn EmbeddingCapability> = client;
@@ -323,7 +342,10 @@ async fn build_client_from_config(
                 BuilderBase::default(),
             );
             builder = builder.base_url(base_url).model(model);
-            let client = builder.build().await.map_err(map_siumai_error)?;
+            let client = builder
+                .build()
+                .await
+                .map_err(|e| map_siumai_error(e, configured_timeout))?;
             let client = Arc::new(client);
             let chat: Arc<dyn ChatCapability> = client.clone();
             let embed: Arc<dyn EmbeddingCapability> = client;
@@ -343,6 +365,7 @@ async fn build_client_from_config(
 pub fn build_openai(
     name: &str,
     config: &OpenaiProviderConfig,
+    configured_timeout: Duration,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let cfg = SiumaiConfig::OpenAi {
         api_key: config.api_key.clone(),
@@ -353,6 +376,7 @@ pub fn build_openai(
         name,
         &config.default_model,
         cfg,
+        configured_timeout,
     )))
 }
 
@@ -363,6 +387,7 @@ pub fn build_openai(
 pub fn build_ollama(
     name: &str,
     config: &OllamaProviderConfig,
+    configured_timeout: Duration,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let cfg = SiumaiConfig::Ollama {
         base_url: config.base_url.clone(),
@@ -372,6 +397,7 @@ pub fn build_ollama(
         name,
         &config.default_model,
         cfg,
+        configured_timeout,
     )))
 }
 
@@ -633,13 +659,13 @@ fn convert_embed_response(response: siumai_core::types::EmbeddingResponse) -> Em
 /// - `ApiError { code: 429 }` / `RateLimitError` → `RateLimit`
 /// - `QuotaExceededError` → `QuotaExceeded`
 /// - `ConnectionError` / `HttpError` → `Network`
-/// - `TimeoutError` → `Timeout`
+/// - `TimeoutError` → `Timeout(configured_timeout)`
 /// - `ModelNotSupported` / `NotFound` (model-like) → `ModelNotFound`
 /// - `StreamError` → `StreamInterrupted`
 /// - `InvalidInput` / `InvalidParameter` → `InvalidRequest`
 /// - `JsonError` / `ParseError` → `Protocol`
 /// - Everything else → `Provider(String)` (catch-all)
-fn map_siumai_error(e: SiumaiLlmError) -> LlmError {
+fn map_siumai_error(e: SiumaiLlmError, configured_timeout: Duration) -> LlmError {
     match &e {
         // Auth failures
         SiumaiLlmError::ApiError {
@@ -665,11 +691,8 @@ fn map_siumai_error(e: SiumaiLlmError) -> LlmError {
             LlmError::Network(e.to_string())
         }
 
-        // Timeout — siumai doesn't expose the elapsed duration, so we cannot
-        // populate LlmError::Timeout(duration) honestly. Map to Network
-        // instead: both are retryable, and "network error" avoids the
-        // misleading "timeout after 0s" Display.
-        SiumaiLlmError::TimeoutError(_) => LlmError::Network("provider request timed out".into()),
+        // Timeout — use the configured timeout from provider config
+        SiumaiLlmError::TimeoutError(_) => LlmError::Timeout(configured_timeout),
 
         // Model not found or not supported
         SiumaiLlmError::ModelNotSupported(_) | SiumaiLlmError::NotFound(_) => {

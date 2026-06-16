@@ -55,7 +55,7 @@ Tools the model may call, passed via `CamelLlmTools` header (JSON array). Compon
 _Avoid_: tool executor, tool runner
 
 **ProducerCache**:
-Materialized-only response cache at the producer level (not a provider decorator). Single-flight via `tokio::sync::watch` — leader detected by dashmap `Entry::Vacant`; waiters hold zero permits. Lookup before semaphore/retry/timeout. TTL-based; LRU eviction deferred. Stores usage (not cost).
+Materialized-only response cache at the producer level (not a provider decorator). Single-flight via `tokio::sync::watch` — leader detected by dashmap `Entry::Vacant`; waiters hold zero permits. Lookup before semaphore/retry/timeout. TTL + LRU eviction (per-entry monotonic `access_order`; `trim()` on leader-complete when `max_entries` set; `in_flight` never trimmed). Stores usage (not cost).
 _Avoid_: response cache, query cache
 
 **PricingTable / cost observability**:
@@ -66,13 +66,19 @@ _Avoid_: billing, accounting
 
 - `LlmGlobalConfig.timeout_secs`: `u64` → `Option<u64>` (use `None` for no timeout)
 - `OpenaiProviderConfig`/`OllamaProviderConfig`: new `network_retry` field (`Option<NetworkRetryPolicy>`)
-- `LlmProducer::new`: expanded signature — added `semaphore: Option<Arc<Semaphore>>`, `timeout: Option<Duration>`, `retry: Option<NetworkRetryPolicy>` parameters
+- `LlmProducer::new`: now takes 4 positional args (`config`, `provider`, `max_prompt_bytes`, `route_id`) + fluent builder `.with_semaphore/.with_timeout/.with_retry/.with_pricing/.with_cache/.with_observability().build()` (was 9 positional params pre-0.16)
+- `ProducerCache::new`: signature changed to `(ttl, max_entries)` (was `ttl` only; `max_entries` adds LRU cap)
 - `ChatRole`: dropped `Copy` (Tool variant holds a `String`); added `#[non_exhaustive]`
 - `ChatEvent`: added `#[non_exhaustive]`; new `ToolCall` variant
 - `ChatRequest`: new fields `tools: Vec<ToolDefinition>`, `tool_choice: Option<ToolChoice>`
 - `ChatMessage`: new field `tool_calls: Option<Vec<EmittedToolCall>>`
 - `build_chat_request`: return type changed from `ChatRequest` to `Result<ChatRequest, LlmError>`
-- `LlmProducer::new`: expanded to 9 params (added `pricing: Option<Arc<PricingTable>>`, `cache: Option<Arc<ProducerCache>>`)
+- `MetricsCollector` trait: new default method `record_histogram` (non-breaking; default no-op)
+- `LlmError::Timeout`: now carries the configured `Duration` (siumai `TimeoutError` maps here, not to `Network`)
+
+## Error mapping
+
+**LlmError → CamelError** is intentionally lossy — 14 variants map to only 3 `CamelError` variants (`Unauthenticated`, `Io`, `ProcessorError`). Downstream handlers that need typed LLM errors should use `CamelError::ProcessorErrorWithSource` (available today) or parse the error string. Extending `CamelError` with LLM-specific variants is deferred until a concrete consumer requires it.
 
 ## Log-level policy
 

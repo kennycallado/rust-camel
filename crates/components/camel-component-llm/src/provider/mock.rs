@@ -1,13 +1,14 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::error::LlmError;
 use crate::provider::{
-    ChatEvent, ChatRequest, ChatRole, EmbedRequest, EmbedResponse, FinishReason, LlmProvider,
-    LlmUsage,
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmbedResponse, FinishReason,
+    LlmProvider, LlmUsage,
 };
 
 /// Mock provider mode.
@@ -57,6 +58,8 @@ pub struct MockProvider {
     track_cancel: bool,
     /// Optional tool call to emit (id, name, arguments).
     tool_call: Option<(String, String, String)>,
+    /// Records received ChatRequest messages for assertion in multi-turn tests.
+    messages_recorder: Option<Arc<Mutex<Vec<ChatMessage>>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +126,7 @@ impl MockProvider {
             cancelled: Arc::new(AtomicBool::new(false)),
             track_cancel: false,
             tool_call: None,
+            messages_recorder: None,
         }
     }
 
@@ -180,6 +184,12 @@ impl MockProvider {
         self
     }
 
+    /// Record received ChatRequest messages for assertion in multi-turn tests.
+    pub fn with_messages_recorder(mut self, recorder: Arc<Mutex<Vec<ChatMessage>>>) -> Self {
+        self.messages_recorder = Some(recorder);
+        self
+    }
+
     /// Track whether any stream produced by this provider was dropped
     /// (cancelled) before reaching a terminal event.
     pub fn with_cancellation_tracking(mut self) -> Self {
@@ -232,8 +242,15 @@ impl LlmProvider for MockProvider {
         let mode = self.mode.clone();
         let model = req.model.clone();
         let tool_call = self.tool_call.clone();
+        let messages_recorder = self.messages_recorder.clone();
 
         let s = async_stream::stream! {
+            // Record received messages before processing the stream.
+            if let Some(ref recorder) = messages_recorder {
+                let mut guard = recorder.lock().expect("messages_recorder poisoned"); // allow-unwrap
+                guard.extend(req.messages.clone());
+            }
+
             // Guards at the TOP so they cover delay and every exit path.
             let _conc_guard = ConcurrentGuard::new(
                 Arc::clone(&concurrent),
@@ -543,7 +560,7 @@ mod tests {
         let provider =
             MockProvider::new("t", MockMode::Fixed("ok".into())).with_cancellation_tracking();
         let mut s = provider.chat_stream(ChatRequest::new("m", vec![ChatMessage::user("x")]));
-        while let Some(_) = s.next().await {} // drain to completion
+        while s.next().await.is_some() {} // drain to completion
         assert!(
             !provider.was_cancelled(),
             "a fully-consumed stream must NOT report cancellation"

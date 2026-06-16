@@ -11,11 +11,13 @@
 //!   `Waiter` receiver (subsequent concurrent callers)
 //! - `LeaderHandle::complete()` stores the result and fans it out to waiters
 //! - LeaderHandle's `Drop` sends a cancellation error so waiters never hang
-//! - TTL-only eviction (LRU deferred — see item 9 follow-up)
+//! - TTL + LRU eviction (per-entry monotonic `access_order`; `trim()` runs on
+//!   leader-complete when `max_entries` is set; `in_flight` entries never trimmed)
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::{DashMap, mapref::entry::Entry};
@@ -37,6 +39,8 @@ pub struct CachedEntry {
     pub usage: Option<LlmUsage>,
     /// When this entry was created (for TTL check).
     pub stored_at: Instant,
+    /// Monotonic access sequence number (from cache.access_counter).
+    pub access_order: AtomicU64,
 }
 
 /// Outcome of `ProducerCache::acquire()`.
@@ -67,10 +71,12 @@ impl LeaderHandle {
     pub fn complete(mut self, result: Result<(String, Option<LlmUsage>), LlmError>) {
         match result {
             Ok((text, usage)) => {
+                let seq = self.cache.access_counter.fetch_add(1, Ordering::Relaxed);
                 let entry = Arc::new(CachedEntry {
                     text,
                     usage,
                     stored_at: Instant::now(),
+                    access_order: AtomicU64::new(seq),
                 });
                 self.cache
                     .entries
@@ -78,6 +84,7 @@ impl LeaderHandle {
                 if let Some(tx) = self.tx.take() {
                     let _ = tx.send(Some(Ok(entry)));
                 }
+                self.cache.trim();
             }
             Err(e) => {
                 if let Some(tx) = self.tx.take() {
@@ -116,28 +123,33 @@ type InFlightMap = DashMap<String, FlightSender>;
 /// Producer-level response cache with single-flight coalescing.
 ///
 /// Only materialised (non-streaming) responses are cached. The cache key
-/// is a hash of the canonicalised request tuple. TTL-only eviction in the
-/// initial implementation; LRU eviction is deferred.
+/// is a hash of the canonicalised request tuple. TTL eviction is always
+/// active; optional LRU eviction via `max_entries`.
 pub struct ProducerCache {
     ttl: Duration,
     entries: DashMap<String, Arc<CachedEntry>>,
     in_flight: InFlightMap,
+    max_entries: Option<usize>,
+    /// Monotonic counter for LRU ordering.
+    access_counter: AtomicU64,
 }
 
 impl ProducerCache {
-    /// Create a new cache with the given TTL.
-    /// `max_entries` is parsed but NOT enforced (LRU eviction deferred).
-    pub fn new(ttl: Duration) -> Self {
+    /// Create a new cache with the given TTL and optional max entries.
+    pub fn new(ttl: Duration, max_entries: Option<usize>) -> Self {
         Self {
             ttl,
             entries: DashMap::new(),
             in_flight: DashMap::new(),
+            max_entries,
+            access_counter: AtomicU64::new(0),
         }
     }
 
     /// Look up a cached entry by key.
     /// Returns `None` if the key is absent or the entry has expired (TTL).
     /// Expired entries are removed lazily on access.
+    /// On hit, bumps the entry's access order for LRU tracking.
     pub fn get(&self, key: &str) -> Option<(String, Option<LlmUsage>)> {
         let e = self.entries.get(key)?;
         if e.stored_at.elapsed() > self.ttl {
@@ -145,6 +157,8 @@ impl ProducerCache {
             self.entries.remove(key);
             return None;
         }
+        let seq = self.access_counter.fetch_add(1, Ordering::Relaxed);
+        e.access_order.store(seq, Ordering::Relaxed);
         Some((e.text.clone(), e.usage))
     }
 
@@ -166,6 +180,36 @@ impl ProducerCache {
                     cache: Arc::clone(self),
                     tx: Some(tx),
                 })
+            }
+        }
+    }
+
+    /// Evict oldest entries if the cache exceeds `max_entries`.
+    ///
+    /// Uses the monotonic `access_order` counter (bumped on insert and
+    /// every cache hit). Entries with the lowest sequence numbers are
+    /// considered least-recently-used and removed first.
+    ///
+    /// `in_flight` entries are NEVER trimmed — single-flight correctness
+    /// depends on them.
+    fn trim(&self) {
+        if let Some(max) = self.max_entries
+            && self.entries.len() > max
+        {
+            let mut entries: Vec<(String, u64)> = self
+                .entries
+                .iter()
+                .map(|e| {
+                    (
+                        e.key().clone(),
+                        e.value().access_order.load(Ordering::Relaxed),
+                    )
+                })
+                .collect();
+            entries.sort_by_key(|(_, seq)| *seq);
+            let to_remove = entries.len().saturating_sub(max);
+            for (key, _) in entries.into_iter().take(to_remove) {
+                self.entries.remove(&key);
             }
         }
     }
@@ -464,13 +508,14 @@ mod tests {
 
     #[test]
     fn cache_get_returns_none_for_expired_entry() {
-        let cache = ProducerCache::new(Duration::from_nanos(1));
+        let cache = ProducerCache::new(Duration::from_nanos(1), None);
         cache.entries.insert(
             "k".into(),
             Arc::new(CachedEntry {
                 text: "v".into(),
                 usage: None,
                 stored_at: Instant::now() - Duration::from_secs(10),
+                access_order: AtomicU64::new(0),
             }),
         );
         // Entry stored_at is 10s ago, ttl is 1ns => expired
@@ -479,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_flight_leader_then_waiter() {
-        let cache = Arc::new(ProducerCache::new(Duration::from_secs(60)));
+        let cache = Arc::new(ProducerCache::new(Duration::from_secs(60), None));
         let key = "test-key";
 
         // Acquire as leader
@@ -504,9 +549,128 @@ mod tests {
         assert_eq!(entry.text, "hello");
     }
 
+    #[test]
+    fn lru_evicts_oldest_on_overflow() {
+        let cache = ProducerCache::new(Duration::from_secs(60), Some(2));
+
+        // Insert three entries with keys ordered by insertion.
+        // We bypass the single-flight path and insert directly to
+        // control the access_order sequence precisely.
+        for i in 0..3 {
+            let seq = cache.access_counter.fetch_add(1, Ordering::Relaxed);
+            let key = format!("k{i}");
+            cache.entries.insert(
+                key,
+                Arc::new(CachedEntry {
+                    text: format!("v{i}"),
+                    usage: None,
+                    stored_at: Instant::now(),
+                    access_order: AtomicU64::new(seq),
+                }),
+            );
+        }
+
+        // Three entries inserted, max is 2 => oldest must be evicted
+        assert_eq!(cache.entries.len(), 3, "all 3 inserted before trim");
+        cache.trim();
+        assert_eq!(cache.entries.len(), 2, "trim must evict oldest entry");
+        assert!(cache.entries.contains_key("k1"), "k1 must survive");
+        assert!(cache.entries.contains_key("k2"), "k2 must survive");
+        assert!(
+            !cache.entries.contains_key("k0"),
+            "k0 (oldest) must be evicted"
+        );
+    }
+
+    #[test]
+    fn lru_updates_access_order_on_hit() {
+        let cache = ProducerCache::new(Duration::from_secs(60), Some(2));
+
+        // Insert three entries directly, no trim yet.
+        for i in 0..3 {
+            let seq = cache.access_counter.fetch_add(1, Ordering::Relaxed);
+            let key = format!("k{i}");
+            cache.entries.insert(
+                key,
+                Arc::new(CachedEntry {
+                    text: format!("v{i}"),
+                    usage: None,
+                    stored_at: Instant::now(),
+                    access_order: AtomicU64::new(seq),
+                }),
+            );
+        }
+
+        // Access k0 — bumps its access_order above k1 and k2
+        let seq = cache.access_counter.fetch_add(1, Ordering::Relaxed);
+        cache
+            .entries
+            .get("k0")
+            .unwrap()
+            .access_order
+            .store(seq, Ordering::Relaxed);
+
+        // Now trim — should evict k1 (oldest access_order), keep k0 and k2
+        cache.trim();
+        assert_eq!(cache.entries.len(), 2, "trim must evict one entry");
+        assert!(
+            cache.entries.contains_key("k0"),
+            "k0 (accessed) must survive"
+        );
+        assert!(cache.entries.contains_key("k2"), "k2 must survive");
+        assert!(
+            !cache.entries.contains_key("k1"),
+            "k1 (oldest after k0 access) must be evicted"
+        );
+    }
+
+    #[test]
+    fn lru_noop_when_under_max() {
+        let cache = ProducerCache::new(Duration::from_secs(60), Some(10));
+        for i in 0..3 {
+            let seq = cache.access_counter.fetch_add(1, Ordering::Relaxed);
+            cache.entries.insert(
+                format!("k{i}"),
+                Arc::new(CachedEntry {
+                    text: format!("v{i}"),
+                    usage: None,
+                    stored_at: Instant::now(),
+                    access_order: AtomicU64::new(seq),
+                }),
+            );
+        }
+        // Under max => no eviction
+        cache.trim();
+        assert_eq!(cache.entries.len(), 3, "no eviction when under max");
+    }
+
+    #[test]
+    fn lru_noop_when_max_entries_none() {
+        let cache = ProducerCache::new(Duration::from_secs(60), None);
+        for i in 0..10 {
+            let seq = cache.access_counter.fetch_add(1, Ordering::Relaxed);
+            cache.entries.insert(
+                format!("k{i}"),
+                Arc::new(CachedEntry {
+                    text: format!("v{i}"),
+                    usage: None,
+                    stored_at: Instant::now(),
+                    access_order: AtomicU64::new(seq),
+                }),
+            );
+        }
+        // No max_entries => trim is a no-op
+        cache.trim();
+        assert_eq!(
+            cache.entries.len(),
+            10,
+            "no eviction when max_entries is None"
+        );
+    }
+
     #[tokio::test]
     async fn single_flight_leader_error_propagates_to_waiter() {
-        let cache = Arc::new(ProducerCache::new(Duration::from_secs(60)));
+        let cache = Arc::new(ProducerCache::new(Duration::from_secs(60), None));
         let key = "err-key";
 
         let slot1 = Arc::clone(&cache).acquire(key);
@@ -526,6 +690,33 @@ mod tests {
         assert!(
             err.to_string().contains("boom"),
             "waiter must receive the leader's error"
+        );
+    }
+
+    #[tokio::test]
+    async fn lru_safe_under_concurrent_complete() {
+        let cache: Arc<ProducerCache> =
+            Arc::new(ProducerCache::new(Duration::from_secs(60), Some(5)));
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            let cache = Arc::clone(&cache);
+            handles.push(tokio::spawn(async move {
+                let key = format!("key{i}");
+                match cache.acquire(&key) {
+                    Slot::Leader(h) => {
+                        h.complete(Ok((format!("text{i}"), None)));
+                    }
+                    _ => panic!("expected leader for new key"),
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert!(
+            cache.entries.len() <= 5,
+            "entries should be bounded by max_entries (got {})",
+            cache.entries.len()
         );
     }
 }

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
+use std::time::Duration;
 
 use crate::config::{LlmGlobalConfig, LlmProviderConfig};
 use crate::error::LlmError;
@@ -10,8 +12,9 @@ pub type ProviderMap = HashMap<String, Arc<dyn LlmProvider>>;
 
 pub fn build_provider_map(config: &LlmGlobalConfig) -> Result<ProviderMap, LlmError> {
     let mut map = HashMap::new();
+    let global_timeout = config.timeout_secs;
     for (name, provider_config) in &config.providers {
-        let provider = build_single(name, provider_config).map_err(|e| {
+        let provider = build_single(name, provider_config, global_timeout).map_err(|e| {
             // log-policy: system-broken
             tracing::error!(provider = %name, error = %e, "failed to build llm provider");
             e
@@ -21,7 +24,11 @@ pub fn build_provider_map(config: &LlmGlobalConfig) -> Result<ProviderMap, LlmEr
     Ok(map)
 }
 
-fn build_single(name: &str, config: &LlmProviderConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+fn build_single(
+    name: &str,
+    config: &LlmProviderConfig,
+    #[allow(unused_variables)] global_timeout: Option<u64>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
     match config {
         LlmProviderConfig::Mock(c) => {
             let mode = if let Some(ref msg) = c.error_message {
@@ -34,15 +41,23 @@ fn build_single(name: &str, config: &LlmProviderConfig) -> Result<Arc<dyn LlmPro
             ))
         }
         #[cfg(any(feature = "openai", feature = "all-providers"))]
-        LlmProviderConfig::Openai(c) => crate::provider::siumai_adapter::build_openai(name, c)
-            .map(|p| p as Arc<dyn LlmProvider>),
+        LlmProviderConfig::Openai(c) => {
+            let configured_timeout =
+                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
+            crate::provider::siumai_adapter::build_openai(name, c, configured_timeout)
+                .map(|p| p as Arc<dyn LlmProvider>)
+        }
         #[cfg(not(any(feature = "openai", feature = "all-providers")))]
         LlmProviderConfig::Openai(_) => Err(LlmError::UnsupportedCapability(
             "OpenAI provider requires the 'openai' feature flag".into(),
         )),
         #[cfg(any(feature = "ollama", feature = "all-providers"))]
-        LlmProviderConfig::Ollama(c) => crate::provider::siumai_adapter::build_ollama(name, c)
-            .map(|p| p as Arc<dyn LlmProvider>),
+        LlmProviderConfig::Ollama(c) => {
+            let configured_timeout =
+                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
+            crate::provider::siumai_adapter::build_ollama(name, c, configured_timeout)
+                .map(|p| p as Arc<dyn LlmProvider>)
+        }
         #[cfg(not(any(feature = "ollama", feature = "all-providers")))]
         LlmProviderConfig::Ollama(_) => Err(LlmError::UnsupportedCapability(
             "Ollama provider requires the 'ollama' feature flag".into(),
@@ -118,7 +133,7 @@ mod tests {
             default_model: "mock-model".into(),
             error_message: Some("boom".into()),
         });
-        let provider = build_single("test", &config).expect("build ok");
+        let provider = build_single("test", &config, None).expect("build ok");
         assert_eq!(provider.id(), "test");
     }
 }

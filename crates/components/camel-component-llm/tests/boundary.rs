@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-/// Enforces that no file outside provider/siumai_adapter.rs and
-/// provider_factory.rs imports siumai.
+/// Enforces that no file outside the allowed boundary imports siumai.
+/// Production boundary: provider/siumai_adapter.rs, provider_factory.rs.
+/// Test-only exception: provider/siumai_adapter_tests.rs (StubChat, StubEmbed implement siumai traits).
 #[test]
 fn no_siumai_imports_outside_adapter() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");

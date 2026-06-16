@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 use futures::future::join_all;
 use siumai_core::error::LlmError as SiumaiLlmError;
@@ -335,6 +337,7 @@ async fn client_built_once_under_concurrency() {
             base_url: Some("http://127.0.0.1:1".into()),
             model: "gpt-4".into(),
         },
+        Duration::from_secs(30),
         stub_builder,
     ));
     let builds = Arc::clone(&provider.client_builds);
@@ -356,4 +359,27 @@ async fn client_built_once_under_concurrency() {
         1,
         "OnceCell must construct the client exactly once across concurrent embed() calls"
     );
+}
+
+// ========================================================================
+// Timeout error mapping tests (N4)
+// ========================================================================
+
+#[test]
+fn timeout_maps_to_llm_error_timeout_not_network() {
+    let err = map_siumai_error(
+        SiumaiLlmError::TimeoutError("elapsed".into()),
+        Duration::from_secs(10),
+    );
+    assert!(matches!(err, LlmError::Timeout(d) if d == Duration::from_secs(10)));
+}
+
+#[test]
+fn other_errors_still_map_correctly() {
+    // Verify that non-timeout errors still map correctly with the new param
+    let err = map_siumai_error(
+        SiumaiLlmError::ConnectionError("conn reset".into()),
+        Duration::from_secs(30),
+    );
+    assert!(matches!(err, LlmError::Network(_)));
 }

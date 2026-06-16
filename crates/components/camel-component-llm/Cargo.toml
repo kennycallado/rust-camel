@@ -1,6 +1,6 @@
 [package]
 name = "camel-component-llm"
-description = "LLM integration component for rust-camel (chat, embeddings)"
+description = "LLM chat, embeddings, tool calling, multi-turn, response cache, cost observability, retry, and concurrency control via OpenAI, Ollama, or Mock"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
