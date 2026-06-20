@@ -8,6 +8,7 @@ use camel_api::{
     loop_eip::{LoopConfig, LoopMode},
 };
 
+use camel_processor::do_try::{CatchClause, CatchMatcher, DoTryService};
 use camel_processor::{ChoiceService, WhenClause};
 
 use super::{CompilationContext, StepCompileResult, StepCompiler, StepCompilerRegistry};
@@ -171,6 +172,99 @@ impl StepCompiler for ControlFlowCompiler {
                     None
                 };
                 let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
+                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+            }
+
+            // ── DeclarativeDoTry ──
+            BuilderStep::DeclarativeDoTry {
+                try_steps,
+                catch,
+                finally,
+            } => {
+                let try_pairs = match ctx.compile_children(try_steps, registry) {
+                    Ok(p) => p,
+                    Err(e) => return StepCompileResult::Matched(Err(e)),
+                };
+                let try_processors: Vec<BoxProcessor> =
+                    try_pairs.into_iter().map(|(p, _)| p).collect();
+
+                let mut catch_clauses = Vec::with_capacity(catch.len());
+                for c in catch {
+                    let matcher = match (c.exception, c.when) {
+                        (Some(names), None) => CatchMatcher::ByVariant(names),
+                        (None, Some(expr)) => {
+                            let predicate = match compile_filter_predicate(ctx.languages, &expr) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    return StepCompileResult::Matched(Err(e));
+                                }
+                            };
+                            CatchMatcher::Predicate(predicate)
+                        }
+                        (Some(_), Some(_)) => {
+                            return StepCompileResult::Matched(Err(CamelError::Config(
+                                "doTry catch clause must specify either `exception` or \
+                                 `when`, not both"
+                                    .into(),
+                            )));
+                        }
+                        (None, None) => {
+                            return StepCompileResult::Matched(Err(CamelError::Config(
+                                "doTry catch clause must specify either `exception` or `when`"
+                                    .into(),
+                            )));
+                        }
+                    };
+                    let on_when = match c.on_when {
+                        Some(expr) => match compile_filter_predicate(ctx.languages, &expr) {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                return StepCompileResult::Matched(Err(e));
+                            }
+                        },
+                        None => None,
+                    };
+                    let clause_pairs = match ctx.compile_children(c.steps, registry) {
+                        Ok(p) => p,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
+                    let clause_processors: Vec<BoxProcessor> =
+                        clause_pairs.into_iter().map(|(p, _)| p).collect();
+                    catch_clauses.push(CatchClause {
+                        matcher,
+                        on_when,
+                        steps: clause_processors,
+                        disposition: c.disposition,
+                    });
+                }
+
+                let (finally_steps, finally_on_when) = if let Some(f) = finally {
+                    let on_when = match f.on_when {
+                        Some(expr) => match compile_filter_predicate(ctx.languages, &expr) {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                return StepCompileResult::Matched(Err(e));
+                            }
+                        },
+                        None => None,
+                    };
+                    let f_pairs = match ctx.compile_children(f.steps, registry) {
+                        Ok(p) => p,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
+                    let f_processors: Vec<BoxProcessor> =
+                        f_pairs.into_iter().map(|(p, _)| p).collect();
+                    (f_processors, on_when)
+                } else {
+                    (Vec::new(), None)
+                };
+
+                let svc = DoTryService::with_catch_and_finally(
+                    try_processors,
+                    catch_clauses,
+                    finally_steps,
+                    finally_on_when,
+                );
                 StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
             }
 

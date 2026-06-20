@@ -27,6 +27,23 @@ pub struct DeclarativeWhenStep {
     pub steps: Vec<BuilderStep>,
 }
 
+/// Builder struct for a single `doCatch` clause in the declarative pipeline.
+#[derive(Debug)]
+pub struct DoTryCatchClauseBuilder {
+    pub exception: Option<Vec<String>>,
+    pub when: Option<LanguageExpressionDef>,
+    pub on_when: Option<LanguageExpressionDef>,
+    pub disposition: camel_api::error_handler::ExceptionDisposition,
+    pub steps: Vec<BuilderStep>,
+}
+
+/// Builder struct for the `doFinally` block in the declarative pipeline.
+#[derive(Debug)]
+pub struct DoTryFinallyBuilder {
+    pub on_when: Option<LanguageExpressionDef>,
+    pub steps: Vec<BuilderStep>,
+}
+
 /// A step in an unresolved route definition.
 pub enum BuilderStep {
     /// A pre-built Tower processor service.
@@ -197,6 +214,12 @@ pub enum BuilderStep {
         uri: String,
         strategy: Option<String>,
         timeout_ms: Option<u64>,
+    },
+    /// Declarative doTry/doCatch/doFinally, resolved at route-add time.
+    DeclarativeDoTry {
+        try_steps: Vec<BuilderStep>,
+        catch: Vec<DoTryCatchClauseBuilder>,
+        finally: Option<DoTryFinallyBuilder>,
     },
 }
 
@@ -374,6 +397,19 @@ impl std::fmt::Debug for BuilderStep {
                 write!(
                     f,
                     "BuilderStep::PollEnrich {{ uri: {uri:?}, strategy: {strategy:?}, timeout_ms: {timeout_ms:?} }}"
+                )
+            }
+            BuilderStep::DeclarativeDoTry {
+                try_steps,
+                catch,
+                finally,
+            } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeDoTry {{ try_steps: {} step(s), catch: {} clause(s), finally: {} }}",
+                    try_steps.len(),
+                    catch.len(),
+                    if finally.is_some() { "Some" } else { "None" }
                 )
             }
         }

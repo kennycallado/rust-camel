@@ -75,8 +75,20 @@ impl RedeliveryPolicy {
     }
 }
 
-/// Configures what happens after an error handler processes a matched exception.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Disposition for an exception handler or catch clause (ADR-0019).
+///
+/// # YAML casing
+///
+/// serde uses `lowercase` casing: `handled`, `propagate`, `continued`.
+///
+/// # Default divergence
+///
+/// `ExceptionDisposition::default()` returns `Propagate` (first variant per `#[derive(Default)]`),
+/// but the YAML + builder layers default to `Handled` for doTry catch clauses
+/// (via `default_handled_disposition()` in `camel-dsl/src/yaml_ast.rs` and the `DoCatchBuilder::do_catch_exception` constructor).
+/// Direct struct construction should explicitly set disposition rather than relying on `Default`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ExceptionDisposition {
     /// After retry exhaustion / on_steps / DLC, re-throw to upstream.
     #[default]

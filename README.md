@@ -232,6 +232,7 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 | Content-Based Router | `.choice()` / `.when()`              | Route based on exchange content                                                                                |
 | Content Enricher     | `.enrich(uri)` / `.poll_enrich(uri, timeout)` | Merge additional content mid-route via producer (`enrich`) or polling consumer (`pollEnrich`); pluggable `EnrichmentStrategy` (default `UseEnrichedBody`) |
 | Delayer              | `.delay()` / `delay:`                | Fixed or dynamic delay (header-based)                                                                          |
+| doTry / doCatch / doFinally | `.do_try()` / `do_try:` | Lexical-scope try/catch/finally with ADR-0019 dispositions |
 | Dynamic Router       | `.dynamic_router(expr)`              | Expression-based routing with slip pattern                                                                     |
 | Routing Slip         | `.routing_slip(expr)`                | Route through a sequence of endpoints determined at runtime                                                    |
 | Filter               | `.filter(predicate)`                 | Forward exchange only when predicate is true                                                                   |
@@ -256,6 +257,7 @@ Run an example:
  cargo run -p container-example
  cargo run -p content-based-routing
  cargo run -p controlbus
+ cargo run -p do-try
  cargo run -p dynamic-router
  cargo run -p recipientlist
  cargo run -p routing-slip

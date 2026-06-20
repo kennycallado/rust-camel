@@ -90,6 +90,37 @@ impl CamelError {
             _ => "unknown",
         }
     }
+
+    /// Stable variant name used by `doTry` catch-by-variant matchers.
+    ///
+    /// `ProcessorErrorWithSource` aliases to `"ProcessorError"` — the two variants are
+    /// not distinguishable by name in MVP (see spec §5.4).
+    ///
+    /// The enum is `#[non_exhaustive]`; this match lives in the defining crate (camel-api),
+    /// so internal exhaustive matching is allowed. Adding a new variant without updating
+    /// this method will fail to compile, surfaced by `variant_name_tests`.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::ComponentNotFound(_) => "ComponentNotFound",
+            Self::EndpointCreationFailed(_) => "EndpointCreationFailed",
+            Self::ProcessorError(_) => "ProcessorError",
+            Self::ProcessorErrorWithSource(_, _) => "ProcessorError",
+            Self::TypeConversionFailed(_) => "TypeConversionFailed",
+            Self::InvalidUri(_) => "InvalidUri",
+            Self::ChannelClosed => "ChannelClosed",
+            Self::RouteError(_) => "RouteError",
+            Self::Io(_) => "Io",
+            Self::DeadLetterChannelFailed(_) => "DeadLetterChannelFailed",
+            Self::CircuitOpen(_) => "CircuitOpen",
+            Self::HttpOperationFailed { .. } => "HttpOperationFailed",
+            Self::Stopped => "Stopped",
+            Self::Config(_) => "Config",
+            Self::AlreadyConsumed => "AlreadyConsumed",
+            Self::StreamLimitExceeded(_) => "StreamLimitExceeded",
+            Self::Unauthenticated(_) => "Unauthenticated",
+            Self::Unauthorized(_) => "Unauthorized",
+        }
+    }
 }
 
 impl From<std::io::Error> for CamelError {
@@ -261,5 +292,75 @@ mod tests {
         let err2 = CamelError::Unauthorized("test".to_string());
         let cloned2 = err2.clone();
         assert!(matches!(cloned2, CamelError::Unauthorized(_)));
+    }
+}
+
+#[cfg(test)]
+mod variant_name_tests {
+    use super::CamelError;
+    use std::sync::Arc;
+
+    /// Representative value for each of the 18 enum variants. This test fails to compile
+    /// when a new variant is added to CamelError without updating variant_name().
+    /// The enum is `#[non_exhaustive]` but this match lives in the same crate, so internal
+    /// exhaustive matching is allowed.
+    #[test]
+    fn variant_name_covers_all_variants() {
+        let cases: Vec<(CamelError, &str)> = vec![
+            (
+                CamelError::ComponentNotFound("x".into()),
+                "ComponentNotFound",
+            ),
+            (
+                CamelError::EndpointCreationFailed("x".into()),
+                "EndpointCreationFailed",
+            ),
+            (CamelError::ProcessorError("x".into()), "ProcessorError"),
+            (
+                CamelError::ProcessorErrorWithSource(
+                    "x".into(),
+                    Arc::new(std::io::Error::new(std::io::ErrorKind::Other, "y")),
+                ),
+                "ProcessorError", // aliased
+            ),
+            (
+                CamelError::TypeConversionFailed("x".into()),
+                "TypeConversionFailed",
+            ),
+            (CamelError::InvalidUri("x".into()), "InvalidUri"),
+            (CamelError::ChannelClosed, "ChannelClosed"),
+            (CamelError::RouteError("x".into()), "RouteError"),
+            (CamelError::Io("x".into()), "Io"),
+            (
+                CamelError::DeadLetterChannelFailed("x".into()),
+                "DeadLetterChannelFailed",
+            ),
+            (CamelError::CircuitOpen("x".into()), "CircuitOpen"),
+            (
+                CamelError::HttpOperationFailed {
+                    method: "GET".into(),
+                    url: "https://example.com".into(),
+                    status_code: 500,
+                    status_text: "Internal Server Error".into(),
+                    response_body: None,
+                },
+                "HttpOperationFailed",
+            ),
+            (CamelError::Stopped, "Stopped"),
+            (CamelError::Config("x".into()), "Config"),
+            (CamelError::AlreadyConsumed, "AlreadyConsumed"),
+            (CamelError::StreamLimitExceeded(42), "StreamLimitExceeded"),
+            (CamelError::Unauthenticated("x".into()), "Unauthenticated"),
+            (CamelError::Unauthorized("x".into()), "Unauthorized"),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(
+                err.variant_name(),
+                expected,
+                "variant_name mismatch for {:?}",
+                err
+            );
+        }
     }
 }

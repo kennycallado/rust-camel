@@ -4,6 +4,7 @@ use std::path::Path;
 
 use tracing::{debug, error, info};
 
+use camel_api::error_handler::ExceptionDisposition;
 use camel_api::{
     CamelError, CanonicalLossReport, CanonicalRouteSpec, StreamSplitConfig, StreamSplitFormat,
 };
@@ -18,12 +19,13 @@ use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
     DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
-    DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DynamicRouterStepDef, EnrichStepDef,
-    LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
-    LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
-    RoutingSlipStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef,
-    SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
-    ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DoTryCatchClauseDef, DoTryFinallyDef,
+    DynamicRouterStepDef, EnrichStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
+    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef,
+    SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
+    SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
+    ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
@@ -37,9 +39,9 @@ pub use crate::yaml_ast::{
     ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep, YamlRoute,
     YamlRoutes, YamlStep,
 };
-use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
+use crate::yaml_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 28] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 29] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -68,6 +70,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 28] = [
     DeclarativeStepKind::Loop,
     DeclarativeStepKind::Enrich,
     DeclarativeStepKind::PollEnrich,
+    DeclarativeStepKind::DoTry,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -1026,6 +1029,132 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 strategy,
                 timeout_ms: timeout,
             }))
+        }
+        YamlStep::DoTry(DoTryStep { do_try: data }) => {
+            // Spec §7.2 Rule 4: try steps must be non-empty.
+            if data.steps.is_empty() {
+                return Err(CamelError::Config("doTry `steps` cannot be empty".into()));
+            }
+
+            let steps = data
+                .steps
+                .into_iter()
+                .map(yaml_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
+            let catch = data
+                .catch
+                .into_iter()
+                .map(|c| {
+                    // Reject unsupported Continued disposition at parse time (spec §3 Non-Goal).
+                    if matches!(c.disposition, ExceptionDisposition::Continued) {
+                        return Err(CamelError::Config(
+                            "doTry catch clause uses unsupported disposition `Continued`; \
+                             only Handled and Propagate are supported in MVP"
+                                .into(),
+                        ));
+                    }
+                    // Spec §7.2 Rule 1: matcher exclusivity — must have exactly one main matcher.
+                    if c.exception.is_some() && c.when.is_some() {
+                        return Err(CamelError::Config(
+                            "doTry catch clause cannot specify both `exception` and `when`".into(),
+                        ));
+                    }
+                    if c.exception.is_none() && c.when.is_none() {
+                        return Err(CamelError::Config(
+                            "doTry catch clause must specify exactly one of `exception` or `when`"
+                                .into(),
+                        ));
+                    }
+                    // Spec §7.2 Rule 2: `on_when` is allowed ONLY when `exception` is the main
+                    // matcher. `on_when` alongside `when` (alone) is a hard error.
+                    if c.on_when.is_some() && c.exception.is_none() {
+                        return Err(CamelError::Config(
+                            "doTry catch clause `on_when` requires `exception` as the main matcher \
+                             (not `when`)"
+                                .into(),
+                        ));
+                    }
+                    // Spec §7.2 Rule 3: `"*"` isolation — cannot mix with other variant names.
+                    if let Some(ref names) = c.exception
+                        && names.iter().any(|n| n == "*") && names.len() > 1
+                    {
+                        return Err(CamelError::Config(
+                            "doTry catch clause `exception: ['*']` cannot mix with other variant names"
+                                .into(),
+                        ));
+                    }
+                    // Reject empty/blank exception variant names — silent never-matches otherwise.
+                    if let Some(ref names) = c.exception {
+                        if names.is_empty() {
+                            return Err(CamelError::Config(
+                                "doTry catch clause `exception` cannot be an empty list".into(),
+                            ));
+                        }
+                        if names.iter().any(|n| n.trim().is_empty()) {
+                            return Err(CamelError::Config(
+                                "doTry catch clause `exception` cannot contain blank variant names"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    // Spec §7.2 Rule 4: catch clause steps must be non-empty.
+                    if c.steps.is_empty() {
+                        return Err(CamelError::Config(
+                            "doTry catch clause `steps` cannot be empty".into(),
+                        ));
+                    }
+
+                    let exception = c.exception;
+                    let when = c.when.map(|s| LanguageExpressionDef {
+                        language: "simple".into(),
+                        source: s,
+                    });
+                    let on_when = c.on_when.map(|s| LanguageExpressionDef {
+                        language: "simple".into(),
+                        source: s,
+                    });
+                    let clause_steps = c
+                        .steps
+                        .into_iter()
+                        .map(yaml_step_to_declarative_step)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(DoTryCatchClauseDef {
+                        exception,
+                        when,
+                        on_when,
+                        disposition: c.disposition,
+                        steps: clause_steps,
+                    })
+                })
+                .collect::<Result<Vec<_>, CamelError>>()?;
+            let finally = if let Some(f) = data.finally {
+                // Spec §7.2 Rule 4: finally steps must be non-empty.
+                if f.steps.is_empty() {
+                    return Err(CamelError::Config(
+                        "doTry `finally.steps` cannot be empty".into(),
+                    ));
+                }
+                let on_when = f.on_when.map(|s| LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: s,
+                });
+                let fsteps = f
+                    .steps
+                    .into_iter()
+                    .map(yaml_step_to_declarative_step)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some(DoTryFinallyDef {
+                    on_when,
+                    steps: fsteps,
+                })
+            } else {
+                None
+            };
+            Ok(DeclarativeStep::DoTry {
+                steps,
+                catch,
+                finally,
+            })
         }
     }
 }
@@ -3134,5 +3263,311 @@ templates:
         assert_eq!(specs[0].routes[0]["ratio"], 3.14);
         assert_eq!(specs[0].routes[0]["enabled"], true);
         assert_eq!(specs[0].routes[0]["nothing"], serde_json::Value::Null);
+    }
+
+    // --- doTry parse tests ---
+
+    #[test]
+    fn do_try_parses_minimal_form() {
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(steps.len(), 1);
+        match &steps[0] {
+            YamlStep::DoTry(d) => {
+                assert_eq!(d.do_try.steps.len(), 1);
+                assert!(d.do_try.catch.is_empty());
+                assert!(d.do_try.finally.is_none());
+            }
+            other => panic!("expected DoTry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn do_try_parses_full_form_with_catch_and_finally() {
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - exception: ["ProcessorError"]
+        on_when: "${body} contains 'x'"
+        disposition: propagate
+        steps:
+          - to: "log:caught"
+      - when: "${exchangeProperty.CamelExceptionKind} == 'Io'"
+        steps:
+          - to: "log:io"
+      - exception: ["*"]
+        steps:
+          - to: "log:all"
+    finally:
+      on_when: "${header.cleanup} == 'true'"
+      steps:
+        - to: "log:fin"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        match &steps[0] {
+            YamlStep::DoTry(d) => {
+                assert_eq!(d.do_try.catch.len(), 3);
+                let c0 = &d.do_try.catch[0];
+                assert_eq!(
+                    c0.exception.as_deref().unwrap(),
+                    &["ProcessorError".to_string()][..]
+                );
+                assert!(c0.on_when.is_some());
+                assert_eq!(c0.steps.len(), 1, "catch clause must have steps field");
+                let c1 = &d.do_try.catch[1];
+                assert!(c1.when.is_some());
+                let c2 = &d.do_try.catch[2];
+                assert_eq!(c2.exception.as_deref().unwrap(), &["*".to_string()][..]);
+                let f = d.do_try.finally.as_ref().unwrap();
+                assert!(f.on_when.is_some());
+                assert_eq!(f.steps.len(), 1);
+            }
+            other => panic!("expected DoTry, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn do_try_rejects_continued_disposition_at_yaml_level() {
+        let yaml = r#"
+routes:
+  - id: "test-continued-reject"
+    from: "direct:start"
+    steps:
+      - do_try:
+          steps:
+            - to: "log:try"
+          catch:
+            - exception: ["ProcessorError"]
+              disposition: continued
+              steps:
+                - to: "log:catch"
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err(), "Continued disposition should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported disposition `Continued`"),
+            "error should mention Continued rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn do_try_defaults_to_handled_disposition() {
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - exception: ["*"]
+        steps:
+          - to: "log:catch"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        match &steps[0] {
+            YamlStep::DoTry(d) => {
+                let c0 = &d.do_try.catch[0];
+                assert_eq!(
+                    c0.disposition,
+                    camel_api::error_handler::ExceptionDisposition::Handled,
+                    "default disposition should be Handled"
+                );
+            }
+            other => panic!("expected DoTry, got {:?}", other),
+        }
+    }
+
+    // ── Negative tests for spec §7.2 parse-time validation rules ──
+
+    #[test]
+    fn do_try_rejects_both_exception_and_when() {
+        // Spec §7.2 Rule 1: matcher exclusivity — cannot have both `exception` and `when`.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - exception: ["ProcessorError"]
+        when: "${body} == 'x'"
+        steps:
+          - to: "log:caught"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(
+            decl.is_err(),
+            "must reject catch clause with both `exception` and `when`"
+        );
+    }
+
+    #[test]
+    fn do_try_rejects_on_when_without_matcher() {
+        // Spec §7.2 Rule 1 + Rule 2: `on_when` requires `exception` as the main matcher;
+        // no matcher at all is rejected by Rule 1.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - on_when: "${body} == 'x'"
+        steps:
+          - to: "log:caught"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(
+            decl.is_err(),
+            "must reject catch clause with `on_when` but no matcher"
+        );
+    }
+
+    #[test]
+    fn do_try_rejects_star_mixed_with_other_variants() {
+        // Spec §7.2 Rule 3: `"*"` isolation — cannot mix with other variant names.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - exception: ["*", "ProcessorError"]
+        steps:
+          - to: "log:caught"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(
+            decl.is_err(),
+            "must reject catch clause with `*` mixed with other variants"
+        );
+    }
+
+    #[test]
+    fn do_try_rejects_empty_try_steps() {
+        // Spec §7.2 Rule 4: try steps must be non-empty.
+        let yaml = r#"
+- do_try:
+    steps: []
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(decl.is_err(), "must reject doTry with empty `steps`");
+    }
+
+    #[test]
+    fn do_try_rejects_empty_catch_steps() {
+        // Spec §7.2 Rule 4: catch clause steps must be non-empty.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - exception: ["*"]
+        steps: []
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(decl.is_err(), "must reject catch clause with empty `steps`");
+    }
+
+    #[test]
+    fn do_try_rejects_empty_finally_steps() {
+        // Spec §7.2 Rule 4: finally steps must be non-empty.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    finally:
+      steps: []
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(decl.is_err(), "must reject finally with empty `steps`");
+    }
+
+    #[test]
+    fn do_try_rejects_on_when_with_when_only() {
+        // Spec §7.2 Rule 2: `on_when` allowed ONLY when `exception` is the main matcher.
+        // `on_when` alongside `when` (alone) is a hard error.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - when: "${body} == 'x'"
+        on_when: "${header.flag} == true"
+        steps:
+          - to: "log:caught"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(
+            decl.is_err(),
+            "must reject catch clause with `on_when` when `when` (not `exception`) is the matcher"
+        );
+    }
+
+    #[test]
+    fn do_try_rejects_catch_clause_without_matcher() {
+        // Spec §7.2 Rule 1: catch clause must have exactly one matcher (`exception` OR `when`).
+        // Having neither is a hard error.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - steps:
+          - to: "log:caught"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(
+            decl.is_err(),
+            "must reject catch clause with neither `exception` nor `when`"
+        );
+    }
+
+    #[test]
+    fn do_try_rejects_empty_exception_list() {
+        // An empty `exception: []` is a silent never-match; reject explicitly.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - exception: []
+        steps:
+          - to: "log:caught"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(
+            decl.is_err(),
+            "must reject catch clause with empty `exception` list"
+        );
+    }
+
+    #[test]
+    fn do_try_rejects_blank_exception_variant_name() {
+        // Blank variant names like `""` or `"  "` are silent never-matches; reject.
+        let yaml = r#"
+- do_try:
+    steps:
+      - to: "log:try"
+    catch:
+      - exception: [""]
+        steps:
+          - to: "log:caught"
+"#;
+        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        assert!(
+            decl.is_err(),
+            "must reject catch clause with blank variant name in `exception`"
+        );
     }
 }

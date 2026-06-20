@@ -392,7 +392,7 @@ Identifies which infrastructure gate produced an error:
 | `HealthReport` | System-wide health report |
 | `ServiceStatus` | Service lifecycle status enum |
 | `HealthStatus` | Aggregated health status enum |
-| `ExceptionDisposition` | Error disposition: Propagate/Handled/Continued |
+| `ExceptionDisposition` | Error disposition: Propagate/Handled/Continued (YAML lowercase: `propagate`/`handled`/`continued`) |
 | `ExceptionPolicy` | Per-error matching rule with disposition |
 | `PolicyId` | Opaque exception policy index |
 | `RetryOutcome` | Retry phase result |

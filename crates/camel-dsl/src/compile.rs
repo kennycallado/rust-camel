@@ -21,7 +21,10 @@ use camel_api::{
     },
 };
 use camel_component_api::ConcurrencyModel;
-use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition, compose_pipeline};
+use camel_core::route::{
+    BuilderStep, DeclarativeWhenStep, DoTryCatchClauseBuilder, DoTryFinallyBuilder,
+    RouteDefinition, compose_pipeline,
+};
 use camel_processor::{
     ConvertBodyTo, LogLevel, MarshalService, StopService, StreamCacheService, UnmarshalService,
     builtin_data_format,
@@ -1021,6 +1024,41 @@ fn compile_declarative_step_with_threshold(
             strategy: def.strategy,
             timeout_ms: def.timeout_ms,
         }),
+        DeclarativeStep::DoTry {
+            steps,
+            catch,
+            finally,
+        } => {
+            let try_steps = compile_declarative_steps(steps, stream_cache_threshold)?;
+            let catch_clauses = catch
+                .into_iter()
+                .map(|c| {
+                    let clause_steps = compile_declarative_steps(c.steps, stream_cache_threshold)?;
+                    Ok(DoTryCatchClauseBuilder {
+                        exception: c.exception,
+                        when: c.when,
+                        on_when: c.on_when,
+                        disposition: c.disposition,
+                        steps: clause_steps,
+                    })
+                })
+                .collect::<Result<Vec<_>, CamelError>>()?;
+            let finally = match finally {
+                Some(f) => {
+                    let fsteps = compile_declarative_steps(f.steps, stream_cache_threshold)?;
+                    Some(DoTryFinallyBuilder {
+                        on_when: f.on_when,
+                        steps: fsteps,
+                    })
+                }
+                None => None,
+            };
+            Ok(BuilderStep::DeclarativeDoTry {
+                try_steps,
+                catch: catch_clauses,
+                finally,
+            })
+        }
     }
 }
 
@@ -1239,6 +1277,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Function(_) => "function",
         DeclarativeStep::Enrich(_) => "enrich",
         DeclarativeStep::PollEnrich(_) => "poll_enrich",
+        DeclarativeStep::DoTry { .. } => "do_try",
     }
 }
 
@@ -1568,6 +1607,25 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         | DeclarativeStep::RecipientList(_)
         | DeclarativeStep::Enrich(_)
         | DeclarativeStep::PollEnrich(_) => {}
+        DeclarativeStep::DoTry {
+            steps,
+            catch,
+            finally,
+        } => {
+            for s in steps {
+                validate_step(s)?;
+            }
+            for c in catch {
+                for s in &c.steps {
+                    validate_step(s)?;
+                }
+            }
+            if let Some(f) = finally {
+                for s in &f.steps {
+                    validate_step(s)?;
+                }
+            }
+        }
     }
     Ok(())
 }

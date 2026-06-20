@@ -35,6 +35,10 @@ use camel_processor::{
     StreamCacheService, UnmarshalService, builtin_data_format,
 };
 
+// ── Module declarations ─────────────────────────────────────────────────────
+pub mod do_try;
+pub use do_try::{DoCatchBuilder, DoFinallyBuilder, DoTryBuilder};
+
 /// Shared step-accumulation methods for all builder types.
 ///
 /// Implementors provide `steps_mut()` and get step-adding methods for free.
@@ -1090,6 +1094,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::DeclarativeStreamSplit { .. } => "stream_split",
         BuilderStep::Enrich { .. } => "enrich",
         BuilderStep::PollEnrich { .. } => "poll_enrich",
+        BuilderStep::DeclarativeDoTry { .. } => "do_try",
     }
 }
 

@@ -14,7 +14,7 @@ Routes can also be defined via YAML using camel-dsl. See the camel-dsl crate for
 
 - **Fluent API**: Intuitive method chaining for route definition
 - **Type Safety**: Compile-time verification of route structure
-- **All EIP Patterns**: Support for filter, split, multicast, aggregate, and more
+- **All EIP Patterns**: Support for filter, split, multicast, aggregate, **doTry / doCatch / doFinally**, and more
 - **Error Handling**: Configure error handlers per route
 - **Circuit Breaker**: Built-in resilience pattern support
 - **Concurrency Control**: Sequential or concurrent processing modes

@@ -3422,6 +3422,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "do-try"
+version = "0.18.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "docker_credential"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

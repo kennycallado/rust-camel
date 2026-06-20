@@ -417,6 +417,21 @@ pub struct EnrichStepDef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DoTryCatchClauseDef {
+    pub exception: Option<Vec<String>>,
+    pub when: Option<LanguageExpressionDef>,
+    pub on_when: Option<LanguageExpressionDef>,
+    pub disposition: camel_api::error_handler::ExceptionDisposition,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DoTryFinallyDef {
+    pub on_when: Option<LanguageExpressionDef>,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
     SetHeader(SetHeaderStepDef),
@@ -446,6 +461,11 @@ pub enum DeclarativeStep {
     Loop(LoopStepDef),
     Enrich(EnrichStepDef),
     PollEnrich(EnrichStepDef),
+    DoTry {
+        steps: Vec<DeclarativeStep>,
+        catch: Vec<DoTryCatchClauseDef>,
+        finally: Option<DoTryFinallyDef>,
+    },
 }
 
 impl DeclarativeStep {
@@ -485,6 +505,7 @@ impl DeclarativeStep {
             DeclarativeStep::Loop(_) => crate::contract::DeclarativeStepKind::Loop,
             DeclarativeStep::Enrich(_) => crate::contract::DeclarativeStepKind::Enrich,
             DeclarativeStep::PollEnrich(_) => crate::contract::DeclarativeStepKind::PollEnrich,
+            DeclarativeStep::DoTry { .. } => crate::contract::DeclarativeStepKind::DoTry,
         }
     }
 }

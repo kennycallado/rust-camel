@@ -1,0 +1,18 @@
+[package]
+name = "do-try"
+description = "doTry/doCatch/doFinally EIP patterns tour"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-direct.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

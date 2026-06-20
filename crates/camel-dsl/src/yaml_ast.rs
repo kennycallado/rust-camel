@@ -266,6 +266,7 @@ pub enum YamlStep {
     Marshal(MarshalStep),
     Unmarshal(UnmarshalStep),
     Delay(DelayStep),
+    DoTry(DoTryStep),
     Loop(LoopStep),
     Validate(ValidateStep),
     Enrich(EnrichStep),
@@ -468,6 +469,43 @@ pub struct ChoiceData {
     pub when: Vec<PredicateBlock>,
     #[serde(default)]
     pub otherwise: Option<Vec<YamlStep>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct DoTryStep {
+    pub do_try: DoTryData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct DoTryData {
+    pub steps: Vec<YamlStep>,
+    #[serde(default)]
+    pub catch: Vec<CatchClauseData>,
+    #[serde(default)]
+    pub finally: Option<FinallyData>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct CatchClauseData {
+    pub exception: Option<Vec<String>>,
+    pub when: Option<String>,
+    pub on_when: Option<String>,
+    #[serde(default = "default_handled_disposition")]
+    pub disposition: camel_api::error_handler::ExceptionDisposition,
+    pub steps: Vec<YamlStep>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FinallyData {
+    pub on_when: Option<String>,
+    pub steps: Vec<YamlStep>,
+}
+
+fn default_handled_disposition() -> camel_api::error_handler::ExceptionDisposition {
+    camel_api::error_handler::ExceptionDisposition::Handled
 }
 
 #[derive(Deserialize, Debug)]

@@ -327,7 +327,6 @@ impl Default for CamelContextBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::FromParts;
 
     #[test]
     fn builder_default_has_sane_timeout() {

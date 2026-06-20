@@ -21,12 +21,12 @@
 - **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker, unit-of-work hooks
 
 - **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax with optional defaults `${env:VAR_NAME:-default}`
-- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, recipient_list, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip
+- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, recipient_list, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip, do_try
 
 ## Supported YAML Steps
 
 ### Core Steps
-to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, recipient_list, stop, script, bean
+to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, recipient_list, stop, script, bean, do_try
 
 ### Delay
 Delay exchange processing:

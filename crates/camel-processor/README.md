@@ -24,6 +24,7 @@
 - **Stop**: Stop processing immediately
 - **Script**: Execute mutating expressions via `ScriptMutator`; changes to headers, properties, and body propagate back with atomic rollback on error
 - **Delayer**: Delay message processing with fixed or dynamic (header-based) duration
+- **DoTryService** — `doTry / doCatch / doFinally` EIP with catch-by-variant, catch-by-predicate, onWhen filter, ADR-0019 dispositions (Handled / Propagate), and Camel-parity finally semantics.
 - **Stream Handling**: Processors that consume streams replace the body with a JSON placeholder `{"placeholder": true}`
 - **Security Policy Layer**: Tower middleware that enforces authorization before forwarding to the inner service
 - **Marshal / Unmarshal**: Serialize/deserialize message bodies using pluggable data formats (JSON, XML, ZIP)
