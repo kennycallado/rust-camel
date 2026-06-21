@@ -4,7 +4,7 @@
 //! `RwLock<HashMap>` for reads, `Mutex<()>` to prevent thundering-herd stampedes,
 //! and lazy eviction when the cache exceeds capacity.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -68,8 +68,10 @@ impl CachingPermissionEvaluator {
     ///
     /// Each field is separated by a `\x00` null byte so that `"ab" + "c"` and
     /// `"a" + "bc"` cannot collide. Scopes are hashed in order with their own
-    /// separators. The JSON `context` is serialised with `serde_json::to_string`
-    /// which produces deterministic output (sorted keys for maps).
+    /// separators. The JSON `context` is canonicalised (object keys sorted
+    /// recursively via BTreeMap) before serialisation so that semantically
+    /// equivalent inputs `{"b":2,"a":1}` and `{"a":1,"b":2}` produce the same
+    /// key regardless of serde_json's `preserve_order` feature being enabled.
     fn cache_key(request: &PermissionRequest) -> String {
         let mut hasher = Sha256::new();
         hasher.update(request.principal.subject.as_bytes());
@@ -84,7 +86,8 @@ impl CachingPermissionEvaluator {
             hasher.update(s.as_bytes());
             hasher.update(b"\x00");
         }
-        let context_str = serde_json::to_string(&request.context).unwrap_or_default();
+        let canonical = canonicalize_json(&request.context);
+        let context_str = serde_json::to_string(&canonical).unwrap_or_default();
         hasher.update(context_str.as_bytes());
         hex::encode(hasher.finalize())
     }
@@ -186,6 +189,27 @@ impl PermissionEvaluator for CachingPermissionEvaluator {
         }
 
         Ok(decision)
+    }
+}
+
+/// Recursively sort all JSON object keys in a value tree.
+///
+/// Arrays are recursed into; leaves (string, number, bool, null) are unchanged.
+/// Uses BTreeMap for deterministic ordering regardless of serde_json's
+/// `preserve_order` feature being enabled workspace-wide.
+fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), canonicalize_json(v)))
+                .collect();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(canonicalize_json).collect())
+        }
+        other => other.clone(),
     }
 }
 
