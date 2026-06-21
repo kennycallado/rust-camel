@@ -107,7 +107,7 @@ mod tests {
         assert!(cargo.contains("name = \"acme-bean\""));
         assert!(cargo.contains("crate-type = [\"cdylib\"]"));
         assert!(cargo.contains("[workspace]"));
-        assert!(cargo.contains("wit-bindgen = \"0.57\""));
+        assert!(cargo.contains("wit-bindgen = \"0.58\""));
         assert!(!cargo.contains("camel-wasm-sdk"));
     }
 

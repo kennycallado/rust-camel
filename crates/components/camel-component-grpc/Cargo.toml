@@ -38,7 +38,7 @@ camel-component-api = { workspace = true, features = ["test-support"] }
 tonic.workspace = true
 prost.workspace = true
 tokio.workspace = true
-tokio-stream = "0.1"
+tokio-stream = { workspace = true }
 tokio-util.workspace = true
 tower.workspace = true
 tonic-prost.workspace = true

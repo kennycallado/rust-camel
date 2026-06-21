@@ -7,6 +7,10 @@ use camel_api::template::{
 
 use crate::yaml_ast::{YamlRoutes, YamlTemplate, YamlTemplateParameter};
 
+// serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
+// Module alias preserves call-site paths byte-for-byte.
+use noyalib::compat::serde_yaml as serde_yml;
+
 /// Parse the `templates` section of a YAML document into [`RouteTemplateSpec`]s.
 ///
 /// Converts the raw `serde_yml::Value` route body into `serde_json::Value`

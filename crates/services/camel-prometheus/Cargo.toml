@@ -14,7 +14,7 @@ categories.workspace = true
 [dependencies]
 camel-api.workspace = true
 camel-health.workspace = true
-prometheus = "0.14"
+prometheus = { workspace = true }
 axum.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -25,7 +25,7 @@ camel-core.workspace = true
 camel-builder.workspace = true
 camel-component-timer.workspace = true
 serde_json.workspace = true
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { workspace = true, features = ["json"] }
 tower = { workspace = true, features = ["util"] }
 
 [lints]

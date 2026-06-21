@@ -1,3 +1,7 @@
+// serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
+// Module alias preserves call-site paths byte-for-byte.
+use noyalib::compat::serde_yaml as serde_yml;
+
 use std::collections::BTreeMap;
 
 use serde::Deserialize;

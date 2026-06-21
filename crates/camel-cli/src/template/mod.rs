@@ -39,7 +39,7 @@ pub trait TemplateProvider {
 
 pub fn cargo_toml(plugin_name: &str) -> String {
     format!(
-        "[package]\nname = \"{plugin_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwit-bindgen = \"0.57\"\n"
+        "[package]\nname = \"{plugin_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwit-bindgen = \"0.58\"\n"
     )
 }
 

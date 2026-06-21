@@ -103,23 +103,27 @@ tonic-prost-build = { version = "0.14" }
 tonic-prost = { version = "0.14" }
 protoc-bin-vendored = "3"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.7", features = ["fs"] }
 async-trait = "0.1"
 thiserror = "2"
 surrealdb = { version = "3", default-features = false, features = ["protocol-ws", "protocol-http", "rustls"] }
 anyhow = "1"
 bytes = "1"
 futures = "0.3"
+futures-util = "0.3"
 tracing = "0.1"
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 tokio-stream = "0.1"
 dashmap = "6"
 indexmap = "2"
 blake3 = "1"
+bollard = "0.20"
 chrono = { version = "0.4", features = ["serde"] }
-kube = { version = "3", features = ["runtime", "derive"] }
-k8s-openapi = { version = "0.27", features = ["v1_31"] }
+clap = "4"
+kube = { version = "4", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.28", features = ["v1_35"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
+tracing-test = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13", features = ["rustls", "stream"], default-features = false }
@@ -129,11 +133,13 @@ sha2 = "0.11"
 hex = "0.4"
 flate2 = "1"
 tar = "0.4"
+tempfile = "3"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 async-stream = "0.3"
 dirs = "6"
 regex = "1"
 redb = "4"
+redis = "1"
 axum = { version = "0.8" }
 http = "1"
 url = "2"
@@ -149,22 +155,26 @@ notify = { version = "8", features = ["macos_fsevent"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "redis"] }
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+proc-macro2 = "1.0"
 prometheus = "0.14"
 quick-xml = "0.40"
+quote = "1.0"
 base64 = "0.22"
 rsa = { version = "0.9", features = ["pem"] }
 serde_urlencoded = "0.7"
 rand = "0.10"
+sqlx = "0.8"
 sxd-document = "0.3"
+syn = "2.0"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
-serde_yml = "0.0.12"
+noyalib = { version = "0.0.8", features = ["compat-serde-yaml"] }
 toml = "1"
 percent-encoding = "2.3"
 schemars = "1"
 ts-rs = "12"
 
 # WASM dependencies
-wit-bindgen = "0.57"
+wit-bindgen = "0.58"
 wasmtime = { version = "45", features = ["component-model"] }
 wasmtime-wasi = "45"
 

@@ -39,8 +39,8 @@ wasmtime-wasi.workspace = true
 camel-component-api = { workspace = true, features = ["test-support"] }
 camel-component-file.workspace = true
 camel-component-log.workspace = true
-futures = "0.3"
-tempfile = "3"
+futures = { workspace = true }
+tempfile = { workspace = true }
 wat = "1"
 
 [lints]

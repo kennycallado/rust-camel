@@ -21,7 +21,7 @@ camel-proto-compiler = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-serde_yml.workspace = true
+noyalib.workspace = true
 tracing.workspace = true
 camel-component-api.workspace = true
 camel-endpoint.workspace = true
@@ -34,7 +34,7 @@ protobuf = ["dep:camel-dataformat-protobuf", "dep:camel-proto-compiler"]
 [dev-dependencies]
 async-trait.workspace = true
 criterion.workspace = true
-tempfile = "3"
+tempfile = { workspace = true }
 
 [[bench]]
 name = "route_parsing"

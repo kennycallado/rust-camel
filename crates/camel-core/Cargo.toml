@@ -54,7 +54,7 @@ internal-adapters = []
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
-tempfile = "3"
+tempfile = { workspace = true }
 camel-component-timer.workspace = true
 camel-component-log.workspace = true
 camel-component-mock.workspace = true

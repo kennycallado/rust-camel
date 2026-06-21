@@ -2,6 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use camel_component_api::{Body, CamelError};
+// serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
+// Module alias preserves call-site paths byte-for-byte.
+use noyalib::compat::serde_yaml as serde_yml;
 use serde_yml::Value as YamlValue;
 
 use crate::config::{SchemaType, ValidatorConfig};

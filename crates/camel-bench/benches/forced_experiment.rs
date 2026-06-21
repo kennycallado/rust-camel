@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, Message, Value};
 use camel_core::route::compose_pipeline;
-use camel_language_api::Expression;
+use camel_language_api::Language;
 use camel_language_simple::SimpleLanguage;
 use camel_processor::{SetBody, SetHeader};
 use criterion::{Criterion, criterion_group, criterion_main};
-use tower::ServiceExt;
+use tower::{Service, ServiceExt};
 
 // ---------------------------------------------------------------------------
 // Level 1: Pure closures (baseline)
@@ -136,7 +136,7 @@ fn expression_pipeline() -> BoxProcessor {
     });
 
     let noop = BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) }));
-    compose_pipeline(vec![noop, eval_step, noop])
+    compose_pipeline(vec![noop.clone(), eval_step, noop])
 }
 
 // ---------------------------------------------------------------------------

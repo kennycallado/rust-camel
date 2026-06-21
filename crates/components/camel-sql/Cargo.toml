@@ -22,7 +22,7 @@ sqlite = ["sqlx/sqlite"]
 [dependencies]
 camel-api = { workspace = true }
 camel-component-api = { workspace = true }
-sqlx = { version = "0.8", features = ["runtime-tokio", "any", "chrono"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "any", "chrono"] }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 tower = { workspace = true }
@@ -30,7 +30,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
-async-stream = "0.3"
+async-stream = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
@@ -40,7 +40,7 @@ chrono = { workspace = true }
 camel-component-api = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-util = { workspace = true }
-tracing-test = { version = "0.2", features = ["no-env-filter"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [lints]
 workspace = true

@@ -14,7 +14,7 @@ categories.workspace = true
 [dependencies]
 camel-language-api.workspace = true
 async-trait.workspace = true
-sxd-document = "0.3"
+sxd-document = { workspace = true }
 sxd-xpath = "0.4"
 serde_json.workspace = true
 tracing.workspace = true

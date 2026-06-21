@@ -37,7 +37,7 @@ protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
-tempfile = "3"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

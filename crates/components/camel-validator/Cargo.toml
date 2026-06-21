@@ -23,7 +23,7 @@ prost = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 jsonschema = { workspace = true }
-serde_yml = { workspace = true }
+noyalib = { workspace = true }
 serde_json.workspace = true
 percent-encoding.workspace = true
 tower.workspace = true
@@ -36,7 +36,7 @@ protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
-tempfile = "3"
+tempfile = { workspace = true }
 camel-core.workspace = true
 camel-dsl.workspace = true
 camel-component-direct.workspace = true

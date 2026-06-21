@@ -34,7 +34,7 @@ camel-core = { workspace = true }
 camel-component-mock = { workspace = true }
 camel-component-direct = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
-tracing-test = { version = "0.2", features = ["no-env-filter"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [features]
 default = []

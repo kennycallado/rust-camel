@@ -25,7 +25,7 @@ blake3.workspace = true
 dashmap.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 reqwest = { workspace = true, features = ["json"] }
-bollard = "0.20"
+bollard = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
