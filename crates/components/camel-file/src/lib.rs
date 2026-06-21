@@ -4,6 +4,7 @@
 //! Main types: `FileBundle`, `FileComponent`, `FileConsumer`, `FileProducer`.
 //! Main modules: `bundle`.
 
+mod atomic_write;
 pub mod bundle;
 pub mod health;
 mod poll_logic;
@@ -50,13 +51,13 @@ use camel_language_simple::SimpleLanguage;
 ///
 /// When dropped, removes the file at `path` unless `disarm` is set to true.
 /// This protects against temp file leaks if `io::copy` panics mid-write.
-struct TempFileGuard {
+pub(crate) struct TempFileGuard {
     path: PathBuf,
     disarm: bool,
 }
 
 impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path,
             disarm: false,
@@ -64,7 +65,7 @@ impl TempFileGuard {
     }
 
     /// Call after successful rename to prevent cleanup.
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.disarm = true;
     }
 }
@@ -457,6 +458,11 @@ pub struct FileConfig {
     /// Prefix for temporary files during atomic writes.
     pub temp_prefix: Option<String>,
 
+    /// If true, fsync temp file and parent directory after atomic write, in the
+    /// correct order (temp → rename → parent). Crash-safe but slower. Opt-in via
+    /// `?durable=true`. Default false (preserves current latency characteristics).
+    pub durable: bool,
+
     /// Whether to automatically create directories.
     pub auto_create: bool,
 
@@ -573,6 +579,7 @@ impl UriConfig for FileConfig {
             done_file_name: params.get("doneFileName").cloned(),
             charset: params.get("charset").cloned(),
             temp_prefix: params.get("tempPrefix").cloned(),
+            durable: parse_bool_param(params, "durable", false)?,
             auto_create: parse_bool_param(params, "autoCreate", true)?,
             starting_directory_must_exist: parse_bool_param(
                 params,
@@ -1133,115 +1140,35 @@ impl Service<Exchange> for FileProducer {
                     file.flush().await.map_err(CamelError::from)?;
                 }
                 FileExistStrategy::TryRename => {
+                    // TryRename requires an explicit tempPrefix (validated at config time).
+                    // Delegates to atomic_write so both branches share one rename path.
                     let prefix = config.temp_prefix.as_deref().ok_or_else(|| {
                         CamelError::Config("fileExist=TryRename requires tempPrefix".into())
                     })?;
-                    let temp_name = format!(
-                        "{prefix}{}",
-                        target_path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                    );
-                    let temp_path = target_path.with_file_name(&temp_name);
-
-                    // RAII guard ensures cleanup even on panic
-                    let mut guard = TempFileGuard::new(temp_path.clone());
-
-                    let mut temp_file = tokio::time::timeout(
-                        config.write_timeout,
-                        OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(&temp_path),
-                    )
-                    .await
-                    .map_err(|_| CamelError::ProcessorError("Timeout creating temp file".into()))?
-                    .map_err(CamelError::from)?;
-                    write_body_with_charset(
+                    crate::atomic_write::atomic_write(
+                        &target_path,
                         body,
-                        &config.charset,
-                        &mut temp_file,
+                        Some(prefix),
+                        config.durable,
                         config.write_timeout,
+                        &config.charset,
                     )
                     .await?;
-                    temp_file.flush().await.map_err(CamelError::from)?;
-
-                    let rename_result = tokio::time::timeout(
-                        config.write_timeout,
-                        fs::rename(&temp_path, &target_path),
-                    )
-                    .await;
-
-                    match rename_result {
-                        Ok(Ok(_)) => {
-                            guard.disarm();
-                        }
-                        Ok(Err(e)) => {
-                            return Err(CamelError::from(e));
-                        }
-                        Err(_) => {
-                            return Err(CamelError::ProcessorError(
-                                "Timeout renaming temp file".into(),
-                            ));
-                        }
-                    }
                 }
                 _ => {
-                    // Override (or Fail when file doesn't exist): always atomic via temp file
-                    let temp_name = if let Some(ref prefix) = config.temp_prefix {
-                        format!("{prefix}{file_name}")
-                    } else {
-                        format!(".tmp.{file_name}")
-                    };
-                    let temp_path = dir_path.join(&temp_name);
-
-                    // RAII guard ensures cleanup even on panic
-                    let mut guard = TempFileGuard::new(temp_path.clone());
-
-                    // Write to temp file
-                    let mut file =
-                        tokio::time::timeout(config.write_timeout, fs::File::create(&temp_path))
-                            .await
-                            .map_err(|_| {
-                                CamelError::ProcessorError("Timeout creating temp file".into())
-                            })?
-                            .map_err(CamelError::from)?;
-
-                    let copy_result = write_body_with_charset(
+                    // Override (and Fail when file doesn't exist): always atomic via temp file.
+                    // Delegates to atomic_write — fixes Bug C (rc-o6o.3): temp path was previously
+                    // computed by joining dir_path with prefix+full_file_name, producing a path
+                    // whose parent did not exist for nested fileName values.
+                    crate::atomic_write::atomic_write(
+                        &target_path,
                         body,
+                        config.temp_prefix.as_deref(),
+                        config.durable,
+                        config.write_timeout,
                         &config.charset,
-                        &mut file,
-                        config.write_timeout,
                     )
-                    .await;
-
-                    // Flush any kernel buffers (best-effort; actual write errors come from io::copy above)
-                    let _ = file.flush().await;
-
-                    copy_result?;
-
-                    // Atomic rename: temp → target
-                    let rename_result = tokio::time::timeout(
-                        config.write_timeout,
-                        fs::rename(&temp_path, &target_path),
-                    )
-                    .await;
-
-                    match rename_result {
-                        Ok(Ok(_)) => {
-                            // Success — disarm guard so it doesn't delete the renamed file
-                            guard.disarm();
-                        }
-                        Ok(Err(e)) => {
-                            // Guard will clean up temp file on drop
-                            return Err(CamelError::from(e));
-                        }
-                        Err(_) => {
-                            // Guard will clean up temp file on drop
-                            return Err(CamelError::ProcessorError("Timeout renaming file".into()));
-                        }
-                    }
+                    .await?;
                 }
             }
 
@@ -1277,7 +1204,7 @@ impl Service<Exchange> for FileProducer {
     }
 }
 
-async fn write_body_with_charset(
+pub(crate) async fn write_body_with_charset(
     body: Body,
     charset: &Option<String>,
     file: &mut fs::File,
@@ -1373,6 +1300,24 @@ mod tests {
         // New timeout defaults
         assert_eq!(config.read_timeout, Duration::from_secs(30));
         assert_eq!(config.write_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn file_config_durable_defaults_to_false() {
+        let config = FileConfig::from_uri("file:/tmp/inbox").unwrap();
+        assert!(!config.durable, "durable must default to false");
+    }
+
+    #[test]
+    fn file_config_durable_true_parsed_from_uri() {
+        let config = FileConfig::from_uri("file:/tmp/inbox?durable=true").unwrap();
+        assert!(config.durable, "durable=true must parse from URI");
+    }
+
+    #[test]
+    fn file_config_durable_rejects_invalid_value() {
+        let result = FileConfig::from_uri("file:/tmp/inbox?durable=maybe");
+        assert!(result.is_err(), "invalid durable value must be rejected");
     }
 
     #[test]
@@ -1901,6 +1846,110 @@ mod tests {
         assert!(!dir.path().join(".tmpfinal.txt").exists());
         let content = std::fs::read_to_string(dir.path().join("final.txt")).unwrap();
         assert_eq!(content, "atomic write");
+    }
+
+    #[tokio::test]
+    async fn file_producer_writes_nested_filename_override() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        // Override is the default fileExist strategy.
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}"), &ctx)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("nested body"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("sub/dir/payload.bin".to_string()),
+        );
+
+        producer.oneshot(exchange).await.unwrap();
+
+        let target = dir.path().join("sub").join("dir").join("payload.bin");
+        assert!(target.exists(), "target file should exist at {:?}", target);
+        let content = std::fs::read(&target).unwrap();
+        assert_eq!(content, b"nested body");
+        // No leftover temp file in the directory root (Bug C symptom: .tmp.sub/dir/payload.bin
+        // path was being computed and the parent dir did not exist).
+        assert!(
+            !dir.path().join(".tmp.sub").exists(),
+            "no stray temp path should be created at directory root"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_producer_writes_nested_filename_try_rename() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("file:{dir_path}?fileExist=TryRename&tempPrefix=.t."),
+                &ctx,
+            )
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("try-rename nested"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("deep/dir/x.bin".to_string()),
+        );
+
+        producer.oneshot(exchange).await.unwrap();
+
+        let target = dir.path().join("deep").join("dir").join("x.bin");
+        assert!(target.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"try-rename nested");
+        // Temp file must not leak.
+        assert!(
+            !dir.path()
+                .join("deep")
+                .join("dir")
+                .join(".t.x.bin")
+                .exists(),
+            "temp file should have been renamed away"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_producer_writes_nested_filename_fail_strategy() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?fileExist=Fail"), &ctx)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("fail-strategy nested"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("a/b/c.bin".to_string()),
+        );
+
+        producer.oneshot(exchange).await.unwrap();
+
+        let target = dir.path().join("a").join("b").join("c.bin");
+        assert!(target.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"fail-strategy nested");
     }
 
     #[tokio::test]
@@ -2622,6 +2671,7 @@ mod tests {
             done_file_name: None,
             charset: None,
             temp_prefix: Some("tmp\0".into()),
+            durable: false,
             auto_create: true,
             starting_directory_must_exist: false,
             read_timeout: Duration::from_millis(30_000),
@@ -2667,6 +2717,7 @@ mod tests {
             done_file_name: None,
             charset: None,
             temp_prefix: None,
+            durable: false,
             auto_create: true,
             starting_directory_must_exist: false,
             read_timeout: Duration::from_millis(30_000),
@@ -2714,6 +2765,7 @@ mod tests {
             done_file_name: None,
             charset: None,
             temp_prefix: None,
+            durable: false,
             auto_create: true,
             starting_directory_must_exist: false,
             read_timeout: Duration::from_millis(30_000),
