@@ -21,6 +21,7 @@ pub mod endpoint_pipeline;
 pub mod error;
 pub mod error_handler;
 pub mod exchange;
+pub mod exchange_lookup;
 pub mod filter;
 pub mod from_body;
 pub mod function;
@@ -77,6 +78,7 @@ pub use security_policy::{
 #[allow(deprecated)]
 pub use error_handler::ExponentialBackoff;
 pub use exchange::{Exchange, ExchangePattern};
+pub use exchange_lookup::{ExchangeLookupPath, LookupPathError, PathSegment};
 pub use filter::FilterPredicate;
 pub use from_body::FromBody;
 pub use function::{

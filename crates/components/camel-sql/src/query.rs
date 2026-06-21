@@ -9,6 +9,7 @@
 //! (Camel-style `:#` prefix) and positional `#`, but the underlying database
 //! driver binding currently only supports positional `$1, $2, ...` params.
 
+use camel_api::ExchangeLookupPath;
 use camel_component_api::{Body, CamelError, Exchange};
 
 /// A parsed parameter slot in a query template.
@@ -195,24 +196,38 @@ fn check_in_prefix(chars: &[char], start: usize) -> bool {
     chars[start..start + in_prefix.len()] == in_prefix[..]
 }
 
-/// Extracts a parameter name starting at the given position.
-/// Parameter names consist of alphanumeric characters and underscores.
-/// Returns (name, end_position) where end_position is the index after the name.
+/// Extract a parameter name starting at the given position.
+///
+/// Reads until a SQL delimiter is encountered. The terminator set is:
+/// whitespace, `?`, `(`, `)`, `,`, `;`, `=`, `<`, `>`, `!`, `'`, `"`, `` ` ``,
+/// `/`, and `:`. Single `:` and Postgres `::` casts both terminate the name
+/// (see rc-o6o Phase 2 §3.2 — `:#id::text` resolves `id` and leaves `::text`
+/// as SQL). Names may contain alphanumerics, `_`, `-`, `.`, and other
+/// characters valid in map keys.
+///
+/// Returns `(name, end_position)` where `end_position` is the index of the
+/// terminator (or `chars.len()` at end-of-string).
 fn extract_param_name(chars: &[char], start: usize) -> (String, usize) {
     let mut name = String::new();
     let mut i = start;
-
     while i < chars.len() {
         let c = chars[i];
-        if c.is_alphanumeric() || c == '_' {
-            name.push(c);
-            i += 1;
-        } else {
+        if is_name_terminator(c) {
             break;
         }
+        name.push(c);
+        i += 1;
     }
-
     (name, i)
+}
+
+/// Returns true when `c` ends a placeholder name. See [`extract_param_name`].
+fn is_name_terminator(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '?' | '(' | ')' | ',' | ';' | '=' | '<' | '>' | '!' | '\'' | '"' | '`' | '/' | ':'
+        )
 }
 
 /// Finds the closing brace matching an opening brace at `start` (0-indexed into chars).
@@ -252,14 +267,12 @@ pub fn resolve_params(
     let mut bindings = Vec::new();
     let mut placeholder_num = 1usize;
 
-    // Pre-extract body as JSON if available
-    let body_json = match &exchange.input.body {
-        Body::Json(val) => Some(val),
+    // Pre-extract body as JSON array for POSITIONAL params only.
+    // (Named / InClause / Expression now route through ExchangeLookupPath.)
+    let body_array = match &exchange.input.body {
+        Body::Json(val) => val.as_array(),
         _ => None,
     };
-
-    // Check if body is an array for positional params
-    let body_array = body_json.as_ref().and_then(|v| v.as_array());
 
     for (i, param) in tpl.params.iter().enumerate() {
         // Add fragment before this param
@@ -286,13 +299,13 @@ pub fn resolve_params(
                 bindings.push(value.clone());
             }
             ParamSlot::Named(name) => {
-                let value = resolve_named_param(name, body_json, &exchange.input, exchange)?;
+                let value = resolve_named_param(name, exchange)?;
                 sql_parts.push(format!("${}", placeholder_num));
                 placeholder_num += 1;
                 bindings.push(value);
             }
             ParamSlot::InClause(name) => {
-                let value = resolve_named_param(name, body_json, &exchange.input, exchange)?;
+                let value = resolve_named_param(name, exchange)?;
 
                 let arr = value.as_array().ok_or_else(|| {
                     CamelError::ProcessorError(format!(
@@ -329,7 +342,7 @@ pub fn resolve_params(
                 }
             }
             ParamSlot::Expression(expr) => {
-                let value = resolve_expression_param(expr, body_json, &exchange.input, exchange)?;
+                let value = resolve_expression_param(expr, exchange)?;
                 sql_parts.push(format!("${}", placeholder_num));
                 placeholder_num += 1;
                 bindings.push(value);
@@ -346,77 +359,64 @@ pub fn resolve_params(
     })
 }
 
-/// Resolves a named parameter from body (JSON object), headers, or properties.
-fn resolve_named_param(
-    name: &str,
-    body_json: Option<&serde_json::Value>,
-    message: &camel_component_api::Message,
-    exchange: &Exchange,
-) -> Result<serde_json::Value, CamelError> {
-    // 1. Try body if it's a JSON object
-    if let Some(json) = body_json
-        && let Some(obj) = json.as_object()
-        && let Some(value) = obj.get(name)
+/// Resolves a named parameter (`:#name`, `:#in:name`, or the identifier portion
+/// of `:#${expr}`) via the shared [`ExchangeLookupPath`] grammar.
+///
+/// Resolution order:
+/// - `body.x.y` walks JSON; `header.x.y` / `property.x.y` / `exchangeProperty.x.y`
+///   are flat keys (maps not nested); anything else is unscoped (body JSON key
+///   → header → property).
+///
+/// Returns `CamelError::ProcessorError` when the path does not resolve.
+fn resolve_named_param(name: &str, exchange: &Exchange) -> Result<serde_json::Value, CamelError> {
+    let path = ExchangeLookupPath::parse(name).map_err(|e| {
+        CamelError::ProcessorError(format!("Invalid placeholder name {name:?}: {e}"))
+    })?;
+    // SQL binds scalars. Bare reserved scope names like `:#body` parse as
+    // `Body(vec![])` (whole body, meaningful for Simple `${body}`) but are
+    // ambiguous for SQL — reject explicitly per e_gpt oracle blessing #2.
+    if let ExchangeLookupPath::Body(segments) = &path
+        && segments.is_empty()
     {
-        return Ok(value.clone());
+        return Err(CamelError::ProcessorError(format!(
+            "SQL placeholder ':#{name}' requires a path (e.g. ':#{name}.field') — bare scope not supported"
+        )));
     }
-
-    // 2. Try headers
-    if let Some(value) = message.header(name) {
-        return Ok(value.clone());
-    }
-
-    // 3. Try properties
-    if let Some(value) = exchange.property(name) {
-        return Ok(value.clone());
-    }
-
-    Err(CamelError::ProcessorError(format!(
-        "Named parameter '{}' not found in body, headers, or properties",
-        name
-    )))
+    path.lookup(exchange).ok_or_else(|| {
+        CamelError::ProcessorError(format!(
+            "Named parameter '{name}' not found in body, headers, or properties"
+        ))
+    })
 }
 
-/// Resolves an expression parameter (:#${expr}) from body/header/property paths.
-/// The expr is a dot-separated path like `body.field`, `header.name`, `property.key`.
+/// Resolves an expression parameter (`:#${expr}`). The expr is the literal
+/// content between `{` and `}` — it follows the same [`ExchangeLookupPath``
+/// grammar as `:#name`. Simple language delegates (`:#${jsonpath:$.a}`) are
+/// NOT supported here; that path belongs to the Simple language itself, not
+/// SQL's `:#${...}` shape.
 fn resolve_expression_param(
     expr: &str,
-    body_json: Option<&serde_json::Value>,
-    message: &camel_component_api::Message,
     exchange: &Exchange,
 ) -> Result<serde_json::Value, CamelError> {
-    let parts: Vec<&str> = expr.splitn(2, '.').collect();
-    match parts.as_slice() {
-        ["body", field] => {
-            // Look up field in body JSON object
-            body_json
-                .and_then(|v| v.as_object())
-                .and_then(|obj| obj.get(*field))
-                .cloned()
-                .ok_or_else(|| {
-                    CamelError::ProcessorError(format!(
-                        "Expression '{}': field '{}' not found in body (note: nested field access is not supported; use a flat body structure or pass the value via header/property)",
-                        expr, field
-                    ))
-                })
-        }
-        ["header", name] => message.header(name).cloned().ok_or_else(|| {
-            CamelError::ProcessorError(format!(
-                "Expression '{}': header '{}' not found",
-                expr, name
-            ))
-        }),
-        ["property", key] => exchange.property(key).cloned().ok_or_else(|| {
-            CamelError::ProcessorError(format!(
-                "Expression '{}': property '{}' not found",
-                expr, key
-            ))
-        }),
-        _ => Err(CamelError::ProcessorError(format!(
-            "Unknown expression syntax: '{}'. Use body.<field>, header.<name>, or property.<key>",
-            expr
-        ))),
+    // Same grammar, distinct error message so users can tell which placeholder
+    // form they hit (the SQL fragment around the param is the real clue, but
+    // the message prefix removes ambiguity for log-only contexts).
+    let path = ExchangeLookupPath::parse(expr)
+        .map_err(|e| CamelError::ProcessorError(format!("Invalid expression {expr:?}: {e}")))?;
+    // Same bare-scope rejection as `resolve_named_param` — `:#${body}` is
+    // ambiguous for SQL just like `:#body`.
+    if let ExchangeLookupPath::Body(segments) = &path
+        && segments.is_empty()
+    {
+        return Err(CamelError::ProcessorError(format!(
+            "SQL expression ':#${{{expr}}}' requires a path (e.g. ':#${{{expr}.field}}') — bare scope not supported"
+        )));
     }
+    path.lookup(exchange).ok_or_else(|| {
+        CamelError::ProcessorError(format!(
+            "Expression '{expr}' not found in body, headers, or properties"
+        ))
+    })
 }
 
 /// Returns true if SQL should run through select path.
@@ -739,5 +739,274 @@ mod tests {
 
         let prepared = resolve_params(&tpl, &ex, ";").unwrap();
         assert_eq!(prepared.sql, "select * from t where id in ($1;$2;$3)");
+    }
+
+    #[test]
+    fn parse_kebab_case_named_param() {
+        // `:#my-param` should parse the WHOLE "my-param" as the name. The current
+        // parser stops at `-` (not alphanumeric), producing `Named("my")` and
+        // leaking `-param` into the SQL fragment. rc-o6o Bug A.
+        let tpl = parse_query_template("select * from t where id = :#my-param", '#').unwrap();
+        assert_eq!(tpl.params.len(), 1);
+        assert!(
+            matches!(&tpl.params[0], ParamSlot::Named(n) if n == "my-param"),
+            "got {:?}",
+            tpl.params[0]
+        );
+        assert_eq!(tpl.fragments[0], "select * from t where id = ");
+        assert_eq!(tpl.fragments[1], ""); // no trailing SQL leak
+    }
+
+    #[test]
+    fn parse_dotted_named_param() {
+        // Dots are now allowed inside names so `body.user.name` is one token.
+        let tpl = parse_query_template("select * from t where x = :#body.user.name", '#').unwrap();
+        assert!(
+            matches!(&tpl.params[0], ParamSlot::Named(n) if n == "body.user.name"),
+            "got {:?}",
+            tpl.params[0]
+        );
+        assert_eq!(tpl.fragments[1], "");
+    }
+
+    #[test]
+    fn parse_named_param_terminated_by_paren() {
+        // `:#id)` — close paren terminates the name.
+        let tpl = parse_query_template("fn(:#id)", '#').unwrap();
+        assert!(
+            matches!(&tpl.params[0], ParamSlot::Named(n) if n == "id"),
+            "got {:?}",
+            tpl.params[0]
+        );
+        assert_eq!(tpl.fragments[1], ")");
+    }
+
+    #[test]
+    fn parse_named_param_terminated_by_comma() {
+        let tpl = parse_query_template("fn(:#a, :#b)", '#').unwrap();
+        assert!(matches!(&tpl.params[0], ParamSlot::Named(n) if n == "a"));
+        assert!(matches!(&tpl.params[1], ParamSlot::Named(n) if n == "b"));
+    }
+
+    #[test]
+    fn parse_named_param_terminated_by_equals() {
+        let tpl = parse_query_template("select :#x=1", '#').unwrap();
+        assert!(matches!(&tpl.params[0], ParamSlot::Named(n) if n == "x"));
+        assert_eq!(tpl.fragments[1], "=1");
+    }
+
+    #[test]
+    fn parse_named_param_terminated_by_semicolon() {
+        let tpl = parse_query_template("select :#x;", '#').unwrap();
+        assert!(matches!(&tpl.params[0], ParamSlot::Named(n) if n == "x"));
+        assert_eq!(tpl.fragments[1], ";");
+    }
+
+    #[test]
+    fn parse_in_clause_kebab_case_name() {
+        // `:#in:my-ids` — IN-clause with hyphenated name.
+        let tpl = parse_query_template("select * from t where id in (:#in:my-ids)", '#').unwrap();
+        assert!(
+            matches!(&tpl.params[0], ParamSlot::InClause(n) if n == "my-ids"),
+            "got {:?}",
+            tpl.params[0]
+        );
+    }
+
+    #[test]
+    fn resolve_named_dotted_body_path_walks_json() {
+        // `:#body.user.name` should walk `body["user"]["name"]`. Today the parser
+        // stops at `.`, capturing `body`, and resolution fails with "Named
+        // parameter 'body' not found". rc-o6o Bug A (scoped lookup).
+        let tpl =
+            parse_query_template("select * from users where name = :#body.user.name", '#').unwrap();
+        assert!(
+            matches!(&tpl.params[0], ParamSlot::Named(n) if n == "body.user.name"),
+            "got {:?}",
+            tpl.params[0]
+        );
+
+        let msg = Message::new(Body::Json(serde_json::json!({
+            "user": { "name": "alice" }
+        })));
+        let ex = Exchange::new(msg);
+
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
+        assert_eq!(prepared.sql, "select * from users where name = $1");
+        assert_eq!(prepared.bindings[0], serde_json::json!("alice"));
+    }
+
+    #[test]
+    fn resolve_named_header_scope_flat_dotted_key() {
+        // `:#header.correlation.id` — flat key "correlation.id".
+        let tpl =
+            parse_query_template("select * from t where x = :#header.correlation.id", '#').unwrap();
+        let mut msg = Message::default();
+        msg.set_header("correlation.id", serde_json::json!("abc-123"));
+        let ex = Exchange::new(msg);
+
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
+        assert_eq!(prepared.bindings[0], serde_json::json!("abc-123"));
+    }
+
+    #[test]
+    fn resolve_named_property_scope_alias() {
+        // `:#exchangeProperty.tenantId` — property flat key "tenantId".
+        let tpl =
+            parse_query_template("select * from t where x = :#exchangeProperty.tenantId", '#')
+                .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.set_property("tenantId", serde_json::json!("acme"));
+
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
+        assert_eq!(prepared.bindings[0], serde_json::json!("acme"));
+    }
+
+    #[test]
+    fn resolve_named_unscoped_kebab_case_fallback_to_property() {
+        // `:#my-param` — unscoped. Body and header miss; property hits.
+        let tpl = parse_query_template("select * from t where x = :#my-param", '#').unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.set_property("my-param", serde_json::json!(7));
+
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
+        assert_eq!(prepared.bindings[0], serde_json::json!(7));
+    }
+
+    #[test]
+    fn resolve_expression_nested_body_walk() {
+        // `:#${body.user.name}` now walks nested JSON (used to be flat-only).
+        let tpl = parse_query_template("select * from users where name = :#${body.user.name}", '#')
+            .unwrap();
+        let msg = Message::new(Body::Json(serde_json::json!({
+            "user": { "name": "bob" }
+        })));
+        let ex = Exchange::new(msg);
+
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
+        assert_eq!(prepared.bindings[0], serde_json::json!("bob"));
+    }
+
+    #[test]
+    fn resolve_named_missing_returns_clear_error() {
+        let tpl = parse_query_template("select * from t where x = :#nope", '#').unwrap();
+        let ex = Exchange::new(Message::default());
+
+        let err = resolve_params(&tpl, &ex, ", ").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("nope"),
+            "error should mention the missing name: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_named_bare_body_rejected() {
+        // e_gpt oracle blessing condition #2: bare `:#body` is ambiguous for SQL.
+        // SQL binds scalars; "whole body" doesn't make sense as a SQL binding.
+        // `parse("body")` returns `Body(vec![])` (whole body for Simple `${body}`);
+        // SQL caller must explicitly reject this with a clear error.
+        let tpl = parse_query_template("select * from t where x = :#body", '#').unwrap();
+        let ex = Exchange::new(Message::new(Body::Json(serde_json::json!({"a": 1}))));
+
+        let err = resolve_params(&tpl, &ex, ", ").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("body") && (msg.contains("path") || msg.contains("requires")),
+            "bare ':#body' must be rejected with a clear message mentioning path requirement: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_named_bare_header_property_exchange_property_rejected() {
+        // Bare reserved scope names (`:#header`, `:#property`, `:#exchangeProperty`)
+        // error at ExchangeLookupPath::parse time (EmptyScopedKey). Verify the SQL
+        // surface propagates the error clearly.
+        for bare in ["header", "property", "exchangeProperty"] {
+            let sql = format!("select * from t where x = :#{bare}");
+            let tpl = parse_query_template(&sql, '#').unwrap();
+            let ex = Exchange::new(Message::default());
+            let err = resolve_params(&tpl, &ex, ", ").unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(bare),
+                "bare ':#{bare}' must error with a message mentioning the scope name: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_expression_bare_body_rejected() {
+        // `:#${body}` is the explicit-expression form; same bare-scope rejection
+        // as `:#body` (e_gpt oracle re-bless concern — SQL binds scalars).
+        let tpl = parse_query_template("select * from t where x = :#${body}", '#').unwrap();
+        let ex = Exchange::new(Message::new(Body::Json(serde_json::json!({"a": 1}))));
+
+        let err = resolve_params(&tpl, &ex, ", ").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("body") && (msg.contains("path") || msg.contains("requires")),
+            "bare ':#${{body}}' must be rejected: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_postgres_cast_after_placeholder_leaves_double_colon_as_sql() {
+        // `:#id::text` — placeholder name is `id`; `::text` is a Postgres cast
+        // that MUST remain in the SQL fragment. rc-o6o Phase 2 §3.2 mandatory
+        // contract test.
+        let tpl = parse_query_template("select :#id::text as id_text from t", '#').unwrap();
+        assert!(
+            matches!(&tpl.params[0], ParamSlot::Named(n) if n == "id"),
+            "got {:?}",
+            tpl.params[0]
+        );
+        assert_eq!(tpl.fragments[0], "select ");
+        assert_eq!(tpl.fragments[1], "::text as id_text from t");
+    }
+
+    #[test]
+    fn resolve_postgres_cast_binds_id_value() {
+        let tpl = parse_query_template("select :#id::text as id_text from t", '#').unwrap();
+        let mut msg = Message::default();
+        msg.set_header("id", serde_json::json!(42));
+        let ex = Exchange::new(msg);
+
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
+        assert_eq!(prepared.sql, "select $1::text as id_text from t");
+        assert_eq!(prepared.bindings[0], serde_json::json!(42));
+    }
+
+    #[test]
+    fn parse_single_colon_terminates_name() {
+        // `:#id:x` — single colon terminates. `:x` remains in SQL.
+        // (No real SQL meaning; verifies the single-vs-double-colon rule.)
+        let tpl = parse_query_template("select :#id:x from t", '#').unwrap();
+        assert!(
+            matches!(&tpl.params[0], ParamSlot::Named(n) if n == "id"),
+            "got {:?}",
+            tpl.params[0]
+        );
+        assert_eq!(tpl.fragments[1], ":x from t");
+    }
+
+    #[test]
+    fn resolve_in_clause_kebab_case_name_from_property() {
+        // `:#in:my-ids` — IN-clause with hyphenated name. Resolves via Unscoped
+        // fallback to a property holding an array.
+        let tpl = parse_query_template("select * from t where id in (:#in:my-ids)", '#').unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.set_property("my-ids", serde_json::json!([1, 2, 3]));
+
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
+        assert_eq!(prepared.sql, "select * from t where id in ($1, $2, $3)");
+        assert_eq!(
+            prepared.bindings,
+            vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3)
+            ]
+        );
     }
 }

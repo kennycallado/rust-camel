@@ -50,14 +50,10 @@ pub enum InterpolatedPart {
     Expr(Box<Expr>),
 }
 
-/// A single segment in a body JSON path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathSegment {
-    /// Named object field: `"name"`, `"user"`.
-    Key(String),
-    /// Array index: `0`, `1`.
-    Index(usize),
-}
+/// Re-export the shared PathSegment so Expr::BodyField stays source-compatible
+/// (variants Key(String) and Index(usize) are identical) while avoiding
+/// duplicate parsing logic. See rc-o6o Phase 2 §3.2.
+pub use camel_api::PathSegment;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -451,39 +447,20 @@ fn token_to_atom(token: &Token) -> Result<Expr, LanguageError> {
 }
 
 fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
+    // Bare `body` means whole body. ExchangeLookupPath::parse also handles
+    // this (returns Body(vec![])), but Simple's Expr::Body variant is
+    // distinct from Expr::BodyField, so we special-case it here.
     if s == "body" {
         return Ok(Expr::Body);
-    }
-
-    if let Some(path_str) = s.strip_prefix("body.") {
-        let segments = parse_body_path(path_str)?;
-        return Ok(Expr::BodyField(segments));
-    }
-
-    if let Some(key) = s.strip_prefix("header.") {
-        if key.is_empty() {
-            return Err(LanguageError::ParseError {
-                expr: s.to_string(),
-                reason: "header key must not be empty".to_string(),
-            });
-        }
-        return Ok(Expr::Header(key.to_string()));
-    }
-
-    if let Some(key) = s.strip_prefix("exchangeProperty.") {
-        if key.is_empty() {
-            return Err(LanguageError::ParseError {
-                expr: s.to_string(),
-                reason: "exchange property key must not be empty".to_string(),
-            });
-        }
-        return Ok(Expr::ExchangeProperty(key.to_string()));
     }
 
     if s == "exception.message" {
         return Ok(Expr::ExceptionMessage);
     }
 
+    // Language delegate: `${jsonpath:$.a[0]}` etc. NOT a lookup path; the
+    // `:` would be rejected by ExchangeLookupPath anyway, so this stays
+    // inline.
     if let Some((language, expression)) = s.split_once(':')
         && !expression.is_empty()
         && !language.is_empty()
@@ -497,10 +474,43 @@ fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
         });
     }
 
+    // Scoped forms: body.x.y / header.x / property.x / exchangeProperty.x.
+    // Delegate to the shared grammar so SQL `:#` and Simple `${...}` agree.
+    if s.starts_with("body.")
+        || s.starts_with("header.")
+        || s.starts_with("property.")
+        || s.starts_with("exchangeProperty.")
+    {
+        return lookup_path_to_expr(s);
+    }
+
     Err(LanguageError::ParseError {
         expr: s.to_string(),
         reason: "unrecognized token".to_string(),
     })
+}
+
+/// Parse a scoped form via [`camel_api::ExchangeLookupPath`] and project to
+/// Simple's [`Expr`]. Errors are translated into [`LanguageError::ParseError`]
+/// preserving the `${...}` rendering callers expect.
+fn lookup_path_to_expr(s: &str) -> Result<Expr, LanguageError> {
+    let path = camel_api::ExchangeLookupPath::parse(s).map_err(|e| LanguageError::ParseError {
+        expr: format!("${{{s}}}"),
+        reason: e.to_string(),
+    })?;
+    match path {
+        camel_api::ExchangeLookupPath::Body(segments) => Ok(Expr::BodyField(segments)),
+        camel_api::ExchangeLookupPath::Header(key) => Ok(Expr::Header(key)),
+        camel_api::ExchangeLookupPath::Property(key) => Ok(Expr::ExchangeProperty(key)),
+        camel_api::ExchangeLookupPath::Unscoped(_) => {
+            // Unscoped reaches here only if `s` had no recognized prefix.
+            // The `starts_with` guards above prevent that — but defend anyway.
+            Err(LanguageError::ParseError {
+                expr: format!("${{{s}}}"),
+                reason: "unrecognized token".to_string(),
+            })
+        }
+    }
 }
 
 fn build_interpolated(tokens: &[Token]) -> Result<Expr, LanguageError> {
@@ -544,28 +554,9 @@ fn unescape_double_quoted(raw: &str) -> String {
     out
 }
 
-/// Parse `"user.address.city"` or `"items.0.name"` into `Vec<PathSegment>`.
-/// Returns `ParseError` if any segment is empty.
-fn parse_body_path(path: &str) -> Result<Vec<PathSegment>, LanguageError> {
-    let mut segments = Vec::new();
-    for seg in path.split('.') {
-        if seg.is_empty() {
-            return Err(LanguageError::ParseError {
-                expr: format!("${{body.{path}}}"),
-                reason: "body path segment must not be empty".to_string(),
-            });
-        }
-        // Only treat as array index if: parses as usize AND has no leading zero
-        // (except "0" itself). This way "01" is treated as Key("01").
-        let is_index = seg.parse::<usize>().is_ok() && (seg == "0" || !seg.starts_with('0'));
-        if is_index {
-            segments.push(PathSegment::Index(seg.parse::<usize>().unwrap())); // allow-unwrap
-        } else {
-            segments.push(PathSegment::Key(seg.to_string()));
-        }
-    }
-    Ok(segments)
-}
+// NOTE: parse_body_path was removed in rc-o6o Phase 2 Task 10. Its logic
+// lives in camel_api::ExchangeLookupPath::parse (via parse_body_segments
+// in crates/camel-api/src/exchange_lookup.rs).
 
 #[cfg(test)]
 mod tests {
@@ -711,5 +702,34 @@ mod tests {
     #[test]
     fn parse_exception_kind_unsupported() {
         assert!(parse("${exception.kind}").is_err());
+    }
+
+    #[test]
+    fn parse_uses_shared_lookup_path_abstraction() {
+        // Smoke: scoped forms still parse identically after the ExchangeLookupPath
+        // migration. If the migration is wired, these all succeed exactly as
+        // before. rc-o6o Phase 2 §4.2 audit.
+        assert_eq!(
+            parse("${body.user.address.city}").unwrap(),
+            Expr::BodyField(vec![
+                PathSegment::Key("user".into()),
+                PathSegment::Key("address".into()),
+                PathSegment::Key("city".into()),
+            ])
+        );
+        assert_eq!(parse("${header.foo}").unwrap(), Expr::Header("foo".into()));
+        assert_eq!(
+            parse("${exchangeProperty.id}").unwrap(),
+            Expr::ExchangeProperty("id".into())
+        );
+        // Bare body and exception.message stay inline (not ExchangeLookupPath).
+        assert_eq!(parse("${body}").unwrap(), Expr::Body);
+        assert_eq!(
+            parse("${exception.message}").unwrap(),
+            Expr::ExceptionMessage
+        );
+        // Trailing dot must still be rejected.
+        assert!(parse("${body.}").is_err());
+        assert!(parse("${header.}").is_err());
     }
 }
