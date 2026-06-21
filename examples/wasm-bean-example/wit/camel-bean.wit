@@ -1,0 +1,16 @@
+package camel:plugin;
+
+/// Guest bean plugin with multi-method dispatch and init-time configuration.
+///
+/// Beans declare their methods via `methods()` and handle invocations
+/// via `invoke(method, exchange)`. The host calls `init(config)` once at
+/// registration with key-value pairs from Camel.toml `[beans.<name>.config]`,
+/// and `invoke()` for each route step that targets this bean.
+world bean {
+    import host;
+    use types.{wasm-exchange, wasm-error};
+
+    export invoke: func(method: string, exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
+    export methods: func() -> list<string>;
+    export init: func(config: list<tuple<string, string>>) -> result<_, string>;
+}

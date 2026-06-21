@@ -10,4 +10,4 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = { workspace = true }
+wit-bindgen = "0.58"
