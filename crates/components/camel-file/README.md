@@ -72,6 +72,7 @@ file:directoryPath[?options]
 | `fileName` | - | Output file name (or use CamelFileName header) |
 | `fileExist` | `Override` | Strategy: Override, Append, Fail, Ignore, TryRename. TryRename requires `tempPrefix` |
 | `tempPrefix` | - | Temp file prefix for atomic writes |
+| `durable` | `false` | When `true`, fsync temp file + parent directory after atomic rename (crash-safe; errors propagate) |
 | `autoCreate` | `true` | Create directories automatically |
 | `writeTimeout` | `30000` | Timeout for writing files (ms) |
 
