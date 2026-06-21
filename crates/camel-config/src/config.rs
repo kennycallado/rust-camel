@@ -1364,6 +1364,16 @@ pub(crate) fn apply_profile_lenient(value: &mut toml::Value, profile: Option<&st
     // If no profile active and no [default] → keep as-is
 }
 
+/// Serializes tests that touch `CAMEL_TIMEOUT_MS` / `CAMEL_PROFILE` env vars.
+///
+/// `test_from_file_with_env_overrides_timeout` (in `profile_loading_tests`)
+/// sets `CAMEL_TIMEOUT_MS=9999` and the async loader in `async_io_tests`
+/// reads env via `config::Environment::with_prefix("CAMEL")` after an
+/// `.await` point, so without serialization the two race and the async
+/// test flakes ~1/5 runs in workspace mode.
+#[cfg(test)]
+static ENV_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod camel_config_defaults_tests {
     use super::*;
@@ -1722,6 +1732,9 @@ timeout_ms = 321
 
     #[test]
     fn test_from_file_with_env_overrides_timeout() {
+        // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+
         let file = write_temp_config(
             r#"
 [default]
@@ -2748,6 +2761,18 @@ timeout_ms = 99
 
     #[tokio::test]
     async fn test_from_file_async_with_env_completes() {
+        // Serialize against env-touching tests (see ENV_OVERRIDE_LOCK). Held
+        // across the `.await` because `config::Environment::with_prefix(...)`
+        // reads env vars deep inside `from_file_async_with_env`.
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+
+        // SAFETY: clear potentially leaked env vars from other parallel tests;
+        // this test asserts the file-only value (1000).
+        unsafe {
+            std::env::remove_var("CAMEL_TIMEOUT_MS");
+            std::env::remove_var("CAMEL_PROFILE");
+        }
+
         let mut f = tempfile::NamedTempFile::new().expect("temp file");
         write!(
             f,

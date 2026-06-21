@@ -353,27 +353,23 @@ mod tests {
     }
 
     #[test]
-    fn test_example_all_wit_has_all_worlds() {
-        let example_dir = std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../examples/wasm-bean-example/wit"
-        ));
-        if !example_dir.exists() {
-            return;
-        }
-        let example_all = std::fs::read_to_string(example_dir.join("camel-all.wit"))
-            .expect("read example all wit");
+    fn test_full_wit_has_all_worlds() {
+        // FULL_WIT (canonical camel-all.wit) is the merged reference document
+        // containing every world. The example wit dir intentionally ships only
+        // camel-plugin.wit + camel-bean.wit (compile-ready subset, no world
+        // overlap) because wit-bindgen 0.58 rejects duplicate world
+        // declarations across files in the same package.
         assert!(
-            example_all.contains("world plugin"),
-            "camel-all.wit must contain plugin world"
+            FULL_WIT.contains("world plugin"),
+            "FULL_WIT must contain plugin world"
         );
         assert!(
-            example_all.contains("world bean"),
-            "camel-all.wit must contain bean world"
+            FULL_WIT.contains("world bean"),
+            "FULL_WIT must contain bean world"
         );
         assert!(
-            example_all.contains("world authorization-policy"),
-            "camel-all.wit must contain authorization-policy world"
+            FULL_WIT.contains("world authorization-policy"),
+            "FULL_WIT must contain authorization-policy world"
         );
     }
 

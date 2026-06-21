@@ -1,5 +1,10 @@
 package camel:plugin;
 
+// TODO(WIT-001): This file is a canonical source; camel-all.wit duplicates its content.
+// TODO(WIT-006): WIT interface versioning strategy is not yet defined. When the
+// WIT tooling supports it, add `@since(version = X.Y.Z)` annotations to each
+// interface and world definition to enable compatibility checks.
+
 /// Simplified exchange types crossing the WASM boundary.
 ///
 /// These types mirror the host's Exchange/Message/Body but exclude
@@ -48,14 +53,19 @@ interface types {
 
 /// Host functions imported by the guest plugin.
 ///
-/// These are implemented by the host runtime and allow
+/// These are implemented by the host runtime (Phase 2) and allow
 /// the guest to call back into Camel infrastructure.
 interface host {
     use types.{wasm-error};
 
     /// Invoke any Camel endpoint synchronously.
     /// Returns the response body as a string (JSON-encoded for structured data).
+    /// TODO(WIT-009): Only string payloads are supported; binary/bytes support is deferred.
     camel-call: func(uri: string, payload: string) -> result<string, wasm-error>;
+
+    /// Poll an endpoint for a message synchronously (pull model).
+    /// Returns the body as a string, or an error on timeout/failure.
+    camel-poll: func(uri: string, timeout-ms: u32) -> result<string, wasm-error>;
 
     /// Read a property from the host Exchange.
     get-property: func(key: string) -> option<string>;
@@ -86,20 +96,6 @@ world plugin {
 
     /// Initialization hook. Called once when the WASM module is instantiated.
     export init: func() -> result<_, string>;
-}
-
-/// Guest bean plugin with multi-method dispatch.
-///
-/// Beans declare their methods via `methods()` and handle invocations
-/// via `invoke(method, exchange)`.
-world bean {
-    import host;
-
-    use types.{wasm-exchange, wasm-error};
-
-    export invoke: func(method: string, exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
-    export methods: func() -> list<string>;
-    export init: func(config: list<tuple<string, string>>) -> result<_, string>;
 }
 
 /// Guest authorization-policy world — authorization only.

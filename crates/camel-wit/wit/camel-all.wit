@@ -1,10 +1,10 @@
+package camel:plugin;
+
 // TODO(WIT-001): This file duplicates content from camel-plugin.wit and camel-bean.wit.
 // Consider generating this at build time from the canonical source files instead.
 // TODO(WIT-006): WIT interface versioning strategy is not yet defined. When the
 // WIT tooling supports it, add `@since(version = X.Y.Z)` annotations to each
 // interface and world definition to enable compatibility checks.
-
-package camel:plugin;
 
 /// Simplified exchange types crossing the WASM boundary.
 ///
@@ -62,6 +62,10 @@ interface host {
     /// Invoke any Camel endpoint synchronously.
     /// TODO(WIT-009): Only string payloads are supported; binary/bytes support is deferred.
     camel-call: func(uri: string, payload: string) -> result<string, wasm-error>;
+
+    /// Poll an endpoint for a message synchronously (pull model).
+    /// Returns the body as a string, or an error on timeout/failure.
+    camel-poll: func(uri: string, timeout-ms: u32) -> result<string, wasm-error>;
 
     /// Read a property from the host Exchange.
     get-property: func(key: string) -> option<string>;
