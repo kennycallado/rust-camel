@@ -33,6 +33,32 @@ Apache Camel models error handling with an outer `ErrorHandler` wrapping the rou
 
 The architectural divergence is forced by Tower. Camel's JVM runtime has no readiness concept — every call is synchronous from the error handler's perspective. Tower splits `poll_ready` (readiness) from `call` (execution), and treats a readiness `Err` as a permanently broken service. This is incompatible with Camel's model where all errors are routable, retryable events. rust-camel resolves the mismatch by having `poll_ready` return `Ready(Ok(()))` unconditionally (multicast, error handler) and routing readiness errors through the same in-pipeline `RouteErrorHandler`. The consequence is that `continued=true` is implemented inside the pipeline loop rather than by an outer layer — a structural necessity, not a stylistic choice.
 
+### Enumeration of processors bound by the `Ready(Ok(()))` readiness contract
+
+Processors whose semantics are incompatible with Tower's "readiness `Err` =
+permanently broken service" assumption MUST NOT propagate readiness errors from
+`poll_ready`. They MUST return `Ready(Ok(()))` unconditionally, or preserve only
+`Pending` backpressure while mapping readiness `Err` to `Ready(Ok(()))`, and move
+per-endpoint or per-fragment readiness checks into `call()` where the route error
+handler can apply retry, handled, continued, failover, or stop-on-exception
+semantics.
+
+| Processor | Reason | Status |
+|---|---|---|
+| `MulticastService` | Parallel/sequential fan-out must honour `stop_on_exception`; per-endpoint readiness belongs in `call()`. | migrated |
+| `ErrorHandlerService` | Deprecated compatibility shell; retry/DLC handling happens in `call()`. | migrated |
+| `AggregatorService` | Aggregation buckets and timeout work are call-time state; readiness has no external endpoint to validate. | migrated |
+| `RecipientListService` | Recipients are dynamically resolved; readiness is per resolved recipient in `call()`. | migrated |
+| `WireTapService` | Fire-and-forget tap failures MUST NOT block the main pipeline. | pending-fix |
+| `LoadBalancerService` | Failover/selection strategies must skip broken endpoints in `call()`, not fail before selection runs. | pending-fix |
+| `SplitterService` | Fragment sub-pipeline readiness is checked per fragment in `call()`; outer readiness MUST NOT bypass split error policy. | pending-fix |
+| `StreamingSplitterService` | Streaming fragment readiness is checked per fragment in `call()`; outer readiness MUST NOT abort before stream policy runs. | pending-fix |
+
+`SecurityPolicyService` is intentionally excluded. Route-level authorization is a
+pre-pipeline boundary per [ADR-0010](./0010-security-policy-pre-pipeline-authorization.md):
+authorization faults are system-boundary faults and MUST surface before normal
+EIP processing runs.
+
 | Concept | Apache Camel 4.x | rust-camel |
 |---|---|---|
 | Error handler placement | Outer layer wrapping route | In-pipeline `RouteErrorHandler` injection |
