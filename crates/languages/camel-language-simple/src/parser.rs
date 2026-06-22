@@ -506,7 +506,7 @@ fn lookup_path_to_expr(s: &str) -> Result<Expr, LanguageError> {
             // Unscoped reaches here only if `s` had no recognized prefix.
             // The `starts_with` guards above prevent that — but defend anyway.
             Err(LanguageError::ParseError {
-                expr: format!("${{{s}}}"),
+                expr: format!("${{{s}}}"), // allow-secret
                 reason: "unrecognized token".to_string(),
             })
         }

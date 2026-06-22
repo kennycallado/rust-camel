@@ -184,14 +184,13 @@ fn parse_body_segments(path: &str, full_input: &str) -> Result<Vec<PathSegment>,
                 input: full_input.into(),
             });
         }
-        let is_index = seg.parse::<usize>().is_ok() && (seg == "0" || !seg.starts_with('0'));
-        if is_index {
-            // seg already validated as a usize above.
-            segments.push(PathSegment::Index(seg.parse::<usize>().expect(
-                "invariant: seg is usize-parseable because is_index checked it",
-            ))); // allow-unwrap
-        } else {
-            segments.push(PathSegment::Key(seg.into()));
+        let parsed = seg
+            .parse::<usize>()
+            .ok()
+            .filter(|_| seg == "0" || !seg.starts_with('0'));
+        match parsed {
+            Some(i) => segments.push(PathSegment::Index(i)),
+            None => segments.push(PathSegment::Key(seg.into())),
         }
     }
     Ok(segments)
