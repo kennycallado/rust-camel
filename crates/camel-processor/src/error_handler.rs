@@ -240,10 +240,6 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
         mut exchange: Exchange,
         error: CamelError,
     ) -> Result<StepDisposition, CamelError> {
-        if matches!(error, CamelError::Stopped) {
-            return Ok(StepDisposition::Propagate(error));
-        }
-
         let (disposition, producer) = self.resolve_producer(policy);
 
         // Run on_steps if present (using the SAME policy identified by PolicyId)
@@ -505,11 +501,6 @@ where
                 Ok(ex) => return Ok(ex),
                 Err(e) => e,
             };
-
-            // Stop EIP is a control-flow sentinel — pass through without retry or DLC.
-            if matches!(err, CamelError::Stopped) {
-                return Err(err);
-            }
 
             // Find the first matching policy.
             let matched = policies.into_iter().find(|(p, _)| (p.matches)(&err));
@@ -917,38 +908,6 @@ mod tests {
         );
     }
 
-    // Stopped is a control-flow sentinel, not a real error.
-    // ErrorHandlerService must pass it through without retrying or forwarding to DLC.
-    #[tokio::test]
-    async fn test_stopped_bypasses_error_handler() {
-        let stopped_inner =
-            BoxProcessor::from_fn(|_ex| Box::pin(async { Err(CamelError::Stopped) }));
-
-        // DLC that tracks if it was ever called.
-        let dlc_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let dlc_called_clone = Arc::clone(&dlc_called);
-        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
-            dlc_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async move { Ok(ex) })
-        });
-
-        let policy = ExceptionPolicy::new(|_| true); // matches everything
-        let svc = ErrorHandlerService::new(stopped_inner, Some(dlc), vec![(policy, None)]);
-        let result = svc.oneshot(make_exchange()).await;
-
-        // Must propagate Err(Stopped) — not absorb it.
-        assert!(
-            matches!(result, Err(CamelError::Stopped)),
-            "expected Err(Stopped), got: {:?}",
-            result
-        );
-        // DLC must NOT have been called.
-        assert!(
-            !dlc_called.load(std::sync::atomic::Ordering::SeqCst),
-            "DLC should not be called for Stopped"
-        );
-    }
-
     #[tokio::test]
     async fn test_on_steps_handled_true_consumes_error() {
         use tower::ServiceExt;
@@ -1341,17 +1300,6 @@ mod tests {
             Ok(StepDisposition::Continued(ex)) => assert!(!ex.has_error()),
             other => panic!("expected Continued, got {:?}", other.is_ok()),
         }
-    }
-
-    #[tokio::test]
-    async fn test_handle_step_stopped_propagates_immediately() {
-        let handler = DefaultRouteErrorHandler::new(None, vec![]);
-        let ex = make_exchange();
-        let result = handler.handle_step(None, ex, CamelError::Stopped).await;
-        assert!(
-            matches!(result, Ok(StepDisposition::Propagate(CamelError::Stopped))),
-            "Stopped should propagate immediately"
-        );
     }
 
     #[tokio::test]

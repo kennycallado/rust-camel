@@ -170,9 +170,7 @@ impl camel_api::RouteController for DefaultRouteController {
                         let result = pipeline.call(exchange).await;
                         if let Some(tx) = reply_tx {
                             let _ = tx.send(result);
-                        } else if let Err(ref e) = result
-                            && !matches!(e, CamelError::Stopped)
-                        {
+                        } else if let Err(ref e) = result {
                             // log-policy: system-broken
                             error!("Pipeline error: {e}");
                         }
@@ -219,9 +217,7 @@ impl camel_api::RouteController for DefaultRouteController {
                             let result = pipe.call(exchange).await;
                             if let Some(tx) = reply_tx {
                                 let _ = tx.send(result);
-                            } else if let Err(ref e) = result
-                                && !matches!(e, CamelError::Stopped)
-                            {
+                            } else if let Err(ref e) = result {
                                 // log-policy: system-broken
                                 error!("Pipeline error: {e}");
                             }

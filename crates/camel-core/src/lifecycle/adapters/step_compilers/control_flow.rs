@@ -11,7 +11,9 @@ use camel_api::{
 use camel_processor::do_try::{CatchClause, CatchMatcher, DoTryService};
 use camel_processor::{ChoiceService, WhenClause};
 
-use super::{CompilationContext, StepCompileResult, StepCompiler, StepCompilerRegistry};
+use super::{
+    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+};
 use crate::lifecycle::adapters::route_compiler::compose_pipeline;
 use crate::lifecycle::adapters::step_resolution::compile_filter_predicate;
 use crate::lifecycle::application::route_definition::BuilderStep;
@@ -33,11 +35,22 @@ impl StepCompiler for ControlFlowCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<BoxProcessor> =
-                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_processors: Vec<CompiledStep> = sub_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { .. } => c,
+                        CompiledStep::Stop => CompiledStep::Process {
+                            processor: BoxProcessor::new(camel_processor::StopService),
+                            body_contract: None,
+                        },
+                    })
+                    .collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let svc = camel_processor::loop_eip::LoopService::new(config, sub_pipeline);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeLoop ──
@@ -70,12 +83,23 @@ impl StepCompiler for ControlFlowCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<BoxProcessor> =
-                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_processors: Vec<CompiledStep> = sub_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { .. } => c,
+                        CompiledStep::Stop => CompiledStep::Process {
+                            processor: BoxProcessor::new(camel_processor::StopService),
+                            body_contract: None,
+                        },
+                    })
+                    .collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let config = LoopConfig { mode };
                 let svc = camel_processor::loop_eip::LoopService::new(config, sub_pipeline);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── Filter (programmatic) ──
@@ -84,11 +108,22 @@ impl StepCompiler for ControlFlowCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<BoxProcessor> =
-                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_processors: Vec<CompiledStep> = sub_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { .. } => c,
+                        CompiledStep::Stop => CompiledStep::Process {
+                            processor: BoxProcessor::new(camel_processor::StopService),
+                            body_contract: None,
+                        },
+                    })
+                    .collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let svc = camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeFilter ──
@@ -101,11 +136,22 @@ impl StepCompiler for ControlFlowCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<BoxProcessor> =
-                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_processors: Vec<CompiledStep> = sub_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { .. } => c,
+                        CompiledStep::Stop => CompiledStep::Process {
+                            processor: BoxProcessor::new(camel_processor::StopService),
+                            body_contract: None,
+                        },
+                    })
+                    .collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let svc = camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── Choice (programmatic) ──
@@ -116,8 +162,16 @@ impl StepCompiler for ControlFlowCompiler {
                         Ok(p) => p,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
+                    let sub_processors: Vec<CompiledStep> = sub_pairs
+                        .into_iter()
+                        .map(|c| match c {
+                            CompiledStep::Process { .. } => c,
+                            CompiledStep::Stop => CompiledStep::Process {
+                                processor: BoxProcessor::new(camel_processor::StopService),
+                                body_contract: None,
+                            },
+                        })
+                        .collect();
                     let pipeline = compose_pipeline(sub_processors);
                     when_clauses.push(WhenClause {
                         predicate: when_step.predicate,
@@ -129,14 +183,27 @@ impl StepCompiler for ControlFlowCompiler {
                         Ok(p) => p,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    Some(compose_pipeline(sub_processors))
+                    Some({
+                        let sub_processors: Vec<CompiledStep> = sub_pairs
+                            .into_iter()
+                            .map(|c| match c {
+                                CompiledStep::Process { .. } => c,
+                                CompiledStep::Stop => CompiledStep::Process {
+                                    processor: BoxProcessor::new(camel_processor::StopService),
+                                    body_contract: None,
+                                },
+                            })
+                            .collect();
+                        compose_pipeline(sub_processors)
+                    })
                 } else {
                     None
                 };
                 let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeChoice ──
@@ -152,8 +219,16 @@ impl StepCompiler for ControlFlowCompiler {
                         Ok(p) => p,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
+                    let sub_processors: Vec<CompiledStep> = sub_pairs
+                        .into_iter()
+                        .map(|c| match c {
+                            CompiledStep::Process { .. } => c,
+                            CompiledStep::Stop => CompiledStep::Process {
+                                processor: BoxProcessor::new(camel_processor::StopService),
+                                body_contract: None,
+                            },
+                        })
+                        .collect();
                     let pipeline = compose_pipeline(sub_processors);
                     when_clauses.push(WhenClause {
                         predicate,
@@ -165,14 +240,27 @@ impl StepCompiler for ControlFlowCompiler {
                         Ok(p) => p,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    Some(compose_pipeline(sub_processors))
+                    Some({
+                        let sub_processors: Vec<CompiledStep> = sub_pairs
+                            .into_iter()
+                            .map(|c| match c {
+                                CompiledStep::Process { .. } => c,
+                                CompiledStep::Stop => CompiledStep::Process {
+                                    processor: BoxProcessor::new(camel_processor::StopService),
+                                    body_contract: None,
+                                },
+                            })
+                            .collect();
+                        compose_pipeline(sub_processors)
+                    })
                 } else {
                     None
                 };
                 let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeDoTry ──
@@ -185,8 +273,13 @@ impl StepCompiler for ControlFlowCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let try_processors: Vec<BoxProcessor> =
-                    try_pairs.into_iter().map(|(p, _)| p).collect();
+                let try_processors: Vec<BoxProcessor> = try_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { processor, .. } => processor,
+                        CompiledStep::Stop => BoxProcessor::new(camel_processor::StopService),
+                    })
+                    .collect();
 
                 let mut catch_clauses = Vec::with_capacity(catch.len());
                 for c in catch {
@@ -228,8 +321,13 @@ impl StepCompiler for ControlFlowCompiler {
                         Ok(p) => p,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let clause_processors: Vec<BoxProcessor> =
-                        clause_pairs.into_iter().map(|(p, _)| p).collect();
+                    let clause_processors: Vec<BoxProcessor> = clause_pairs
+                        .into_iter()
+                        .map(|c| match c {
+                            CompiledStep::Process { processor, .. } => processor,
+                            CompiledStep::Stop => BoxProcessor::new(camel_processor::StopService),
+                        })
+                        .collect();
                     catch_clauses.push(CatchClause {
                         matcher,
                         on_when,
@@ -252,8 +350,13 @@ impl StepCompiler for ControlFlowCompiler {
                         Ok(p) => p,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let f_processors: Vec<BoxProcessor> =
-                        f_pairs.into_iter().map(|(p, _)| p).collect();
+                    let f_processors: Vec<BoxProcessor> = f_pairs
+                        .into_iter()
+                        .map(|c| match c {
+                            CompiledStep::Process { processor, .. } => processor,
+                            CompiledStep::Stop => BoxProcessor::new(camel_processor::StopService),
+                        })
+                        .collect();
                     (f_processors, on_when)
                 } else {
                     (Vec::new(), None)
@@ -265,7 +368,10 @@ impl StepCompiler for ControlFlowCompiler {
                     finally_steps,
                     finally_on_when,
                 );
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             _ => StepCompileResult::NotHandled(step),

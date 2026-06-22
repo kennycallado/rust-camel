@@ -10,9 +10,8 @@ use std::task::{Context, Poll};
 
 use tower::Service;
 
-use camel_api::BodyType;
 use camel_api::metrics::MetricsCollector;
-use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor};
+use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, PipelineOutcome};
 
 use camel_api::error_handler::{BoundaryKind, RetryOutcome, StepDisposition};
 use camel_processor::{
@@ -21,21 +20,33 @@ use camel_processor::{
 use tracing::Instrument;
 
 use crate::lifecycle::adapters::body_coercing::wrap_if_needed;
+use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::shared::observability::adapters::TracingProcessor;
 use crate::shared::observability::domain::DetailLevel;
 
-/// Compose a list of BoxProcessors into a single pipeline that runs them sequentially.
-pub fn compose_pipeline(processors: Vec<BoxProcessor>) -> BoxProcessor {
-    compose_pipeline_with_handler(processors, None)
+/// Compose a list of CompiledSteps into a sub-pipeline (EIP internal).
+///
+/// Sub-pipelines preserve `Err(CamelError::Stopped)` so nested Stop
+/// propagates to the outer `run_steps` bypass. Use [`compose_pipeline_with_handler`]
+/// for the top-level consumer-facing pipeline.
+pub fn compose_pipeline(processors: Vec<CompiledStep>) -> BoxProcessor {
+    if processors.is_empty() {
+        return BoxProcessor::new(IdentityProcessor);
+    }
+    BoxProcessor::new(SequentialPipeline {
+        steps: processors,
+        handler: None,
+        flatten_stop: false,
+    })
 }
 
-/// Compose a list of BoxProcessors with an optional route error handler.
+/// Compose a list of CompiledSteps with an optional route error handler.
 ///
 /// When a handler is present, step readiness errors are swallowed (poll_ready
 /// returns Ready) and the handler's retry/recovery logic is invoked on step
 /// failures. Otherwise, step readiness errors propagate immediately.
 pub fn compose_pipeline_with_handler(
-    processors: Vec<BoxProcessor>,
+    processors: Vec<CompiledStep>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
 ) -> BoxProcessor {
     if processors.is_empty() {
@@ -44,15 +55,16 @@ pub fn compose_pipeline_with_handler(
     BoxProcessor::new(SequentialPipeline {
         steps: processors,
         handler,
+        flatten_stop: true, // top-level: flatten Stop to Ok(ex) — Bug B fix
     })
 }
 
-/// Compose a list of BoxProcessors into a traced pipeline.
+/// Compose a list of CompiledSteps into a traced pipeline.
 ///
 /// Each processor is wrapped with TracingProcessor to emit spans for observability.
 /// When tracing is disabled, falls back to plain compose_pipeline with zero overhead.
 pub fn compose_traced_pipeline(
-    processors: Vec<BoxProcessor>,
+    processors: Vec<CompiledStep>,
     route_id: &str,
     trace_enabled: bool,
     detail_level: DetailLevel,
@@ -67,51 +79,72 @@ pub fn compose_traced_pipeline(
         return BoxProcessor::new(IdentityProcessor);
     }
 
-    let wrapped: Vec<BoxProcessor> = processors
+    let wrapped: Vec<CompiledStep> = processors
         .into_iter()
         .enumerate()
-        .map(|(idx, processor)| {
-            BoxProcessor::new(TracingProcessor::new(
-                processor,
+        .map(|(idx, step)| {
+            let (p, c) = match step {
+                CompiledStep::Process {
+                    processor,
+                    body_contract,
+                } => (processor, body_contract),
+                CompiledStep::Stop => return CompiledStep::Stop,
+            };
+            let traced = BoxProcessor::new(TracingProcessor::new(
+                p,
                 route_id.to_string(),
                 idx,
                 detail_level.clone(),
                 metrics.clone(),
-            ))
+            ));
+            CompiledStep::Process {
+                processor: traced,
+                body_contract: c,
+            }
         })
         .collect();
 
     BoxProcessor::new(TracedPipeline {
         steps: wrapped,
         handler,
+        flatten_stop: false, // sub-pipeline: preserve Err(Stopped) for EIP nesting
     })
 }
 
-/// Compose a list of `(BoxProcessor, Option<BodyType>)` pairs into a single pipeline.
+/// Compose a list of `CompiledStep` items into a single pipeline with body coercion.
 ///
 /// Each processor is optionally wrapped with [`BodyCoercingProcessor`] based on its
 /// contract. Processors with `None` contract are passed through with zero overhead.
-///
-/// This is the internal variant used by `route_controller` for top-level route steps.
-/// Sub-pipelines (filter, choice, split branches) always use [`compose_pipeline`] because
-/// their steps are `.process()` closures or EIP processors — never raw component producers.
+/// `CompiledStep::Stop` passes through without coercion.
 pub fn compose_pipeline_with_contracts(
-    processors: Vec<(BoxProcessor, Option<BodyType>)>,
+    processors: Vec<CompiledStep>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
 ) -> BoxProcessor {
-    let wrapped: Vec<BoxProcessor> = processors
+    let wrapped: Vec<CompiledStep> = processors
         .into_iter()
-        .map(|(p, c)| wrap_if_needed(p, c))
+        .map(|step| match step {
+            CompiledStep::Process {
+                processor,
+                body_contract,
+            } => {
+                let coerced = wrap_if_needed(processor, body_contract);
+                CompiledStep::Process {
+                    processor: coerced,
+                    body_contract: None,
+                }
+            }
+            CompiledStep::Stop => CompiledStep::Stop,
+        })
         .collect();
     compose_pipeline_with_handler(wrapped, handler)
 }
 
-/// Compose a list of `(BoxProcessor, Option<BodyType>)` pairs into a traced pipeline.
+/// Compose a list of `CompiledStep` items into a traced pipeline with body coercion.
 ///
 /// Applies body coercion contracts first, then wraps with `TracingProcessor`.
 /// When tracing is disabled, falls back to [`compose_pipeline_with_contracts`].
 pub(crate) fn compose_traced_pipeline_with_contracts(
-    processors: Vec<(BoxProcessor, Option<BodyType>)>,
+    processors: Vec<CompiledStep>,
     route_id: &str,
     trace_enabled: bool,
     detail_level: DetailLevel,
@@ -126,32 +159,51 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
         return BoxProcessor::new(IdentityProcessor);
     }
 
-    let wrapped: Vec<BoxProcessor> = processors
+    let wrapped: Vec<CompiledStep> = processors
         .into_iter()
         .enumerate()
-        .map(|(idx, (p, c))| {
-            let coerced = wrap_if_needed(p, c);
-            BoxProcessor::new(TracingProcessor::new(
-                coerced,
-                route_id.to_string(),
-                idx,
-                detail_level.clone(),
-                metrics.clone(),
-            ))
+        .map(|(idx, step)| match step {
+            CompiledStep::Process {
+                processor,
+                body_contract,
+            } => {
+                let coerced = wrap_if_needed(processor, body_contract);
+                let traced = BoxProcessor::new(TracingProcessor::new(
+                    coerced,
+                    route_id.to_string(),
+                    idx,
+                    detail_level.clone(),
+                    metrics.clone(),
+                ));
+                CompiledStep::Process {
+                    processor: traced,
+                    body_contract: None,
+                }
+            }
+            CompiledStep::Stop => CompiledStep::Stop,
         })
         .collect();
 
     BoxProcessor::new(TracedPipeline {
         steps: wrapped,
         handler,
+        flatten_stop: true, // top-level: flatten Stop to Ok(ex) — Bug B fix
     })
 }
 
-/// A service that executes a sequence of BoxProcessors in order.
+/// A service that executes a sequence of CompiledSteps in order.
+///
+/// When `flatten_stop` is true (top-level route pipeline), `Stopped(ex)` is
+/// flattened to `Ok(ex)` via `into_tower_result()` — the Bug B fix that makes
+/// Stop indistinguishable from Completed at the consumer boundary.
+/// When `flatten_stop` is false (EIP sub-pipeline), `Stopped(ex)` remapped to
+/// `Err(CamelError::Stopped)` so nested Stop propagates to the outer pipeline's
+/// `run_steps` bypass (per e_gpt oracle Option E, 2026-06-22).
 #[derive(Clone)]
 struct SequentialPipeline {
-    steps: Vec<BoxProcessor>,
+    steps: Vec<CompiledStep>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
+    flatten_stop: bool,
 }
 
 impl Service<Exchange> for SequentialPipeline {
@@ -161,30 +213,45 @@ impl Service<Exchange> for SequentialPipeline {
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.steps.first() {
-            Some(first) => {
-                let mut first = first.clone();
-                match first.poll_ready(cx) {
+            Some(CompiledStep::Process { processor, .. }) => {
+                let mut proc = processor.clone();
+                match proc.poll_ready(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(Err(_)) if self.handler.is_some() => Poll::Ready(Ok(())),
                     Poll::Ready(other) => Poll::Ready(other),
                 }
             }
+            Some(CompiledStep::Stop) => Poll::Ready(Ok(())),
             None => Poll::Ready(Ok(())),
         }
     }
 
+    // ADR-0024 reply-channel adapter: PipelineOutcome → Result<Exchange, CamelError>.
+    // This is the ONLY translation site. Completed(ex) and Stopped(ex) both map to
+    // Ok(ex); Failed(err) maps to Err. Downstream consumers (RouteChannelService,
+    // ExchangeUoWLayer, HTTP/Kafka reply finalisers) see Result<Exchange, CamelError>
+    // and treat Stop as success — the core fix for Bug B.
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let steps = self.steps.clone();
         let handler = self.handler.clone();
-        Box::pin(async move { run_steps(steps, exchange, handler, false).await })
+        let flatten = self.flatten_stop;
+        Box::pin(async move {
+            let outcome = run_steps(steps, exchange, handler, false).await;
+            if flatten {
+                outcome.into_tower_result()
+            } else {
+                eip_outcome_to_result(outcome)
+            }
+        })
     }
 }
 
-/// A traced service pipeline for wrapped processors.
+/// A traced service pipeline for wrapped CompiledSteps.
 #[derive(Clone)]
 struct TracedPipeline {
-    steps: Vec<BoxProcessor>,
+    steps: Vec<CompiledStep>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
+    flatten_stop: bool,
 }
 
 impl Service<Exchange> for TracedPipeline {
@@ -194,46 +261,80 @@ impl Service<Exchange> for TracedPipeline {
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.steps.first() {
-            Some(first) => {
-                let mut first = first.clone();
-                match first.poll_ready(cx) {
+            Some(CompiledStep::Process { processor, .. }) => {
+                let mut proc = processor.clone();
+                match proc.poll_ready(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(Err(_)) if self.handler.is_some() => Poll::Ready(Ok(())),
                     Poll::Ready(other) => Poll::Ready(other),
                 }
             }
+            Some(CompiledStep::Stop) => Poll::Ready(Ok(())),
             None => Poll::Ready(Ok(())),
         }
     }
 
+    // ADR-0024 reply-channel adapter (same as SequentialPipeline::call):
+    // Completed(ex) and Stopped(ex) both map to Ok(ex). Bug B fix.
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let steps = self.steps.clone();
         let handler = self.handler.clone();
-        Box::pin(async move { run_steps(steps, exchange, handler, true).await })
+        let flatten = self.flatten_stop;
+        Box::pin(async move {
+            let outcome = run_steps(steps, exchange, handler, true).await;
+            if flatten {
+                outcome.into_tower_result()
+            } else {
+                eip_outcome_to_result(outcome)
+            }
+        })
     }
 }
 
-/// Run a sequence of steps with optional error recovery.
+/// Translate a `PipelineOutcome` to `Result<Exchange, CamelError>` for the Tower
+/// boundary of an EIP sub-pipeline. Unlike `into_tower_result` (which maps
+/// `Stopped(ex)` → `Ok(ex)` for the top-level consumer reply), this preserves
+/// `Err(CamelError::Stopped)` so nested Stop propagates to the outer `run_steps`
+/// bypass in `stop_inside_filter_prevents_outer_pipeline` and similar EIP tests.
+/// This is the internal sub-pipeline adapter — removed once EIPs become
+/// outcome-aware (per e_gpt oracle Option E, 2026-06-22).
+fn eip_outcome_to_result(outcome: PipelineOutcome) -> Result<Exchange, CamelError> {
+    match outcome {
+        PipelineOutcome::Completed(ex) => Ok(ex),
+        PipelineOutcome::Stopped(_ex) => Err(CamelError::Stopped),
+        PipelineOutcome::Failed(err) => Err(err),
+    }
+}
+
+/// Run a sequence of CompiledSteps with optional error recovery.
 ///
-/// Each step is executed via `invoke_processor`. On failure:
-/// 1. `CamelError::Stopped` is propagated immediately (no handler involved).
-/// 2. If a handler is present, `match_policy` selects a retry policy.
-/// 3. `retry_step` attempts recovery; if exhausted, `handle_step` determines
+/// Each CompiledStep::Process is executed via `invoke_processor`. On failure:
+/// 1. If a handler is present, `match_policy` selects a retry policy.
+/// 2. `retry_step` attempts recovery; if exhausted, `handle_step` determines
 ///    the disposition:
 ///    - `Propagate` — return the error
 ///    - `Handled` — return the exchange early (success)
 ///    - `Continued` — clear the error and continue to the next step
-/// 4. If no handler is present, the error is propagated directly.
+/// 3. If no handler is present, the error is propagated directly.
+///
+/// CompiledStep::Stop short-circuits to `PipelineOutcome::Stopped(ex)` — the
+/// handler is bypassed and no Tower service is invoked (ADR-0024 §3.5).
 pub async fn run_steps(
-    steps: Vec<BoxProcessor>,
+    steps: Vec<CompiledStep>,
     exchange: Exchange,
     handler: Option<Arc<dyn RouteErrorHandler>>,
     trace: bool,
-) -> Result<Exchange, CamelError> {
+) -> PipelineOutcome {
+    use camel_api::PipelineOutcome;
     let mut ex = exchange;
-    for (i, mut step) in steps.into_iter().enumerate() {
+    for (i, step) in steps.into_iter().enumerate() {
+        let CompiledStep::Process { mut processor, .. } = step else {
+            // CompiledStep::Stop — short-circuit to Stopped outcome WITHOUT
+            // invoking a Tower service. The handler is bypassed (ADR-0024 §3.5).
+            return PipelineOutcome::Stopped(ex);
+        };
         let original = ex.clone();
-        let invoke_future = invoke_processor(&mut step, ex);
+        let invoke_future = invoke_processor(&mut processor, ex);
         let result = if trace {
             invoke_future
                 .instrument(tracing::debug_span!("pipeline_step", index = i))
@@ -246,16 +347,29 @@ pub async fn run_steps(
                 ex = next;
             }
             Err(err) => {
+                // INTERIM (e_gpt oracle Option E, 2026-06-22): Err(CamelError::Stopped)
+                // comes from a nested sub-pipeline (CompiledStep::Stop was mapped to
+                // StopService in the sub-pipeline compiler — see control_flow.rs et al).
+                // The handler is bypassed; translate to PipelineOutcome::Stopped using
+                // the Exchange from BEFORE the step ran. This preserves Apache Camel
+                // nested-stop semantics (Stop inside filter/choice/loop/multicast/split
+                // halts the entire route). Removed in Task 22 once EIPs are outcome-aware.
                 if matches!(err, CamelError::Stopped) {
-                    return Err(err);
+                    return PipelineOutcome::Stopped(original);
                 }
+                // NOTE: The CompiledStep::Stop at the top of the loop handles the
+                // top-level Stop. The check above handles the DISTINCT case of
+                // nested Stop propagating through Tower Response from a sub-pipeline.
 
                 let Some(handler) = handler.as_ref() else {
-                    return Err(err);
+                    return PipelineOutcome::Failed(err);
                 };
 
                 let policy = handler.match_policy(&err);
-                match handler.retry_step(policy, &mut step, original, err).await {
+                match handler
+                    .retry_step(policy, &mut processor, original, err)
+                    .await
+                {
                     RetryOutcome::Recovered(exchange) => {
                         ex = exchange;
                         continue;
@@ -269,23 +383,26 @@ pub async fn run_steps(
                         let disposition = if trace {
                             handle_future
                                 .instrument(tracing::debug_span!("error_handler", step_index = i))
-                                .await?
+                                .await
                         } else {
-                            handle_future.await?
+                            handle_future.await
                         };
                         match disposition {
-                            StepDisposition::Propagate(e) => return Err(e),
-                            StepDisposition::Handled(done) => return Ok(done),
-                            StepDisposition::Continued(next) => {
+                            Ok(StepDisposition::Propagate(e)) => return PipelineOutcome::Failed(e),
+                            Ok(StepDisposition::Handled(done)) => {
+                                return PipelineOutcome::Completed(done);
+                            }
+                            Ok(StepDisposition::Continued(next)) => {
                                 ex = next;
                             }
+                            Err(e) => return PipelineOutcome::Failed(e),
                         }
                     }
                 }
             }
         }
     }
-    Ok(ex)
+    PipelineOutcome::Completed(ex)
 }
 
 /// Route channel with explicit security and circuit-breaker gates.
@@ -538,8 +655,12 @@ mod tests {
         };
         let boxed = BoxProcessor::new(inner);
         let mut pipeline = SequentialPipeline {
-            steps: vec![boxed],
+            steps: vec![CompiledStep::Process {
+                processor: boxed,
+                body_contract: None,
+            }],
             handler: None,
+            flatten_stop: true,
         };
 
         let first = pipeline.poll_ready(&mut cx);
@@ -557,38 +678,131 @@ mod tests {
         let mut pipeline = SequentialPipeline {
             steps: vec![],
             handler: None,
+            flatten_stop: true,
         };
         let result = pipeline.poll_ready(&mut cx);
         assert!(result.is_ready(), "expected Ready for empty pipeline");
     }
 
     #[tokio::test]
-    async fn test_pipeline_stops_gracefully_on_stopped_error() {
+    async fn test_pipeline_stop_returns_ok_with_exchange() {
+        let stop_step = CompiledStep::Stop;
         let after_called = Arc::new(AtomicBool::new(false));
         let after_called_clone = after_called.clone();
-
-        let stop_step = BoxProcessor::from_fn(|_ex| Box::pin(async { Err(CamelError::Stopped) }));
-        let after_step = BoxProcessor::from_fn(move |ex| {
-            after_called_clone.store(true, Ordering::SeqCst);
-            Box::pin(async move { Ok(ex) })
-        });
+        let after_step = CompiledStep::Process {
+            processor: BoxProcessor::from_fn(move |ex| {
+                after_called_clone.store(true, Ordering::SeqCst);
+                Box::pin(async move { Ok(ex) })
+            }),
+            body_contract: None,
+        };
 
         let mut pipeline = SequentialPipeline {
             steps: vec![stop_step, after_step],
             handler: None,
+            flatten_stop: true,
         };
 
         let ex = Exchange::new(camel_api::Message::new("hello"));
         let result = pipeline.call(ex).await;
-
-        assert!(
-            matches!(result, Err(CamelError::Stopped)),
-            "expected Err(Stopped), got: {:?}",
-            result
-        );
+        // Pipeline-level result is Ok(ex) — Stop arrives as success (ADR-0024).
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert_eq!(result.unwrap().input.body.as_text(), Some("hello"));
         assert!(
             !after_called.load(Ordering::SeqCst),
             "step after stop should not be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_steps_stop_produces_pipeline_outcome_stopped() {
+        use camel_api::PipelineOutcome;
+        // A two-step pipeline where the first step is a Stop marker.
+        let steps = vec![
+            CompiledStep::Stop,
+            CompiledStep::Process {
+                processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
+                body_contract: None,
+            },
+        ];
+        let ex = Exchange::new(camel_api::Message::new("payload"));
+        let outcome = run_steps(steps, ex, None, false).await;
+        match outcome {
+            PipelineOutcome::Stopped(returned) => {
+                assert_eq!(returned.input.body.as_text(), Some("payload"));
+            }
+            other => panic!(
+                "expected PipelineOutcome::Stopped, got {:?}",
+                other.is_success()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_steps_stop_bypasses_error_handler() {
+        use camel_api::PipelineOutcome;
+        use camel_api::error_handler::{BoundaryKind, PolicyId, RetryOutcome, StepDisposition};
+        use camel_processor::RouteErrorHandler;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let handler_invocations = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&handler_invocations);
+
+        // Handler that records every call. NONE of its methods should be invoked for Stop.
+        struct RecordingHandler {
+            counter: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl RouteErrorHandler for RecordingHandler {
+            fn match_policy(&self, _err: &CamelError) -> Option<PolicyId> {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+            async fn retry_step(
+                &self,
+                _policy: Option<PolicyId>,
+                _step: &mut camel_api::BoxProcessor,
+                _original: Exchange,
+                _error: CamelError,
+            ) -> RetryOutcome {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                unreachable!("retry_step must not be called for CompiledStep::Stop")
+            }
+            async fn handle_step(
+                &self,
+                _policy: Option<PolicyId>,
+                _exchange: Exchange,
+                _error: CamelError,
+            ) -> Result<StepDisposition, CamelError> {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                unreachable!("handle_step must not be called for CompiledStep::Stop")
+            }
+            async fn handle_boundary(
+                &self,
+                _kind: BoundaryKind,
+                _exchange: Exchange,
+                _error: CamelError,
+            ) -> Result<Exchange, CamelError> {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                unreachable!("handle_boundary must not be called for CompiledStep::Stop")
+            }
+        }
+
+        let steps = vec![CompiledStep::Stop];
+        let ex = Exchange::new(camel_api::Message::new("payload"));
+        let outcome = run_steps(
+            steps,
+            ex,
+            Some(Arc::new(RecordingHandler { counter })),
+            false,
+        )
+        .await;
+
+        assert!(matches!(outcome, PipelineOutcome::Stopped(_)));
+        assert_eq!(
+            handler_invocations.load(Ordering::SeqCst),
+            0,
+            "error handler MUST NOT be invoked for CompiledStep::Stop"
         );
     }
 
@@ -611,7 +825,10 @@ mod tests {
     async fn test_compose_traced_pipeline_enabled() {
         let step = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
         let pipeline = compose_traced_pipeline(
-            vec![step],
+            vec![CompiledStep::Process {
+                processor: step,
+                body_contract: None,
+            }],
             "test-route",
             true,
             DetailLevel::Minimal,
@@ -636,7 +853,13 @@ mod tests {
             })
         });
 
-        let pipeline = compose_pipeline_with_contracts(vec![(inner, Some(BodyType::Text))], None);
+        let pipeline = compose_pipeline_with_contracts(
+            vec![CompiledStep::Process {
+                processor: inner,
+                body_contract: Some(camel_api::BodyType::Text),
+            }],
+            None,
+        );
 
         let mut ex = Exchange::new(Message::default());
         ex.input.body = Body::Json(json!("hello"));
@@ -650,29 +873,42 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_steps_continued_skips_failed_step() {
-        let step1 = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
-        let step2 = BoxProcessor::from_fn(|_ex| {
-            Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
-        });
+        let step1 = CompiledStep::Process {
+            processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
+            body_contract: None,
+        };
+        let step2 = CompiledStep::Process {
+            processor: BoxProcessor::from_fn(|_ex| {
+                Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
+            }),
+            body_contract: None,
+        };
         let step3_hit = Arc::new(AtomicBool::new(false));
         let hit = step3_hit.clone();
-        let step3 = BoxProcessor::from_fn(move |ex| {
-            let hit = hit.clone();
-            Box::pin(async move {
-                hit.store(true, Ordering::SeqCst);
-                Ok(ex)
-            })
-        });
+        let step3 = CompiledStep::Process {
+            processor: BoxProcessor::from_fn(move |ex| {
+                let hit = hit.clone();
+                Box::pin(async move {
+                    hit.store(true, Ordering::SeqCst);
+                    Ok(ex)
+                })
+            }),
+            body_contract: None,
+        };
 
         let handler: Arc<dyn RouteErrorHandler> = Arc::new(ContinuedHandler);
-        let result = run_steps(
+        let outcome = run_steps(
             vec![step1, step2, step3],
             make_test_exchange(),
             Some(handler),
             false,
         )
         .await;
-        assert!(result.is_ok());
+        assert!(
+            matches!(outcome, PipelineOutcome::Completed(_)),
+            "expected Completed, got: {:?}",
+            outcome.is_success()
+        );
         assert!(
             step3_hit.load(Ordering::SeqCst),
             "step 3 should have executed after continued"
@@ -687,7 +923,13 @@ mod tests {
         let failing_step = BoxProcessor::from_fn(|_ex| {
             Box::pin(async { Err(CamelError::ProcessorError("step boom".into())) })
         });
-        let pipeline = compose_pipeline_with_handler(vec![failing_step], Some(handler.clone()));
+        let pipeline = compose_pipeline_with_handler(
+            vec![CompiledStep::Process {
+                processor: failing_step,
+                body_contract: None,
+            }],
+            Some(handler.clone()),
+        );
         let channel = RouteChannelService::new(handler.clone(), None, None, pipeline);
         let mut svc = BoxProcessor::new(channel);
         let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
@@ -782,6 +1024,40 @@ mod tests {
         assert!(
             result.is_ok(),
             "fallback failure should go through handle_boundary, not raw Err"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_channel_cb_counts_stopped_as_success() {
+        // ADR-0024 §3.5: PipelineOutcome::Stopped translates to Ok(ex) at the
+        // Tower boundary. RouteChannelService::call invokes cb.after_result(&result)
+        // where result = Ok(ex) for Stop. The CB must NOT trip.
+        let handler: Arc<dyn RouteErrorHandler> = Arc::new(PropagateHandler);
+        let cb_gate = CircuitBreakerGate::new(CircuitBreakerConfig {
+            failure_threshold: 2,
+            open_duration: Duration::from_secs(60),
+            success_threshold: 1,
+            fallback: None,
+        });
+        let cb_clone = cb_gate.clone();
+
+        // Pipeline emits Stop as the only step — top-level uses flatten_stop: true.
+        let pipeline = compose_pipeline_with_handler(vec![CompiledStep::Stop], None);
+
+        let channel = RouteChannelService::new(handler, None, Some(cb_gate), pipeline);
+
+        // Two Stop invocations — would trip a 2-failure CB if Stop counted as failure.
+        let ex1 = Exchange::new(camel_api::Message::new("a"));
+        let ex2 = Exchange::new(camel_api::Message::new("b"));
+        let r1 = tower::ServiceExt::oneshot(channel.clone(), ex1).await;
+        let r2 = tower::ServiceExt::oneshot(channel, ex2).await;
+        assert!(r1.is_ok(), "Stop must arrive as Ok via RouteChannelService");
+        assert!(r2.is_ok(), "Stop must arrive as Ok via RouteChannelService");
+
+        // CB must still be in Allow state — Stop counted as success.
+        assert!(
+            matches!(cb_clone.before_call(), CircuitBreakerDecision::Allow),
+            "CB should count Stop as success"
         );
     }
 }

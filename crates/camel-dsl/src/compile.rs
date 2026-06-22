@@ -22,7 +22,7 @@ use camel_api::{
 };
 use camel_component_api::ConcurrencyModel;
 use camel_core::route::{
-    BuilderStep, DeclarativeWhenStep, DoTryCatchClauseBuilder, DoTryFinallyBuilder,
+    BuilderStep, CompiledStep, DeclarativeWhenStep, DoTryCatchClauseBuilder, DoTryFinallyBuilder,
     RouteDefinition, compose_pipeline,
 };
 use camel_processor::{
@@ -635,7 +635,15 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                          cannot be executed inline — use handled_by instead"
                     );
                 } else {
-                    builder = builder.on_steps(compose_pipeline(processors));
+                    builder = builder.on_steps(compose_pipeline(
+                        processors
+                            .into_iter()
+                            .map(|p| CompiledStep::Process {
+                                processor: p,
+                                body_contract: None,
+                            })
+                            .collect(),
+                    ));
                 }
             }
             // Boolean precedence: continued=true → Continued; else handled=true → Handled; else Propagate
@@ -690,7 +698,7 @@ fn supported_exception_kinds() -> Vec<&'static str> {
         "DeadLetterChannelFailed",
         "CircuitOpen",
         "HttpOperationFailed",
-        "Stopped",
+        "ConsumerStopping",
         "Config",
         "AlreadyConsumed",
         "StreamLimitExceeded",
@@ -710,7 +718,12 @@ fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
         "DeadLetterChannelFailed" => matches!(err, CamelError::DeadLetterChannelFailed(_)),
         "CircuitOpen" => matches!(err, CamelError::CircuitOpen(_)),
         "HttpOperationFailed" => matches!(err, CamelError::HttpOperationFailed { .. }),
-        "Stopped" => matches!(err, CamelError::Stopped),
+        // "Stopped" arm REMOVED (ADR-0024 + user directive 2026-06-20):
+        // Stop EIP no longer produces an error at the top-level (CompiledStep::Stop
+        // → PipelineOutcome::Stopped → Ok(ex)). Sub-pipeline Stop propagates via
+        // Err(Stopped) but is bypassed in run_steps before reaching the handler.
+        // So onException: [Stopped] would never fire — arm removed.
+        "ConsumerStopping" => matches!(err, CamelError::ConsumerStopping),
         "Config" => matches!(err, CamelError::Config(_)),
         "AlreadyConsumed" => matches!(err, CamelError::AlreadyConsumed),
         "StreamLimitExceeded" => matches!(err, CamelError::StreamLimitExceeded(_)),
@@ -1815,7 +1828,7 @@ mod tests {
             "DeadLetterChannelFailed",
             "CircuitOpen",
             "HttpOperationFailed",
-            "Stopped",
+            "ConsumerStopping",
             "Config",
             "AlreadyConsumed",
             "StreamLimitExceeded",
@@ -1909,7 +1922,7 @@ mod tests {
             dead_letter_channel: Some("log:dlc".into()),
             retry: None,
             on_exceptions: Some(vec![DeclarativeOnException {
-                kind: Some("Stopped".into()),
+                kind: Some("ConsumerStopping".into()),
                 message_contains: None,
                 retry: None,
                 steps: vec![],
@@ -1921,7 +1934,7 @@ mod tests {
 
         assert_eq!(config.policies.len(), 1);
         assert!(config.policies[0].retry.is_none());
-        assert!((config.policies[0].matches)(&CamelError::Stopped));
+        assert!((config.policies[0].matches)(&CamelError::ConsumerStopping));
     }
 
     #[test]
@@ -2100,7 +2113,6 @@ mod tests {
                 response_body: None,
             }
         ));
-        assert!(exception_kind_matches("Stopped", &CamelError::Stopped));
         assert!(exception_kind_matches(
             "Config",
             &CamelError::Config("x".into())
@@ -2505,12 +2517,38 @@ mod tests {
     fn ensure_known_exception_kind_valid() {
         assert!(ensure_known_exception_kind("Io").is_ok());
         assert!(ensure_known_exception_kind("ProcessorError").is_ok());
-        assert!(ensure_known_exception_kind("Stopped").is_ok());
+        assert!(ensure_known_exception_kind("ConsumerStopping").is_ok());
     }
 
     #[test]
     fn ensure_known_exception_kind_invalid() {
         assert!(ensure_known_exception_kind("NoSuchError").is_err());
+    }
+
+    #[test]
+    fn exception_kind_matches_consumer_stopping() {
+        assert!(exception_kind_matches(
+            "ConsumerStopping",
+            &CamelError::ConsumerStopping
+        ));
+        assert!(!exception_kind_matches(
+            "ConsumerStopping",
+            &CamelError::ProcessorError("x".into())
+        ));
+    }
+
+    #[test]
+    fn exception_kind_matches_stopped_arm_removed() {
+        // ADR-0024 + user directive 2026-06-20 (no deprecation paths):
+        // The "Stopped" arm was removed because it would never fire — Stop EIP
+        // is no longer an error at the top-level (CompiledStep::Stop → Stopped → Ok).
+        // Sub-pipeline Stop propagation is bypassed in run_steps before the handler.
+        assert!(!exception_kind_matches(
+            "Stopped",
+            &CamelError::ConsumerStopping
+        ));
+        // Note: CamelError::Stopped variant still exists (deferred to bd rc-5uv
+        // for full removal) but the DSL arm is gone because the arm would never fire.
     }
 
     #[test]

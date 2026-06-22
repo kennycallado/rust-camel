@@ -2912,14 +2912,15 @@ async fn http_consumer_overflow_status_code_fallback_e2e() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn http_consumer_stop_returns_204_e2e() {
+async fn http_consumer_stop_returns_exchange_state_e2e() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
         .build()
         .await;
 
     let route = RouteBuilder::from("http://0.0.0.0:18090/stop-route")
-        .route_id("test-stop-204")
+        .route_id("test-stop-route")
+        .set_body("stopped-payload")
         .stop()
         .build()
         .unwrap();
@@ -2934,11 +2935,16 @@ async fn http_consumer_stop_returns_204_e2e() {
         .send()
         .await
         .unwrap();
+    // Bug B fix: Stop arrives as Ok(ex) indistinguishable from Completed(ex).
+    // HTTP consumer now builds response from Exchange state — 200 OK with body.
     assert_eq!(
         resp.status(),
-        reqwest::StatusCode::NO_CONTENT,
-        "Stopped route should return 204, not 500"
+        reqwest::StatusCode::OK,
+        "Stopped route should return 200 with body (Bug B fix), got: {}",
+        resp.status()
     );
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "stopped-payload", "body must be preserved on stop");
     h.stop().await;
 }
 

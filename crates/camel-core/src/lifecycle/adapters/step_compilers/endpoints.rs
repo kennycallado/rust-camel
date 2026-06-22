@@ -9,7 +9,8 @@ use camel_api::{BoxProcessor, CamelError};
 use camel_endpoint::parse_uri;
 
 use super::{
-    CompilationContext, StepCompileResult, StepCompiler, StepCompilerRegistry, resolve_producer,
+    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+    resolve_producer,
 };
 use crate::lifecycle::application::route_definition::BuilderStep;
 
@@ -48,7 +49,10 @@ impl StepCompiler for EndpointsCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                StepCompileResult::Matched(Ok((producer, contract)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: producer,
+                    body_contract: contract,
+                }))
             }
 
             // ── WireTap ──
@@ -58,7 +62,10 @@ impl StepCompiler for EndpointsCompiler {
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
                 let svc = camel_processor::WireTapService::new(producer);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             _ => StepCompileResult::NotHandled(step),

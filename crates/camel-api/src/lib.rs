@@ -32,6 +32,7 @@ pub mod loop_eip;
 pub mod message;
 pub mod metrics;
 pub mod multicast;
+pub mod pipeline_outcome;
 pub mod platform;
 pub mod processor;
 pub mod producer;
@@ -91,6 +92,7 @@ pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};
 pub use message::Message;
 pub use metrics::{MetricsCollector, NoOpMetrics};
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
+pub use pipeline_outcome::PipelineOutcome;
 pub use platform::{
     LeadershipEvent, LeadershipHandle, LeadershipService, NoopLeadershipService,
     NoopPlatformService, NoopReadinessGate, PlatformError, PlatformIdentity, PlatformService,

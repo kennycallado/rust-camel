@@ -3,6 +3,9 @@
 **Date:** 2026-06-13
 **Status:** Accepted
 **Amends:** ADR-0012
+**Amended by:** [ADR-0024](./0024-pipeline-outcome-replaces-camel-error-stopped.md)
+
+> **Amended by [ADR-0024](./0024-pipeline-outcome-replaces-camel-error-stopped.md):** the route pipeline executor (`run_steps`) now returns `PipelineOutcome` (Completed | Stopped | Failed) instead of `Result<Exchange, CamelError>`. The in-pipeline disposition table below is unchanged; see ADR-0024 for the `PipelineOutcome` semantics and reply-channel adapter.
 
 ## Decision
 

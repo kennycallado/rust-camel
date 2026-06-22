@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use camel_api::BoxProcessor;
 
-use super::{CompilationContext, StepCompileResult, StepCompiler, StepCompilerRegistry};
+use super::{
+    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+};
 use crate::lifecycle::adapters::endpoint_resolver_factory;
 use crate::lifecycle::adapters::route_compiler::compose_pipeline;
 use crate::lifecycle::adapters::step_resolution::{await_eval, compile_language_expression};
@@ -32,7 +34,10 @@ impl StepCompiler for RoutingCompiler {
                 );
                 let svc =
                     camel_processor::dynamic_router::DynamicRouterService::new(config, resolver);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeDynamicRouter ──
@@ -70,7 +75,10 @@ impl StepCompiler for RoutingCompiler {
                 );
                 let svc =
                     camel_processor::dynamic_router::DynamicRouterService::new(config, resolver);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── RoutingSlip ──
@@ -81,7 +89,10 @@ impl StepCompiler for RoutingCompiler {
                     ctx.producer_ctx.clone(),
                 );
                 let svc = camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeRoutingSlip ──
@@ -116,7 +127,10 @@ impl StepCompiler for RoutingCompiler {
                     ctx.producer_ctx.clone(),
                 );
                 let svc = camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── RecipientList ──
@@ -132,7 +146,10 @@ impl StepCompiler for RoutingCompiler {
                     Ok(s) => s,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeRecipientList ──
@@ -179,7 +196,10 @@ impl StepCompiler for RoutingCompiler {
                     Ok(s) => s,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── Throttle (recursive — compiles child steps) ──
@@ -188,11 +208,22 @@ impl StepCompiler for RoutingCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<BoxProcessor> =
-                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_processors: Vec<CompiledStep> = sub_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { .. } => c,
+                        CompiledStep::Stop => CompiledStep::Process {
+                            processor: BoxProcessor::new(camel_processor::StopService),
+                            body_contract: None,
+                        },
+                    })
+                    .collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let svc = camel_processor::throttler::ThrottlerService::new(config, sub_pipeline);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── LoadBalance (recursive — each step is an independent endpoint) ──
@@ -203,14 +234,15 @@ impl StepCompiler for RoutingCompiler {
                         Ok(p) => p,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    let endpoint = compose_pipeline(sub_processors);
+                    let endpoint = compose_pipeline(sub_pairs);
                     endpoints.push(endpoint);
                 }
                 let svc =
                     camel_processor::load_balancer::LoadBalancerService::new(endpoints, config);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             _ => StepCompileResult::NotHandled(step),

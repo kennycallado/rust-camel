@@ -14,7 +14,7 @@ use camel_api::error_handler::{
 use camel_api::{
     BoxProcessor, BoxProcessorExt, CamelError, CircuitBreakerConfig, Exchange, Message,
 };
-use camel_core::route::{RouteChannelService, compose_pipeline_with_handler};
+use camel_core::route::{CompiledStep, RouteChannelService, compose_pipeline_with_handler};
 use camel_processor::error_handler::{DefaultRouteErrorHandler, RouteErrorHandler};
 use camel_processor::{CircuitBreakerDecision, CircuitBreakerGate};
 use tower::ServiceExt;
@@ -52,7 +52,23 @@ async fn continued_e2e_step3_executes_after_step2_failure() {
         Arc::new(DefaultRouteErrorHandler::new(None, policies));
 
     // Compose a pipeline with the handler
-    let pipeline = compose_pipeline_with_handler(vec![step1, step2, step3], Some(handler));
+    let pipeline = compose_pipeline_with_handler(
+        vec![
+            CompiledStep::Process {
+                processor: step1,
+                body_contract: None,
+            },
+            CompiledStep::Process {
+                processor: step2,
+                body_contract: None,
+            },
+            CompiledStep::Process {
+                processor: step3,
+                body_contract: None,
+            },
+        ],
+        Some(handler),
+    );
 
     // Execute the exchange
     let exchange = Exchange::new(Message::new("test continued_e2e"));
@@ -141,7 +157,23 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
     let handler: Arc<dyn RouteErrorHandler> = Arc::new(ContinuedHandler);
 
     // Build pipeline with handler injected for step-level recovery
-    let pipeline = compose_pipeline_with_handler(vec![step1, step2, step3], Some(handler.clone()));
+    let pipeline = compose_pipeline_with_handler(
+        vec![
+            CompiledStep::Process {
+                processor: step1,
+                body_contract: None,
+            },
+            CompiledStep::Process {
+                processor: step2,
+                body_contract: None,
+            },
+            CompiledStep::Process {
+                processor: step3,
+                body_contract: None,
+            },
+        ],
+        Some(handler.clone()),
+    );
 
     // CircuitBreakerGate — shared state via Arc
     let cb_gate = CircuitBreakerGate::new(CircuitBreakerConfig {

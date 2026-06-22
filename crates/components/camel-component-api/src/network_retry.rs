@@ -328,7 +328,7 @@ where
 ///
 /// Non-retryable variants:
 /// - [`CamelError::Config`], [`CamelError::TypeConversionFailed`],
-///   [`CamelError::Stopped`], [`CamelError::EndpointCreationFailed`],
+///   [`CamelError::ConsumerStopping`], [`CamelError::EndpointCreationFailed`],
 ///   [`CamelError::ChannelClosed`] — permanent failures
 pub fn is_retryable_camel_error(err: &CamelError) -> bool {
     matches!(err, CamelError::Io(_))

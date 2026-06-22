@@ -10,7 +10,8 @@ use camel_endpoint::parse_uri;
 use camel_processor::{EnrichService, PollEnrichService};
 
 use super::{
-    CompilationContext, StepCompileResult, StepCompiler, StepCompilerRegistry, resolve_producer,
+    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+    resolve_producer,
 };
 use crate::lifecycle::adapters::step_resolution::resolve_enrichment_strategy;
 use crate::lifecycle::application::route_definition::BuilderStep;
@@ -37,7 +38,10 @@ impl StepCompiler for TransformsCompiler {
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
                 let svc = EnrichService::new(producer, strategy_arc);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── PollEnrich ──
@@ -79,7 +83,10 @@ impl StepCompiler for TransformsCompiler {
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
                 let svc = PollEnrichService::new(poller, timeout, strategy_arc);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             _ => StepCompileResult::NotHandled(step),

@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use camel_api::{BoxProcessor, CamelError, Exchange, StreamSplitFormat, Value, body::Body};
 
-use super::{CompilationContext, StepCompileResult, StepCompiler, StepCompilerRegistry};
+use super::{
+    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+};
 use crate::lifecycle::adapters::route_compiler::compose_pipeline;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::adapters::step_resolution::{await_eval, compile_language_expression};
@@ -92,15 +94,26 @@ impl StepCompiler for SplittingCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<BoxProcessor> =
-                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_processors: Vec<CompiledStep> = sub_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { .. } => c,
+                        CompiledStep::Stop => CompiledStep::Process {
+                            processor: BoxProcessor::new(camel_processor::StopService),
+                            body_contract: None,
+                        },
+                    })
+                    .collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let splitter =
                     match camel_processor::splitter::SplitterService::new(config, sub_pipeline) {
                         Ok(s) => s,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                StepCompileResult::Matched(Ok((BoxProcessor::new(splitter), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(splitter),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeSplit ──
@@ -152,15 +165,26 @@ impl StepCompiler for SplittingCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<BoxProcessor> =
-                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_processors: Vec<CompiledStep> = sub_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { .. } => c,
+                        CompiledStep::Stop => CompiledStep::Process {
+                            processor: BoxProcessor::new(camel_processor::StopService),
+                            body_contract: None,
+                        },
+                    })
+                    .collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let splitter =
                     match camel_processor::splitter::SplitterService::new(config, sub_pipeline) {
                         Ok(s) => s,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                StepCompileResult::Matched(Ok((BoxProcessor::new(splitter), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(splitter),
+                    body_contract: None,
+                }))
             }
 
             // ── DeclarativeStreamSplit ──
@@ -179,8 +203,16 @@ impl StepCompiler for SplittingCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<BoxProcessor> =
-                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_processors: Vec<CompiledStep> = sub_pairs
+                    .into_iter()
+                    .map(|c| match c {
+                        CompiledStep::Process { .. } => c,
+                        CompiledStep::Stop => CompiledStep::Process {
+                            processor: BoxProcessor::new(camel_processor::StopService),
+                            body_contract: None,
+                        },
+                    })
+                    .collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
 
                 let config_clone = stream_config.clone();
@@ -320,7 +352,10 @@ impl StepCompiler for SplittingCompiler {
                     aggregation,
                     stop_on_exception,
                 );
-                StepCompileResult::Matched(Ok((BoxProcessor::new(splitter), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(splitter),
+                    body_contract: None,
+                }))
             }
 
             // ── Aggregate ──
@@ -331,7 +366,10 @@ impl StepCompiler for SplittingCompiler {
                 let cancel = CancellationToken::new();
                 let svc =
                     camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── Multicast ──
@@ -342,16 +380,17 @@ impl StepCompiler for SplittingCompiler {
                         Ok(p) => p,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    let endpoint = compose_pipeline(sub_processors);
+                    let endpoint = compose_pipeline(sub_pairs);
                     endpoints.push(endpoint);
                 }
                 let svc = match camel_processor::MulticastService::new(endpoints, config) {
                     Ok(s) => s,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             _ => StepCompileResult::NotHandled(step),

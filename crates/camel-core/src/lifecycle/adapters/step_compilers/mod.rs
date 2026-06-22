@@ -24,7 +24,28 @@ mod routing;
 mod splitting;
 mod transforms;
 
-pub(crate) type CompiledStep = (BoxProcessor, Option<BodyType>);
+/// A compiled pipeline step.
+///
+/// `Process` is the normal case: a boxed processor plus its optional body
+/// contract. `Stop` (added in Task 3b) is the Stop EIP marker — `run_steps`
+/// recognises it and produces `PipelineOutcome::Stopped` without invoking a
+/// Tower service.
+///
+/// **Boundary:** `CompiledStep` is the compile-time representation. At runtime,
+/// `run_steps` consumes a `Vec<CompiledStep>` (Stop variants included) and
+/// produces a `PipelineOutcome`; the wrapping `Service<Exchange>` impl
+/// translates `PipelineOutcome` back to `Result<Exchange, CamelError>`. See
+/// ADR-0024.
+#[derive(Debug, Clone)]
+pub enum CompiledStep {
+    Process {
+        processor: BoxProcessor,
+        body_contract: Option<BodyType>,
+    },
+    /// Stop EIP marker. `run_steps` produces `PipelineOutcome::Stopped(ex)`
+    /// without invoking a Tower service. Replaces `StopService` (Task 7).
+    Stop,
+}
 
 /// Result from a compiler: either it handled the step (with success or error),
 /// or it did not recognize the variant and returns the step for the next compiler.

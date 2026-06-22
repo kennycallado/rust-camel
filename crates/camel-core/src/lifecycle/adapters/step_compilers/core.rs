@@ -9,7 +9,9 @@ use camel_language_api::LanguageError;
 use camel_processor::{LogProcessor, log::DynamicLog, script_mutator::ScriptMutator, set_property};
 use tracing::warn;
 
-use super::{CompilationContext, StepCompileResult, StepCompiler, StepCompilerRegistry};
+use super::{
+    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+};
 use crate::lifecycle::adapters::step_resolution::{
     FunctionStagingMode, await_eval, compile_language_expression, resolve_language,
 };
@@ -35,24 +37,30 @@ impl StepCompiler for CoreCompiler {
     ) -> StepCompileResult {
         match step {
             // ── Pre-built processor ──
-            BuilderStep::Processor(svc) => StepCompileResult::Matched(Ok((svc, None))),
+            BuilderStep::Processor(svc) => StepCompileResult::Matched(Ok(CompiledStep::Process {
+                processor: svc,
+                body_contract: None,
+            })),
 
             // ── Stop ──
-            BuilderStep::Stop => {
-                let svc = BoxProcessor::new(camel_processor::StopService);
-                StepCompileResult::Matched(Ok((svc, None)))
-            }
+            BuilderStep::Stop => StepCompileResult::Matched(Ok(CompiledStep::Stop)),
 
             // ── Delay ──
             BuilderStep::Delay { config } => {
                 let svc = camel_processor::delayer::DelayerService::new(config);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── Static Log ──
             BuilderStep::Log { level, message } => {
                 let svc = LogProcessor::new(level, message);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── Declarative Log (language-evaluated message) ──
@@ -80,14 +88,20 @@ impl StepCompiler for CoreCompiler {
                         })
                         .to_string()
                     });
-                StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                }))
             }
 
             // ── SetHeader (declarative) ──
             BuilderStep::DeclarativeSetHeader { key, value } => match value {
                 ValueSourceDef::Literal(value) => {
                     let svc = camel_processor::SetHeader::new(IdentityProcessor, key, value);
-                    StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(svc),
+                        body_contract: None,
+                    }))
                 }
                 ValueSourceDef::Expression(expression) => {
                     let expression = match compile_language_expression(ctx.languages, &expression) {
@@ -99,7 +113,10 @@ impl StepCompiler for CoreCompiler {
                         key,
                         move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
-                    StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(svc),
+                        body_contract: None,
+                    }))
                 }
             },
 
@@ -107,7 +124,10 @@ impl StepCompiler for CoreCompiler {
             BuilderStep::DeclarativeSetProperty { key, value_source } => match value_source {
                 ValueSourceDef::Literal(value) => {
                     let svc = set_property::SetProperty::new(IdentityProcessor, key, value);
-                    StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(svc),
+                        body_contract: None,
+                    }))
                 }
                 ValueSourceDef::Expression(expression) => {
                     let expression = match compile_language_expression(ctx.languages, &expression) {
@@ -119,7 +139,10 @@ impl StepCompiler for CoreCompiler {
                         key,
                         move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
-                    StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(svc),
+                        body_contract: None,
+                    }))
                 }
             },
 
@@ -131,7 +154,10 @@ impl StepCompiler for CoreCompiler {
                         IdentityProcessor,
                         move |_exchange: &Exchange| body.clone(),
                     );
-                    StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(svc),
+                        body_contract: None,
+                    }))
                 }
                 ValueSourceDef::Expression(expression) => {
                     let expression = match compile_language_expression(ctx.languages, &expression) {
@@ -145,7 +171,10 @@ impl StepCompiler for CoreCompiler {
                             value_to_body(value)
                         },
                     );
-                    StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(svc),
+                        body_contract: None,
+                    }))
                 }
             },
 
@@ -156,10 +185,10 @@ impl StepCompiler for CoreCompiler {
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
                 match lang.create_mutating_expression(&expression.source) {
-                    Ok(mut_expr) => StepCompileResult::Matched(Ok((
-                        BoxProcessor::new(ScriptMutator::new(mut_expr)),
-                        None,
-                    ))),
+                    Ok(mut_expr) => StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
+                        body_contract: None,
+                    })),
                     Err(LanguageError::NotSupported { .. }) => {
                         // Graceful degradation: fall back to read-only Expression → SetBody
                         let expression =
@@ -174,7 +203,10 @@ impl StepCompiler for CoreCompiler {
                                 value_to_body(value)
                             },
                         );
-                        StepCompileResult::Matched(Ok((BoxProcessor::new(svc), None)))
+                        StepCompileResult::Matched(Ok(CompiledStep::Process {
+                            processor: BoxProcessor::new(svc),
+                            body_contract: None,
+                        }))
                     }
                     Err(e) => StepCompileResult::Matched(Err(CamelError::RouteError(format!(
                         "Failed to create mutating expression for language '{}': {}",
@@ -203,7 +235,10 @@ impl StepCompiler for CoreCompiler {
                     FunctionStagingMode::DryCompile => {}
                 }
                 let step = crate::step::function_step::FunctionStep::new(invoker, definition);
-                StepCompileResult::Matched(Ok((BoxProcessor::new(step), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(step),
+                    body_contract: None,
+                }))
             }
 
             // ── Bean invocation ──
@@ -232,7 +267,10 @@ impl StepCompiler for CoreCompiler {
                         Ok(exchange)
                     }
                 });
-                StepCompileResult::Matched(Ok((BoxProcessor::new(processor), None)))
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(processor),
+                    body_contract: None,
+                }))
             }
 
             // ── Script (hard error on NotSupported) ──
@@ -242,10 +280,10 @@ impl StepCompiler for CoreCompiler {
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
                 match lang.create_mutating_expression(&script) {
-                    Ok(mut_expr) => StepCompileResult::Matched(Ok((
-                        BoxProcessor::new(ScriptMutator::new(mut_expr)),
-                        None,
-                    ))),
+                    Ok(mut_expr) => StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
+                        body_contract: None,
+                    })),
                     Err(LanguageError::NotSupported {
                         feature,
                         language: ref lang_name,

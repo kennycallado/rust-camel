@@ -1182,14 +1182,6 @@ impl Consumer for HttpConsumer {
                                     body: reply_body,
                                 }
                             }
-                            Err(CamelError::Stopped) => {
-                                tracing::debug!(path = %path_clone, "Route stopped — returning 204 No Content");
-                                HttpReply {
-                                    status: 204,
-                                    headers: vec![],
-                                    body: HttpReplyBody::Bytes(bytes::Bytes::new()),
-                                }
-                            }
                             Err(CamelError::Unauthenticated(msg)) => {
                                 tracing::warn!(error = %msg, path = %path_clone, "Authentication failed");
                                 HttpReply {
@@ -4923,5 +4915,69 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn http_consumer_returns_body_and_code_on_stop() {
+        use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, Message};
+        use camel_core::route::{CompiledStep, compose_pipeline_with_handler};
+        use tower::ServiceExt;
+
+        // Pipeline: set_body("nope") + set CamelHttpResponseCode=409 + Stop.
+        let set_body_step = CompiledStep::Process {
+            processor: BoxProcessor::from_fn(|mut ex: Exchange| {
+                ex.input.body = Body::Text("nope".into());
+                Box::pin(async move { Ok(ex) })
+            }),
+            body_contract: None,
+        };
+        let set_status_step = CompiledStep::Process {
+            processor: BoxProcessor::from_fn(|mut ex: Exchange| {
+                ex.input.set_header(
+                    "CamelHttpResponseCode",
+                    serde_json::Value::Number(409.into()),
+                );
+                Box::pin(async move { Ok(ex) })
+            }),
+            body_contract: None,
+        };
+        let pipeline = compose_pipeline_with_handler(
+            vec![set_body_step, set_status_step, CompiledStep::Stop],
+            None,
+        );
+
+        let ex = Exchange::new(Message::default());
+        let result = pipeline.oneshot(ex).await;
+        assert!(result.is_ok(), "Stop must arrive as Ok (Bug B fix)");
+        let returned = result.unwrap();
+        assert_eq!(returned.input.body.as_text(), Some("nope"));
+        assert_eq!(
+            returned
+                .input
+                .header("CamelHttpResponseCode")
+                .and_then(|v| v.as_u64()),
+            Some(409)
+        );
+    }
+
+    #[tokio::test]
+    async fn http_consumer_returns_200_when_body_empty_on_stop() {
+        // After ADR-0024: Stop with no body + no status header produces 200 (same as
+        // a normal completion with no body). The 204 default is gone — users who
+        // want 204 set CamelHttpResponseCode=204 explicitly.
+        //
+        // This test stays at the pipeline level (consistent with the test above).
+        // E2E coverage of the full HTTP dispatch path is in
+        // crates/camel-test/tests/integration_test.rs.
+        use camel_api::{Exchange, Message};
+        use camel_core::route::{CompiledStep, compose_pipeline_with_handler};
+        use tower::ServiceExt;
+
+        let pipeline = compose_pipeline_with_handler(vec![CompiledStep::Stop], None);
+        let ex = Exchange::new(Message::default());
+        let result = pipeline.oneshot(ex).await;
+        assert!(result.is_ok(), "Stop with empty body arrives as Ok");
+        // Body is default (empty); no CamelHttpResponseCode header was set.
+        // The HTTP reply finaliser (tested at E2E) maps this to status=200 + empty body.
     }
 }

@@ -75,6 +75,7 @@ pub mod route {
         compose_pipeline_with_handler, compose_traced_pipeline,
     };
     pub use crate::lifecycle::adapters::route_types::Route;
+    pub use crate::lifecycle::adapters::step_compilers::CompiledStep;
     pub use crate::lifecycle::application::route_definition::*;
     pub use crate::lifecycle::domain::route::RouteSpec;
 }

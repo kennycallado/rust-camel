@@ -213,7 +213,11 @@ pub fn camel_error_to_wasm_error(error: CamelError) -> WasmError {
                 .map(|body| format!(" body={body}"))
                 .unwrap_or_default()
         )),
-        CamelError::Stopped => WasmError::ProcessorError("Exchange stopped by Stop EIP".into()),
+        // Post-ADR-0024: Stop EIP no longer reaches WASM (pipeline translates
+        // PipelineOutcome::Stopped → Ok(ex) before WASM producers run). The only
+        // CamelError variants WASM might see from the framework are producer
+        // shutdown signals — map ConsumerStopping explicitly; Stopped is legacy.
+        CamelError::ConsumerStopping => WasmError::ProcessorError("Consumer stopping".into()),
         CamelError::ChannelClosed => WasmError::Io("Channel closed".into()),
         _ => WasmError::ProcessorError(error.to_string()),
     }

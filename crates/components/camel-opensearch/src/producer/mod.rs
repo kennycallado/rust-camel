@@ -536,7 +536,7 @@ impl Service<Exchange> for OpenSearchProducer {
                 self.pending_permit = Some(permit);
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::Stopped)),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ConsumerStopping)),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -654,6 +654,19 @@ mod tests {
 
         // Both producers share the same client Arc
         assert!(Arc::ptr_eq(&producer.client, &producer2.client));
+    }
+
+    #[test]
+    fn poll_ready_returns_consumer_stopping_when_semaphore_closed() {
+        let config =
+            OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
+        let mut producer = OpenSearchProducer::new(config, test_rt());
+        producer.semaphore.close();
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(matches!(
+            producer.poll_ready(&mut cx),
+            Poll::Ready(Err(CamelError::ConsumerStopping))
+        ));
     }
 
     #[test]

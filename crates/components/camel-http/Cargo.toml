@@ -38,6 +38,7 @@ otel = ["dep:camel-otel"]
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
+camel-core = { workspace = true }
 tempfile = { workspace = true }
 flate2 = { workspace = true }
 

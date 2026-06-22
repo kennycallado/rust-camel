@@ -52,6 +52,12 @@ pub enum CamelError {
     #[error("Exchange stopped by Stop EIP")]
     Stopped,
 
+    /// Producer's `poll_ready` returned a shutdown signal — the consumer/semaphore
+    /// is closing and the producer cannot acquire a permit. Distinct from Stop EIP
+    /// (which is successful control flow). Used by JMS/OpenSearch producers. See ADR-0024.
+    #[error("Consumer stopping: semaphore closed during poll_ready")]
+    ConsumerStopping,
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -83,6 +89,7 @@ impl CamelError {
             Self::Config(_) => "config",
             Self::DeadLetterChannelFailed(_) => "dead_letter",
             Self::Stopped => "stopped",
+            Self::ConsumerStopping => "consumer_stop",
             Self::StreamLimitExceeded(_) => "stream",
             Self::ChannelClosed => "channel",
             Self::Unauthenticated(_) => "unauthenticated",
@@ -114,6 +121,7 @@ impl CamelError {
             Self::CircuitOpen(_) => "CircuitOpen",
             Self::HttpOperationFailed { .. } => "HttpOperationFailed",
             Self::Stopped => "Stopped",
+            Self::ConsumerStopping => "ConsumerStopping",
             Self::Config(_) => "Config",
             Self::AlreadyConsumed => "AlreadyConsumed",
             Self::StreamLimitExceeded(_) => "StreamLimitExceeded",
@@ -163,6 +171,7 @@ mod tests {
                 response_body: Some("error".to_string()),
             },
             CamelError::Stopped,
+            CamelError::ConsumerStopping,
             CamelError::Config("x".to_string()),
             CamelError::AlreadyConsumed,
             CamelError::StreamLimitExceeded(42),

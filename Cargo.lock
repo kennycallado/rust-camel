@@ -1412,6 +1412,7 @@ dependencies = [
  "camel-api",
  "camel-auth",
  "camel-component-api",
+ "camel-core",
  "camel-otel",
  "flate2",
  "futures",

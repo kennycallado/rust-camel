@@ -33,6 +33,7 @@ use crate::lifecycle::adapters::route_compiler::{
     RouteChannelService, compose_traced_pipeline_with_contracts,
 };
 use crate::lifecycle::adapters::route_registry::RouteRegistry;
+use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::DetailLevel;
@@ -148,7 +149,7 @@ pub(crate) fn build_eh_config_pipeline(
     health_registry: Arc<HealthCheckRegistry>,
     route_id: &str,
     producer_ctx: &ProducerContext,
-    processors_with_contracts: Vec<(BoxProcessor, Option<camel_api::BodyType>)>,
+    processors_with_contracts: Vec<CompiledStep>,
     tracing_enabled: bool,
     tracer_detail_level: DetailLevel,
     security_policy: Option<SecurityPolicyConfig>,
@@ -260,7 +261,7 @@ impl RouteCompilerExt<'_> {
         registry: &Arc<std::sync::Mutex<Registry>>,
         route_id: Option<&str>,
         staging_mode: &super::step_resolution::FunctionStagingMode,
-    ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
+    ) -> Result<Vec<CompiledStep>, CamelError> {
         let component_ctx = Arc::new(ControllerComponentContext::new(
             Arc::clone(registry),
             Arc::clone(self.languages),

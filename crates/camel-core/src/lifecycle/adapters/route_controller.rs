@@ -38,6 +38,7 @@ pub(super) use crate::lifecycle::adapters::route_helpers::{
 };
 use crate::lifecycle::adapters::route_registry::RouteRegistry;
 use crate::lifecycle::adapters::route_runtime_state;
+use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::{DetailLevel, TracerConfig};
@@ -248,7 +249,7 @@ impl DefaultRouteController {
         registry: &Arc<std::sync::Mutex<Registry>>,
         route_id: Option<&str>,
         staging_mode: &super::step_resolution::FunctionStagingMode,
-    ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
+    ) -> Result<Vec<CompiledStep>, CamelError> {
         let component_ctx = Arc::new(ControllerComponentContext::new(
             Arc::clone(registry),
             Arc::clone(&self.languages),
@@ -358,9 +359,8 @@ impl DefaultRouteController {
                     Some(&route_id),
                     staging_mode,
                 )?;
-                let pre_procs: Vec<BoxProcessor> = pre_pairs.into_iter().map(|(p, _)| p).collect();
                 let pre_pipeline =
-                    super::pipeline_runtime::new_shared_pipeline(compose_pipeline(pre_procs));
+                    super::pipeline_runtime::new_shared_pipeline(compose_pipeline(pre_pairs));
 
                 let post_pairs = self.resolve_steps(
                     post_steps,
@@ -369,10 +369,8 @@ impl DefaultRouteController {
                     Some(&route_id),
                     staging_mode,
                 )?;
-                let post_procs: Vec<BoxProcessor> =
-                    post_pairs.into_iter().map(|(p, _)| p).collect();
                 let post_pipeline =
-                    super::pipeline_runtime::new_shared_pipeline(compose_pipeline(post_procs));
+                    super::pipeline_runtime::new_shared_pipeline(compose_pipeline(post_pairs));
 
                 aggregate_split = Some(AggregateSplitInfo {
                     pre_pipeline,

@@ -137,7 +137,7 @@ impl Service<Exchange> for JmsProducer {
                 self.pending_permit = Some(permit);
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::Stopped)),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ConsumerStopping)),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -302,5 +302,22 @@ mod tests {
     fn destination_topic_format() {
         let endpoint_config = JmsEndpointConfig::from_uri("jms:topic:events").unwrap();
         assert_eq!(JmsProducer::destination(&endpoint_config), "topic:events");
+    }
+
+    #[tokio::test]
+    async fn poll_ready_returns_consumer_stopping_when_semaphore_closed() {
+        use futures::task::noop_waker_ref;
+        use std::task::{Context, Poll};
+
+        let config = JmsEndpointConfig::from_uri("jms:queue:orders").unwrap();
+        let channel: tonic::transport::Channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut producer = JmsProducer::new(channel, config);
+        producer.semaphore.close();
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(matches!(
+            producer.poll_ready(&mut cx),
+            Poll::Ready(Err(CamelError::ConsumerStopping))
+        ));
     }
 }

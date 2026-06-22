@@ -6,9 +6,8 @@ pub(crate) enum FunctionStagingMode {
     HotReload { generation: u64 },
 }
 
-use camel_api::{
-    BoxProcessor, CamelError, Exchange, FilterPredicate, FunctionInvoker, ProducerContext, Value,
-};
+use crate::lifecycle::adapters::step_compilers::CompiledStep;
+use camel_api::{CamelError, Exchange, FilterPredicate, FunctionInvoker, ProducerContext, Value};
 use camel_bean::BeanRegistry;
 use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_language_api::{Expression, Language, Predicate};
@@ -122,7 +121,7 @@ pub(crate) fn resolve_steps(
     component_ctx: Arc<dyn ComponentContext>,
     route_id: Option<&str>,
     staging_mode: &FunctionStagingMode,
-) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
+) -> Result<Vec<CompiledStep>, CamelError> {
     use crate::lifecycle::adapters::step_compilers::{CompilationContext, build_registry};
 
     let compiler_registry = build_registry();
@@ -143,6 +142,7 @@ pub(crate) fn resolve_steps(
 mod tests {
     use super::*;
     use crate::lifecycle::application::route_definition::{LanguageExpressionDef, ValueSourceDef};
+    use camel_api::BoxProcessor;
     use camel_api::IdentityProcessor;
     use camel_api::body::Body;
 
