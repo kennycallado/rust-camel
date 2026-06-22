@@ -1,5 +1,4 @@
 // Thin dispatcher — each thematic test family lives in its own file.
-// See ADR-0023 for the split rationale.
 
 #[path = "producer_chat_tests.rs"]
 mod producer_chat_tests;
