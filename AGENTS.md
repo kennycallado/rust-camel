@@ -141,8 +141,8 @@ Search results can flood context. Use `context-mode_ctx_execute(language: "shell
 | `ctx doctor`  | Call the `doctor` MCP tool, run the returned shell command, display as checklist  |
 | `ctx upgrade` | Call the `upgrade` MCP tool, run the returned shell command, display as checklist |
 
-
 <!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:f65d5d33 -->
+
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
@@ -208,10 +208,12 @@ bd close bd-42 --reason "Completed" --json
 5. **Complete**: `bd close <id> --reason "Done"`
 
 ### Quality
+
 - Use `--acceptance` and `--design` fields when creating issues
 - Use `--validate` to check description completeness
 
 ### Lifecycle
+
 - `bd defer <id>` / `bd supersede <id>` for issue management
 - `bd stale` / `bd orphans` / `bd lint` for hygiene
 - `bd human <id>` to flag for human decisions
@@ -255,6 +257,7 @@ For more details, see README.md and docs/QUICKSTART.md.
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
+
 - **NEVER run `git push`** - Pushing costs money on GitHub Actions. Only the human does push.
 - **NEVER run `git push`** - This is PROHIBITED. No exceptions.
 - Commit locally and stop. The user will push when ready.
