@@ -10,6 +10,8 @@ pub mod discovery;
 pub mod env_interpolation;
 pub mod json;
 pub mod model;
+#[cfg(test)]
+mod parity_tests;
 pub mod route_ast;
 pub mod template;
 pub mod yaml;
