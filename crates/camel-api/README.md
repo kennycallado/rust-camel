@@ -69,7 +69,7 @@ The health monitoring system provides Kubernetes-ready endpoints for monitoring 
 |------|-------------|
 | `HealthReport` | System-wide health report with status, services list, and timestamp |
 | `ServiceHealth` | Health status of an individual service (name + status) |
-| `HealthStatus` | Aggregated system health: `Healthy` or `Unhealthy` |
+| `HealthStatus` | Aggregated system health: `Healthy`, `Degraded`, or `Unhealthy` |
 | `ServiceStatus` | Individual service status: `Stopped`, `Started`, or `Failed` |
 
 ### Usage Example
@@ -112,12 +112,12 @@ let report = ctx.health_check(); // Returns HealthReport
 
 ### Kubernetes Endpoints
 
-The `camel-prometheus` crate exposes these endpoints:
+The `camel-health` crate exposes these endpoints:
 - `/healthz` - Liveness probe (always 200 OK)
 - `/readyz` - Readiness probe (200 if healthy, 503 if unhealthy)
 - `/health` - Detailed health report (JSON)
 
-See `camel-prometheus` documentation for Kubernetes integration examples.
+See `camel-health` documentation for Kubernetes integration examples.
 
 ## Platform SPI
 
@@ -357,6 +357,7 @@ Result of the retry phase:
 | Variant | Description |
 |---------|-------------|
 | `Recovered(Exchange)` | Retry succeeded — pipeline continues normally |
+| `Stopped(Exchange)` | Retry attempt returned `Stopped(ex)` — bypasses `handle_step`; maps to `PipelineOutcome::Stopped` (ADR-0024/0025) |
 | `Exhausted{ exchange, error, policy }` | Retries exhausted or not configured |
 
 ### `StepDisposition`
@@ -384,7 +385,7 @@ Identifies which infrastructure gate produced an error:
 | Type | Description |
 |------|-------------|
 | `Exchange` | The message container flowing through routes |
-| `Message` | Holds body, headers, and properties |
+| `Message` | Holds body and headers (properties live on `Exchange`) |
 | `Body` | Message body (Empty, Text, Json, Bytes, Xml, Stream) |
 | `Processor` | Trait for processing exchanges |
 | `CamelError` | Comprehensive error type |

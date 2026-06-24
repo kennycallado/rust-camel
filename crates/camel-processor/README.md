@@ -108,7 +108,7 @@ let route = RouteBuilder::from("timer:tick")
 | `AggregatorService` | Combine messages |
 | `MulticastService` | Parallel routing |
 | `WireTapService` | Side-channel routing |
-| `CircuitBreakerLayer` | Fault tolerance (deprecated since 0.16.0 — use `RouteChannelService`) |
+| `CircuitBreakerLayer` | Fault tolerance (circuit-breaker gate) |
 | `ErrorHandlerLayer` | Error handling (deprecated since 0.16.0 — use `RouteChannelService`) |
 | `CompiledStep::Stop` | Stop processing (control flow via PipelineOutcome::Stopped) |
 | `ScriptMutator` | Execute mutating scripts that modify Exchange headers, properties, or body |
