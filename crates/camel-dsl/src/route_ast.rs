@@ -7,21 +7,21 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub struct YamlRoutes {
+pub struct RouteDslRoutes {
     #[serde(default)]
-    pub routes: Vec<YamlRoute>,
+    pub routes: Vec<RouteDslRoute>,
     #[serde(default)]
-    pub templates: Vec<YamlTemplate>,
+    pub templates: Vec<RouteDslTemplate>,
     #[serde(default)]
-    pub templated_routes: Vec<YamlTemplatedRoute>,
+    pub templated_routes: Vec<RouteDslTemplatedRoute>,
 }
 
 #[derive(Deserialize)]
-pub struct YamlRoute {
+pub struct RouteDslRoute {
     pub id: String,
     pub from: String,
     #[serde(default)]
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
     #[serde(default = "default_true")]
     pub auto_startup: bool,
     #[serde(default = "default_startup_order")]
@@ -31,11 +31,11 @@ pub struct YamlRoute {
     #[serde(default)]
     pub concurrent: Option<usize>,
     #[serde(default)]
-    pub error_handler: Option<YamlErrorHandler>,
+    pub error_handler: Option<RouteDslErrorHandler>,
     #[serde(default)]
-    pub circuit_breaker: Option<YamlCircuitBreaker>,
+    pub circuit_breaker: Option<RouteDslCircuitBreaker>,
     #[serde(default)]
-    pub security_policy: Option<YamlSecurityPolicy>,
+    pub security_policy: Option<RouteDslSecurityPolicy>,
     #[serde(default)]
     pub on_complete: Option<String>,
     #[serde(default)]
@@ -43,7 +43,7 @@ pub struct YamlRoute {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct YamlSecurityPolicy {
+pub struct RouteDslSecurityPolicy {
     #[serde(default)]
     pub roles: Option<Vec<String>>,
     #[serde(default)]
@@ -57,20 +57,20 @@ pub struct YamlSecurityPolicy {
     #[serde(default)]
     pub config: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
-    pub permission: Option<YamlPermissionPolicy>,
+    pub permission: Option<RouteDslPermissionPolicy>,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct YamlPermissionPolicy {
+pub struct RouteDslPermissionPolicy {
     pub policy: String,
     #[serde(default)]
-    pub resource: Option<YamlPermissionValueSource>,
+    pub resource: Option<RouteDslPermissionValueSource>,
     #[serde(default)]
-    pub action: Option<YamlPermissionValueSource>,
+    pub action: Option<RouteDslPermissionValueSource>,
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
     #[serde(default)]
-    pub context: Option<YamlPermissionContext>,
+    pub context: Option<RouteDslPermissionContext>,
     #[serde(default)]
     pub cache_ttl_secs: Option<u64>,
     #[serde(default)]
@@ -78,7 +78,7 @@ pub struct YamlPermissionPolicy {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct YamlPermissionValueSource {
+pub struct RouteDslPermissionValueSource {
     #[serde(default)]
     pub literal: Option<String>,
     #[serde(default)]
@@ -88,7 +88,7 @@ pub struct YamlPermissionValueSource {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct YamlPermissionContext {
+pub struct RouteDslPermissionContext {
     #[serde(default)]
     pub headers: Vec<String>,
     #[serde(default)]
@@ -96,25 +96,25 @@ pub struct YamlPermissionContext {
 }
 
 #[derive(Deserialize)]
-pub struct YamlErrorHandler {
+pub struct RouteDslErrorHandler {
     #[serde(default)]
     pub dead_letter_channel: Option<String>,
     #[serde(default)]
-    pub retry: Option<YamlRedeliveryPolicy>,
+    pub retry: Option<RouteDslRedeliveryPolicy>,
     #[serde(default)]
-    pub on_exceptions: Option<Vec<YamlOnException>>,
+    pub on_exceptions: Option<Vec<RouteDslOnException>>,
 }
 
 #[derive(Deserialize)]
-pub struct YamlOnException {
+pub struct RouteDslOnException {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
     pub message_contains: Option<String>,
     #[serde(default)]
-    pub retry: Option<YamlRedeliveryPolicy>,
+    pub retry: Option<RouteDslRedeliveryPolicy>,
     #[serde(default)]
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
     #[serde(default)]
     pub handled: Option<bool>,
     #[serde(default)]
@@ -122,7 +122,7 @@ pub struct YamlOnException {
 }
 
 #[derive(Deserialize)]
-pub struct YamlRedeliveryPolicy {
+pub struct RouteDslRedeliveryPolicy {
     pub max_attempts: u32,
     #[serde(default = "default_initial_delay_ms")]
     pub initial_delay_ms: u64,
@@ -137,7 +137,7 @@ pub struct YamlRedeliveryPolicy {
 }
 
 #[derive(Deserialize)]
-pub struct YamlCircuitBreaker {
+pub struct RouteDslCircuitBreaker {
     #[serde(default = "default_failure_threshold")]
     pub failure_threshold: u32,
     #[serde(default = "default_open_duration_ms")]
@@ -220,7 +220,7 @@ pub struct LoopFullConfig {
     #[serde(rename = "while")]
     pub while_expr: Option<LoopWhileExpr>,
     #[serde(default)]
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
 }
 
 /// Expression-only predicate for loop while condition.
@@ -243,7 +243,7 @@ pub struct LoopWhileExpr {
 
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
-pub enum YamlStep {
+pub enum RouteDslStep {
     To(ToStep),
     SetHeader(SetHeaderStep),
     SetProperty(SetPropertyStep),
@@ -458,7 +458,7 @@ pub struct PredicateBlock {
     #[serde(default)]
     pub xpath: Option<String>,
     #[serde(default)]
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -472,7 +472,7 @@ pub struct ChoiceData {
     #[serde(default)]
     pub when: Vec<PredicateBlock>,
     #[serde(default)]
-    pub otherwise: Option<Vec<YamlStep>>,
+    pub otherwise: Option<Vec<RouteDslStep>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -483,7 +483,7 @@ pub struct DoTryStep {
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct DoTryData {
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
     #[serde(default)]
     pub catch: Vec<CatchClauseData>,
     #[serde(default)]
@@ -498,14 +498,14 @@ pub struct CatchClauseData {
     pub on_when: Option<String>,
     #[serde(default = "default_handled_disposition")]
     pub disposition: camel_api::error_handler::ExceptionDisposition,
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FinallyData {
     pub on_when: Option<String>,
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
 }
 
 fn default_handled_disposition() -> camel_api::error_handler::ExceptionDisposition {
@@ -531,7 +531,7 @@ pub struct SplitData {
     #[serde(default = "default_true")]
     pub stop_on_exception: bool,
     #[serde(default)]
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
     #[serde(default)]
     pub streaming: bool,
     #[serde(default)]
@@ -636,7 +636,7 @@ pub struct MulticastData {
     #[serde(default = "default_multicast_aggregation")]
     pub aggregation: String,
     #[serde(default)]
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
 }
 
 fn default_multicast_aggregation() -> String {
@@ -745,7 +745,7 @@ pub struct ThrottleData {
     #[serde(default)]
     pub strategy: Option<String>,
     #[serde(default)]
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
 }
 
 fn default_throttle_period_secs() -> u64 {
@@ -766,7 +766,7 @@ pub struct LoadBalanceData {
     #[serde(default)]
     pub distribution_ratio: Option<String>,
     #[serde(default)]
-    pub steps: Vec<YamlStep>,
+    pub steps: Vec<RouteDslStep>,
 }
 
 fn default_lb_strategy() -> String {
@@ -779,17 +779,17 @@ fn default_lb_strategy() -> String {
 
 /// A reusable route template declared in YAML/JSON.
 #[derive(Deserialize, Debug)]
-pub struct YamlTemplate {
+pub struct RouteDslTemplate {
     pub id: String,
     #[serde(default)]
-    pub parameters: Vec<YamlTemplateParameter>,
+    pub parameters: Vec<RouteDslTemplateParameter>,
     #[serde(default)]
     pub routes: Vec<serde_yml::Value>,
 }
 
 /// A single parameter that a route template accepts.
 #[derive(Deserialize, Debug)]
-pub struct YamlTemplateParameter {
+pub struct RouteDslTemplateParameter {
     /// The parameter name (used inside `{{name}}` placeholders).
     pub name: String,
     /// Optional default value used when the caller does not supply one.
@@ -802,7 +802,7 @@ pub struct YamlTemplateParameter {
 
 /// A request to instantiate a template with concrete parameter values.
 #[derive(Deserialize, Debug)]
-pub struct YamlTemplatedRoute {
+pub struct RouteDslTemplatedRoute {
     pub route_template_ref: String,
     /// Optional explicit route id for the resulting instance.
     #[serde(default)]
@@ -843,7 +843,7 @@ routes:
   - id: r1
     from: direct:start
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes.len(), 1);
         assert_eq!(parsed.routes[0].id, "r1");
         assert_eq!(parsed.routes[0].from, "direct:start");
@@ -860,7 +860,7 @@ routes:
     from: timer:tick
     concurrent: 4
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes[0].concurrent, Some(4));
         assert!(!parsed.routes[0].sequential);
     }
@@ -874,7 +874,7 @@ routes:
     error_handler:
       dead_letter_channel: log:dlq
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         let eh = parsed.routes[0].error_handler.as_ref().unwrap();
         assert_eq!(eh.dead_letter_channel.as_deref(), Some("log:dlq"));
     }
@@ -889,7 +889,7 @@ routes:
       failure_threshold: 3
       open_duration_ms: 5000
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         let cb = parsed.routes[0].circuit_breaker.as_ref().unwrap();
         assert_eq!(cb.failure_threshold, 3);
         assert_eq!(cb.open_duration_ms, 5000);
@@ -903,7 +903,7 @@ routes:
     from: direct:in
     circuit_breaker: {}
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         let cb = parsed.routes[0].circuit_breaker.as_ref().unwrap();
         assert_eq!(cb.failure_threshold, 5);
         assert_eq!(cb.open_duration_ms, 30_000);
@@ -918,7 +918,7 @@ routes:
     steps:
       - to: log:out
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes[0].steps.len(), 1);
     }
 
@@ -931,9 +931,9 @@ routes:
     steps:
       - delay: 500
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
-            YamlStep::Delay(d) => match &d.delay {
+            RouteDslStep::Delay(d) => match &d.delay {
                 DelayBody::Short(ms) => assert_eq!(*ms, 500),
                 _ => panic!("expected short form"),
             },
@@ -952,9 +952,9 @@ routes:
           delay_ms: 200
           dynamic_header: X-Delay
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
-            YamlStep::Delay(d) => match &d.delay {
+            RouteDslStep::Delay(d) => match &d.delay {
                 DelayBody::Full(cfg) => {
                     assert_eq!(cfg.delay_ms, 200);
                     assert_eq!(cfg.dynamic_header.as_deref(), Some("X-Delay"));
@@ -975,7 +975,7 @@ routes:
       retry:
         max_attempts: 3
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         let retry = parsed.routes[0]
             .error_handler
             .as_ref()
@@ -999,9 +999,9 @@ routes:
     steps:
       - stream_cache: true
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
-            YamlStep::StreamCache(s) => match &s.stream_cache {
+            RouteDslStep::StreamCache(s) => match &s.stream_cache {
                 StreamCacheBody::Enabled(b) => assert!(*b),
                 _ => panic!("expected enabled"),
             },
@@ -1018,9 +1018,9 @@ routes:
     steps:
       - stop: true
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
-            YamlStep::Stop(s) => assert!(s.stop),
+            RouteDslStep::Stop(s) => assert!(s.stop),
             _ => panic!("expected stop"),
         }
     }
@@ -1034,9 +1034,9 @@ routes:
     steps:
       - convert_body_to: json
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
-            YamlStep::ConvertBodyTo(s) => assert_eq!(s.convert_body_to, "json"),
+            RouteDslStep::ConvertBodyTo(s) => assert_eq!(s.convert_body_to, "json"),
             _ => panic!("expected convert_body_to"),
         }
     }
@@ -1051,7 +1051,7 @@ routes:
       - marshal: protobuf
       - unmarshal: protobuf
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes[0].steps.len(), 2);
     }
 
@@ -1066,9 +1066,9 @@ routes:
           name: myBean
           method: handle
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
-            YamlStep::Bean(b) => {
+            RouteDslStep::Bean(b) => {
                 assert_eq!(b.bean.name, "myBean");
                 assert_eq!(b.bean.method, "handle");
             }
@@ -1087,9 +1087,9 @@ routes:
           language: rhai
           source: "1 + 1"
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
-            YamlStep::Script(s) => {
+            RouteDslStep::Script(s) => {
                 assert_eq!(s.script.language, "rhai");
                 assert_eq!(s.script.source, "1 + 1");
             }
@@ -1122,7 +1122,7 @@ templated_routes:
     parameters:
       path: /users
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes.len(), 1);
         assert_eq!(parsed.templates.len(), 1);
         assert_eq!(parsed.templated_routes.len(), 1);
@@ -1152,7 +1152,7 @@ routes:
     steps:
       - to: log:info
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes.len(), 1);
         assert!(parsed.templates.is_empty());
         assert!(parsed.templated_routes.is_empty());
@@ -1168,7 +1168,7 @@ templates:
       - id: simple-route
         from: timer:tick
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.templates.len(), 1);
         assert!(parsed.templates[0].parameters.is_empty());
     }
@@ -1180,7 +1180,7 @@ routes: []
 templated_routes:
   - route_template_ref: my-tpl
 "#;
-        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.templated_routes.len(), 1);
         let tr = &parsed.templated_routes[0];
         assert_eq!(tr.route_template_ref, "my-tpl");

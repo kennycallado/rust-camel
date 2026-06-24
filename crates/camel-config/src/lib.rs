@@ -25,6 +25,6 @@ pub use discovery::{
 pub use properties::{PropertiesResolver, ResolveError};
 pub use wasm_limits::WasmLimitsConfig;
 pub use yaml::{
-    YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_canonical,
-    parse_yaml_to_declarative, parse_yaml_with_threshold,
+    RouteDslRoute, RouteDslRoutes, RouteDslStep, load_from_file, parse_yaml,
+    parse_yaml_to_canonical, parse_yaml_to_declarative, parse_yaml_with_threshold,
 };

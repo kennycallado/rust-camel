@@ -85,7 +85,7 @@ impl RedeliveryPolicy {
 ///
 /// `ExceptionDisposition::default()` returns `Propagate` (first variant per `#[derive(Default)]`),
 /// but the YAML + builder layers default to `Handled` for doTry catch clauses
-/// (via `default_handled_disposition()` in `camel-dsl/src/yaml_ast.rs` and the `DoCatchBuilder::do_catch_exception` constructor).
+/// (via `default_handled_disposition()` in `camel-dsl/src/route_ast.rs` and the `DoCatchBuilder::do_catch_exception` constructor).
 /// Direct struct construction should explicitly set disposition rather than relying on `Default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -1,13 +1,13 @@
 //! JSON route definition parser.
 //!
-//! Reuses the same AST types as the YAML parser ([`crate::yaml::YamlRoutes`],
-//! [`crate::yaml::YamlRoute`], [`crate::yaml::YamlStep`])
+//! Reuses the same AST types as the YAML parser ([`crate::yaml::RouteDslRoutes`],
+//! [`crate::yaml::RouteDslRoute`], [`crate::yaml::RouteDslStep`])
 //! since JSON is a subset of YAML's data model. The only difference is the deserializer.
 //!
 //! ## Stability note
 //!
-//! The type aliases [`JsonRoutes`], [`JsonRoute`], [`JsonStep`] are convenience wrappers
-//! around the YAML AST types. They are **not a stable SDK contract**. SDKs and external
+//! The parser uses [`RouteDslRoutes`] directly (no separate JSON-specific AST types).
+//! The `RouteDsl*` AST types are **not a stable SDK contract**. SDKs and external
 //! consumers should target [`CanonicalRouteSpec`] for forward compatibility.
 
 use std::path::Path;
@@ -20,22 +20,13 @@ use crate::compile::{
     compile_declarative_route_with_stream_cache_threshold,
 };
 use crate::model::SecurityCompileContext;
-use crate::yaml::{YamlRoutes, yaml_route_to_declarative_route};
-
-/// Convenience alias — not a stable SDK contract. Target [`CanonicalRouteSpec`] instead.
-pub type JsonRoutes = crate::yaml::YamlRoutes;
-
-/// Convenience alias — not a stable SDK contract. Target [`CanonicalRouteSpec`] instead.
-pub type JsonRoute = crate::yaml::YamlRoute;
-
-/// Convenience alias — not a stable SDK contract. Target [`CanonicalRouteSpec`] instead.
-pub type JsonStep = crate::yaml::YamlStep;
+use crate::yaml::{RouteDslRoutes, yaml_route_to_declarative_route};
 
 /// Parse a JSON string into declarative route models.
 pub fn parse_json_to_declarative(
     json: &str,
 ) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
-    let routes: YamlRoutes = serde_json::from_str(json)
+    let routes: RouteDslRoutes = serde_json::from_str(json)
         .map_err(|e| CamelError::RouteError(format!("JSON parse error: {e}")))?;
 
     routes

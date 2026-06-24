@@ -1,7 +1,7 @@
 //! YAML/JSON DSL for defining Camel routes — declarative route parsing and compilation to canonical specs.
 //!
-//! Main types: `DeclarativeRoute`, `DeclarativeStep`, `YamlRoute`, `YamlStep`.
-//! Main modules: `canonical`, `compile`, `contract`, `discovery`, `json`, `model`, `yaml`, `yaml_ast`.
+//! Main types: `DeclarativeRoute`, `DeclarativeStep`, `RouteDslRoute`, `RouteDslStep`.
+//! Main modules: `canonical`, `compile`, `contract`, `discovery`, `json`, `model`, `yaml`, `route_ast`.
 
 pub mod canonical;
 pub mod compile;
@@ -10,9 +10,9 @@ pub mod discovery;
 pub mod env_interpolation;
 pub mod json;
 pub mod model;
+pub mod route_ast;
 pub mod template;
 pub mod yaml;
-pub mod yaml_ast;
 
 pub use canonical::{parse_canonical_json, parse_canonical_route};
 pub use compile::{
@@ -38,8 +38,9 @@ pub use model::{
     ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use yaml::{
-    YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_canonical,
-    parse_yaml_to_declarative, parse_yaml_with_threshold, parse_yaml_with_threshold_and_security,
+    RouteDslRoute, RouteDslRoutes, RouteDslStep, load_from_file, parse_yaml,
+    parse_yaml_to_canonical, parse_yaml_to_declarative, parse_yaml_with_threshold,
+    parse_yaml_with_threshold_and_security,
 };
 
 pub use template::json::{parse_json_templated_routes, parse_json_templates};

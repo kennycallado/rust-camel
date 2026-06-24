@@ -5,7 +5,7 @@ use camel_api::template::{
     RouteTemplateSpec, TemplateError, TemplateParameterSpec, TemplatedRouteSpec,
 };
 
-use crate::yaml_ast::{YamlRoutes, YamlTemplate, YamlTemplateParameter};
+use crate::route_ast::{RouteDslRoutes, RouteDslTemplate, RouteDslTemplateParameter};
 
 // serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
 // Module alias preserves call-site paths byte-for-byte.
@@ -16,7 +16,7 @@ use noyalib::compat::serde_yaml as serde_yml;
 /// Converts the raw `serde_yml::Value` route body into `serde_json::Value`
 /// so it can be processed by the materializer.
 pub fn parse_yaml_templates(yaml_str: &str) -> Result<Vec<RouteTemplateSpec>, TemplateError> {
-    let routes: YamlRoutes =
+    let routes: RouteDslRoutes =
         serde_yml::from_str(yaml_str).map_err(|e| TemplateError::InvalidBody(e.to_string()))?;
 
     routes
@@ -30,7 +30,7 @@ pub fn parse_yaml_templates(yaml_str: &str) -> Result<Vec<RouteTemplateSpec>, Te
 pub fn parse_yaml_templated_routes(
     yaml_str: &str,
 ) -> Result<Vec<TemplatedRouteSpec>, TemplateError> {
-    let routes: YamlRoutes =
+    let routes: RouteDslRoutes =
         serde_yml::from_str(yaml_str).map_err(|e| TemplateError::InvalidBody(e.to_string()))?;
 
     Ok(routes
@@ -44,7 +44,7 @@ pub fn parse_yaml_templated_routes(
         .collect())
 }
 
-fn yaml_template_to_spec(yt: YamlTemplate) -> Result<RouteTemplateSpec, TemplateError> {
+fn yaml_template_to_spec(yt: RouteDslTemplate) -> Result<RouteTemplateSpec, TemplateError> {
     if yt.routes.is_empty() {
         return Err(TemplateError::InvalidBody(format!(
             "template '{}': routes array is empty",
@@ -73,7 +73,7 @@ fn yaml_template_to_spec(yt: YamlTemplate) -> Result<RouteTemplateSpec, Template
     })
 }
 
-fn yaml_param_to_spec(yp: YamlTemplateParameter) -> TemplateParameterSpec {
+fn yaml_param_to_spec(yp: RouteDslTemplateParameter) -> TemplateParameterSpec {
     TemplateParameterSpec {
         name: yp.name,
         default_value: yp.default_value,

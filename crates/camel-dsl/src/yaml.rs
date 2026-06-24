@@ -31,19 +31,19 @@ use crate::model::{
     SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
     ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
-pub use crate::yaml_ast::{
+pub use crate::route_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
     DelayStep, DynamicRouterData, DynamicRouterStep, EnrichBody, EnrichConfig, EnrichStep,
     FilterStep, FunctionStep, LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData,
     LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PollEnrichStep,
-    PredicateBlock, RecipientListData, RecipientListStep, RoutingSlipData, RoutingSlipStep,
-    ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
-    SetPropertyData, SetPropertyStep, SplitData, SplitExpressionConfig, SplitExpressionYaml,
-    SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep, ThrottleData,
-    ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep, YamlRoute,
-    YamlRoutes, YamlStep,
+    PredicateBlock, RecipientListData, RecipientListStep, RouteDslRoute, RouteDslRoutes,
+    RouteDslStep, RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig,
+    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep,
+    SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
+    StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
+    UnmarshalStep, ValidateStep, WireTapStep,
 };
-use crate::yaml_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
+use crate::route_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
 const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 29] = [
     DeclarativeStepKind::To,
@@ -80,7 +80,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 29] = [
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
 
 pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
-    let routes: YamlRoutes = serde_yml::from_str(yaml).map_err(|e| {
+    let routes: RouteDslRoutes = serde_yml::from_str(yaml).map_err(|e| {
         // log-policy: system-broken
         error!(error = %e, "yaml parse failed");
         CamelError::RouteError(format!("YAML parse error: {e}"))
@@ -148,7 +148,7 @@ pub fn parse_yaml_to_canonical(
 }
 
 fn yaml_source_to_value_source(
-    yaml: crate::yaml_ast::YamlPermissionValueSource,
+    yaml: crate::route_ast::RouteDslPermissionValueSource,
 ) -> Result<camel_auth::PermissionValueSource, CamelError> {
     if let Some(s) = yaml.literal {
         Ok(camel_auth::PermissionValueSource::Literal(s))
@@ -164,7 +164,7 @@ fn yaml_source_to_value_source(
 }
 
 pub(crate) fn yaml_route_to_declarative_route(
-    route: YamlRoute,
+    route: RouteDslRoute,
 ) -> Result<DeclarativeRoute, CamelError> {
     if route.id.is_empty() {
         return Err(CamelError::RouteError(
@@ -201,7 +201,7 @@ pub(crate) fn yaml_route_to_declarative_route(
                             let steps = clause
                                 .steps
                                 .into_iter()
-                                .map(yaml_step_to_declarative_step)
+                                .map(route_step_to_declarative_step)
                                 .collect::<Result<Vec<_>, _>>()?;
                             Ok::<_, CamelError>(DeclarativeOnException {
                                 kind: clause.kind,
@@ -360,7 +360,7 @@ pub(crate) fn yaml_route_to_declarative_route(
     let steps = route
         .steps
         .into_iter()
-        .map(yaml_step_to_declarative_step)
+        .map(route_step_to_declarative_step)
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(DeclarativeRoute {
@@ -377,15 +377,17 @@ pub(crate) fn yaml_route_to_declarative_route(
     })
 }
 
-pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, CamelError> {
+pub(crate) fn route_step_to_declarative_step(
+    step: RouteDslStep,
+) -> Result<DeclarativeStep, CamelError> {
     match step {
-        YamlStep::To(ToStep { to }) => {
+        RouteDslStep::To(ToStep { to }) => {
             if to.trim().is_empty() {
                 return Err(CamelError::RouteError("to: URI must not be empty".into()));
             }
             Ok(DeclarativeStep::To(ToStepDef::new(to)))
         }
-        YamlStep::WireTap(WireTapStep { wire_tap }) => {
+        RouteDslStep::WireTap(WireTapStep { wire_tap }) => {
             if wire_tap.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "wire_tap: URI must not be empty".into(),
@@ -393,7 +395,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             }
             Ok(DeclarativeStep::WireTap(WireTapStepDef { uri: wire_tap }))
         }
-        YamlStep::Stop(StopStep { stop }) => {
+        RouteDslStep::Stop(StopStep { stop }) => {
             if stop {
                 Ok(DeclarativeStep::Stop)
             } else {
@@ -402,7 +404,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 ))
             }
         }
-        YamlStep::StreamCache(step) => {
+        RouteDslStep::StreamCache(step) => {
             let threshold = match step.stream_cache {
                 StreamCacheBody::Enabled(true) => None,
                 StreamCacheBody::Enabled(false) => {
@@ -417,13 +419,13 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 threshold,
             }))
         }
-        YamlStep::Log(LogStep { log }) => {
+        RouteDslStep::Log(LogStep { log }) => {
             let (message_data, level) = match log {
-                crate::yaml_ast::LogBody::Message(message) => (
-                    crate::yaml_ast::LogMessageData::Literal(message),
+                crate::route_ast::LogBody::Message(message) => (
+                    crate::route_ast::LogMessageData::Literal(message),
                     LogLevelDef::Info,
                 ),
-                crate::yaml_ast::LogBody::Config(config) => {
+                crate::route_ast::LogBody::Config(config) => {
                     let level = match config.level.as_deref().unwrap_or("info") {
                         "trace" => LogLevelDef::Trace,
                         "debug" => LogLevelDef::Debug,
@@ -442,13 +444,13 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             let message = match message_data {
                 // A bare string like `log: "Got ${body}"` is always evaluated as Simple Language,
                 // matching Apache Camel behaviour: the message field "uses simple language".
-                crate::yaml_ast::LogMessageData::Literal(s) => {
+                crate::route_ast::LogMessageData::Literal(s) => {
                     ValueSourceDef::Expression(LanguageExpressionDef {
                         language: "simple".to_string(),
                         source: s,
                     })
                 }
-                crate::yaml_ast::LogMessageData::Expr(expr) => parse_value_source(
+                crate::route_ast::LogMessageData::Expr(expr) => parse_value_source(
                     expr.value.map(serde_json::Value::String),
                     expr.language,
                     expr.source,
@@ -461,7 +463,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             };
             Ok(DeclarativeStep::Log(LogStepDef { message, level }))
         }
-        YamlStep::SetHeader(SetHeaderStep { set_header }) => {
+        RouteDslStep::SetHeader(SetHeaderStep { set_header }) => {
             if set_header.key.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "set_header: key must not be empty".into(),
@@ -482,7 +484,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 value,
             }))
         }
-        YamlStep::SetProperty(SetPropertyStep { set_property }) => {
+        RouteDslStep::SetProperty(SetPropertyStep { set_property }) => {
             if set_property.name.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "set_property: key must not be empty".into(),
@@ -503,7 +505,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 value,
             }))
         }
-        YamlStep::SetBody(SetBodyStep { set_body }) => {
+        RouteDslStep::SetBody(SetBodyStep { set_body }) => {
             let value = match set_body {
                 SetBodyData::Literal(value) => ValueSourceDef::Literal(value),
                 SetBodyData::Config(SetBodyConfig {
@@ -520,7 +522,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
         }
-        YamlStep::Transform(TransformStep { transform }) => {
+        RouteDslStep::Transform(TransformStep { transform }) => {
             let value = match transform {
                 SetBodyData::Literal(value) => ValueSourceDef::Literal(value),
                 SetBodyData::Config(SetBodyConfig {
@@ -544,24 +546,24 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
         }
-        YamlStep::Script(ScriptStep {
+        RouteDslStep::Script(ScriptStep {
             script: ScriptData { language, source },
         }) => Ok(DeclarativeStep::Script(ScriptStepDef {
             expression: LanguageExpressionDef { language, source },
         })),
-        YamlStep::Filter(FilterStep { filter }) => {
+        RouteDslStep::Filter(FilterStep { filter }) => {
             let predicate = parse_predicate_block(&filter, "filter")?;
             let steps = filter
                 .steps
                 .into_iter()
-                .map(yaml_step_to_declarative_step)
+                .map(route_step_to_declarative_step)
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeStep::Filter(crate::model::FilterStepDef {
                 predicate,
                 steps,
             }))
         }
-        YamlStep::Function(FunctionStep { function: data }) => {
+        RouteDslStep::Function(FunctionStep { function: data }) => {
             if data.runtime.is_empty() {
                 return Err(CamelError::RouteError(
                     "function: 'runtime' must not be empty".into(),
@@ -591,7 +593,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 timeout_ms: data.timeout_ms,
             }))
         }
-        YamlStep::Choice(ChoiceStep {
+        RouteDslStep::Choice(ChoiceStep {
             choice: ChoiceData { when, otherwise },
         }) => {
             let whens = when
@@ -601,7 +603,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                     let steps = block
                         .steps
                         .into_iter()
-                        .map(yaml_step_to_declarative_step)
+                        .map(route_step_to_declarative_step)
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(WhenStepDef { predicate, steps })
                 })
@@ -611,7 +613,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 Some(steps) => Some(
                     steps
                         .into_iter()
-                        .map(yaml_step_to_declarative_step)
+                        .map(route_step_to_declarative_step)
                         .collect::<Result<Vec<_>, _>>()?,
                 ),
                 None => None,
@@ -619,7 +621,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
 
             Ok(DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }))
         }
-        YamlStep::Split(SplitStep { split }) => {
+        RouteDslStep::Split(SplitStep { split }) => {
             let expression = if split.streaming {
                 let stream_cfg = split.stream.unwrap_or_default();
                 let config = StreamSplitConfig {
@@ -690,7 +692,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             let steps = split
                 .steps
                 .into_iter()
-                .map(yaml_step_to_declarative_step)
+                .map(route_step_to_declarative_step)
                 .collect::<Result<Vec<_>, _>>()?;
 
             Ok(DeclarativeStep::Split(SplitStepDef {
@@ -702,7 +704,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 steps,
             }))
         }
-        YamlStep::Aggregate(AggregateStep { aggregate }) => {
+        RouteDslStep::Aggregate(AggregateStep { aggregate }) => {
             let strategy = match aggregate.strategy.as_str() {
                 "collect_all" => AggregateStrategyDef::CollectAll,
                 other => {
@@ -730,7 +732,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 discard_on_timeout: aggregate.discard_on_timeout,
             }))
         }
-        YamlStep::Multicast(MulticastStep { multicast }) => {
+        RouteDslStep::Multicast(MulticastStep { multicast }) => {
             let aggregation = match multicast.aggregation.as_str() {
                 "last_wins" => MulticastAggregationDef::LastWins,
                 "collect_all" => MulticastAggregationDef::CollectAll,
@@ -745,7 +747,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             let steps = multicast
                 .steps
                 .into_iter()
-                .map(yaml_step_to_declarative_step)
+                .map(route_step_to_declarative_step)
                 .collect::<Result<Vec<_>, _>>()?;
 
             Ok(DeclarativeStep::Multicast(MulticastStepDef {
@@ -757,7 +759,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 aggregation,
             }))
         }
-        YamlStep::ConvertBodyTo(step) => {
+        RouteDslStep::ConvertBodyTo(step) => {
             let def = match step.convert_body_to.to_lowercase().as_str() {
                 "text" => BodyTypeDef::Text,
                 "json" => BodyTypeDef::Json,
@@ -773,7 +775,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             };
             Ok(DeclarativeStep::ConvertBodyTo(def))
         }
-        YamlStep::Marshal(MarshalStep { marshal }) => {
+        RouteDslStep::Marshal(MarshalStep { marshal }) => {
             if marshal.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "marshal: format must not be empty".into(),
@@ -781,7 +783,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             }
             Ok(DeclarativeStep::Marshal(DataFormatDef { format: marshal }))
         }
-        YamlStep::Unmarshal(UnmarshalStep { unmarshal }) => {
+        RouteDslStep::Unmarshal(UnmarshalStep { unmarshal }) => {
             if unmarshal.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "unmarshal: format must not be empty".into(),
@@ -791,7 +793,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 format: unmarshal,
             }))
         }
-        YamlStep::Bean(BeanStep {
+        RouteDslStep::Bean(BeanStep {
             bean: BeanStepData { name, method },
         }) => {
             if name.trim().is_empty() {
@@ -801,7 +803,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             }
             Ok(DeclarativeStep::Bean(BeanStepDef::new(name, method)))
         }
-        YamlStep::DynamicRouter(DynamicRouterStep {
+        RouteDslStep::DynamicRouter(DynamicRouterStep {
             dynamic_router:
                 DynamicRouterData {
                     language,
@@ -831,7 +833,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 max_iterations,
             }))
         }
-        YamlStep::LoadBalance(LoadBalanceStep {
+        RouteDslStep::LoadBalance(LoadBalanceStep {
             load_balance:
                 LoadBalanceData {
                     strategy,
@@ -861,14 +863,14 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             };
             let steps = steps
                 .into_iter()
-                .map(yaml_step_to_declarative_step)
+                .map(route_step_to_declarative_step)
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeStep::LoadBalance(LoadBalanceStepDef {
                 strategy,
                 steps,
             }))
         }
-        YamlStep::RoutingSlip(RoutingSlipStep {
+        RouteDslStep::RoutingSlip(RoutingSlipStep {
             routing_slip:
                 RoutingSlipData {
                     language,
@@ -896,7 +898,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 ignore_invalid_endpoints,
             }))
         }
-        YamlStep::RecipientList(RecipientListStep {
+        RouteDslStep::RecipientList(RecipientListStep {
             recipient_list:
                 RecipientListData {
                     language,
@@ -938,7 +940,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 aggregation,
             }))
         }
-        YamlStep::Throttle(ThrottleStep {
+        RouteDslStep::Throttle(ThrottleStep {
             throttle:
                 ThrottleData {
                     max_requests,
@@ -959,7 +961,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             };
             let steps = steps
                 .into_iter()
-                .map(yaml_step_to_declarative_step)
+                .map(route_step_to_declarative_step)
                 .collect::<Result<Vec<_>, _>>()?;
             if max_requests == 0 {
                 return Err(CamelError::RouteError(
@@ -973,7 +975,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 steps,
             }))
         }
-        YamlStep::Delay(DelayStep { delay }) => {
+        RouteDslStep::Delay(DelayStep { delay }) => {
             let (delay_ms, dynamic_header) = match delay {
                 DelayBody::Short(ms) => (ms, None),
                 DelayBody::Full(cfg) => (cfg.delay_ms, cfg.dynamic_header),
@@ -986,7 +988,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 dynamic_header,
             }))
         }
-        YamlStep::Loop(LoopStep { loop_data }) => {
+        RouteDslStep::Loop(LoopStep { loop_data }) => {
             let (count, while_predicate, steps) = match loop_data {
                 LoopData::Count(n) => (Some(n), None, vec![]),
                 LoopData::Full(cfg) => {
@@ -997,7 +999,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                     let sub_steps = cfg
                         .steps
                         .into_iter()
-                        .map(yaml_step_to_declarative_step)
+                        .map(route_step_to_declarative_step)
                         .collect::<Result<Vec<_>, _>>()?;
                     (cfg.count, predicate, sub_steps)
                 }
@@ -1008,7 +1010,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 steps,
             }))
         }
-        YamlStep::Validate(ValidateStep { validate }) => {
+        RouteDslStep::Validate(ValidateStep { validate }) => {
             let uri = if validate.starts_with("validator:") {
                 validate
             } else {
@@ -1016,7 +1018,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             };
             Ok(DeclarativeStep::To(ToStepDef::new(uri)))
         }
-        YamlStep::Enrich(EnrichStep { enrich }) => {
+        RouteDslStep::Enrich(EnrichStep { enrich }) => {
             let (uri, strategy) = unpack_enrich_body(enrich)?;
             Ok(DeclarativeStep::Enrich(EnrichStepDef {
                 uri,
@@ -1024,7 +1026,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 timeout_ms: None,
             }))
         }
-        YamlStep::PollEnrich(PollEnrichStep { poll_enrich }) => {
+        RouteDslStep::PollEnrich(PollEnrichStep { poll_enrich }) => {
             let (uri, strategy, timeout) = unpack_poll_enrich_body(poll_enrich)?;
             Ok(DeclarativeStep::PollEnrich(EnrichStepDef {
                 uri,
@@ -1032,7 +1034,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 timeout_ms: timeout,
             }))
         }
-        YamlStep::DoTry(DoTryStep { do_try: data }) => {
+        RouteDslStep::DoTry(DoTryStep { do_try: data }) => {
             // Spec §7.2 Rule 4: try steps must be non-empty.
             if data.steps.is_empty() {
                 return Err(CamelError::Config("doTry `steps` cannot be empty".into()));
@@ -1041,7 +1043,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             let steps = data
                 .steps
                 .into_iter()
-                .map(yaml_step_to_declarative_step)
+                .map(route_step_to_declarative_step)
                 .collect::<Result<Vec<_>, _>>()?;
             let catch = data
                 .catch
@@ -1118,7 +1120,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                     let clause_steps = c
                         .steps
                         .into_iter()
-                        .map(yaml_step_to_declarative_step)
+                        .map(route_step_to_declarative_step)
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(DoTryCatchClauseDef {
                         exception,
@@ -1143,7 +1145,7 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 let fsteps = f
                     .steps
                     .into_iter()
-                    .map(yaml_step_to_declarative_step)
+                    .map(route_step_to_declarative_step)
                     .collect::<Result<Vec<_>, _>>()?;
                 Some(DoTryFinallyDef {
                     on_when,
@@ -3276,10 +3278,10 @@ templates:
     steps:
       - to: "log:try"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
         assert_eq!(steps.len(), 1);
         match &steps[0] {
-            YamlStep::DoTry(d) => {
+            RouteDslStep::DoTry(d) => {
                 assert_eq!(d.do_try.steps.len(), 1);
                 assert!(d.do_try.catch.is_empty());
                 assert!(d.do_try.finally.is_none());
@@ -3311,9 +3313,9 @@ templates:
       steps:
         - to: "log:fin"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
         match &steps[0] {
-            YamlStep::DoTry(d) => {
+            RouteDslStep::DoTry(d) => {
                 assert_eq!(d.do_try.catch.len(), 3);
                 let c0 = &d.do_try.catch[0];
                 assert_eq!(
@@ -3370,9 +3372,9 @@ routes:
         steps:
           - to: "log:catch"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
         match &steps[0] {
-            YamlStep::DoTry(d) => {
+            RouteDslStep::DoTry(d) => {
                 let c0 = &d.do_try.catch[0];
                 assert_eq!(
                     c0.disposition,
@@ -3399,8 +3401,8 @@ routes:
         steps:
           - to: "log:caught"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(
             decl.is_err(),
             "must reject catch clause with both `exception` and `when`"
@@ -3420,8 +3422,8 @@ routes:
         steps:
           - to: "log:caught"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(
             decl.is_err(),
             "must reject catch clause with `on_when` but no matcher"
@@ -3440,8 +3442,8 @@ routes:
         steps:
           - to: "log:caught"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(
             decl.is_err(),
             "must reject catch clause with `*` mixed with other variants"
@@ -3455,8 +3457,8 @@ routes:
 - do_try:
     steps: []
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(decl.is_err(), "must reject doTry with empty `steps`");
     }
 
@@ -3471,8 +3473,8 @@ routes:
       - exception: ["*"]
         steps: []
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(decl.is_err(), "must reject catch clause with empty `steps`");
     }
 
@@ -3486,8 +3488,8 @@ routes:
     finally:
       steps: []
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(decl.is_err(), "must reject finally with empty `steps`");
     }
 
@@ -3505,8 +3507,8 @@ routes:
         steps:
           - to: "log:caught"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(
             decl.is_err(),
             "must reject catch clause with `on_when` when `when` (not `exception`) is the matcher"
@@ -3525,8 +3527,8 @@ routes:
       - steps:
           - to: "log:caught"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(
             decl.is_err(),
             "must reject catch clause with neither `exception` nor `when`"
@@ -3545,8 +3547,8 @@ routes:
         steps:
           - to: "log:caught"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(
             decl.is_err(),
             "must reject catch clause with empty `exception` list"
@@ -3565,8 +3567,8 @@ routes:
         steps:
           - to: "log:caught"
 "#;
-        let steps: Vec<YamlStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = yaml_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
         assert!(
             decl.is_err(),
             "must reject catch clause with blank variant name in `exception`"

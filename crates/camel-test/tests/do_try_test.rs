@@ -239,7 +239,7 @@ async fn do_try_propagate_does_not_reach_downstream() {
 /// Integration test: YAML doTry with `on_when` Simple predicate filters catch execution.
 ///
 /// Verifies the full YAML→compile→runtime pipeline for `on_when`:
-///   YAML text → YamlStep::DoTry → DeclarativeStep::DoTry → BuilderStep::DeclarativeDoTry
+///   YAML text → RouteDslStep::DoTry → DeclarativeStep::DoTry → BuilderStep::DeclarativeDoTry
 ///   → camel-core resolves the Simple predicate via language registry → DoTryService
 ///   evaluates predicate at runtime to gate the catch clause.
 ///

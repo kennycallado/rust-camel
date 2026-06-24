@@ -219,7 +219,7 @@ use std::path::Path;
 let routes = load_json_from_file(Path::new("routes.json"))?;
 ```
 
-The type aliases `JsonRoutes`, `JsonRoute`, and `JsonStep` are convenience wrappers around the YAML AST types and are **not a stable SDK contract**. SDKs and external consumers that need forward compatibility should target `CanonicalRouteSpec` instead:
+The canonical route-DSL AST types are `RouteDslRoutes`, `RouteDslRoute`, and `RouteDslStep` (defined in `crates/camel-dsl/src/route_ast.rs`). Both the YAML and JSON parsers lower into these shared types. Per the JSON-canonical strategy (rc-iq7), JSON is the canonical full-DSL authoring format for SDKs and machine-driven workflows; YAML remains a supported human convenience. SDKs and external consumers that need forward compatibility should target `CanonicalRouteSpec` instead (per ADR-0011).
 
 ```rust
 use camel_dsl::parse_json_to_canonical;

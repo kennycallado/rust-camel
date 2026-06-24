@@ -5,14 +5,14 @@ use camel_api::template::{
     RouteTemplateSpec, TemplateError, TemplateParameterSpec, TemplatedRouteSpec,
 };
 
-use crate::yaml_ast::{YamlRoutes, YamlTemplateParameter};
+use crate::route_ast::{RouteDslRoutes, RouteDslTemplateParameter};
 
 /// Parse the `templates` section of a JSON document into [`RouteTemplateSpec`]s.
 ///
 /// Since JSON is a subset of YAML's data model, we reuse the same AST types
 /// but deserialize with `serde_json`.
 pub fn parse_json_templates(json_str: &str) -> Result<Vec<RouteTemplateSpec>, TemplateError> {
-    let routes: YamlRoutes =
+    let routes: RouteDslRoutes =
         serde_json::from_str(json_str).map_err(|e| TemplateError::InvalidBody(e.to_string()))?;
 
     routes
@@ -26,7 +26,7 @@ pub fn parse_json_templates(json_str: &str) -> Result<Vec<RouteTemplateSpec>, Te
 pub fn parse_json_templated_routes(
     json_str: &str,
 ) -> Result<Vec<TemplatedRouteSpec>, TemplateError> {
-    let routes: YamlRoutes =
+    let routes: RouteDslRoutes =
         serde_json::from_str(json_str).map_err(|e| TemplateError::InvalidBody(e.to_string()))?;
 
     Ok(routes
@@ -41,7 +41,7 @@ pub fn parse_json_templated_routes(
 }
 
 fn json_template_to_spec(
-    yt: crate::yaml_ast::YamlTemplate,
+    yt: crate::route_ast::RouteDslTemplate,
 ) -> Result<RouteTemplateSpec, TemplateError> {
     if yt.routes.is_empty() {
         return Err(TemplateError::InvalidBody(format!(
@@ -71,7 +71,7 @@ fn json_template_to_spec(
     })
 }
 
-fn json_param_to_spec(yp: YamlTemplateParameter) -> TemplateParameterSpec {
+fn json_param_to_spec(yp: RouteDslTemplateParameter) -> TemplateParameterSpec {
     TemplateParameterSpec {
         name: yp.name,
         default_value: yp.default_value,
