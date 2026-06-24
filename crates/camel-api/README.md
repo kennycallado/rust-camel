@@ -114,8 +114,8 @@ let report = ctx.health_check(); // Returns HealthReport
 
 The `camel-health` crate exposes these endpoints:
 - `/healthz` - Liveness probe (always 200 OK)
-- `/readyz` - Readiness probe (200 if healthy, 503 if unhealthy)
-- `/health` - Detailed health report (JSON)
+- `/readyz` - Readiness probe (200 for `Healthy` or `Degraded`, 503 for `Unhealthy`)
+- `/startupz` - Startup probe (200 once started)
 
 See `camel-health` documentation for Kubernetes integration examples.
 
@@ -389,7 +389,7 @@ Identifies which infrastructure gate produced an error:
 | `Body` | Message body (Empty, Text, Json, Bytes, Xml, Stream) |
 | `Processor` | Trait for processing exchanges |
 | `CamelError` | Comprehensive error type |
-| `DataFormat` | Pluggable serialization trait for marshal/unmarshal EIP (implement to add custom formats; JSON and XML built-in) |
+| `DataFormat` | Pluggable serialization trait for marshal/unmarshal EIP (implement to add custom formats; JSON, XML, and ZIP built-in) |
 | `HealthReport` | System-wide health report |
 | `ServiceStatus` | Service lifecycle status enum |
 | `HealthStatus` | Aggregated health status enum |

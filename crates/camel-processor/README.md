@@ -109,7 +109,7 @@ let route = RouteBuilder::from("timer:tick")
 | `MulticastService` | Parallel routing |
 | `WireTapService` | Side-channel routing |
 | `CircuitBreakerLayer` | Fault tolerance (circuit-breaker gate) |
-| `ErrorHandlerLayer` | Error handling (deprecated since 0.16.0 — use `RouteChannelService`) |
+| `ErrorHandlerLayer` | Error handling (Tower layer; prefer `RouteChannelService` + `DefaultRouteErrorHandler` for new code per ADR-0019) |
 | `CompiledStep::Stop` | Stop processing (control flow via PipelineOutcome::Stopped) |
 | `ScriptMutator` | Execute mutating scripts that modify Exchange headers, properties, or body |
 | `MarshalService` | Marshal body using a DataFormat (e.g., Json → Text) |

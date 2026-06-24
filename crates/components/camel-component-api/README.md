@@ -4,14 +4,14 @@
 
 ## Overview
 
-`camel-component-api` defines the core `Component`, `Endpoint`, `Consumer`, and `Producer` contracts used by component crates.
+`camel-component-api` defines the core `Component`, `Endpoint`, and `Consumer` contracts used by component crates. Producers are not a separate trait — `Endpoint::create_producer()` returns a `BoxProcessor` (a Tower `Service<Exchange>`), per ADR-0014.
 
 It also re-exports common types from `camel-api` and URI helpers from `camel-endpoint`, so most component crates can depend on a single API crate.
 
 ## Features
 
 - `Component` trait for scheme-based endpoint factories
-- `Endpoint`, `Consumer`, and producer context contracts
+- `Endpoint`, `Consumer`, and producer-context contracts (producers are `BoxProcessor`s, not a separate trait)
 - New extension traits: `ComponentContext`, `ComponentRegistrar`, `ComponentBundle`
 - `NoOpComponentContext` helper for tests and examples
 - Re-exports from `camel-api` (e.g. `CamelError`, `Exchange`, `BoxProcessor`)

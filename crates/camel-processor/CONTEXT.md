@@ -80,7 +80,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `EndpointPipelineService` | stable | `src/lib.rs:51` | Endpoint resolver/cache wrapper. |
 | `EnrichmentStrategy`, `UseEnrichedBody` | stable | `src/lib.rs:52` | Enrichment merge strategy. |
 | `DefaultRouteErrorHandler`, `RouteErrorHandler`, `invoke_processor` | stable | `src/lib.rs:55-58` | ADR-0019 in-pipeline handler API. |
-| `ErrorHandlerLayer`, `ErrorHandlerService` | deprecated | `src/lib.rs:55-58`; `src/error_handler.rs:367-420` | `#[deprecated(since = "0.16.0")]`; replacement is RouteChannelService + `DefaultRouteErrorHandler` per ADR-0019. |
+| `ErrorHandlerLayer`, `ErrorHandlerService` | stable | `src/lib.rs:55-58`; `src/error_handler.rs:367-420` | Legacy Tower layer/service for in-pipeline error handling; prefer `RouteChannelService` + `DefaultRouteErrorHandler` per ADR-0019 for new code. |
 | `FilterService` | stable | `src/lib.rs:59` | Filter EIP. |
 | `LoadBalancerService` | stable | `src/lib.rs:60` | Load balancer EIP; poll_ready migration pending. |
 | `LogLevel`, `LogProcessor` | stable | `src/lib.rs:61` | Log EIP. |

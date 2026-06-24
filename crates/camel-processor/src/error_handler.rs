@@ -369,10 +369,6 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
 /// Tower Layer that wraps a pipeline with error handling behaviour.
 ///
 /// Constructed with already-resolved producers; URI resolution happens in `camel-core`.
-#[deprecated(
-    since = "0.16.0",
-    note = "Use RouteChannelService + DefaultRouteErrorHandler instead"
-)]
 pub struct ErrorHandlerLayer {
     /// Resolved DLC producer (None = log only).
     dlc_producer: Option<BoxProcessor>,
@@ -380,7 +376,6 @@ pub struct ErrorHandlerLayer {
     policies: Vec<(ExceptionPolicy, Option<BoxProcessor>)>,
 }
 
-#[allow(deprecated)]
 impl ErrorHandlerLayer {
     /// Create the layer with pre-resolved producers.
     pub fn new(
@@ -394,7 +389,6 @@ impl ErrorHandlerLayer {
     }
 }
 
-#[allow(deprecated)]
 impl<S> Layer<S> for ErrorHandlerLayer
 where
     S: Service<Exchange, Response = Exchange, Error = CamelError> + Send + Clone + 'static,
@@ -419,17 +413,12 @@ where
 ///
 /// `call` always returns `Ok` — errors are absorbed. The returned exchange will have
 /// `has_error() == true` if the pipeline ultimately failed.
-#[deprecated(
-    since = "0.16.0",
-    note = "Use RouteChannelService + DefaultRouteErrorHandler instead"
-)]
 pub struct ErrorHandlerService<S> {
     inner: S,
     dlc_producer: Option<BoxProcessor>,
     policies: Vec<(ExceptionPolicy, Option<BoxProcessor>)>,
 }
 
-#[allow(deprecated)]
 impl<S: Clone> Clone for ErrorHandlerService<S> {
     fn clone(&self) -> Self {
         Self {
@@ -444,7 +433,6 @@ impl<S: Clone> Clone for ErrorHandlerService<S> {
     }
 }
 
-#[allow(deprecated)]
 impl<S> ErrorHandlerService<S>
 where
     S: Service<Exchange, Response = Exchange, Error = CamelError> + Send + Clone + 'static,
@@ -464,7 +452,6 @@ where
     }
 }
 
-#[allow(deprecated)]
 impl<S> Service<Exchange> for ErrorHandlerService<S>
 where
     S: Service<Exchange, Response = Exchange, Error = CamelError> + Send + Clone + 'static,
@@ -622,7 +609,6 @@ async fn send_to_handler(
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use camel_api::{

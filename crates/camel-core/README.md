@@ -380,8 +380,6 @@ Tests verify:
 ## Documentation
 
 - [API Documentation](https://docs.rs/camel-core)
-- [DDD/CQRS Report](./DDD_CQRS_GO_NO_GO_REPORT.md)
-- [Facade V1 Contract](./DDD_CQRS_FACADE_V1_CONTRACT.md)
 
 ## License
 
