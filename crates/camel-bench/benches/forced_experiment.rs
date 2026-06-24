@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, Message, Value};
-use camel_core::route::compose_pipeline;
+use camel_core::route::{CompiledStep, compose_pipeline};
 use camel_language_api::Language;
 use camel_language_simple::SimpleLanguage;
 use camel_processor::{SetBody, SetHeader};
@@ -25,20 +25,29 @@ use tower::{Service, ServiceExt};
 
 fn pure_closure_pipeline() -> BoxProcessor {
     compose_pipeline(vec![
-        BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
-        BoxProcessor::from_fn(|mut ex: Exchange| {
-            let _body = Body::Text("response".into());
-            ex.input.body = Body::Text("response".into());
-            Box::pin(async move { Ok(ex) })
-        }),
-        BoxProcessor::from_fn(|mut ex: Exchange| {
-            Box::pin(async move {
-                ex.input
-                    .headers
-                    .insert("Content-Type".into(), Value::String("text/plain".into()));
-                Ok(ex)
-            })
-        }),
+        CompiledStep::Process {
+            processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: BoxProcessor::from_fn(|mut ex: Exchange| {
+                let _body = Body::Text("response".into());
+                ex.input.body = Body::Text("response".into());
+                Box::pin(async move { Ok(ex) })
+            }),
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: BoxProcessor::from_fn(|mut ex: Exchange| {
+                Box::pin(async move {
+                    ex.input
+                        .headers
+                        .insert("Content-Type".into(), Value::String("text/plain".into()));
+                    Ok(ex)
+                })
+            }),
+            body_contract: None,
+        },
     ])
 }
 
@@ -63,7 +72,20 @@ fn concrete_processor_pipeline() -> BoxProcessor {
         Value::String("text/plain".into()),
     ));
     let noop = BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) }));
-    compose_pipeline(vec![noop, set_body, set_header])
+    compose_pipeline(vec![
+        CompiledStep::Process {
+            processor: noop,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: set_body,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: set_header,
+            body_contract: None,
+        },
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +107,20 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
         Value::String("text/plain".into()),
     ));
     let noop = BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) }));
-    compose_pipeline(vec![noop, set_body, set_header])
+    compose_pipeline(vec![
+        CompiledStep::Process {
+            processor: noop,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: set_body,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: set_header,
+            body_contract: None,
+        },
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +131,7 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
 
 fn deep_pipeline() -> BoxProcessor {
     let body = Body::Text("response".into());
-    let mut steps: Vec<BoxProcessor> = Vec::with_capacity(10);
+    let mut steps: Vec<CompiledStep> = Vec::with_capacity(10);
 
     for i in 0..10 {
         let step: BoxProcessor = if i % 2 == 0 {
@@ -111,7 +146,10 @@ fn deep_pipeline() -> BoxProcessor {
                 Value::String(format!("value-{i}")),
             ))
         };
-        steps.push(step);
+        steps.push(CompiledStep::Process {
+            processor: step,
+            body_contract: None,
+        });
     }
 
     compose_pipeline(steps)
@@ -136,7 +174,20 @@ fn expression_pipeline() -> BoxProcessor {
     });
 
     let noop = BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) }));
-    compose_pipeline(vec![noop.clone(), eval_step, noop])
+    compose_pipeline(vec![
+        CompiledStep::Process {
+            processor: noop.clone(),
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: eval_step,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: noop,
+            body_contract: None,
+        },
+    ])
 }
 
 // ---------------------------------------------------------------------------

@@ -32,6 +32,8 @@ pub mod loop_eip;
 pub mod message;
 pub mod metrics;
 pub mod multicast;
+pub mod outcome_pipeline;
+pub mod outcome_segment;
 pub mod pipeline_outcome;
 pub mod platform;
 pub mod processor;
@@ -68,7 +70,8 @@ pub use error::CamelError;
 pub use error_handler::{
     BoundaryKind, ErrorHandlerConfig, ExceptionDisposition, ExceptionPolicy,
     ExceptionPolicyBuilder, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER,
-    HEADER_REDELIVERY_MAX_COUNTER, PolicyId, RedeliveryPolicy, RetryOutcome, StepDisposition,
+    HEADER_REDELIVERY_MAX_COUNTER, PolicyId, RedeliveryPolicy, RetryOutcome, RetryableStep,
+    StepDisposition,
 };
 pub use security_policy::{
     AuthorizationDecision, PRINCIPAL_AUDIENCE_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_ISSUER_KEY,
@@ -92,6 +95,8 @@ pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};
 pub use message::Message;
 pub use metrics::{MetricsCollector, NoOpMetrics};
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
+pub use outcome_pipeline::OutcomePipeline;
+pub use outcome_segment::OutcomeSegment;
 pub use pipeline_outcome::PipelineOutcome;
 pub use platform::{
     LeadershipEvent, LeadershipHandle, LeadershipService, NoopLeadershipService,

@@ -836,7 +836,6 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 LoadBalanceData {
                     strategy,
                     distribution_ratio,
-                    parallel,
                     steps,
                 },
         }) => {
@@ -866,7 +865,6 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeStep::LoadBalance(LoadBalanceStepDef {
                 strategy,
-                parallel,
                 steps,
             }))
         }

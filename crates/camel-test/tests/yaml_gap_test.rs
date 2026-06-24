@@ -127,35 +127,6 @@ routes:
         match &route.steps[0] {
             DeclarativeStep::LoadBalance(step) => {
                 assert_eq!(step.strategy, LoadBalanceStrategyDef::RoundRobin);
-                assert!(!step.parallel);
-                assert_eq!(step.steps.len(), 2);
-            }
-            other => panic!("expected LoadBalance step, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn load_balance_parallel_random() {
-        let yaml = r#"
-routes:
-  - id: "lb-random"
-    from: "direct:start"
-    steps:
-      - load_balance:
-          strategy: "random"
-          parallel: true
-          steps:
-            - to: "mock:a"
-            - to: "mock:b"
-"#;
-
-        let routes = parse_yaml_to_declarative(yaml).expect("YAML parse should succeed");
-        let route = &routes[0];
-
-        match &route.steps[0] {
-            DeclarativeStep::LoadBalance(step) => {
-                assert_eq!(step.strategy, LoadBalanceStrategyDef::Random);
-                assert!(step.parallel);
                 assert_eq!(step.steps.len(), 2);
             }
             other => panic!("expected LoadBalance step, got {other:?}"),

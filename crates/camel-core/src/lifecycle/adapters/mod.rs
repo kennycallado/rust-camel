@@ -6,6 +6,7 @@ pub(crate) mod controller_component_context;
 pub(crate) mod endpoint_resolver_factory;
 pub mod exchange_uow;
 pub mod in_memory;
+pub(crate) mod outcome_composition;
 pub(crate) mod pipeline_runtime;
 pub mod redb_journal;
 pub(crate) mod route_compiler;

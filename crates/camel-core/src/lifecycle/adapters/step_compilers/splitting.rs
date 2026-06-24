@@ -10,12 +10,14 @@ use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use camel_api::{BoxProcessor, CamelError, Exchange, StreamSplitFormat, Value, body::Body};
+use camel_api::{
+    Body, BoxProcessor, CamelError, Exchange, MulticastStrategy, StreamSplitFormat, Value,
+};
 
 use super::{
     CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
 };
-use crate::lifecycle::adapters::route_compiler::compose_pipeline;
+use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::adapters::step_resolution::{await_eval, compile_language_expression};
 use crate::lifecycle::application::route_definition::BuilderStep;
@@ -90,28 +92,21 @@ impl StepCompiler for SplittingCompiler {
         match step {
             // ── Split (programmatic) ──
             BuilderStep::Split { config, steps } => {
-                let sub_pairs = match ctx.compile_children(steps, registry) {
-                    Ok(p) => p,
+                let sub_segments = match ctx.compile_children_segments(steps, registry) {
+                    Ok(s) => s,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<CompiledStep> = sub_pairs
-                    .into_iter()
-                    .map(|c| match c {
-                        CompiledStep::Process { .. } => c,
-                        CompiledStep::Stop => CompiledStep::Process {
-                            processor: BoxProcessor::new(camel_processor::StopService),
-                            body_contract: None,
-                        },
-                    })
-                    .collect();
-                let sub_pipeline = compose_pipeline(sub_processors);
-                let splitter =
-                    match camel_processor::splitter::SplitterService::new(config, sub_pipeline) {
-                        Ok(s) => s,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
-                    processor: BoxProcessor::new(splitter),
+                let body_segment = compose_outcome_segment(sub_segments);
+                let split_segment = camel_processor::SplitSegment {
+                    splitter: config.expression,
+                    body: body_segment,
+                    parallel: config.parallel,
+                    parallel_limit: config.parallel_limit,
+                    stop_on_exception: config.stop_on_exception,
+                    aggregation: config.aggregation,
+                };
+                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(split_segment)),
                     body_contract: None,
                 }))
             }
@@ -129,60 +124,46 @@ impl StepCompiler for SplittingCompiler {
                     Ok(e) => e,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let split_fn = move |exchange: &Exchange| {
-                    let value = await_eval(&lang_expr, exchange);
-                    match value {
-                        Value::String(s) => s
-                            .lines()
-                            .filter(|line| !line.is_empty())
-                            .map(|line| {
-                                let mut fragment = exchange.clone();
-                                fragment.input.body = Body::from(line.to_string());
-                                fragment
-                            })
-                            .collect(),
-                        Value::Array(arr) => arr
-                            .into_iter()
-                            .map(|v| {
-                                let mut fragment = exchange.clone();
-                                fragment.input.body = Body::from(v);
-                                fragment
-                            })
-                            .collect(),
-                        _ => vec![exchange.clone()],
-                    }
-                };
+                let split_fn: camel_api::splitter::SplitExpression =
+                    Arc::new(move |exchange: &Exchange| {
+                        let value = await_eval(&lang_expr, exchange);
+                        match value {
+                            Value::String(s) => s
+                                .lines()
+                                .filter(|line| !line.is_empty())
+                                .map(|line| {
+                                    let mut fragment = exchange.clone();
+                                    fragment.input.body = Body::from(line.to_string());
+                                    fragment
+                                })
+                                .collect(),
+                            Value::Array(arr) => arr
+                                .into_iter()
+                                .map(|v| {
+                                    let mut fragment = exchange.clone();
+                                    fragment.input.body = Body::from(v);
+                                    fragment
+                                })
+                                .collect(),
+                            _ => vec![exchange.clone()],
+                        }
+                    });
 
-                let mut config = camel_api::splitter::SplitterConfig::new(Arc::new(split_fn))
-                    .aggregation(aggregation)
-                    .parallel(parallel)
-                    .stop_on_exception(stop_on_exception);
-                if let Some(limit) = parallel_limit {
-                    config = config.parallel_limit(limit);
-                }
-
-                let sub_pairs = match ctx.compile_children(steps, registry) {
-                    Ok(p) => p,
+                let sub_segments = match ctx.compile_children_segments(steps, registry) {
+                    Ok(s) => s,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<CompiledStep> = sub_pairs
-                    .into_iter()
-                    .map(|c| match c {
-                        CompiledStep::Process { .. } => c,
-                        CompiledStep::Stop => CompiledStep::Process {
-                            processor: BoxProcessor::new(camel_processor::StopService),
-                            body_contract: None,
-                        },
-                    })
-                    .collect();
-                let sub_pipeline = compose_pipeline(sub_processors);
-                let splitter =
-                    match camel_processor::splitter::SplitterService::new(config, sub_pipeline) {
-                        Ok(s) => s,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
-                    processor: BoxProcessor::new(splitter),
+                let body_segment = compose_outcome_segment(sub_segments);
+                let split_segment = camel_processor::SplitSegment {
+                    splitter: split_fn,
+                    body: body_segment,
+                    parallel,
+                    parallel_limit,
+                    stop_on_exception,
+                    aggregation,
+                };
+                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(split_segment)),
                     body_contract: None,
                 }))
             }
@@ -199,21 +180,11 @@ impl StepCompiler for SplittingCompiler {
                         "invalid stream config: {e}"
                     ))));
                 }
-                let sub_pairs = match ctx.compile_children(steps, registry) {
-                    Ok(p) => p,
+                let sub_segments = match ctx.compile_children_segments(steps, registry) {
+                    Ok(s) => s,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<CompiledStep> = sub_pairs
-                    .into_iter()
-                    .map(|c| match c {
-                        CompiledStep::Process { .. } => c,
-                        CompiledStep::Stop => CompiledStep::Process {
-                            processor: BoxProcessor::new(camel_processor::StopService),
-                            body_contract: None,
-                        },
-                    })
-                    .collect();
-                let sub_pipeline = compose_pipeline(sub_processors);
+                let body_segment = compose_outcome_segment(sub_segments);
 
                 let config_clone = stream_config.clone();
                 let zip_config = camel_processor::zip_splitter::ZipSplitConfig::default();
@@ -346,14 +317,14 @@ impl StepCompiler for SplittingCompiler {
                     },
                 );
 
-                let splitter = camel_processor::streaming_splitter::StreamingSplitterService::new(
+                let segment = camel_processor::StreamingSplitSegment {
                     expression,
-                    sub_pipeline,
+                    body: body_segment,
                     aggregation,
                     stop_on_exception,
-                );
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
-                    processor: BoxProcessor::new(splitter),
+                };
+                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                 }))
             }
@@ -374,21 +345,64 @@ impl StepCompiler for SplittingCompiler {
 
             // ── Multicast ──
             BuilderStep::Multicast { config, steps } => {
-                let mut endpoints = Vec::new();
+                let mut branch_segments: Vec<camel_api::OutcomeSegment> = Vec::new();
                 for step in steps {
-                    let sub_pairs = match ctx.compile_children(vec![step], registry) {
-                        Ok(p) => p,
+                    let sub_segments = match ctx.compile_children_segments(vec![step], registry) {
+                        Ok(s) => s,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let endpoint = compose_pipeline(sub_pairs);
-                    endpoints.push(endpoint);
+                    branch_segments.push(compose_outcome_segment(sub_segments));
                 }
-                let svc = match camel_processor::MulticastService::new(endpoints, config) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
+                let strategy = config.aggregation.clone();
+                let aggregator: Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> = Arc::new(
+                    move |outputs| match &strategy {
+                        MulticastStrategy::LastWins => {
+                            outputs.into_iter().last().unwrap_or_default()
+                        }
+                        MulticastStrategy::CollectAll => {
+                            let bodies: Vec<Value> = outputs
+                                .iter()
+                                .map(|ex| match &ex.input.body {
+                                    Body::Text(s) => Value::String(s.clone()),
+                                    Body::Json(v) => v.clone(),
+                                    Body::Xml(s) => Value::String(s.clone()),
+                                    Body::Bytes(b) => {
+                                        Value::String(String::from_utf8_lossy(b).into_owned())
+                                    }
+                                    Body::Empty => Value::Null,
+                                    Body::Stream(s) => serde_json::json!({
+                                        "_stream": {
+                                            "origin": s.metadata.origin,
+                                            "placeholder": true,
+                                            "hint": "Materialize exchange body with .into_bytes() before multicast aggregation"
+                                        }
+                                    }),
+                                })
+                                .collect();
+                            let mut out = Exchange::default();
+                            out.input.body = Body::Json(Value::Array(bodies));
+                            out
+                        }
+                        MulticastStrategy::Original => {
+                            outputs.into_iter().next().unwrap_or_default()
+                        }
+                        MulticastStrategy::Custom(fold_fn) => {
+                            let mut iter = outputs.into_iter();
+                            let first = iter.next().unwrap_or_default();
+                            iter.fold(first, |acc, next| fold_fn(acc, next))
+                        }
+                    },
+                );
+                let segment = camel_processor::MulticastSegment {
+                    branches: branch_segments,
+                    parallel: config.parallel,
+                    parallel_limit: config.parallel_limit,
+                    stop_on_exception: config.stop_on_exception,
+                    timeout: config.timeout,
+                    aggregator,
                 };
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
-                    processor: BoxProcessor::new(svc),
+                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                 }))
             }

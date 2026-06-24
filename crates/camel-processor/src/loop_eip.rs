@@ -69,6 +69,92 @@ impl Service<Exchange> for LoopService {
     }
 }
 
+// ── LoopSegment (ADR-0025 OutcomePipeline) ─────────────────────────────
+
+/// Outcome-aware structural EIP segment for the Loop pattern.
+///
+/// Operates at the `PipelineOutcome` layer so that `Stopped(ex)` from a
+/// sub-step (e.g. Stop EIP) is preserved with the exchange including all
+/// mutations. Supports both Count and While modes, mirroring `LoopService`
+/// semantics exactly.
+///
+/// Unlike `LoopService` (which operates at the Tower layer), `LoopSegment`
+/// correctly short-circuits on `PipelineOutcome::Stopped` or `Failed`.
+pub struct LoopSegment {
+    pub config: camel_api::loop_eip::LoopConfig,
+    pub body: camel_api::OutcomeSegment,
+}
+
+impl Clone for LoopSegment {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            body: self.body.clone(),
+        }
+    }
+}
+
+impl camel_api::OutcomePipeline for LoopSegment {
+    fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+        Box::new(self.clone())
+    }
+
+    fn run<'a>(
+        &'a mut self,
+        exchange: camel_api::Exchange,
+    ) -> Pin<Box<dyn Future<Output = camel_api::PipelineOutcome> + Send + 'a>> {
+        use camel_api::loop_eip::MAX_LOOP_ITERATIONS;
+        use camel_api::{PipelineOutcome, Value};
+
+        let config = self.config.clone();
+        let body = &mut self.body;
+
+        Box::pin(async move {
+            match config.mode {
+                camel_api::loop_eip::LoopMode::Count(n) => {
+                    let mut ex = exchange;
+                    ex.set_property(CAMEL_LOOP_SIZE, Value::from(n as u64));
+                    for i in 0..n {
+                        ex.set_property(CAMEL_LOOP_INDEX, Value::from(i as u64));
+                        match body.run(ex).await {
+                            PipelineOutcome::Completed(next) => {
+                                ex = next;
+                            }
+                            other => return other,
+                        }
+                    }
+                    PipelineOutcome::Completed(ex)
+                }
+                camel_api::loop_eip::LoopMode::While(ref predicate) => {
+                    let mut ex = exchange;
+                    ex.set_property(CAMEL_LOOP_SIZE, Value::from(0u64));
+                    let mut i = 0u64;
+                    while i < MAX_LOOP_ITERATIONS as u64 {
+                        if !predicate(&ex) {
+                            break;
+                        }
+                        ex.set_property(CAMEL_LOOP_INDEX, Value::from(i));
+                        match body.run(ex).await {
+                            PipelineOutcome::Completed(next) => {
+                                ex = next;
+                            }
+                            other => return other,
+                        }
+                        i += 1;
+                    }
+                    if predicate(&ex) {
+                        tracing::warn!(
+                            "Loop while-mode hit MAX_LOOP_ITERATIONS ({}) safety guard. Predicate still true.",
+                            MAX_LOOP_ITERATIONS
+                        );
+                    }
+                    PipelineOutcome::Completed(ex)
+                }
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};

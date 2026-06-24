@@ -49,9 +49,6 @@ pub enum CamelError {
         response_body: Option<String>,
     },
 
-    #[error("Exchange stopped by Stop EIP")]
-    Stopped,
-
     /// Producer's `poll_ready` returned a shutdown signal — the consumer/semaphore
     /// is closing and the producer cannot acquire a permit. Distinct from Stop EIP
     /// (which is successful control flow). Used by JMS/OpenSearch producers. See ADR-0024.
@@ -88,7 +85,6 @@ impl CamelError {
             Self::HttpOperationFailed { .. } => "http",
             Self::Config(_) => "config",
             Self::DeadLetterChannelFailed(_) => "dead_letter",
-            Self::Stopped => "stopped",
             Self::ConsumerStopping => "consumer_stop",
             Self::StreamLimitExceeded(_) => "stream",
             Self::ChannelClosed => "channel",
@@ -120,7 +116,6 @@ impl CamelError {
             Self::DeadLetterChannelFailed(_) => "DeadLetterChannelFailed",
             Self::CircuitOpen(_) => "CircuitOpen",
             Self::HttpOperationFailed { .. } => "HttpOperationFailed",
-            Self::Stopped => "Stopped",
             Self::ConsumerStopping => "ConsumerStopping",
             Self::Config(_) => "Config",
             Self::AlreadyConsumed => "AlreadyConsumed",
@@ -170,7 +165,6 @@ mod tests {
                 status_text: "Internal Server Error".to_string(),
                 response_body: Some("error".to_string()),
             },
-            CamelError::Stopped,
             CamelError::ConsumerStopping,
             CamelError::Config("x".to_string()),
             CamelError::AlreadyConsumed,
@@ -211,14 +205,6 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn test_stopped_variant_exists_and_is_clone() {
-        let err = CamelError::Stopped;
-        let cloned = err.clone();
-        assert!(matches!(cloned, CamelError::Stopped));
-        assert_eq!(format!("{err}"), "Exchange stopped by Stop EIP");
     }
 
     #[test]
@@ -265,7 +251,6 @@ mod tests {
             .classify(),
             "http"
         );
-        assert_eq!(CamelError::Stopped.classify(), "stopped");
         assert_eq!(CamelError::Config("x".to_string()).classify(), "config");
         assert_eq!(CamelError::AlreadyConsumed.classify(), "type_conversion");
         assert_eq!(CamelError::StreamLimitExceeded(42).classify(), "stream");
@@ -355,7 +340,6 @@ mod variant_name_tests {
                 },
                 "HttpOperationFailed",
             ),
-            (CamelError::Stopped, "Stopped"),
             (CamelError::Config("x".into()), "Config"),
             (CamelError::AlreadyConsumed, "AlreadyConsumed"),
             (CamelError::StreamLimitExceeded(42), "StreamLimitExceeded"),

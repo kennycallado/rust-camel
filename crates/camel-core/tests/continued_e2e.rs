@@ -101,7 +101,7 @@ impl RouteErrorHandler for ContinuedHandler {
     async fn retry_step(
         &self,
         _: Option<PolicyId>,
-        _: &mut BoxProcessor,
+        _: &mut dyn camel_api::error_handler::RetryableStep,
         original: Exchange,
         error: CamelError,
     ) -> RetryOutcome {

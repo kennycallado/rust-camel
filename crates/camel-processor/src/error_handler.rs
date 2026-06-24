@@ -9,7 +9,7 @@ use camel_api::error_handler::{
     HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER, PolicyId, RetryOutcome,
     StepDisposition,
 };
-use camel_api::{BoxProcessor, CamelError, Exchange, SyncBoxProcessor, Value};
+use camel_api::{BoxProcessor, CamelError, Exchange, PipelineOutcome, SyncBoxProcessor, Value};
 
 async fn execute_on_steps(
     original: Exchange,
@@ -75,7 +75,7 @@ pub trait RouteErrorHandler: Send + Sync {
     async fn retry_step(
         &self,
         policy: Option<PolicyId>,
-        step: &mut BoxProcessor,
+        step: &mut dyn camel_api::error_handler::RetryableStep,
         original: Exchange,
         error: CamelError,
     ) -> RetryOutcome;
@@ -160,7 +160,7 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
     async fn retry_step(
         &self,
         policy: Option<PolicyId>,
-        step: &mut BoxProcessor,
+        step: &mut dyn camel_api::error_handler::RetryableStep,
         original: Exchange,
         error: CamelError,
     ) -> RetryOutcome {
@@ -201,9 +201,14 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                 Value::Number(backoff.max_attempts.into()),
             );
 
-            match invoke_processor(step, ex).await {
-                Ok(exchange) => return RetryOutcome::Recovered(exchange),
-                Err(retry_err) => {
+            match step.invoke(ex).await {
+                PipelineOutcome::Completed(exchange) => {
+                    return RetryOutcome::Recovered(exchange);
+                }
+                PipelineOutcome::Stopped(stopped_ex) => {
+                    return RetryOutcome::Stopped(stopped_ex);
+                }
+                PipelineOutcome::Failed(retry_err) => {
                     if attempt + 1 == backoff.max_attempts {
                         let mut final_ex = original;
                         final_ex
@@ -621,9 +626,12 @@ async fn send_to_handler(
 mod tests {
     use super::*;
     use camel_api::{
-        BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message, SyncBoxProcessor, Value,
+        BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message, OutcomePipeline,
+        OutcomeSegment, PipelineOutcome, RetryableStep, SyncBoxProcessor, Value,
         error_handler::RedeliveryPolicy,
     };
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -1540,5 +1548,118 @@ mod tests {
             matches!(ex.input.body, camel_api::Body::Bytes(_)),
             "on_steps should have modified the body"
         );
+    }
+
+    #[tokio::test]
+    async fn retry_step_segment_stop_maps_to_retry_outcome_stopped() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct StoppingSegment {
+            n: Arc<AtomicUsize>,
+        }
+        impl OutcomePipeline for StoppingSegment {
+            fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                ex: Exchange,
+            ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+                let n = self.n.clone();
+                Box::pin(async move {
+                    n.fetch_add(1, Ordering::SeqCst);
+                    PipelineOutcome::Stopped(ex)
+                })
+            }
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let seg = OutcomeSegment::new(Box::new(StoppingSegment {
+            n: call_count.clone(),
+        }));
+        let mut retryable: Box<dyn RetryableStep> = Box::new(seg);
+
+        let mut policy = ExceptionPolicy::new(|_e: &CamelError| true);
+        policy.retry = Some(RedeliveryPolicy::new(3));
+        let handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+
+        let original = Exchange::new(Message::new("retry-me"));
+        let err = CamelError::ProcessorError("trigger retry".into());
+        let outcome = handler
+            .retry_step(Some(PolicyId(0)), retryable.as_mut(), original, err)
+            .await;
+
+        assert!(
+            matches!(outcome, RetryOutcome::Stopped(_)),
+            "Segment Stop must map to RetryOutcome::Stopped, got {:?}",
+            outcome
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "Stop must short-circuit retry — only 1 invoke expected, got {}",
+            call_count.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_step_new_signature_works_with_dlc_producer() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct CountingProducer {
+            count: Arc<AtomicUsize>,
+            succeed_on: usize,
+        }
+        impl tower::Service<Exchange> for CountingProducer {
+            type Response = Exchange;
+            type Error = CamelError;
+            type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+            fn poll_ready(
+                &mut self,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn call(&mut self, ex: Exchange) -> Self::Future {
+                let n = self.count.fetch_add(1, Ordering::SeqCst);
+                let succeed_on = self.succeed_on;
+                Box::pin(async move {
+                    if n >= succeed_on {
+                        Ok(ex)
+                    } else {
+                        Err(CamelError::ProcessorError("retry".into()))
+                    }
+                })
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let producer = CountingProducer {
+            count: count.clone(),
+            succeed_on: 2,
+        };
+        let sync_bp = SyncBoxProcessor::new(BoxProcessor::new(producer));
+        let bp1 = sync_bp.clone_inner();
+        let bp2 = sync_bp.clone_inner();
+        let mut retryable1: Box<dyn RetryableStep> = Box::new(bp1);
+        let mut retryable2: Box<dyn RetryableStep> = Box::new(bp2);
+
+        let ex = Exchange::new(Message::new("dlc"));
+        let outcome1 = retryable1.invoke(ex.clone()).await;
+        let outcome2 = retryable2.invoke(ex).await;
+        assert!(matches!(outcome1, PipelineOutcome::Failed(_)));
+        assert!(matches!(outcome2, PipelineOutcome::Failed(_)));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "DLC producer must be invoked exactly twice through SyncBoxProcessor"
+        );
+        drop(retryable1);
+        drop(retryable2);
+        drop(sync_bp);
     }
 }

@@ -33,11 +33,9 @@ impl PipelineOutcome {
     /// to the consumer, which is the core fix for Bug B. `Failed(err)` becomes
     /// `Err(err)`.
     ///
-    /// This is the ONLY public `PipelineOutcome → Result` translation site for
-    /// `Service<Exchange>::Response`. Code review MUST reject any new public
-    /// translation sites. (The private `eip_outcome_to_result` in camel-core is
-    /// the documented oracle Option E interim for nested sub-pipeline boundaries;
-    /// it is internal-only and removed in bd rc-5uv once EIPs become outcome-aware.)
+    /// This is the ONLY `PipelineOutcome → Result` translation site for
+    /// `Service<Exchange>::Response`. Code review MUST reject any new
+    /// translation sites.
     pub fn into_tower_result(self) -> Result<Exchange, CamelError> {
         match self {
             PipelineOutcome::Completed(ex) | PipelineOutcome::Stopped(ex) => Ok(ex),

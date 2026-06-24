@@ -1505,15 +1505,6 @@ impl LoadBalancerBuilder {
         self
     }
 
-    /// Enable or disable parallel execution of endpoints.
-    ///
-    /// When enabled, all endpoints receive the exchange simultaneously.
-    /// When disabled (default), only one endpoint is selected per exchange.
-    pub fn parallel(mut self, parallel: bool) -> Self {
-        self.config = self.config.parallel(parallel);
-        self
-    }
-
     /// Close the load balance scope. Packages the accumulated sub-steps into a
     /// `BuilderStep::LoadBalance` and returns the parent `RouteBuilder`.
     pub fn end_load_balance(mut self) -> RouteBuilder {
@@ -3080,16 +3071,15 @@ mod tests {
     }
 
     #[test]
-    fn test_load_balance_builder_weighted_failover_parallel_config() {
+    fn test_load_balance_builder_weighted_failover_config() {
         let route = RouteBuilder::from("direct:start")
-            .route_id("lb-weighted-failover-parallel")
+            .route_id("lb-weighted-failover")
             .load_balance()
             .weighted(vec![
                 ("direct:a".to_string(), 3),
                 ("direct:b".to_string(), 1),
             ])
             .failover()
-            .parallel(true)
             .to("mock:result")
             .end_load_balance()
             .build()
@@ -3097,7 +3087,6 @@ mod tests {
 
         if let BuilderStep::LoadBalance { config, .. } = &route.steps()[0] {
             assert_eq!(config.strategy, LoadBalanceStrategy::Failover);
-            assert!(config.parallel);
         } else {
             panic!("Expected LoadBalance step");
         }
@@ -3177,26 +3166,6 @@ mod tests {
 
         if let BuilderStep::LoadBalance { config, .. } = &route.steps()[0] {
             assert_eq!(config.strategy, LoadBalanceStrategy::Failover);
-            assert!(!config.parallel);
-        } else {
-            panic!("Expected LoadBalance step");
-        }
-    }
-
-    #[test]
-    fn test_load_balance_builder_parallel_false_explicit() {
-        let route = RouteBuilder::from("direct:start")
-            .route_id("lb-parallel-false")
-            .load_balance()
-            .round_robin()
-            .parallel(false)
-            .to("mock:result")
-            .end_load_balance()
-            .build()
-            .unwrap();
-
-        if let BuilderStep::LoadBalance { config, .. } = &route.steps()[0] {
-            assert!(!config.parallel);
         } else {
             panic!("Expected LoadBalance step");
         }

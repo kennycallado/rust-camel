@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, Message, Value};
-use camel_core::route::compose_pipeline;
+use camel_core::route::{CompiledStep, compose_pipeline};
 use camel_processor::{ChoiceService, FilterService, LogLevel, LogProcessor, WhenClause};
 use criterion::{Criterion, criterion_group, criterion_main};
 use tower::ServiceExt;
@@ -41,7 +41,28 @@ fn build_exchange_flow() -> BoxProcessor {
     let step4 = BoxProcessor::new(LogProcessor::new(LogLevel::Info, "flow-log".to_string()));
     let step5 = body_step("final");
 
-    compose_pipeline(vec![step1, step2, step3, step4, step5])
+    compose_pipeline(vec![
+        CompiledStep::Process {
+            processor: step1,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: step2,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: step3,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: step4,
+            body_contract: None,
+        },
+        CompiledStep::Process {
+            processor: step5,
+            body_contract: None,
+        },
+    ])
 }
 
 /// Benchmarks a 5-processor exchange flow (set-header → filter → choice → log → set-body)

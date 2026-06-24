@@ -36,13 +36,29 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `set_header` | SetHeader | transformation | `src/lib.rs:27` |
 | `set_property` | SetProperty | transformation | `src/lib.rs:28` |
 | `splitter` | Split | splitting / aggregation | `src/lib.rs:29` |
-| `stop` | StopService | legacy nested stop sentinel | `src/lib.rs:30`; ADR-0024 |
+| `stop` | CompiledStep::Stop | control-flow Stop (ADR-0024) | `src/lib.rs:30`; ADR-0025 |
 | `stream_cache` | StreamCache | body materialization | `src/lib.rs:31` |
 | `stream_codec` | StreamSplitCodec implementations | streaming split support | `src/lib.rs:32` |
 | `streaming_splitter` | StreamingSplit | streaming splitter | `src/lib.rs:33` |
 | `throttler` | Throttle | rate limiting | `src/lib.rs:34` |
 | `wire_tap` | WireTap | fire-and-forget side route | `src/lib.rs:35` |
 | `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:36` |
+
+## Structural EIP Segments
+
+Phase 4 (ADR-0025) migrated structural EIPs from Tower services returning `Err(CamelError::Stopped)` to `OutcomePipeline` implementations that return `PipelineOutcome` directly. Each wraps its body as an `OutcomeSegment` and is stored in a `CompiledStep::Segment` variant.
+
+| Segment | Module | Description |
+|---------|--------|-------------|
+| `FilterSegment` | `filter` | Conditional routing — if predicate matches, runs body; else skips. Stop from body propagates to outer pipeline. |
+| `ChoiceSegment` | `choice` | Conditional routing — evaluates `when` clauses in order; first match runs its body. Stop from body propagates. |
+| `LoopSegment` | `loop_eip` | Repeated routing — runs body configured number of times (or until Stop). Stop from body breaks immediately. |
+| `ThrottleSegment` | `throttler` | Rate limiting — delays body execution to enforce max throughput. Stop from body propagates. |
+| `DoTrySegment` | `do_try` | Error-handling block — runs body; on error, matches `catch` clauses. Stop from body or catch propagates. |
+| `SplitSegment` | `split_segment` | Splitting / aggregation — splits Exchange by expression, runs body per fragment, aggregates results. Stop from body returns `Stopped(fragment_ex)`, skips aggregation. `SplitterService` (Tower wrapper) delegates to this. |
+| `StreamingSplitSegment` | `streaming_split_segment` | Streaming split — same semantics as `SplitSegment` but processes a lazy byte stream. Stop drops the underlying stream and returns `Stopped(fragment_ex)`. |
+| `MulticastSegment` | `multicast` | Fan-out routing — sends Exchange to multiple endpoints in parallel or sequentially. Stop from any branch propagates to outer pipeline. |
+| `LoadBalanceSegment` | `load_balancer` | Load balancing / failover — selects one endpoint per strategy (round-robin, random, failover). Stop from selected branch propagates. |
 
 ## Public API surface (v1.0 freeze)
 
@@ -80,7 +96,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `SetHeader`, `SetHeaderLayer` | stable | `src/lib.rs:71` | Header mutation. |
 | `SetProperty`, `SetPropertyLayer` | stable | `src/lib.rs:72` | Property mutation. |
 | `SplitterService` | stable | `src/lib.rs:73` | Split EIP; poll_ready migration pending. |
-| `StopService` | legacy-pending-removal | `src/lib.rs:74` | Nested structural sub-pipeline sentinel retained by ADR-0024. |
+| `CompiledStep::Stop` | stable | `src/lib.rs:74` | Control-flow Stop EIP compiled step (ADR-0024, ADR-0025). |
 | `StreamCacheService` | stable | `src/lib.rs:75` | Stream body materialization. |
 | `StreamingSplitterService` | stable | `src/lib.rs:76` | Streaming Split EIP; poll_ready migration pending. |
 | `ThrottlerService` | stable | `src/lib.rs:77` | Throttle EIP. |

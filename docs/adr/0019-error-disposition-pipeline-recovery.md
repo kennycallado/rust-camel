@@ -6,6 +6,8 @@
 **Amended by:** [ADR-0024](./0024-pipeline-outcome-replaces-camel-error-stopped.md)
 
 > **Amended by [ADR-0024](./0024-pipeline-outcome-replaces-camel-error-stopped.md):** the route pipeline executor (`run_steps`) now returns `PipelineOutcome` (Completed | Stopped | Failed) instead of `Result<Exchange, CamelError>`. The in-pipeline disposition table below is unchanged; see ADR-0024 for the `PipelineOutcome` semantics and reply-channel adapter.
+>
+> **Phase 4 amendment (2026-06-22, ADR-0025):** `retry_step` retries the failed **compiled step** via `RetryableStep` (generalised from `&mut BoxProcessor`). `RetryOutcome::Stopped` exits before the disposition phase — Stop is successful control flow, not exhausted error handling. The `StepDisposition` model itself is unchanged.
 
 ## Decision
 

@@ -75,6 +75,17 @@ Runtime per-error matching rule compiled from a DSL `OnException`. Uses a predic
 `CamelError` to select which errors trigger this policy's retry/routing behaviour.
 _Avoid_: OnException (use OnException in DSL context; ExceptionPolicy in runtime context)
 
+## Compiled Step Variants
+
+**Process**:
+The most common variant — wraps a `BoxProcessor` (a Tower `BoxCloneService<Exchange, Exchange, CamelError>`). Used for all non-structural EIP steps (setBody, log, marshal, etc.).
+
+**Stop**:
+Terminates route processing successfully. `run_steps` converts it to `PipelineOutcome::Stopped(ex)` without invoking any Tower service. The exchange state is preserved as-is; the reply channel sees `Ok(ex)` (indistinguishable from Completed).
+
+**Segment**:
+Wraps an `OutcomeSegment` — a structural EIP sub-pipeline (Filter, Choice, Loop, Throttle, doTry, Split, StreamingSplit, Multicast, LoadBalance) that returns `PipelineOutcome` directly. Enables `Stopped(ex)` propagation with nested-before-Stop mutations intact.
+
 ## ADR-0012 log-policy annotations
 
 | File | Line | Category | Reason |

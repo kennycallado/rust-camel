@@ -766,8 +766,6 @@ pub struct LoadBalanceData {
     #[serde(default)]
     pub distribution_ratio: Option<String>,
     #[serde(default)]
-    pub parallel: bool,
-    #[serde(default)]
     pub steps: Vec<YamlStep>,
 }
 

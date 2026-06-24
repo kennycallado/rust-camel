@@ -1,3 +1,7 @@
+//! ## Stop semantics (ADR-0025)
+//!
+//! This segment implements `OutcomePipeline` and propagates `PipelineOutcome::Stopped(ex)` with the exchange state intact (including mutations made inside the segment body before Stop fired). See ADR-0025 §3 (stopped-exchange-state-preservation invariant).
+
 use camel_api::error_handler::ExceptionDisposition;
 use camel_api::exchange::PROPERTY_EXCEPTION_HANDLED;
 use camel_api::{BoxProcessor, CamelError, Exchange, FilterPredicate};
@@ -263,6 +267,12 @@ impl tower::Service<Exchange> for DoTryService {
         })
     }
 }
+
+// ── DoTrySegment (ADR-0025 OutcomePipeline) ──────────────────────────────
+
+/// Compilable segment for a `doCatch` clause within a `DoTrySegment`.
+///
+/// `disposition` controls outcome when the catch body completes:
 
 #[cfg(test)]
 mod tests {

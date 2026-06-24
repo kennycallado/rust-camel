@@ -66,11 +66,27 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **PollingConsumer** — Pull-based adapter created on demand from an Endpoint, delivering one Exchange per call. Contrasts with the event-driven Consumer (push model) that drives a Route. Endpoints opt in via `Endpoint::polling_consumer`; components that are purely event-driven (HTTP server, Kafka) return `None` by default. Used by the EIP-7 `pollEnrich` DSL verb and the WASM `camel_poll` host function. Established by ADR-0015. (camel-component-api + camel-processor + camel-core)
 - **EnrichmentStrategy** — Strategy that merges the original Exchange with the enriched/polled Exchange in the EIP-7 `enrich` and `pollEnrich` verbs. Distinct from the EIP-22 `AggregateStrategyDef` family (which collides on the obvious name "AggregationStrategy"). Established by ADR-0015. (camel-processor + camel-dsl)
 - **Starting Route** — Externally observable Route lifecycle state recorded after start intent is accepted and before the Consumer/Pipeline side effect is confirmed. Operators may see `Starting` in `RouteStatusProjection`; it is not an internal-only transient. Established by ADR-0018. (camel-core)
+- **StopSegment**:
+  Outcome-aware analog of `CompiledStep::Stop` for use inside structural EIP sub-pipelines. Always returns `PipelineOutcome::Stopped(ex)`.
+  _Avoid_: stop processor, stop service (use StopSegment for the struct).
+
+- **RetryableStep**:
+  Object-safe trait unifying `BoxProcessor` and `OutcomeSegment` for `RouteErrorHandler::retry_step`. Single retry path serves both Tower processors and outcome-aware segments.
+  _Avoid_: retry adapter, retry handler (use RetryableStep for the trait).
+
 - **Route lifecycle compensation** — Control-plane recovery rule: if a lifecycle side effect fails after durable intent/state changed, Runtime records the Route as `Failed`, reconciles the status projection, and publishes failure events instead of rolling history back. Established by ADR-0018. (camel-core)
 - **ExceptionDisposition** — Enum (`Propagate | Handled | Continued`) that replaces `handled: bool`. `Propagate` returns the error upstream; `Handled` absorbs and terminates the route normally; `Continued` clears the error and advances to the next pipeline step. Established by ADR-0019. (camel-api + camel-processor + camel-dsl)
 - **RouteErrorHandler** — Trait injected into the pipeline with 4 async methods (`match_policy`, `retry_step`, `handle_step`, `handle_boundary`). The pipeline calls these after each step failure; the returned disposition drives the loop. `DefaultRouteErrorHandler` is the production implementation. Established by ADR-0019. (camel-processor + camel-core)
 - **RouteChannelService** — Service that chains Security → CircuitBreaker(`before_call`) → Pipeline(`run_steps`) → CircuitBreaker(`after_result`). Constructed only when an `errorHandler` is configured. Boundary errors from Security or CB gates go through `handle_boundary`. Established by ADR-0019. (camel-core)
 - **LlmProvider** — Trait abstraction over LLM backends (OpenAI, Ollama, Mock). Camel-shaped, not siumai-shaped. Owned by `LlmComponent` as `Arc<dyn LlmProvider>` in a `ProviderMap`. All siumai imports confined to the adapter. Established by ADR-0020. (camel-component-llm)
 - **ProviderMap** — `HashMap<String, Arc<dyn LlmProvider>>` owned by `LlmComponent`. Resolved by name from config. Not a global registry — safe for tests, hot-reload, multi-context. Established by ADR-0020. (camel-component-llm)
+- **OutcomePipeline**:
+  Internal trait one layer above Tower for structural EIP sub-pipelines. Returns `PipelineOutcome` directly (NOT Tower `Result<Exchange, CamelError>`), so `Stopped(ex)` propagates with Exchange state intact. Implementations: FilterSegment, ChoiceSegment, LoopSegment, ThrottleSegment, DoTrySegment, SplitSegment, StreamingSplitSegment, MulticastSegment, LoadBalanceSegment.
+  _Avoid_: outcome service, segment processor (use OutcomePipeline for trait, Segment for the CompiledStep variant).
+
+- **OutcomeSegment**:
+  Wrapper struct over `Box<dyn OutcomePipeline>` with extension hooks for tracing/metrics. Lives in camel-api (`crates/camel-api/src/outcome_segment.rs`); composition helpers (`SequentialOutcomeSegment`, `BoxProcessorSegment`, `StopSegment`, `BodyCoercingSegment`, `compose_outcome_segment`) stay in camel-core. Used as the payload of `CompiledStep::Segment`.
+  _Avoid_: outcome box, pipeline wrapper.
+
 - **PipelineOutcome** — Enum (`Completed(Exchange) | Stopped(Exchange) | Failed(CamelError)`) produced by `run_steps` (the pipeline executor). Lives ONE LAYER ABOVE Tower — `BoxProcessor::Response` and every `Service<Exchange>::Response` stays `Result<Exchange, CamelError>`. The pipeline's `Service<Exchange>` impl translates `PipelineOutcome` to `Result` via `into_tower_result()` (Completed/Stopped both → Ok). Stop EIP is successful control flow, not an error. Established by ADR-0024. (camel-api + camel-core + camel-processor)
 - **ConsumerStopping** — `CamelError` variant for producer `poll_ready` shutdown signals. Distinct from Stop EIP — it indicates the producer's semaphore/channel is closing and the call cannot proceed. Used by JMS/OpenSearch producers. Established by ADR-0024. (camel-api + camel-component-jms + camel-component-opensearch)

@@ -29,7 +29,8 @@ mod transforms;
 /// `Process` is the normal case: a boxed processor plus its optional body
 /// contract. `Stop` (added in Task 3b) is the Stop EIP marker — `run_steps`
 /// recognises it and produces `PipelineOutcome::Stopped` without invoking a
-/// Tower service.
+/// Tower service. `Segment` (added in Task 3) wraps an `OutcomeSegment` for
+/// structural EIPs with outcome-aware sub-pipelines.
 ///
 /// **Boundary:** `CompiledStep` is the compile-time representation. At runtime,
 /// `run_steps` consumes a `Vec<CompiledStep>` (Stop variants included) and
@@ -45,6 +46,13 @@ pub enum CompiledStep {
     /// Stop EIP marker. `run_steps` produces `PipelineOutcome::Stopped(ex)`
     /// without invoking a Tower service. Replaces `StopService` (Task 7).
     Stop,
+    /// Outcome-aware structural EIP segment. `run_steps` invokes
+    /// `segment.run(ex)` and matches on the returned `PipelineOutcome`.
+    /// See ADR-0025.
+    Segment {
+        segment: camel_api::OutcomeSegment,
+        body_contract: Option<BodyType>,
+    },
 }
 
 /// Result from a compiler: either it handled the step (with success or error),
@@ -90,6 +98,52 @@ impl<'a> CompilationContext<'a> {
         registry: &StepCompilerRegistry,
     ) -> Result<Vec<CompiledStep>, CamelError> {
         registry.compile_steps(steps, self)
+    }
+
+    /// Recursively compile child steps and map them into outcome-aware segments.
+    ///
+    /// Each `CompiledStep` variant is converted to a `Box<dyn OutcomePipeline>`:
+    /// - `Process` → `BoxProcessorSegment`, optionally wrapped in `BodyCoercingSegment`
+    /// - `Stop` → `StopSegment` (produces `PipelineOutcome::Stopped(ex)`)
+    /// - `Segment` → its inner `OutcomeSegment` (which now implements OutcomePipeline)
+    ///
+    /// This replaces the 22-line duplicated closure in Filter/DeclarativeFilter
+    /// (and will prevent 14+ more duplicates in T9–T16).
+    pub fn compile_children_segments(
+        &self,
+        steps: Vec<BuilderStep>,
+        registry: &StepCompilerRegistry,
+    ) -> Result<Vec<Box<dyn camel_api::OutcomePipeline>>, CamelError> {
+        let pairs = self.compile_children(steps, registry)?;
+        let segments: Vec<Box<dyn camel_api::OutcomePipeline>> = pairs
+            .into_iter()
+            .map(|c| match c {
+                CompiledStep::Process {
+                    processor,
+                    body_contract,
+                } => {
+                    let inner: Box<dyn camel_api::OutcomePipeline> = Box::new(
+                        crate::lifecycle::adapters::route_compiler::BoxProcessorSegment::new(
+                            processor,
+                        ),
+                    );
+                    match body_contract {
+                        Some(contract) => Box::new(
+                            crate::lifecycle::adapters::route_compiler::BodyCoercingSegment::new(
+                                inner, contract,
+                            ),
+                        ),
+                        None => inner,
+                    }
+                }
+                CompiledStep::Stop => {
+                    Box::new(crate::lifecycle::adapters::route_compiler::StopSegment)
+                        as Box<dyn camel_api::OutcomePipeline>
+                }
+                CompiledStep::Segment { segment, .. } => Box::new(segment),
+            })
+            .collect();
+        Ok(segments)
     }
 }
 
@@ -163,6 +217,95 @@ pub(crate) fn resolve_producer(
         .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
     let endpoint = component.create_endpoint(uri, ctx.component_ctx.as_ref())?;
     endpoint.create_producer(Arc::clone(&ctx.rt), ctx.producer_ctx)
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+    use camel_api::{Exchange, OutcomePipeline, PipelineOutcome};
+    use std::future::Future;
+    use std::pin::Pin;
+
+    #[derive(Clone)]
+    struct EchoSegment;
+
+    impl OutcomePipeline for EchoSegment {
+        fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+            Box::new(EchoSegment)
+        }
+        fn run<'a>(
+            &'a mut self,
+            exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            Box::pin(async move { PipelineOutcome::Completed(exchange) })
+        }
+    }
+
+    #[test]
+    fn compiled_step_segment_clone_compiles() {
+        let seg = camel_api::OutcomeSegment::new(Box::new(EchoSegment));
+        let step = CompiledStep::Segment {
+            segment: seg,
+            body_contract: None,
+        };
+        let _cloned = step.clone();
+        if let CompiledStep::Segment { segment: _, .. } = _cloned {
+            // ok
+        } else {
+            panic!("clone should preserve variant");
+        }
+    }
+
+    #[test]
+    fn compiled_step_segment_debug_renders() {
+        let seg = camel_api::OutcomeSegment::new(Box::new(EchoSegment));
+        let step = CompiledStep::Segment {
+            segment: seg,
+            body_contract: None,
+        };
+        let s = format!("{:?}", step);
+        assert!(
+            s.contains("Segment"),
+            "debug should mention Segment variant: {s}"
+        );
+    }
+
+    #[test]
+    fn outcome_segment_satisfies_clone_send_static() {
+        fn assert_traits<T: Clone + Send + 'static>() {}
+        assert_traits::<camel_api::OutcomeSegment>();
+    }
+
+    #[tokio::test]
+    async fn outcome_segment_survives_arcswap_swap() {
+        use arc_swap::ArcSwap;
+        use camel_api::{Exchange, Message, OutcomePipeline, PipelineOutcome};
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct EchoSegment;
+        impl OutcomePipeline for EchoSegment {
+            fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+                Box::new(EchoSegment)
+            }
+            fn run<'a>(
+                &'a mut self,
+                ex: Exchange,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+            {
+                Box::pin(async move { PipelineOutcome::Completed(ex) })
+            }
+        }
+
+        let seg = camel_api::OutcomeSegment::new(Box::new(EchoSegment));
+        let slot: ArcSwap<Option<camel_api::OutcomeSegment>> = ArcSwap::from_pointee(None);
+        slot.store(Arc::new(Some(seg.clone())));
+        slot.store(Arc::new(Some(seg)));
+
+        let mut borrowed = slot.load().as_ref().clone().unwrap();
+        let outcome = borrowed.run(Exchange::new(Message::new("ping"))).await;
+        assert!(matches!(outcome, PipelineOutcome::Completed(_)));
+    }
 }
 
 /// Build the full registry with all compiler groups.

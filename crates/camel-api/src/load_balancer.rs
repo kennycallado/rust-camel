@@ -10,41 +10,31 @@ pub enum LoadBalanceStrategy {
 #[derive(Debug, Clone)]
 pub struct LoadBalancerConfig {
     pub strategy: LoadBalanceStrategy,
-    pub parallel: bool,
 }
 
 impl LoadBalancerConfig {
     pub fn round_robin() -> Self {
         Self {
             strategy: LoadBalanceStrategy::RoundRobin,
-            parallel: false,
         }
     }
 
     pub fn random() -> Self {
         Self {
             strategy: LoadBalanceStrategy::Random,
-            parallel: false,
         }
     }
 
     pub fn weighted(weights: Vec<(String, u32)>) -> Self {
         Self {
             strategy: LoadBalanceStrategy::Weighted(weights),
-            parallel: false,
         }
     }
 
     pub fn failover() -> Self {
         Self {
             strategy: LoadBalanceStrategy::Failover,
-            parallel: false,
         }
-    }
-
-    pub fn parallel(mut self, p: bool) -> Self {
-        self.parallel = p;
-        self
     }
 }
 
@@ -56,7 +46,6 @@ mod tests {
     fn round_robin_factory() {
         let cfg = LoadBalancerConfig::round_robin();
         assert_eq!(cfg.strategy, LoadBalanceStrategy::RoundRobin);
-        assert!(!cfg.parallel);
     }
 
     #[test]
@@ -79,12 +68,6 @@ mod tests {
     }
 
     #[test]
-    fn parallel_builder() {
-        let cfg = LoadBalancerConfig::round_robin().parallel(true);
-        assert!(cfg.parallel);
-    }
-
-    #[test]
     fn default_strategy_is_round_robin() {
         assert_eq!(
             LoadBalanceStrategy::default(),
@@ -103,9 +86,8 @@ mod tests {
 
     #[test]
     fn clone_preserves_strategy() {
-        let cfg = LoadBalancerConfig::failover().parallel(true);
+        let cfg = LoadBalancerConfig::failover();
         let cloned = cfg.clone();
         assert_eq!(cloned.strategy, LoadBalanceStrategy::Failover);
-        assert!(cloned.parallel);
     }
 }

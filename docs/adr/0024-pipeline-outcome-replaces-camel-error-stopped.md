@@ -86,9 +86,9 @@ fn outcome_to_reply(outcome: PipelineOutcome) -> Result<Exchange, ReplyError> {
 
 This adapter lives at exactly one site per pipeline — the body of `SequentialPipeline::call` / `TracedPipeline::call` in `crates/camel-core/src/lifecycle/adapters/route_compiler.rs` (see ADR-0018 for route lifecycle context) — which is the only place `PipelineOutcome` crosses back into `Result<Exchange, CamelError>`.
 
-### `RouteErrorHandler` trait shape is UNCHANGED
+### `RouteErrorHandler` retry parameter generalised
 
-The handler (`match_policy`, `retry_step`, `handle_step`, `handle_boundary`) keeps its existing return types (`StepDisposition`). Translation from `StepDisposition` to `PipelineOutcome` happens inside `run_steps`, per the mapping table below. This locking of the trait shape was an explicit e_gpt blessing condition.
+Phase 4 (bd rc-5uv) changes `retry_step`'s step argument from `&mut BoxProcessor` to `&mut dyn RetryableStep`. This is semantic preservation, not new handler responsibility: `RouteErrorHandler` remains sole owner of policy matching, redelivery counters, backoff, onException, and DLC routing. The generalisation exists only because compiled steps may now be Tower processors OR outcome-aware internal segments. `PipelineOutcome` still does not cross public `Service<Exchange>` boundaries. Implementation details governed by ADR-0025.
 
 ### `CompiledStep` type alias becomes an enum
 
@@ -100,25 +100,23 @@ The file `crates/camel-processor/src/stop.rs` is deleted (or gutted if other con
 
 ### `CamelError::Stopped` is removed (hard removal, no deprecation)
 
-**Removal path (updated 2026-06-22 per e_gpt Option E):** `CamelError::Stopped`
-is removed only after (a) JMS/OpenSearch `poll_ready` migrate to
-`ConsumerStopping` (Tasks 17-19), AND (b) nested structural sub-pipelines
-propagate Stop without going through Tower Response (deferred to future epic).
-Task 22's variant removal is contingent on both conditions. `StopService`
-removal (Task 7) is similarly deferred.
+**Removal COMPLETED in Phase 4 (bd rc-5uv).** `StopService`, `CamelError::Stopped`, `eip_outcome_to_result`, `flatten_stop` flag, and the `Err(Stopped)` bypass in `run_steps` are all deleted.
 
 ### Mapping table: error handler ↔ `PipelineOutcome`
 
 The following table governs how `run_steps` translates handler outputs into `PipelineOutcome`:
 
-| Inside the step loop | Handler returns | `run_steps` produces |
+| CompiledStep variant | Handler returns | PipelineOutcome |
 |---|---|---|
-| Step completes normally | (not called) | continue to next step |
-| Step errors, handler matches and absorbs | `StepDisposition::Handled(ex)` | `PipelineOutcome::Completed(ex)` |
-| Step errors, handler clears and continues | `StepDisposition::Continued(ex)` | continue loop with `ex` |
-| Step errors, handler propagates | `StepDisposition::Propagate(err)` | `PipelineOutcome::Failed(err)` |
-| Step is `CompiledStep::Stop` | (handler bypassed) | `PipelineOutcome::Stopped(ex)` |
-| Step is `CompiledStep::Stop` boundary error | `StepDisposition::Propagate(err)` (via `handle_boundary`) | `PipelineOutcome::Failed(err)` |
+| `Process` completes normally | (not called) | continue loop with returned `Exchange` |
+| `Process` errors, handler matches and absorbs | `StepDisposition::Handled(ex)` | `PipelineOutcome::Completed(ex)` |
+| `Process` errors, handler clears and continues | `StepDisposition::Continued(ex)` | continue loop with `ex` |
+| `Process` errors, handler propagates | `StepDisposition::Propagate(err)` | `PipelineOutcome::Failed(err)` |
+| `Segment` returns `Completed(ex)` | (not called) | continue loop with `ex` |
+| `Segment` returns `Stopped(ex)` | (handler bypassed) | `PipelineOutcome::Stopped(ex)` |
+| `Segment` returns `Failed + retry recovers` | `RetryOutcome::Recovered(ex)` | continue with recovered `ex` |
+| `Segment` returns `Failed + retry returns Stopped` | `RetryOutcome::Stopped(ex)` | `PipelineOutcome::Stopped(ex)` |
+| `Segment` returns `Failed + retry exhausts` | `StepDisposition::*` (via `handle_step`) | per disposition |
 
 ### Reply-channel adapter
 
@@ -138,6 +136,8 @@ Consumers that today expect `Result<Exchange, CamelError>` from the pipeline get
 `ExchangeUoW<S>::call` (exchange_uow.rs:94-133) sees `Ok(ex)` for both `Completed` and `Stopped`, so `on_complete` fires for Stop. The `ex.has_error()` branch remains for explicit `set_error()` calls. A regression test is mandatory (Task 15).
 
 ### Sub-pipeline boundary (amendment 2026-06-22)
+
+> **SUPERSEDED by Phase 4 (bd rc-5uv, ADR-0025).** The interim Option E mechanism described below is REMOVED. Structural EIPs now propagate `PipelineOutcome::Stopped(ex)` directly via the `OutcomePipeline` trait + `CompiledStep::Segment` variant, preserving Exchange mutations made inside nested blocks before Stop. The text below is preserved for historical context only.
 
 The original boundary rule above ("PipelineOutcome MUST NOT cross any
 Service<Exchange>::Response") applies to **public** Service<Exchange> impls —
@@ -198,3 +198,17 @@ Searched `crates/components/` for `Err(CamelError::Stopped)` arms in consumer re
 | `crates/components/camel-opensearch/src/producer/mod.rs:539` | OpenSearch `poll_ready` misuse | Task 19 |
 
 No additional Bug B fixes needed beyond `camel-http` (landed in commit `4f81a6e0`).
+
+## Phase 4 audit (2026-06-22)
+
+After Phase 4 (bd rc-5uv, ADR-0025) implementation:
+
+- `StopService` deleted (`crates/camel-processor/src/stop.rs` removed).
+- `CamelError::Stopped` variant removed entirely.
+- `eip_outcome_to_result()` removed.
+- `flatten_stop` flag on `SequentialPipeline`/`TracedPipeline` removed.
+- `Err(Stopped)` bypass in `run_steps` removed.
+- Structural EIPs (Filter/Choice/Loop/Throttle/Split/StreamingSplit/Multicast/LoadBalance/doTry) migrated to `OutcomePipeline` trait + `CompiledStep::Segment` variant.
+- Stopped-exchange-state-preservation invariant locked as tested contract.
+
+Zero remaining sites misuse `CamelError::Stopped` for control flow.

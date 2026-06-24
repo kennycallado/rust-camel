@@ -110,7 +110,7 @@ let route = RouteBuilder::from("timer:tick")
 | `WireTapService` | Side-channel routing |
 | `CircuitBreakerLayer` | Fault tolerance (deprecated since 0.16.0 — use `RouteChannelService`) |
 | `ErrorHandlerLayer` | Error handling (deprecated since 0.16.0 — use `RouteChannelService`) |
-| `StopService` | Stop processing |
+| `CompiledStep::Stop` | Stop processing (control flow via PipelineOutcome::Stopped) |
 | `ScriptMutator` | Execute mutating scripts that modify Exchange headers, properties, or body |
 | `MarshalService` | Marshal body using a DataFormat (e.g., Json → Text) |
 | `UnmarshalService` | Unmarshal body using a DataFormat (e.g., Text → Json) |

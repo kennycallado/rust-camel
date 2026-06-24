@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{BoxProcessor, CamelError, Exchange, SyncBoxProcessor};
+use crate::{BoxProcessor, CamelError, Exchange, PipelineOutcome, SyncBoxProcessor};
 
 /// Camel-compatible header names for redelivery state.
 pub const HEADER_REDELIVERED: &str = "CamelRedelivered";
@@ -106,16 +106,55 @@ pub enum ExceptionDisposition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PolicyId(pub usize);
 
-/// Result of Phase 1 (retry) of error handling.
+/// Result of a single retry attempt by `RouteErrorHandler::retry_step`.
+#[derive(Debug)]
 pub enum RetryOutcome {
-    /// Retry succeeded — pipeline continues normally.
+    /// Retry succeeded; pipeline continues with this Exchange.
     Recovered(Exchange),
-    /// Retries exhausted or no retry configured.
+    /// Retry attempt returned `Stopped(ex)`. Bypasses `handle_step` —
+    /// Stop is successful control flow, not exhausted error handling.
+    /// Maps to `PipelineOutcome::Stopped(ex)` in `run_steps`.
+    Stopped(Exchange),
+    /// All retry attempts exhausted. Handler decides via `handle_step`.
     Exhausted {
         exchange: Exchange,
         error: CamelError,
         policy: Option<PolicyId>,
     },
+}
+
+/// Object-safe retry abstraction. Unifies `BoxProcessor` and `OutcomeSegment`
+/// for `RouteErrorHandler::retry_step`. See ADR-0024 amendment (Phase 4).
+///
+/// `invoke` returns `PipelineOutcome` (not Tower `Result`), preserving
+/// `Stopped(ex)` state across retry attempts.
+pub trait RetryableStep: Send {
+    fn invoke<'a>(
+        &'a mut self,
+        exchange: Exchange,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>;
+}
+
+/// BoxProcessor adapter: preserves readiness-error routing by calling
+/// `ServiceExt::ready().await` before `Service::call()`. Readiness
+/// failures (e.g. channel closed, circuit breaker open) become
+/// `PipelineOutcome::Failed`, NOT panic or silent skip.
+impl RetryableStep for crate::BoxProcessor {
+    fn invoke<'a>(
+        &'a mut self,
+        exchange: Exchange,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>> {
+        use tower::ServiceExt;
+        Box::pin(async move {
+            match self.ready().await {
+                Ok(ready_svc) => match tower::Service::call(ready_svc, exchange).await {
+                    Ok(ex) => PipelineOutcome::Completed(ex),
+                    Err(err) => PipelineOutcome::Failed(err),
+                },
+                Err(err) => PipelineOutcome::Failed(err),
+            }
+        })
+    }
 }
 
 /// Result of Phase 2 (handle) of step error handling.
@@ -291,6 +330,134 @@ impl ExceptionPolicyBuilder {
 // Backwards compatibility alias
 #[deprecated(since = "0.1.0", note = "Use `RedeliveryPolicy` instead")]
 pub type ExponentialBackoff = RedeliveryPolicy;
+
+#[cfg(test)]
+mod retryable_step_tests {
+    use super::*;
+    use crate::{BoxProcessor, CamelError, Exchange, Message, PipelineOutcome};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingProcessor {
+        call_count: Arc<AtomicUsize>,
+        succeed: bool,
+    }
+
+    impl tower::Service<Exchange> for CountingProcessor {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, exchange: Exchange) -> Self::Future {
+            let count = self.call_count.clone();
+            let succeed = self.succeed;
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                if succeed {
+                    Ok(exchange)
+                } else {
+                    Err(CamelError::ProcessorError("fail".into()))
+                }
+            })
+        }
+    }
+
+    impl Clone for CountingProcessor {
+        fn clone(&self) -> Self {
+            Self {
+                call_count: self.call_count.clone(),
+                succeed: self.succeed,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn boxprocessor_adapter_maps_ok_to_completed() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let processor = CountingProcessor {
+            call_count: count.clone(),
+            succeed: true,
+        };
+        let bp: BoxProcessor = BoxProcessor::new(processor);
+        let mut retryable: Box<dyn RetryableStep> = Box::new(bp);
+        let ex = Exchange::new(Message::new("hello"));
+        let outcome = retryable.invoke(ex).await;
+        assert!(matches!(outcome, PipelineOutcome::Completed(_)));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn boxprocessor_adapter_maps_err_to_failed() {
+        let processor = CountingProcessor {
+            call_count: Arc::new(AtomicUsize::new(0)),
+            succeed: false,
+        };
+        let bp: BoxProcessor = BoxProcessor::new(processor);
+        let mut retryable: Box<dyn RetryableStep> = Box::new(bp);
+        let ex = Exchange::new(Message::new("hello"));
+        let outcome = retryable.invoke(ex).await;
+        assert!(matches!(outcome, PipelineOutcome::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn boxprocessor_readiness_error_propagates_to_failed() {
+        struct AlwaysNotReady;
+
+        impl tower::Service<Exchange> for AlwaysNotReady {
+            type Response = Exchange;
+            type Error = CamelError;
+            type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+            fn poll_ready(
+                &mut self,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Err(CamelError::ProcessorError(
+                    "readiness failed: consumer closed".into(),
+                )))
+            }
+
+            fn call(&mut self, _ex: Exchange) -> Self::Future {
+                Box::pin(async {
+                    unreachable!("call() must not be reached when poll_ready errors")
+                })
+            }
+        }
+
+        impl Clone for AlwaysNotReady {
+            fn clone(&self) -> Self {
+                AlwaysNotReady
+            }
+        }
+
+        let bp: BoxProcessor = BoxProcessor::new(AlwaysNotReady);
+        let mut retryable: Box<dyn RetryableStep> = Box::new(bp);
+        let ex = Exchange::new(Message::new("hello"));
+        let outcome = retryable.invoke(ex).await;
+        match outcome {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("readiness") || msg.contains("consumer"),
+                    "readiness error message should be preserved, got: {msg}"
+                );
+            }
+            other => panic!(
+                "readiness failure must map to PipelineOutcome::Failed, got {:?}",
+                other
+            ),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

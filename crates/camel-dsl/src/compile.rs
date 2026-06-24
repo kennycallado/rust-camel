@@ -26,7 +26,7 @@ use camel_core::route::{
     RouteDefinition, compose_pipeline,
 };
 use camel_processor::{
-    ConvertBodyTo, LogLevel, MarshalService, StopService, StreamCacheService, UnmarshalService,
+    ConvertBodyTo, LogLevel, MarshalService, StreamCacheService, UnmarshalService,
     builtin_data_format,
 };
 
@@ -795,9 +795,7 @@ fn compile_declarative_step_with_threshold(
                 StreamCacheService::new(camel_api::IdentityProcessor, config),
             )))
         }
-        DeclarativeStep::Stop => Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-            StopService,
-        ))),
+        DeclarativeStep::Stop => Ok(BuilderStep::Stop),
         DeclarativeStep::Filter(def) => {
             compile_filter_step(def.predicate, def.steps, stream_cache_threshold)
         }
@@ -856,11 +854,7 @@ fn compile_declarative_step_with_threshold(
                 steps: compiled_steps,
             })
         }
-        DeclarativeStep::LoadBalance(LoadBalanceStepDef {
-            strategy,
-            parallel,
-            steps,
-        }) => {
+        DeclarativeStep::LoadBalance(LoadBalanceStepDef { strategy, steps }) => {
             let compiled_steps = compile_declarative_steps(steps, stream_cache_threshold)?;
             let strategy = match strategy {
                 LoadBalanceStrategyDef::RoundRobin => LoadBalanceStrategy::RoundRobin,
@@ -891,7 +885,7 @@ fn compile_declarative_step_with_threshold(
                     LoadBalanceStrategy::Weighted(weighted)
                 }
             };
-            let config = LoadBalancerConfig { strategy, parallel };
+            let config = LoadBalancerConfig { strategy };
             Ok(BuilderStep::LoadBalance {
                 config,
                 steps: compiled_steps,
@@ -2125,7 +2119,10 @@ mod tests {
             "StreamLimitExceeded",
             &CamelError::StreamLimitExceeded(1)
         ));
-        assert!(!exception_kind_matches("NoSuchKind", &CamelError::Stopped));
+        assert!(!exception_kind_matches(
+            "NoSuchKind",
+            &CamelError::ConsumerStopping
+        ));
     }
 
     #[test]
@@ -2391,7 +2388,6 @@ mod tests {
         assert_eq!(
             declarative_step_name(&DeclarativeStep::LoadBalance(LoadBalanceStepDef {
                 strategy: LoadBalanceStrategyDef::RoundRobin,
-                parallel: false,
                 steps: vec![]
             })),
             "load_balance"
@@ -2535,20 +2531,6 @@ mod tests {
             "ConsumerStopping",
             &CamelError::ProcessorError("x".into())
         ));
-    }
-
-    #[test]
-    fn exception_kind_matches_stopped_arm_removed() {
-        // ADR-0024 + user directive 2026-06-20 (no deprecation paths):
-        // The "Stopped" arm was removed because it would never fire — Stop EIP
-        // is no longer an error at the top-level (CompiledStep::Stop → Stopped → Ok).
-        // Sub-pipeline Stop propagation is bypassed in run_steps before the handler.
-        assert!(!exception_kind_matches(
-            "Stopped",
-            &CamelError::ConsumerStopping
-        ));
-        // Note: CamelError::Stopped variant still exists (deferred to bd rc-5uv
-        // for full removal) but the DSL arm is gone because the arm would never fire.
     }
 
     #[test]
@@ -2754,7 +2736,6 @@ mod tests {
     fn compile_step_load_balance_round_robin() {
         let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
             strategy: LoadBalanceStrategyDef::RoundRobin,
-            parallel: false,
             steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
         });
         let result = compile_declarative_step(step);
@@ -2767,7 +2748,6 @@ mod tests {
             strategy: LoadBalanceStrategyDef::Weighted {
                 distribution_ratio: "3,1".into(),
             },
-            parallel: false,
             steps: vec![
                 DeclarativeStep::To(ToStepDef::new("direct:a")),
                 DeclarativeStep::To(ToStepDef::new("direct:b")),
@@ -2783,7 +2763,6 @@ mod tests {
             strategy: LoadBalanceStrategyDef::Weighted {
                 distribution_ratio: "abc".into(),
             },
-            parallel: false,
             steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
         });
         assert!(compile_declarative_step(step).is_err());
@@ -2795,7 +2774,6 @@ mod tests {
             strategy: LoadBalanceStrategyDef::Weighted {
                 distribution_ratio: "3,1".into(),
             },
-            parallel: false,
             steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
         });
         assert!(compile_declarative_step(step).is_err());
@@ -3033,7 +3011,6 @@ mod tests {
     fn compile_step_load_balance_failover() {
         let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
             strategy: LoadBalanceStrategyDef::Failover,
-            parallel: true,
             steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
         });
         assert!(compile_declarative_step(step).is_ok());
@@ -3043,7 +3020,6 @@ mod tests {
     fn compile_step_load_balance_random() {
         let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
             strategy: LoadBalanceStrategyDef::Random,
-            parallel: false,
             steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
         });
         assert!(compile_declarative_step(step).is_ok());
@@ -4058,6 +4034,16 @@ mod tests {
                 .dropped_fields
                 .iter()
                 .any(|f| f.field == "concurrency.max")
+        );
+    }
+
+    #[test]
+    fn declarative_stop_emits_builder_step_stop_not_stop_service() {
+        let step = compile_declarative_step(DeclarativeStep::Stop).unwrap();
+        assert!(
+            matches!(step, BuilderStep::Stop),
+            "DSL Stop must emit BuilderStep::Stop, got: {:?}",
+            step
         );
     }
 }

@@ -324,7 +324,6 @@ pub enum LoadBalanceStrategyDef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadBalanceStepDef {
     pub strategy: LoadBalanceStrategyDef,
-    pub parallel: bool,
     pub steps: Vec<DeclarativeStep>,
 }
 

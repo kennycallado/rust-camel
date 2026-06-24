@@ -285,7 +285,7 @@ mod tests {
     use super::*;
     use camel_api::{BoxProcessorExt, Message};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tower::ServiceExt;
 
     // ── Test helpers ───────────────────────────────────────────────────

@@ -417,7 +417,7 @@ fn spawn_timeout_task(
     cancel: CancellationToken,
     buckets: Arc<Mutex<HashMap<String, Bucket>>>,
     timeout_tasks: Arc<Mutex<HashMap<String, CancellationToken>>>,
-    _timeout_handles: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    timeout_handles: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     late_tx: mpsc::Sender<Exchange>,
     strategy: AggregationStrategy,
     discard: bool,
@@ -438,6 +438,12 @@ fn spawn_timeout_task(
                 };
                 if !should_proceed {
                     return;
+                }
+                // Clean up our own JoinHandle from the map on natural completion.
+                // Without this, the handle entry leaks until route shutdown.
+                {
+                    let mut hh = timeout_handles.lock().unwrap_or_else(|e| e.into_inner());
+                    hh.remove(&key);
                 }
                 let bucket_exchanges = {
                     let mut guard = buckets.lock().unwrap_or_else(|e| e.into_inner());
@@ -1234,6 +1240,39 @@ mod tests {
                 "placeholder flag should be true"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn timeout_completion_clears_handle_from_map() {
+        // Regression: Oracle audit found that natural timeout completion removed
+        // the bucket but left the JoinHandle in `timeout_handles`, leaking the
+        // entry until route shutdown. After fix, the timeout task itself cleans
+        // its handle from the map on natural completion.
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let svc = AggregatorService::new(config, tx, registry, cancel);
+
+        // Send an exchange to create a pending bucket with a timeout task.
+        let mut call_svc = svc.clone();
+        let ex = make_exchange("key", "A", "data");
+        let _ = call_svc.ready().await.unwrap().call(ex).await.unwrap();
+        assert!(
+            !svc.timeout_handles.lock().unwrap().is_empty(),
+            "handle should exist while timeout pending"
+        );
+
+        // Wait real time for the 50ms timeout to fire + spawned task to complete.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            svc.timeout_handles.lock().unwrap().is_empty(),
+            "handle should be cleared from map after natural timeout completion (was leak)"
+        );
     }
 
     #[tokio::test(start_paused = true)]

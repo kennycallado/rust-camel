@@ -3,6 +3,7 @@
 //! Steps that route exchanges to multiple destinations using endpoint resolvers.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use camel_api::BoxProcessor;
 
@@ -10,7 +11,7 @@ use super::{
     CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
 };
 use crate::lifecycle::adapters::endpoint_resolver_factory;
-use crate::lifecycle::adapters::route_compiler::compose_pipeline;
+use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
 use crate::lifecycle::adapters::step_resolution::{await_eval, compile_language_expression};
 use crate::lifecycle::application::route_definition::BuilderStep;
 
@@ -202,45 +203,37 @@ impl StepCompiler for RoutingCompiler {
                 }))
             }
 
-            // ── Throttle (recursive — compiles child steps) ──
+            // ── Throttle (recursive — compiles child steps, outcome-aware) ──
             BuilderStep::Throttle { config, steps } => {
-                let sub_pairs = match ctx.compile_children(steps, registry) {
-                    Ok(p) => p,
+                let sub_segments = match ctx.compile_children_segments(steps, registry) {
+                    Ok(s) => s,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_processors: Vec<CompiledStep> = sub_pairs
-                    .into_iter()
-                    .map(|c| match c {
-                        CompiledStep::Process { .. } => c,
-                        CompiledStep::Stop => CompiledStep::Process {
-                            processor: BoxProcessor::new(camel_processor::StopService),
-                            body_contract: None,
-                        },
-                    })
-                    .collect();
-                let sub_pipeline = compose_pipeline(sub_processors);
-                let svc = camel_processor::throttler::ThrottlerService::new(config, sub_pipeline);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
-                    processor: BoxProcessor::new(svc),
+                let body = compose_outcome_segment(sub_segments);
+                let segment = camel_processor::ThrottleSegment::new(config, body);
+                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                 }))
             }
 
-            // ── LoadBalance (recursive — each step is an independent endpoint) ──
+            // ── LoadBalance (recursive — each step compiles to an OutcomeSegment) ──
             BuilderStep::LoadBalance { config, steps } => {
-                let mut endpoints = Vec::new();
+                let mut destinations: Vec<camel_api::OutcomeSegment> = Vec::new();
                 for step in steps {
-                    let sub_pairs = match ctx.compile_children(vec![step], registry) {
-                        Ok(p) => p,
+                    let sub_segments = match ctx.compile_children_segments(vec![step], registry) {
+                        Ok(s) => s,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                    let endpoint = compose_pipeline(sub_pairs);
-                    endpoints.push(endpoint);
+                    destinations.push(compose_outcome_segment(sub_segments));
                 }
-                let svc =
-                    camel_processor::load_balancer::LoadBalancerService::new(endpoints, config);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
-                    processor: BoxProcessor::new(svc),
+                let segment = camel_processor::LoadBalanceSegment {
+                    destinations,
+                    strategy: config.strategy,
+                    round_robin_index: Arc::new(AtomicUsize::new(0)),
+                };
+                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                 }))
             }

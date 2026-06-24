@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -63,6 +64,79 @@ impl Service<Exchange> for ChoiceService {
             return Box::pin(fut);
         }
         Box::pin(async move { Ok(exchange) })
+    }
+}
+
+// ── ChoiceSegment + WhenClauseSegment (ADR-0025 OutcomePipeline) ──────────
+
+/// Outcome-aware structural EIP segment for a single when clause.
+pub struct WhenClauseSegment {
+    pub predicate: camel_api::FilterPredicate,
+    pub body: camel_api::OutcomeSegment,
+}
+
+impl Clone for WhenClauseSegment {
+    fn clone(&self) -> Self {
+        Self {
+            predicate: Arc::clone(&self.predicate),
+            body: self.body.clone(),
+        }
+    }
+}
+
+/// Outcome-aware structural EIP segment for the Choice pattern.
+///
+/// Evaluates `when` clauses in order. The first matching predicate runs its
+/// `body` (which can return `Completed`, `Stopped`, or `Failed`). If no
+/// predicate matches, the `otherwise` segment runs (if present); otherwise
+/// returns `Completed(original_exchange)`.
+///
+/// Unlike `ChoiceService` (which operates at the Tower layer and cannot
+/// preserve `Stopped(ex)` with mutations), `ChoiceSegment` operates at the
+/// `PipelineOutcome` layer and preserves the exchange at the Stop point
+/// including all mutations.
+pub struct ChoiceSegment {
+    pub clauses: Vec<WhenClauseSegment>,
+    pub otherwise: Option<camel_api::OutcomeSegment>,
+}
+
+impl Clone for ChoiceSegment {
+    fn clone(&self) -> Self {
+        Self {
+            clauses: self
+                .clauses
+                .iter()
+                .map(|c| WhenClauseSegment {
+                    predicate: Arc::clone(&c.predicate),
+                    body: c.body.clone(),
+                })
+                .collect(),
+            otherwise: self.otherwise.clone(),
+        }
+    }
+}
+
+impl camel_api::OutcomePipeline for ChoiceSegment {
+    fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+        Box::new(self.clone())
+    }
+
+    fn run<'a>(
+        &'a mut self,
+        exchange: camel_api::Exchange,
+    ) -> Pin<Box<dyn Future<Output = camel_api::PipelineOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            for clause in self.clauses.iter_mut() {
+                if (clause.predicate)(&exchange) {
+                    return clause.body.run(exchange).await;
+                }
+            }
+            if let Some(otherwise) = self.otherwise.as_mut() {
+                otherwise.run(exchange).await
+            } else {
+                camel_api::PipelineOutcome::Completed(exchange)
+            }
+        })
     }
 }
 
