@@ -24,6 +24,7 @@ name = "rust-camel"
 [workspace.package]
 version = "0.19.0"
 edition = "2024"
+rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/kennycallado/rust-camel"
 homepage = "https://github.com/kennycallado/rust-camel"
