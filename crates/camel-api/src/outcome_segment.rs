@@ -1,8 +1,7 @@
-//! Wrapper around `Box<dyn OutcomePipeline>` with extension hooks for
-//! tracing and metrics. Lives in camel-api (NOT camel-core) so EIP
-//! segment structs in camel-processor can type their fields as
-//! `camel_api::OutcomeSegment` (camel-processor depends on camel-api,
-//! not camel-core). See ADR-0025.
+//! Wrapper around `Box<dyn OutcomePipeline>`. Lives in camel-api (NOT
+//! camel-core) so EIP segment structs in camel-processor can type their
+//! fields as `camel_api::OutcomeSegment` (camel-processor depends on
+//! camel-api, not camel-core). See ADR-0025.
 
 use crate::exchange::Exchange;
 use crate::outcome_pipeline::OutcomePipeline;
@@ -10,9 +9,8 @@ use crate::pipeline_outcome::PipelineOutcome;
 use std::future::Future;
 use std::pin::Pin;
 
-/// Wrapper around `Box<dyn OutcomePipeline>` with extension hooks for
-/// tracing and metrics. Constructed via `OutcomeSegment::new(...)` and
-/// optionally enriched via `.with_tracing(route_id, idx, metrics)`.
+/// Wrapper around `Box<dyn OutcomePipeline>`. Constructed via
+/// `OutcomeSegment::new(...)` and run via `run(exchange)`.
 #[derive(Clone)]
 pub struct OutcomeSegment {
     inner: Box<dyn OutcomePipeline>,
@@ -27,15 +25,6 @@ impl std::fmt::Debug for OutcomeSegment {
 impl OutcomeSegment {
     pub fn new(inner: Box<dyn OutcomePipeline>) -> Self {
         Self { inner }
-    }
-
-    pub fn with_tracing(
-        self,
-        _route_id: &str,
-        _idx: usize,
-        _metrics: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
-    ) -> Self {
-        self
     }
 
     pub async fn run(&mut self, exchange: Exchange) -> PipelineOutcome {
