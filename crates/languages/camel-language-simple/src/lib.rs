@@ -246,6 +246,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_property_and_header_keys_preserve_hyphens() {
+        // Regression guard for rc-o6o.4: a reporter claimed
+        // `${exchangeProperty.my-decision}` resolved only `my`, silently
+        // skipping the choice.when branch. Probe (2026-06-20) showed the
+        // parser preserves the full key — `parser.rs` uses
+        // `strip_prefix("exchangeProperty.")` / `strip_prefix("header.")`,
+        // both of which keep hyphens. This test locks the behaviour in for
+        // property + header keys with hyphens, in both expression and
+        // predicate positions.
+        let lang = SimpleLanguage::new();
+
+        // Property expression: ${exchangeProperty.my-decision} -> "reject"
+        let prop_expr = lang
+            .create_expression("${exchangeProperty.my-decision}")
+            .unwrap();
+        let mut ex = exchange_with_body("anything");
+        ex.set_property(
+            "my-decision".to_string(),
+            Value::String("reject".to_string()),
+        );
+        let val = prop_expr.evaluate(&ex).await.unwrap();
+        assert_eq!(val, Value::String("reject".to_string()));
+
+        // Predicate: ${exchangeProperty.my-decision} == 'reject' -> true
+        let pred = lang
+            .create_predicate("${exchangeProperty.my-decision} == 'reject'")
+            .unwrap();
+        assert!(pred.matches(&ex).await.unwrap());
+
+        // Header expression: ${header.my-header} -> "hv"
+        let header_expr = lang.create_expression("${header.my-header}").unwrap();
+        ex.input
+            .set_header("my-header".to_string(), Value::String("hv".to_string()));
+        let header_val = header_expr.evaluate(&ex).await.unwrap();
+        assert_eq!(header_val, Value::String("hv".to_string()));
+    }
+
+    #[tokio::test]
     async fn test_string_literal_expression() {
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("'hello'").unwrap();
