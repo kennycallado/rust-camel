@@ -45,6 +45,8 @@ If a subagent needs ULTRATHINK instructions are in .opencode/instructions/ultrat
   run: cargo xtask lint-secrets
 - name: lint-log-levels
   run: cargo xtask lint-log-levels
+- name: schema-check
+  run: cargo xtask schema --check
 ```
 
 ## MERGE TO MAIN

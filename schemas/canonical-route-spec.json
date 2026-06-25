@@ -3,6 +3,12 @@
   "title": "CanonicalRouteSpec",
   "type": "object",
   "properties": {
+    "auto_startup": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "circuit_breaker": {
       "anyOf": [
         {
@@ -13,12 +19,29 @@
         }
       ]
     },
+    "concurrency": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CanonicalConcurrencySpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "from": {
       "type": "string"
     },
     "route_id": {
-      "description": "Stable minimal route representation for runtime command registration.\n\nScope note (v1):\n- This is intentionally a partial model and does not mirror every `BuilderStep`.\n- Not included in v1: auto_startup, startup_order, concurrency, error_handler,\n  unit_of_work. These are set to defaults when compiling from canonical.\n- Round-trip (YAML → Canonical → YAML) loses these fields.\n- Advanced EIPs continue to use the existing RouteDefinition/BuilderStep path.",
+      "description": "Stable minimal route representation for runtime command registration.\n\nScope notes:\n- This is intentionally a partial model and does not mirror every `BuilderStep`.\n- Version 2 adds: auto_startup, startup_order, concurrency.\n- Still excluded: error_handler, unit_of_work. These are set to defaults\n  when compiling from canonical.\n- Round-trip (YAML → Canonical → YAML) loses these fields.\n- Advanced EIPs continue to use the existing RouteDefinition/BuilderStep path.",
       "type": "string"
+    },
+    "startup_order": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32"
     },
     "steps": {
       "type": "array",
@@ -129,6 +152,40 @@
         "open_duration_ms"
       ]
     },
+    "CanonicalConcurrencySpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "sequential"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "max": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "mode": {
+              "type": "string",
+              "const": "concurrent"
+            }
+          },
+          "required": [
+            "mode",
+            "max"
+          ]
+        }
+      ]
+    },
     "CanonicalSplitAggregationSpec": {
       "type": "string",
       "enum": [
@@ -156,6 +213,18 @@
           "additionalProperties": false,
           "required": [
             "language"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "stream": {
+              "$ref": "#/$defs/StreamSplitConfig"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "stream"
           ]
         }
       ]
@@ -470,6 +539,77 @@
       "required": [
         "language",
         "source"
+      ]
+    },
+    "StreamSplitConfig": {
+      "description": "Configuration for splitting a streaming body into fragments.\n\nControls how the stream splitter processes the body, including format\ndetection, sizing limits, and metadata propagation.",
+      "type": "object",
+      "properties": {
+        "batch_size": {
+          "description": "Number of records/chunks to collect into a single exchange batch.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "chunk_size": {
+          "description": "Explicit chunk size in bytes (required when format is [`Chunks`](StreamSplitFormat::Chunks)).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "format": {
+          "description": "The streaming format to use.",
+          "$ref": "#/$defs/StreamSplitFormat"
+        },
+        "include_origin": {
+          "description": "Whether to include origin metadata in each fragment.",
+          "type": "boolean"
+        },
+        "max_record_bytes": {
+          "description": "Maximum size (in bytes) of a single record or chunk.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "format",
+        "max_record_bytes",
+        "batch_size",
+        "include_origin"
+      ]
+    },
+    "StreamSplitFormat": {
+      "description": "The streaming format to use when splitting a stream body.",
+      "oneOf": [
+        {
+          "description": "Auto-detect the format from the body content.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "Newline-delimited JSON — each line is a complete JSON value.",
+          "type": "string",
+          "const": "ndjson"
+        },
+        {
+          "description": "Split by newlines, each line becomes a text fragment.",
+          "type": "string",
+          "const": "lines"
+        },
+        {
+          "description": "Split into fixed-size byte chunks.",
+          "type": "string",
+          "const": "chunks"
+        },
+        {
+          "description": "ZIP archive — materialized format, each entry becomes a fragment exchange.",
+          "type": "string",
+          "const": "zip"
+        }
       ]
     }
   }

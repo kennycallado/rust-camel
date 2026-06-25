@@ -1,0 +1,2083 @@
+{
+  "$defs": {
+    "AggregateData": {
+      "additionalProperties": false,
+      "properties": {
+        "bucket_ttl_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "completion_predicate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PredicateBlock"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completion_size": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "completion_timeout_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "correlation_key": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discard_on_timeout": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "force_completion_on_stop": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "header": {
+          "type": "string"
+        },
+        "max_buckets": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "strategy": {
+          "default": "collect_all",
+          "type": "string"
+        }
+      },
+      "required": [
+        "header"
+      ],
+      "type": "object"
+    },
+    "AggregateStep": {
+      "properties": {
+        "aggregate": {
+          "$ref": "#/$defs/AggregateData"
+        }
+      },
+      "required": [
+        "aggregate"
+      ],
+      "type": "object"
+    },
+    "BeanStep": {
+      "additionalProperties": false,
+      "properties": {
+        "bean": {
+          "$ref": "#/$defs/BeanStepData"
+        }
+      },
+      "required": [
+        "bean"
+      ],
+      "type": "object"
+    },
+    "BeanStepData": {
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "method"
+      ],
+      "type": "object"
+    },
+    "CatchClauseData": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/ExceptionDisposition"
+        },
+        "exception": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "on_when": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "when": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "type": "object"
+    },
+    "ChoiceData": {
+      "additionalProperties": false,
+      "properties": {
+        "otherwise": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "when": {
+          "items": {
+            "$ref": "#/$defs/PredicateBlock"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ChoiceStep": {
+      "properties": {
+        "choice": {
+          "$ref": "#/$defs/ChoiceData"
+        }
+      },
+      "required": [
+        "choice"
+      ],
+      "type": "object"
+    },
+    "ConvertBodyToStep": {
+      "properties": {
+        "convert_body_to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "convert_body_to"
+      ],
+      "type": "object"
+    },
+    "DelayBody": {
+      "anyOf": [
+        {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "$ref": "#/$defs/DelayFullConfig"
+        }
+      ]
+    },
+    "DelayFullConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "delay_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dynamic_header": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "delay_ms"
+      ],
+      "type": "object"
+    },
+    "DelayStep": {
+      "properties": {
+        "delay": {
+          "$ref": "#/$defs/DelayBody"
+        }
+      },
+      "required": [
+        "delay"
+      ],
+      "type": "object"
+    },
+    "DoTryData": {
+      "additionalProperties": false,
+      "properties": {
+        "catch": {
+          "items": {
+            "$ref": "#/$defs/CatchClauseData"
+          },
+          "type": "array"
+        },
+        "finally": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FinallyData"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "type": "object"
+    },
+    "DoTryStep": {
+      "properties": {
+        "do_try": {
+          "$ref": "#/$defs/DoTryData"
+        }
+      },
+      "required": [
+        "do_try"
+      ],
+      "type": "object"
+    },
+    "DynamicRouterData": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_size": {
+          "default": 1000,
+          "format": "int32",
+          "type": "integer"
+        },
+        "ignore_invalid_endpoints": {
+          "default": false,
+          "type": "boolean"
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_iterations": {
+          "default": 1000,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uri_delimiter": {
+          "default": ",",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "DynamicRouterStep": {
+      "additionalProperties": false,
+      "properties": {
+        "dynamic_router": {
+          "$ref": "#/$defs/DynamicRouterData"
+        }
+      },
+      "required": [
+        "dynamic_router"
+      ],
+      "type": "object"
+    },
+    "EnrichBody": {
+      "anyOf": [
+        {
+          "description": "Shorthand: `enrich: \"file:...\"` or `poll_enrich: \"file:...\"`",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/EnrichConfig",
+          "description": "Full form: `enrich: { uri: \"...\", strategy: \"...\", timeout: ... }`"
+        }
+      ]
+    },
+    "EnrichConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri"
+      ],
+      "type": "object"
+    },
+    "EnrichStep": {
+      "additionalProperties": false,
+      "properties": {
+        "enrich": {
+          "$ref": "#/$defs/EnrichBody"
+        }
+      },
+      "required": [
+        "enrich"
+      ],
+      "type": "object"
+    },
+    "ExceptionDisposition": {
+      "description": "Disposition for an exception handler or catch clause (ADR-0019).\n\n# YAML casing\n\nserde uses `lowercase` casing: `handled`, `propagate`, `continued`.\n\n# Default divergence\n\n`ExceptionDisposition::default()` returns `Propagate` (first variant per `#[derive(Default)]`),\nbut the YAML + builder layers default to `Handled` for doTry catch clauses\n(via `default_handled_disposition()` in `camel-dsl/src/route_ast.rs` and the `DoCatchBuilder::do_catch_exception` constructor).\nDirect struct construction should explicitly set disposition rather than relying on `Default`.",
+      "oneOf": [
+        {
+          "const": "propagate",
+          "description": "After retry exhaustion / on_steps / DLC, re-throw to upstream.",
+          "type": "string"
+        },
+        {
+          "const": "handled",
+          "description": "Suppress re-throw. The handler's exchange is the final result.",
+          "type": "string"
+        },
+        {
+          "const": "continued",
+          "description": "Clear the error. The pipeline continues to the NEXT step.",
+          "type": "string"
+        }
+      ]
+    },
+    "FilterStep": {
+      "properties": {
+        "filter": {
+          "$ref": "#/$defs/PredicateBlock"
+        }
+      },
+      "required": [
+        "filter"
+      ],
+      "type": "object"
+    },
+    "FinallyData": {
+      "additionalProperties": false,
+      "properties": {
+        "on_when": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "type": "object"
+    },
+    "FunctionData": {
+      "additionalProperties": false,
+      "properties": {
+        "runtime": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "timeout_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "runtime",
+        "source"
+      ],
+      "type": "object"
+    },
+    "FunctionStep": {
+      "additionalProperties": false,
+      "properties": {
+        "function": {
+          "$ref": "#/$defs/FunctionData"
+        }
+      },
+      "required": [
+        "function"
+      ],
+      "type": "object"
+    },
+    "LoadBalanceData": {
+      "additionalProperties": false,
+      "properties": {
+        "distribution_ratio": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "strategy": {
+          "default": "round_robin",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "LoadBalanceStep": {
+      "additionalProperties": false,
+      "properties": {
+        "load_balance": {
+          "$ref": "#/$defs/LoadBalanceData"
+        }
+      },
+      "required": [
+        "load_balance"
+      ],
+      "type": "object"
+    },
+    "LogBody": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/LogConfig"
+        }
+      ]
+    },
+    "LogConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "$ref": "#/$defs/LogMessageData",
+          "description": "The log message. Can be a plain string literal or a nested expression object."
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
+    "LogMessageData": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/LogMessageExpr"
+        }
+      ],
+      "description": "The `message` field inside a `log: { message: ... }` config block.\nEither a bare string literal or a value-source expression (simple, rhai, language+source)."
+    },
+    "LogMessageExpr": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "xpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LogStep": {
+      "properties": {
+        "log": {
+          "$ref": "#/$defs/LogBody"
+        }
+      },
+      "required": [
+        "log"
+      ],
+      "type": "object"
+    },
+    "LoopData": {
+      "anyOf": [
+        {
+          "description": "Shorthand: `loop: 3`",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "$ref": "#/$defs/LoopFullConfig",
+          "description": "Full form with config block."
+        }
+      ]
+    },
+    "LoopFullConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "description": "Fixed iteration count. Mutually exclusive with `while`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "while": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoopWhileExpr"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "While condition — expression-only (no nested steps)."
+        }
+      },
+      "type": "object"
+    },
+    "LoopStep": {
+      "properties": {
+        "loop": {
+          "$ref": "#/$defs/LoopData"
+        }
+      },
+      "required": [
+        "loop"
+      ],
+      "type": "object"
+    },
+    "LoopWhileExpr": {
+      "additionalProperties": false,
+      "description": "Expression-only predicate for loop while condition.",
+      "properties": {
+        "jsonpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "xpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MarshalStep": {
+      "properties": {
+        "marshal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "marshal"
+      ],
+      "type": "object"
+    },
+    "MulticastData": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregation": {
+          "default": "last_wins",
+          "type": "string"
+        },
+        "parallel": {
+          "default": false,
+          "type": "boolean"
+        },
+        "parallel_limit": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "stop_on_exception": {
+          "default": false,
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MulticastStep": {
+      "properties": {
+        "multicast": {
+          "$ref": "#/$defs/MulticastData"
+        }
+      },
+      "required": [
+        "multicast"
+      ],
+      "type": "object"
+    },
+    "PollEnrichStep": {
+      "additionalProperties": false,
+      "properties": {
+        "poll_enrich": {
+          "$ref": "#/$defs/EnrichBody"
+        }
+      },
+      "required": [
+        "poll_enrich"
+      ],
+      "type": "object"
+    },
+    "PredicateBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "xpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RecipientListData": {
+      "additionalProperties": false,
+      "properties": {
+        "delimiter": {
+          "default": ",",
+          "type": "string"
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parallel": {
+          "default": false,
+          "type": "boolean"
+        },
+        "parallel_limit": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stop_on_exception": {
+          "default": false,
+          "type": "boolean"
+        },
+        "strategy": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RecipientListStep": {
+      "additionalProperties": false,
+      "properties": {
+        "recipient_list": {
+          "$ref": "#/$defs/RecipientListData"
+        }
+      },
+      "required": [
+        "recipient_list"
+      ],
+      "type": "object"
+    },
+    "RouteDslCircuitBreaker": {
+      "properties": {
+        "failure_threshold": {
+          "default": 5,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "open_duration_ms": {
+          "default": 30000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "RouteDslErrorHandler": {
+      "properties": {
+        "dead_letter_channel": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on_exceptions": {
+          "items": {
+            "$ref": "#/$defs/RouteDslOnException"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslRedeliveryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RouteDslOnException": {
+      "properties": {
+        "continued": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "handled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "kind": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_contains": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslRedeliveryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RouteDslPermissionContext": {
+      "properties": {
+        "headers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "properties": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RouteDslPermissionPolicy": {
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslPermissionValueSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cache_negative_ttl_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cache_ttl_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslPermissionContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy": {
+          "type": "string"
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslPermissionValueSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scopes": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "policy"
+      ],
+      "type": "object"
+    },
+    "RouteDslPermissionValueSource": {
+      "properties": {
+        "header": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "literal": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "property": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RouteDslRedeliveryPolicy": {
+      "properties": {
+        "handled_by": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "initial_delay_ms": {
+          "default": 100,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "jitter_factor": {
+          "default": 0.0,
+          "format": "double",
+          "type": "number"
+        },
+        "max_attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_delay_ms": {
+          "default": 10000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "multiplier": {
+          "default": 2.0,
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "max_attempts"
+      ],
+      "type": "object"
+    },
+    "RouteDslRoute": {
+      "properties": {
+        "auto_startup": {
+          "default": true,
+          "type": "boolean"
+        },
+        "circuit_breaker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslCircuitBreaker"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "concurrent": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error_handler": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslErrorHandler"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "on_complete": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on_failure": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "security_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslSecurityPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sequential": {
+          "default": false,
+          "type": "boolean"
+        },
+        "startup_order": {
+          "default": 1000,
+          "format": "int32",
+          "type": "integer"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "from"
+      ],
+      "type": "object"
+    },
+    "RouteDslSecurityPolicy": {
+      "properties": {
+        "all_required": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "config": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": null,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RouteDslPermissionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ref": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roles": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "scopes": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "wasm": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RouteDslStep": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToStep"
+        },
+        {
+          "$ref": "#/$defs/SetHeaderStep"
+        },
+        {
+          "$ref": "#/$defs/SetPropertyStep"
+        },
+        {
+          "$ref": "#/$defs/SetBodyStep"
+        },
+        {
+          "$ref": "#/$defs/BeanStep"
+        },
+        {
+          "$ref": "#/$defs/ChoiceStep"
+        },
+        {
+          "$ref": "#/$defs/DynamicRouterStep"
+        },
+        {
+          "$ref": "#/$defs/FilterStep"
+        },
+        {
+          "$ref": "#/$defs/FunctionStep"
+        },
+        {
+          "$ref": "#/$defs/LoadBalanceStep"
+        },
+        {
+          "$ref": "#/$defs/LogStep"
+        },
+        {
+          "$ref": "#/$defs/SplitStep"
+        },
+        {
+          "$ref": "#/$defs/AggregateStep"
+        },
+        {
+          "$ref": "#/$defs/WireTapStep"
+        },
+        {
+          "$ref": "#/$defs/MulticastStep"
+        },
+        {
+          "$ref": "#/$defs/RoutingSlipStep"
+        },
+        {
+          "$ref": "#/$defs/RecipientListStep"
+        },
+        {
+          "$ref": "#/$defs/StopStep"
+        },
+        {
+          "$ref": "#/$defs/StreamCacheStep"
+        },
+        {
+          "$ref": "#/$defs/ThrottleStep"
+        },
+        {
+          "$ref": "#/$defs/TransformStep"
+        },
+        {
+          "$ref": "#/$defs/ScriptStep"
+        },
+        {
+          "$ref": "#/$defs/ConvertBodyToStep"
+        },
+        {
+          "$ref": "#/$defs/MarshalStep"
+        },
+        {
+          "$ref": "#/$defs/UnmarshalStep"
+        },
+        {
+          "$ref": "#/$defs/DelayStep"
+        },
+        {
+          "$ref": "#/$defs/DoTryStep"
+        },
+        {
+          "$ref": "#/$defs/LoopStep"
+        },
+        {
+          "$ref": "#/$defs/ValidateStep"
+        },
+        {
+          "$ref": "#/$defs/EnrichStep"
+        },
+        {
+          "$ref": "#/$defs/PollEnrichStep"
+        }
+      ]
+    },
+    "RoutingSlipData": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_size": {
+          "default": 1000,
+          "format": "int32",
+          "type": "integer"
+        },
+        "ignore_invalid_endpoints": {
+          "default": false,
+          "type": "boolean"
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uri_delimiter": {
+          "default": ",",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RoutingSlipStep": {
+      "additionalProperties": false,
+      "properties": {
+        "routing_slip": {
+          "$ref": "#/$defs/RoutingSlipData"
+        }
+      },
+      "required": [
+        "routing_slip"
+      ],
+      "type": "object"
+    },
+    "ScriptData": {
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "language",
+        "source"
+      ],
+      "type": "object"
+    },
+    "ScriptStep": {
+      "properties": {
+        "script": {
+          "$ref": "#/$defs/ScriptData"
+        }
+      },
+      "required": [
+        "script"
+      ],
+      "type": "object"
+    },
+    "SetBodyConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "default": null
+        },
+        "xpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SetBodyData": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SetBodyConfig"
+        },
+        true
+      ]
+    },
+    "SetBodyStep": {
+      "properties": {
+        "set_body": {
+          "$ref": "#/$defs/SetBodyData"
+        }
+      },
+      "required": [
+        "set_body"
+      ],
+      "type": "object"
+    },
+    "SetHeaderData": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "default": null
+        },
+        "xpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "SetHeaderStep": {
+      "properties": {
+        "set_header": {
+          "$ref": "#/$defs/SetHeaderData"
+        }
+      },
+      "required": [
+        "set_header"
+      ],
+      "type": "object"
+    },
+    "SetPropertyData": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "default": null
+        },
+        "xpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "SetPropertyStep": {
+      "properties": {
+        "set_property": {
+          "$ref": "#/$defs/SetPropertyData"
+        }
+      },
+      "required": [
+        "set_property"
+      ],
+      "type": "object"
+    },
+    "SplitData": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregation": {
+          "default": "last_wins",
+          "type": "string"
+        },
+        "expression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SplitExpressionYaml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parallel": {
+          "default": false,
+          "type": "boolean"
+        },
+        "parallel_limit": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "stop_on_exception": {
+          "default": true,
+          "type": "boolean"
+        },
+        "stream": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StreamConfigYaml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "streaming": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "SplitExpressionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "language": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rhai": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "simple": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "xpath": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SplitExpressionYaml": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/SplitExpressionConfig"
+        }
+      ]
+    },
+    "SplitStep": {
+      "properties": {
+        "split": {
+          "$ref": "#/$defs/SplitData"
+        }
+      },
+      "required": [
+        "split"
+      ],
+      "type": "object"
+    },
+    "StopStep": {
+      "properties": {
+        "stop": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stop"
+      ],
+      "type": "object"
+    },
+    "StreamCacheBody": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/StreamCacheConfig"
+        }
+      ]
+    },
+    "StreamCacheConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "threshold": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "StreamCacheStep": {
+      "properties": {
+        "stream_cache": {
+          "$ref": "#/$defs/StreamCacheBody"
+        }
+      },
+      "required": [
+        "stream_cache"
+      ],
+      "type": "object"
+    },
+    "StreamConfigYaml": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_size": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "chunk_size": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "format": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_record_bytes": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ThrottleData": {
+      "additionalProperties": false,
+      "properties": {
+        "max_requests": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "period_secs": {
+          "default": 1,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "strategy": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "max_requests"
+      ],
+      "type": "object"
+    },
+    "ThrottleStep": {
+      "additionalProperties": false,
+      "properties": {
+        "throttle": {
+          "$ref": "#/$defs/ThrottleData"
+        }
+      },
+      "required": [
+        "throttle"
+      ],
+      "type": "object"
+    },
+    "ToStep": {
+      "properties": {
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "type": "object"
+    },
+    "TransformStep": {
+      "description": "`transform:` step — alias for `set_body:`, reuses all SetBodyData types.",
+      "properties": {
+        "transform": {
+          "$ref": "#/$defs/SetBodyData"
+        }
+      },
+      "required": [
+        "transform"
+      ],
+      "type": "object"
+    },
+    "UnmarshalStep": {
+      "properties": {
+        "unmarshal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "unmarshal"
+      ],
+      "type": "object"
+    },
+    "ValidateStep": {
+      "properties": {
+        "validate": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "validate"
+      ],
+      "type": "object"
+    },
+    "WireTapStep": {
+      "properties": {
+        "wire_tap": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "wire_tap"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/dsl/route-schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Schema envelope for the public DSL surface.\n\nExcludes templates (which use `noyalib::compat::serde_yaml::Value` —\na type that does not implement JsonSchema). Templates are internal\nmachinery; the public SDK schema is `{routes: [...]}` only.",
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema URL (mirrors RouteDslRoutes.schema_url — added in Task 9).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "writeOnly": true
+    },
+    "routes": {
+      "description": "Route definitions.",
+      "items": {
+        "$ref": "#/$defs/RouteDslRoute"
+      },
+      "type": "array"
+    }
+  },
+  "title": "RouteDslSchemaEnvelope",
+  "type": "object"
+}

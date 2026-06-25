@@ -58,7 +58,11 @@ enum Commands {
         target: String,
     },
     /// Generate canonical route spec artifacts (JSON Schema, TypeScript types)
-    Schema,
+    Schema {
+        /// Check on-disk schemas match freshly-regenerated ones. Exit non-zero on drift.
+        #[arg(long)]
+        check: bool,
+    },
     /// Scan production source files for .unwrap() and .expect( calls.
     /// Exits non-zero if any violations are found.
     /// Escape hatch: append `// allow-unwrap` to the line.
@@ -123,9 +127,9 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Schema => {
-            if let Err(e) = generate_schema() {
-                eprintln!("error: {e}");
+        Commands::Schema { check } => {
+            if let Err(e) = run_schema_generation(check) {
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
@@ -825,48 +829,319 @@ pub fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
     None
 }
 
-fn generate_schema() -> Result<(), String> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root =
-        find_workspace_root_from(&manifest_dir).ok_or("Cannot locate workspace root")?;
+fn run_schema_generation(check: bool) -> Result<(), String> {
+    let workspace_root = find_workspace_root_from(&PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        .ok_or("Cannot locate workspace root")?;
     let schemas_dir = workspace_root.join("schemas");
-    std::fs::create_dir_all(&schemas_dir)
-        .map_err(|e| format!("Failed to create schemas dir: {e}"))?;
-
-    let schema = schemars::schema_for!(camel_api::CanonicalRouteSpec);
-    let schema_json = serde_json::to_string_pretty(&schema)
-        .map_err(|e| format!("Failed to serialize schema: {e}"))?;
-    let schema_path = schemas_dir.join("canonical-route-spec.json");
-    std::fs::write(&schema_path, &schema_json)
-        .map_err(|e| format!("Failed to write schema: {e}"))?;
-    println!("Generated: {}", schema_path.display());
-
+    let dsl_dir = schemas_dir.join("dsl");
     let ts_dir = schemas_dir.join("ts");
-    std::fs::create_dir_all(&ts_dir).map_err(|e| format!("Failed to create ts dir: {e}"))?;
+    // Directory creation is DEFERRED to the `!check` branch — `--check` mode
+    // must be non-mutating (no create_dir_all, no writes anywhere).
 
-    let ts_config = ts_rs::Config::new().with_out_dir(&ts_dir);
-    <camel_api::CanonicalRouteSpec as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export CanonicalRouteSpec: {e}"))?;
-    <camel_api::runtime::CanonicalStepSpec as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export CanonicalStepSpec: {e}"))?;
-    <camel_api::runtime::CanonicalWhenSpec as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export CanonicalWhenSpec: {e}"))?;
-    <camel_api::runtime::CanonicalCircuitBreakerSpec as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export CanonicalCircuitBreakerSpec: {e}"))?;
-    <camel_api::runtime::CanonicalSplitExpressionSpec as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export CanonicalSplitExpressionSpec: {e}"))?;
-    <camel_api::runtime::CanonicalSplitAggregationSpec as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export CanonicalSplitAggregationSpec: {e}"))?;
-    <camel_api::runtime::CanonicalAggregateStrategySpec as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export CanonicalAggregateStrategySpec: {e}"))?;
-    <camel_api::runtime::CanonicalAggregateSpec as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export CanonicalAggregateSpec: {e}"))?;
-    <camel_api::declarative::LanguageExpressionDef as ts_rs::TS>::export(&ts_config)
-        .map_err(|e| format!("Failed to export LanguageExpressionDef: {e}"))?;
-    println!("Generated TypeScript types in: {}", ts_dir.display());
+    // Pure content-producing fns (no IO).
+    let canonical_schema = generate_canonical_schema_content()?;
+    let dsl_schema = generate_dsl_schema()?;
 
-    println!("Done! Run `quicktype` manually for Go/Python types.");
+    // JSON schema artifacts: (path, content).
+    let schema_artifacts: Vec<(std::path::PathBuf, String)> = vec![
+        (
+            schemas_dir.join("canonical-route-spec.json"),
+            canonical_schema,
+        ),
+        (dsl_dir.join("route-schema.json"), dsl_schema),
+    ];
+
+    // TS artifacts: ALWAYS export to a tempdir first (never write to ts_dir
+    // before the drift check; otherwise --check mode would overwrite disk
+    // and the subsequent diff would always succeed).
+    let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let ts_config = ts_rs::Config::new().with_out_dir(temp.path());
+    export_ts_types(&ts_config)?;
+    let mut temp_ts_files: Vec<(String, String)> = collect_ts_files(temp.path())?;
+    // Append missing dependency files that ts_rs references but doesn't auto-generate.
+    // serde_json::Value fields trigger `import type { JsonValue } from "./serde_json/JsonValue"`.
+    temp_ts_files.push((
+        "serde_json/JsonValue.ts".to_string(),
+        "// unknown is safer than any — callers must narrow before use.\n// This file is hand-maintained because ts-rs references the import\n// path but does not auto-generate the file.\nexport type JsonValue = unknown;\n".to_string(),
+    ));
+
+    if check {
+        // NON-MUTATING: no create_dir_all, no writes anywhere. Only reads.
+        let mut drift: Vec<String> = Vec::new();
+        for (path, expected) in &schema_artifacts {
+            let actual = std::fs::read_to_string(path)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            if &actual != expected {
+                drift.push(path.display().to_string());
+            }
+        }
+        if let Err(ts_err) = check_ts_drift(&ts_dir, &temp_ts_files) {
+            drift.push(ts_err);
+        }
+        if !drift.is_empty() {
+            return Err(format!(
+                "Schema drift detected. Re-run `cargo xtask schema` and commit.\n  {}",
+                drift.join("\n  ")
+            ));
+        }
+        println!("OK: all schemas and TS types match.");
+    } else {
+        // MUTATING: create all dirs lazily, then write everything.
+        std::fs::create_dir_all(&schemas_dir).map_err(|e| format!("create schemas/: {e}"))?;
+        std::fs::create_dir_all(&dsl_dir).map_err(|e| format!("create schemas/dsl/: {e}"))?;
+        std::fs::create_dir_all(&ts_dir).map_err(|e| format!("create schemas/ts/: {e}"))?;
+        // Write JSON schema artifacts.
+        for (path, content) in &schema_artifacts {
+            std::fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+            println!("Generated: {}", path.display());
+        }
+        // Write TS files from tempdir to ts_dir.
+        for (fname, content) in &temp_ts_files {
+            let target = ts_dir.join(fname);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create {}: {e}", parent.display()))?;
+            }
+            std::fs::write(&target, content)
+                .map_err(|e| format!("write {}: {e}", target.display()))?;
+        }
+        // Remove stale TS files on disk that no longer get generated.
+        let on_disk_files: Vec<String> = std::fs::read_dir(&ts_dir)
+            .map_err(|e| format!("read ts_dir: {e}"))?
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".ts"))
+            .collect();
+        let generated: Vec<&String> = temp_ts_files.iter().map(|(n, _)| n).collect();
+        for fname in on_disk_files {
+            if !generated.contains(&&fname) {
+                let stale = ts_dir.join(&fname);
+                std::fs::remove_file(&stale).ok();
+                println!("Removed stale: {}", stale.display());
+            }
+        }
+        println!(
+            "Generated {} TS files in: {}",
+            temp_ts_files.len(),
+            ts_dir.display()
+        );
+        println!("Done! Run `quicktype` manually for Go/Python types.");
+    }
+
     Ok(())
+}
+
+fn generate_canonical_schema_content() -> Result<String, String> {
+    let schema = schemars::schema_for!(camel_api::CanonicalRouteSpec);
+    serde_json::to_string_pretty(&schema).map_err(|e| format!("serialize canonical: {e}"))
+}
+
+fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
+    // Helper macro to reduce boilerplate
+    macro_rules! ts_export {
+        ($config:ident, $ty:ty) => {
+            <$ty as ts_rs::TS>::export($config)
+                .map_err(|e| format!("TS {}: {e}", stringify!($ty)))?;
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // camel_api types — CanonicalRouteSpec and its transitive dependencies
+    // -----------------------------------------------------------------------
+    ts_export!(ts_config, camel_api::CanonicalRouteSpec);
+    ts_export!(ts_config, camel_api::runtime::CanonicalStepSpec);
+    ts_export!(ts_config, camel_api::runtime::CanonicalWhenSpec);
+    ts_export!(ts_config, camel_api::runtime::CanonicalCircuitBreakerSpec);
+    ts_export!(ts_config, camel_api::runtime::CanonicalSplitExpressionSpec);
+    ts_export!(ts_config, camel_api::runtime::CanonicalSplitAggregationSpec);
+    ts_export!(
+        ts_config,
+        camel_api::runtime::CanonicalAggregateStrategySpec
+    );
+    ts_export!(ts_config, camel_api::runtime::CanonicalAggregateSpec);
+    ts_export!(ts_config, camel_api::declarative::LanguageExpressionDef);
+    // ExceptionDisposition — referenced by CatchClauseData in the DSL
+    ts_export!(ts_config, camel_api::error_handler::ExceptionDisposition);
+    // CanonicalConcurrencySpec — referenced by CanonicalRouteSpec
+    ts_export!(ts_config, camel_api::runtime::CanonicalConcurrencySpec);
+    // StreamSplitConfig + StreamSplitFormat — referenced by CanonicalSplitExpressionSpec
+    ts_export!(ts_config, camel_api::splitter::StreamSplitConfig);
+    ts_export!(ts_config, camel_api::splitter::StreamSplitFormat);
+
+    // -----------------------------------------------------------------------
+    // camel_dsl::route_ast DSL types — every type with the cfg_attr derive
+    // -----------------------------------------------------------------------
+    // Route-level config / error handling / security
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslRoute);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslStep);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslSecurityPolicy);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslPermissionPolicy);
+    ts_export!(
+        ts_config,
+        camel_dsl::route_ast::RouteDslPermissionValueSource
+    );
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslPermissionContext);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslErrorHandler);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslOnException);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslRedeliveryPolicy);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslCircuitBreaker);
+
+    // Step wrappers
+    ts_export!(ts_config, camel_dsl::route_ast::AggregateStep);
+    ts_export!(ts_config, camel_dsl::route_ast::BeanStep);
+    ts_export!(ts_config, camel_dsl::route_ast::ChoiceStep);
+    ts_export!(ts_config, camel_dsl::route_ast::ConvertBodyToStep);
+    ts_export!(ts_config, camel_dsl::route_ast::DelayStep);
+    ts_export!(ts_config, camel_dsl::route_ast::DoTryStep);
+    ts_export!(ts_config, camel_dsl::route_ast::DynamicRouterStep);
+    ts_export!(ts_config, camel_dsl::route_ast::EnrichStep);
+    ts_export!(ts_config, camel_dsl::route_ast::FilterStep);
+    ts_export!(ts_config, camel_dsl::route_ast::FunctionStep);
+    ts_export!(ts_config, camel_dsl::route_ast::LoadBalanceStep);
+    ts_export!(ts_config, camel_dsl::route_ast::LogStep);
+    ts_export!(ts_config, camel_dsl::route_ast::LoopStep);
+    ts_export!(ts_config, camel_dsl::route_ast::MarshalStep);
+    ts_export!(ts_config, camel_dsl::route_ast::MulticastStep);
+    ts_export!(ts_config, camel_dsl::route_ast::PollEnrichStep);
+    ts_export!(ts_config, camel_dsl::route_ast::RecipientListStep);
+    ts_export!(ts_config, camel_dsl::route_ast::RoutingSlipStep);
+    ts_export!(ts_config, camel_dsl::route_ast::ScriptStep);
+    ts_export!(ts_config, camel_dsl::route_ast::SetBodyStep);
+    ts_export!(ts_config, camel_dsl::route_ast::SetHeaderStep);
+    ts_export!(ts_config, camel_dsl::route_ast::SetPropertyStep);
+    ts_export!(ts_config, camel_dsl::route_ast::SplitStep);
+    ts_export!(ts_config, camel_dsl::route_ast::StopStep);
+    ts_export!(ts_config, camel_dsl::route_ast::StreamCacheStep);
+    ts_export!(ts_config, camel_dsl::route_ast::ThrottleStep);
+    ts_export!(ts_config, camel_dsl::route_ast::ToStep);
+    ts_export!(ts_config, camel_dsl::route_ast::TransformStep);
+    ts_export!(ts_config, camel_dsl::route_ast::UnmarshalStep);
+    ts_export!(ts_config, camel_dsl::route_ast::ValidateStep);
+    ts_export!(ts_config, camel_dsl::route_ast::WireTapStep);
+
+    // Step data types
+    ts_export!(ts_config, camel_dsl::route_ast::AggregateData);
+    ts_export!(ts_config, camel_dsl::route_ast::BeanStepData);
+    ts_export!(ts_config, camel_dsl::route_ast::CatchClauseData);
+    ts_export!(ts_config, camel_dsl::route_ast::ChoiceData);
+    ts_export!(ts_config, camel_dsl::route_ast::DelayFullConfig);
+    ts_export!(ts_config, camel_dsl::route_ast::DoTryData);
+    ts_export!(ts_config, camel_dsl::route_ast::DynamicRouterData);
+    ts_export!(ts_config, camel_dsl::route_ast::EnrichConfig);
+    ts_export!(ts_config, camel_dsl::route_ast::FinallyData);
+    ts_export!(ts_config, camel_dsl::route_ast::FunctionData);
+    ts_export!(ts_config, camel_dsl::route_ast::LoadBalanceData);
+    ts_export!(ts_config, camel_dsl::route_ast::LogConfig);
+    ts_export!(ts_config, camel_dsl::route_ast::LogMessageExpr);
+    ts_export!(ts_config, camel_dsl::route_ast::MulticastData);
+    ts_export!(ts_config, camel_dsl::route_ast::PredicateBlock);
+    ts_export!(ts_config, camel_dsl::route_ast::RecipientListData);
+    ts_export!(ts_config, camel_dsl::route_ast::RoutingSlipData);
+    ts_export!(ts_config, camel_dsl::route_ast::ScriptData);
+    ts_export!(ts_config, camel_dsl::route_ast::SetBodyConfig);
+    ts_export!(ts_config, camel_dsl::route_ast::SetHeaderData);
+    ts_export!(ts_config, camel_dsl::route_ast::SetPropertyData);
+    ts_export!(ts_config, camel_dsl::route_ast::SplitData);
+    ts_export!(ts_config, camel_dsl::route_ast::SplitExpressionConfig);
+    ts_export!(ts_config, camel_dsl::route_ast::StreamConfigYaml);
+    ts_export!(ts_config, camel_dsl::route_ast::ThrottleData);
+    ts_export!(ts_config, camel_dsl::route_ast::LoopFullConfig);
+    ts_export!(ts_config, camel_dsl::route_ast::LoopWhileExpr);
+    ts_export!(ts_config, camel_dsl::route_ast::EnrichBody);
+    ts_export!(ts_config, camel_dsl::route_ast::StreamCacheConfig);
+
+    // Untagged enums (body/data unions)
+    ts_export!(ts_config, camel_dsl::route_ast::DelayBody);
+    ts_export!(ts_config, camel_dsl::route_ast::LogBody);
+    ts_export!(ts_config, camel_dsl::route_ast::LogMessageData);
+    ts_export!(ts_config, camel_dsl::route_ast::LoopData);
+    ts_export!(ts_config, camel_dsl::route_ast::SetBodyData);
+    ts_export!(ts_config, camel_dsl::route_ast::SplitExpressionYaml);
+    ts_export!(ts_config, camel_dsl::route_ast::StreamCacheBody);
+
+    // Template types
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslTemplateParameter);
+    ts_export!(ts_config, camel_dsl::route_ast::RouteDslTemplatedRoute);
+
+    Ok(())
+}
+
+fn collect_ts_files(dir: &std::path::Path) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("ts") {
+            continue;
+        }
+        let fname = entry.file_name().to_string_lossy().into_owned();
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        out.push((fname, content));
+    }
+    Ok(out)
+}
+
+fn check_ts_drift(ts_dir: &std::path::Path, temp_files: &[(String, String)]) -> Result<(), String> {
+    let mut drift = Vec::new();
+
+    for (fname, expected) in temp_files {
+        let disk_path = ts_dir.join(fname);
+        match std::fs::read_to_string(&disk_path) {
+            Ok(actual) if &actual == expected => { /* match */ }
+            Ok(_) => drift.push(format!("{}: content differs", fname)),
+            Err(_) => drift.push(format!("{}: missing on disk", fname)),
+        }
+    }
+
+    if let Ok(entries) = std::fs::read_dir(ts_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let fname = entry.file_name().to_string_lossy().into_owned();
+            if fname.ends_with(".ts") && !temp_files.iter().any(|(n, _)| n == &fname) {
+                drift.push(format!("{}: stale on disk (no longer generated)", fname));
+            }
+        }
+    }
+
+    if drift.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("schemas/ts/ drift: {}", drift.join("; ")))
+    }
+}
+
+/// Schema envelope for the public DSL surface.
+///
+/// Excludes templates (which use `noyalib::compat::serde_yaml::Value` —
+/// a type that does not implement JsonSchema). Templates are internal
+/// machinery; the public SDK schema is `{routes: [...]}` only.
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+struct RouteDslSchemaEnvelope {
+    /// Optional JSON Schema URL (mirrors RouteDslRoutes.schema_url — added in Task 9).
+    #[serde(rename = "$schema", default, skip_serializing)]
+    schema_url: Option<String>,
+    /// Route definitions.
+    #[serde(default)]
+    routes: Vec<camel_dsl::RouteDslRoute>,
+}
+
+const DSL_SCHEMA_URL: &str =
+    "https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/dsl/route-schema.json";
+
+fn generate_dsl_schema() -> Result<String, String> {
+    let schema = schemars::schema_for!(RouteDslSchemaEnvelope);
+    let mut value =
+        serde_json::to_value(&schema).map_err(|e| format!("serialize DSL schema: {e}"))?;
+    if let Some(obj) = value.as_object_mut() {
+        // $id self-identifies the schema (per JSON Schema 2020-12 spec).
+        // Tools like ajv use $id for $ref resolution.
+        obj.insert(
+            "$id".to_string(),
+            serde_json::Value::String(DSL_SCHEMA_URL.to_string()),
+        );
+    }
+    serde_json::to_string_pretty(&value).map_err(|e| format!("re-serialize DSL schema: {e}"))
 }
 
 fn sha256_hex(data: &[u8]) -> String {

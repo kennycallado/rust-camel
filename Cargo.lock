@@ -1856,13 +1856,16 @@ dependencies = [
  "camel-proto-compiler",
  "criterion",
  "glob",
+ "jsonschema",
  "noyalib",
  "regex",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "ts-rs",
 ]
 
 [[package]]
@@ -11474,6 +11477,7 @@ version = "12.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
 dependencies = [
+ "serde_json",
  "thiserror 2.0.18",
  "ts-rs-macros",
 ]
@@ -13094,12 +13098,14 @@ name = "xtask"
 version = "0.19.0"
 dependencies = [
  "camel-api",
+ "camel-dsl",
  "clap",
  "hex",
  "regex",
  "schemars 1.2.1",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "ts-rs",
  "ureq",
  "walkdir",

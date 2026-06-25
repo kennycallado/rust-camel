@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 camel-api = { path = "../../crates/camel-api" }
+camel-dsl = { path = "../../crates/camel-dsl", features = ["schema"] }
 clap = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
@@ -15,6 +16,7 @@ zip = { workspace = true }
 serde_json = { workspace = true }
 ureq = "3"
 schemars = { workspace = true }
+tempfile = "3"
 ts-rs = { workspace = true }
 
 [lints]

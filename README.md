@@ -775,6 +775,26 @@ URI parameters always take precedence over global defaults:
 
 See `docs/configuration.md` for full details.
 
+## JSON Schema
+
+The full DSL AST has a published JSON Schema:
+
+- **URL:** `https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/dsl/route-schema.json`
+- **Local:** `schemas/dsl/route-schema.json` (regenerate with `cargo xtask schema`).
+
+### Using `$schema`
+
+Add the `$schema` key to your JSON route files for editor autocomplete and SDK validation:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/dsl/route-schema.json",
+  "routes": [...]
+}
+```
+
+The parser silently ignores the key. See [`schemas/dsl/README.md`](./schemas/dsl/README.md) for scope and versioning.
+
 ## License
 
 Apache-2.0

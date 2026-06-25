@@ -502,6 +502,16 @@ mod tests {
     }
 
     #[test]
+    fn dollar_schema_key_is_accepted() {
+        let json = r#"{
+            "$schema": "https://example.com/route-schema.json",
+            "routes": [{"id": "r1", "from": "direct:start", "steps": [{"to": "direct:end"}]}]
+        }"#;
+        let parsed = parse_json_to_declarative(json).expect("$schema key must be accepted");
+        assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
     fn parse_json_to_canonical_rejects_security_policy() {
         let json = r#"{
             "routes": [{

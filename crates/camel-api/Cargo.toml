@@ -31,6 +31,9 @@ schemars.workspace = true
 toml = { workspace = true }
 ts-rs.workspace = true
 
+[features]
+schema = []
+
 [dev-dependencies]
 criterion.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

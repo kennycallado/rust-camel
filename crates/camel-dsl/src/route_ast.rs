@@ -8,6 +8,10 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct RouteDslRoutes {
+    /// Optional JSON Schema URL (ignored by the parser; consumed by SDKs/editors).
+    #[serde(default, skip_serializing, rename = "$schema")]
+    pub schema_url: Option<String>,
+
     #[serde(default)]
     pub routes: Vec<RouteDslRoute>,
     #[serde(default)]
@@ -16,6 +20,7 @@ pub struct RouteDslRoutes {
     pub templated_routes: Vec<RouteDslTemplatedRoute>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize)]
 pub struct RouteDslRoute {
     pub id: String,
@@ -42,6 +47,7 @@ pub struct RouteDslRoute {
     pub on_failure: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct RouteDslSecurityPolicy {
     #[serde(default)]
@@ -60,6 +66,7 @@ pub struct RouteDslSecurityPolicy {
     pub permission: Option<RouteDslPermissionPolicy>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct RouteDslPermissionPolicy {
     pub policy: String,
@@ -77,6 +84,7 @@ pub struct RouteDslPermissionPolicy {
     pub cache_negative_ttl_secs: Option<u64>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 pub struct RouteDslPermissionValueSource {
     #[serde(default)]
@@ -87,6 +95,7 @@ pub struct RouteDslPermissionValueSource {
     pub property: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 pub struct RouteDslPermissionContext {
     #[serde(default)]
@@ -95,6 +104,7 @@ pub struct RouteDslPermissionContext {
     pub properties: Vec<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize)]
 pub struct RouteDslErrorHandler {
     #[serde(default)]
@@ -105,6 +115,7 @@ pub struct RouteDslErrorHandler {
     pub on_exceptions: Option<Vec<RouteDslOnException>>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize)]
 pub struct RouteDslOnException {
     #[serde(default)]
@@ -121,6 +132,7 @@ pub struct RouteDslOnException {
     pub continued: Option<bool>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize)]
 pub struct RouteDslRedeliveryPolicy {
     pub max_attempts: u32,
@@ -136,6 +148,7 @@ pub struct RouteDslRedeliveryPolicy {
     pub handled_by: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize)]
 pub struct RouteDslCircuitBreaker {
     #[serde(default = "default_failure_threshold")]
@@ -176,18 +189,22 @@ fn default_open_duration_ms() -> u64 {
     30_000
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct DelayStep {
     pub delay: DelayBody,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum DelayBody {
     Short(u64),
     Full(DelayFullConfig),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct DelayFullConfig {
@@ -196,14 +213,17 @@ pub struct DelayFullConfig {
     pub dynamic_header: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct LoopStep {
     #[serde(rename = "loop")]
     pub loop_data: LoopData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum LoopData {
     /// Shorthand: `loop: 3`
     Count(usize),
@@ -211,6 +231,7 @@ pub enum LoopData {
     Full(LoopFullConfig),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LoopFullConfig {
@@ -224,6 +245,7 @@ pub struct LoopFullConfig {
 }
 
 /// Expression-only predicate for loop while condition.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LoopWhileExpr {
@@ -241,8 +263,10 @@ pub struct LoopWhileExpr {
     pub xpath: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum RouteDslStep {
     To(ToStep),
     SetHeader(SetHeaderStep),
@@ -277,12 +301,14 @@ pub enum RouteDslStep {
     PollEnrich(PollEnrichStep),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionStep {
     pub function: FunctionData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionData {
@@ -292,21 +318,25 @@ pub struct FunctionData {
     pub timeout_ms: Option<u64>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct ToStep {
     pub to: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct SetHeaderStep {
     pub set_header: SetHeaderData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct SetPropertyStep {
     pub set_property: SetPropertyData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct SetHeaderData {
@@ -327,6 +357,7 @@ pub struct SetHeaderData {
     pub xpath: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct SetPropertyData {
@@ -347,19 +378,23 @@ pub struct SetPropertyData {
     pub xpath: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct SetBodyStep {
     pub set_body: SetBodyData,
 }
 
 /// `transform:` step — alias for `set_body:`, reuses all SetBodyData types.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct TransformStep {
     pub transform: SetBodyData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum SetBodyData {
     // Config must be tried BEFORE Literal: serde_json::Value matches any YAML value (including
     // objects), so it would greedily swallow `{ simple: "..." }` as a Literal JSON object
@@ -369,6 +404,7 @@ pub enum SetBodyData {
     Literal(serde_json::Value),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct SetBodyConfig {
@@ -388,13 +424,16 @@ pub struct SetBodyConfig {
     pub xpath: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum LogBody {
     Message(String),
     Config(LogConfig),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
@@ -406,13 +445,16 @@ pub struct LogConfig {
 
 /// The `message` field inside a `log: { message: ... }` config block.
 /// Either a bare string literal or a value-source expression (simple, rhai, language+source).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum LogMessageData {
     Literal(String),
     Expr(LogMessageExpr),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LogMessageExpr {
@@ -432,16 +474,19 @@ pub struct LogMessageExpr {
     pub xpath: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct LogStep {
     pub log: LogBody,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct FilterStep {
     pub filter: PredicateBlock,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct PredicateBlock {
@@ -461,11 +506,13 @@ pub struct PredicateBlock {
     pub steps: Vec<RouteDslStep>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct ChoiceStep {
     pub choice: ChoiceData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ChoiceData {
@@ -475,11 +522,13 @@ pub struct ChoiceData {
     pub otherwise: Option<Vec<RouteDslStep>>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct DoTryStep {
     pub do_try: DoTryData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct DoTryData {
@@ -490,6 +539,7 @@ pub struct DoTryData {
     pub finally: Option<FinallyData>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct CatchClauseData {
@@ -501,6 +551,7 @@ pub struct CatchClauseData {
     pub steps: Vec<RouteDslStep>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FinallyData {
@@ -512,11 +563,13 @@ fn default_handled_disposition() -> camel_api::error_handler::ExceptionDispositi
     camel_api::error_handler::ExceptionDisposition::Handled
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct SplitStep {
     pub split: SplitData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct SplitData {
@@ -538,6 +591,7 @@ pub struct SplitData {
     pub stream: Option<StreamConfigYaml>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Default, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct StreamConfigYaml {
@@ -551,13 +605,16 @@ pub struct StreamConfigYaml {
     pub chunk_size: Option<usize>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum SplitExpressionYaml {
     Simple(String),
     Config(SplitExpressionConfig),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SplitExpressionConfig {
@@ -579,11 +636,13 @@ fn default_split_aggregation() -> String {
     "last_wins".to_string()
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct AggregateStep {
     pub aggregate: AggregateData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateData {
@@ -612,16 +671,19 @@ fn default_aggregate_strategy() -> String {
     "collect_all".to_string()
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct WireTapStep {
     pub wire_tap: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct MulticastStep {
     pub multicast: MulticastData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct MulticastData {
@@ -643,23 +705,28 @@ fn default_multicast_aggregation() -> String {
     "last_wins".to_string()
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct StopStep {
     pub stop: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct StreamCacheStep {
     pub stream_cache: StreamCacheBody,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum StreamCacheBody {
     Enabled(bool),
     Config(StreamCacheConfig),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct StreamCacheConfig {
@@ -667,45 +734,54 @@ pub struct StreamCacheConfig {
     pub threshold: Option<usize>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct ScriptStep {
     pub script: ScriptData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct ConvertBodyToStep {
     pub convert_body_to: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct MarshalStep {
     pub marshal: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct UnmarshalStep {
     pub unmarshal: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct ValidateStep {
     pub validate: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct EnrichStep {
     pub enrich: EnrichBody,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct PollEnrichStep {
     pub poll_enrich: EnrichBody,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum EnrichBody {
     /// Shorthand: `enrich: "file:..."` or `poll_enrich: "file:..."`
     Uri(String),
@@ -713,6 +789,7 @@ pub enum EnrichBody {
     Full(EnrichConfig),
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct EnrichConfig {
@@ -723,6 +800,7 @@ pub struct EnrichConfig {
     pub timeout: Option<u64>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptData {
@@ -730,12 +808,14 @@ pub struct ScriptData {
     pub source: String,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ThrottleStep {
     pub throttle: ThrottleData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ThrottleData {
@@ -752,12 +832,14 @@ fn default_throttle_period_secs() -> u64 {
     1
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LoadBalanceStep {
     pub load_balance: LoadBalanceData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LoadBalanceData {
@@ -788,6 +870,7 @@ pub struct RouteDslTemplate {
 }
 
 /// A single parameter that a route template accepts.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct RouteDslTemplateParameter {
     /// The parameter name (used inside `{{name}}` placeholders).
@@ -801,6 +884,7 @@ pub struct RouteDslTemplateParameter {
 }
 
 /// A request to instantiate a template with concrete parameter values.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 pub struct RouteDslTemplatedRoute {
     pub route_template_ref: String,
@@ -1189,12 +1273,14 @@ templated_routes:
     }
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicRouterStep {
     pub dynamic_router: DynamicRouterData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicRouterData {
@@ -1228,12 +1314,14 @@ fn default_max_iterations() -> usize {
     1000
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingSlipStep {
     pub routing_slip: RoutingSlipData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingSlipData {
@@ -1253,12 +1341,14 @@ pub struct RoutingSlipData {
     pub ignore_invalid_endpoints: bool,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct RecipientListStep {
     pub recipient_list: RecipientListData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct RecipientListData {
@@ -1282,12 +1372,14 @@ pub struct RecipientListData {
     pub strategy: Option<String>,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct BeanStep {
     pub bean: BeanStepData,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct BeanStepData {

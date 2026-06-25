@@ -602,6 +602,10 @@ routes:
 
 Routes that declare `security_policy` cannot currently use the canonical/hot-reload path. They must be loaded through the standard YAML/JSON DSL loader.
 
+## JSON Schema
+
+This crate's AST is published as JSON Schema. See [workspace `schemas/dsl/README.md`](../../schemas/dsl/README.md).
+
 ## Documentation
 - [API Documentation](https://docs.rs/camel-dsl)
 - [Examples](https://github.com/kennycallado/rust-camel/tree/main/examples)
