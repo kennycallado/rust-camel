@@ -1,0 +1,86 @@
+{
+  "routes": [
+    {
+      "id": "throttle-demo",
+      "from": "direct:start",
+      "steps": [
+        {
+          "throttle": {
+            "max_requests": 5,
+            "period_secs": 1,
+            "strategy": "delay",
+            "steps": [
+              { "to": "mock:throttled" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "load-balance-demo",
+      "from": "direct:start",
+      "steps": [
+        {
+          "load_balance": {
+            "strategy": "round_robin",
+            "steps": [
+              { "to": "mock:lb-a" },
+              { "to": "mock:lb-b" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "weighted-lb-demo",
+      "from": "direct:start",
+      "steps": [
+        {
+          "load_balance": {
+            "strategy": "weighted",
+            "distribution_ratio": "4,2,1",
+            "steps": [
+              { "to": "mock:wlb-x" },
+              { "to": "mock:wlb-y" },
+              { "to": "mock:wlb-z" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "dynamic-router-demo",
+      "from": "direct:start",
+      "steps": [
+        {
+          "dynamic_router": {
+            "simple": "${header.dest}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "routing-slip-demo",
+      "from": "direct:start",
+      "steps": [
+        {
+          "routing_slip": {
+            "simple": "${header.slip}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "bean-demo",
+      "from": "direct:start",
+      "steps": [
+        {
+          "bean": {
+            "name": "myProcessor",
+            "method": "handle"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,13 +1,14 @@
 //! Configuration layer for rust-camel — YAML/JSON loading, route discovery, and property resolution.
 //!
 //! Main types: `CamelConfig`, `JournalConfig`, `ComponentsConfig`, `PropertiesResolver`.
-//! Main modules: `config`, `context_ext`, `discovery`, `properties`, `yaml`.
+//! Main modules: `config`, `context_ext`, `discovery`, `properties`, `yaml`, `json`.
 
 pub mod config;
 pub(crate) mod context_ext;
 pub mod discovery;
 pub(crate) mod filter;
 pub(crate) mod include;
+pub mod json;
 pub mod properties;
 pub mod wasm_limits;
 pub mod yaml;
@@ -21,6 +22,10 @@ pub use config::{
 pub use discovery::{
     DiscoveryError, discover_routes, discover_routes_with_threshold,
     discover_routes_with_threshold_and_security,
+};
+pub use json::{
+    load_json_from_file, parse_json, parse_json_to_canonical, parse_json_to_declarative,
+    parse_json_with_threshold,
 };
 pub use properties::{PropertiesResolver, ResolveError};
 pub use wasm_limits::WasmLimitsConfig;
