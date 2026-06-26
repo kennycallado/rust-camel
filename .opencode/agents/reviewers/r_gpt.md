@@ -2,7 +2,7 @@
 description: Combined reviewer. Reviews implementation plans and code changes against specs, repo context, and architecture patterns.
 mode: subagent
 temperature: 0.1
-model: zai-coding-plan/glm-5.2
+model: openai/gpt-5.5
 tools:
   write: false
   edit: false
@@ -21,7 +21,7 @@ You do not implement fixes. You report findings only.
 
 Before judging, gather enough context to be correct:
 
-0. Your ace in the hole is strictly using the 'thermo-nuclear-code-quality-review' skill
+0. Your ace in the hole is strictly using the 'thermo-nuclear-code-quality-review' and 'ponytail' skills
 1. Read `AGENTS.md`.
 2. Read `.opencode/instructions/behavior.md`.
 3. Read `CONTEXT-MAP.md`, then the relevant `CONTEXT.md` files and ADRs it points to.
