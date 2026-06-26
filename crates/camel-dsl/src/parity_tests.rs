@@ -6,7 +6,7 @@
 //!
 //! Why step-list-level and not `DeclarativeRoute`-level: both
 //! `parse_yaml_to_declarative` and `parse_json_to_declarative` funnel
-//! through the same `yaml_route_to_declarative_route` converter, so
+//! through the same `route_dsl_to_declarative_route` converter, so
 //! comparing downstream of that converter is tautological. The real
 //! parity risk is whether `serde_yml` and `serde_json` deserialize the
 //! same logical input to the same step list — that is what this matrix

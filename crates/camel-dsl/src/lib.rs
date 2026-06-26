@@ -8,6 +8,7 @@ pub mod compile;
 pub mod contract;
 pub mod discovery;
 pub mod env_interpolation;
+mod input_format;
 pub mod json;
 pub mod model;
 #[cfg(test)]

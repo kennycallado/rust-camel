@@ -19,11 +19,18 @@ use crate::compile::{
     compile_declarative_route, compile_declarative_route_to_canonical,
     compile_declarative_route_with_stream_cache_threshold,
 };
+use crate::input_format::{InputFormat, annotate_format};
 use crate::model::SecurityCompileContext;
-use crate::yaml::{RouteDslRoutes, yaml_route_to_declarative_route};
+use crate::yaml::{RouteDslRoutes, route_dsl_to_declarative_route};
 
 /// Parse a JSON string into declarative route models.
 pub fn parse_json_to_declarative(
+    json: &str,
+) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
+    annotate_format(InputFormat::Json, parse_json_to_declarative_inner(json))
+}
+
+fn parse_json_to_declarative_inner(
     json: &str,
 ) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
     let routes: RouteDslRoutes = serde_json::from_str(json)
@@ -32,13 +39,17 @@ pub fn parse_json_to_declarative(
     routes
         .routes
         .into_iter()
-        .map(yaml_route_to_declarative_route)
+        .map(route_dsl_to_declarative_route)
         .collect()
 }
 
 /// Parse a JSON string into compiled [`RouteDefinition`]s.
 pub fn parse_json(json: &str) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_json_to_declarative(json)?
+    annotate_format(InputFormat::Json, parse_json_inner(json))
+}
+
+fn parse_json_inner(json: &str) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_json_to_declarative_inner(json)?
         .into_iter()
         .map(compile_declarative_route)
         .collect()
@@ -49,7 +60,17 @@ pub fn parse_json_with_threshold(
     json: &str,
     stream_cache_threshold: usize,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_json_with_threshold_and_security(
+    annotate_format(
+        InputFormat::Json,
+        parse_json_with_threshold_inner(json, stream_cache_threshold),
+    )
+}
+
+fn parse_json_with_threshold_inner(
+    json: &str,
+    stream_cache_threshold: usize,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_json_with_threshold_and_security_inner(
         json,
         stream_cache_threshold,
         SecurityCompileContext::default(),
@@ -61,7 +82,18 @@ pub fn parse_json_with_threshold_and_security(
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_json_to_declarative(json)?
+    annotate_format(
+        InputFormat::Json,
+        parse_json_with_threshold_and_security_inner(json, stream_cache_threshold, security_ctx),
+    )
+}
+
+fn parse_json_with_threshold_and_security_inner(
+    json: &str,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_json_to_declarative_inner(json)?
         .into_iter()
         .map(|route| {
             compile_declarative_route_with_stream_cache_threshold(
@@ -75,7 +107,11 @@ pub fn parse_json_with_threshold_and_security(
 
 /// Parse a JSON string into canonical route specs.
 pub fn parse_json_to_canonical(json: &str) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
-    let routes = parse_json_to_declarative(json)?;
+    annotate_format(InputFormat::Json, parse_json_to_canonical_inner(json))
+}
+
+fn parse_json_to_canonical_inner(json: &str) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
+    let routes = parse_json_to_declarative_inner(json)?;
     for route in &routes {
         if route.security_policy.is_some() {
             return Err(CamelError::RouteError(
@@ -95,7 +131,13 @@ pub fn parse_json_to_canonical(json: &str) -> Result<Vec<CanonicalRouteSpec>, Ca
 pub fn load_json_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| CamelError::Io(format!("Failed to read {}: {e}", path.display())))?;
-    parse_json(&content).map_err(|e| CamelError::RouteError(format!("{e} (in {})", path.display())))
+    let annotated = annotate_format(InputFormat::Json, parse_json_inner(&content));
+    annotated.map_err(|e| match e {
+        CamelError::RouteError(msg) => {
+            CamelError::RouteError(format!("{msg} (in {})", path.display()))
+        }
+        other => other,
+    })
 }
 
 #[cfg(test)]
@@ -215,8 +257,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("JSON parse error:"),
-            "expected 'JSON parse error:' in error, got: {err}"
+            err.contains("JSON DSL error: JSON parse error:"),
+            "expected 'JSON DSL error: JSON parse error:' in error, got: {err}"
         );
     }
 
@@ -523,5 +565,33 @@ mod tests {
         }"#;
         let result = parse_json_to_canonical(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn semantic_error_carries_json_format_prefix() {
+        let json = r#"{"routes": [{"id": "", "from": "timer:tick"}]}"#;
+        let result = parse_json_to_declarative(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("JSON DSL error:"),
+            "expected 'JSON DSL error:' prefix, got: {err}"
+        );
+        assert!(
+            err.contains("route 'id' must not be empty"),
+            "expected underlying semantic message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn json_parse_error_carries_format_prefix() {
+        let json = "{ not valid json }}}";
+        let result = parse_json_to_declarative(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("JSON DSL error: JSON parse error:"),
+            "expected double prefix for parse errors, got: {err}"
+        );
     }
 }

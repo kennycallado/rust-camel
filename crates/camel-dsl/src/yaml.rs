@@ -19,6 +19,7 @@ use crate::compile::{
     compile_declarative_route_with_stream_cache_threshold,
 };
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
+use crate::input_format::{InputFormat, annotate_format};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
@@ -80,6 +81,10 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 29] = [
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
 
 pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
+    annotate_format(InputFormat::Yaml, parse_yaml_to_declarative_inner(yaml))
+}
+
+fn parse_yaml_to_declarative_inner(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
     let routes: RouteDslRoutes = serde_yml::from_str(yaml).map_err(|e| {
         // log-policy: system-broken
         error!(error = %e, "yaml parse failed");
@@ -90,12 +95,16 @@ pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, Ca
     routes
         .routes
         .into_iter()
-        .map(yaml_route_to_declarative_route)
+        .map(route_dsl_to_declarative_route)
         .collect()
 }
 
 pub fn parse_yaml(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_yaml_to_declarative(yaml)?
+    annotate_format(InputFormat::Yaml, parse_yaml_inner(yaml))
+}
+
+fn parse_yaml_inner(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_yaml_to_declarative_inner(yaml)?
         .into_iter()
         .map(compile_declarative_route)
         .collect()
@@ -105,7 +114,17 @@ pub fn parse_yaml_with_threshold(
     yaml: &str,
     stream_cache_threshold: usize,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_yaml_with_threshold_and_security(
+    annotate_format(
+        InputFormat::Yaml,
+        parse_yaml_with_threshold_inner(yaml, stream_cache_threshold),
+    )
+}
+
+fn parse_yaml_with_threshold_inner(
+    yaml: &str,
+    stream_cache_threshold: usize,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_yaml_with_threshold_and_security_inner(
         yaml,
         stream_cache_threshold,
         SecurityCompileContext::default(),
@@ -117,7 +136,18 @@ pub fn parse_yaml_with_threshold_and_security(
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_yaml_to_declarative(yaml)?
+    annotate_format(
+        InputFormat::Yaml,
+        parse_yaml_with_threshold_and_security_inner(yaml, stream_cache_threshold, security_ctx),
+    )
+}
+
+fn parse_yaml_with_threshold_and_security_inner(
+    yaml: &str,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_yaml_to_declarative_inner(yaml)?
         .into_iter()
         .map(|route| {
             compile_declarative_route_with_stream_cache_threshold(
@@ -133,7 +163,17 @@ pub fn parse_yaml_to_canonical(
     yaml: &str,
     allow_loss: bool,
 ) -> Result<Vec<(CanonicalRouteSpec, Option<CanonicalLossReport>)>, CamelError> {
-    let routes = parse_yaml_to_declarative(yaml)?;
+    annotate_format(
+        InputFormat::Yaml,
+        parse_yaml_to_canonical_inner(yaml, allow_loss),
+    )
+}
+
+fn parse_yaml_to_canonical_inner(
+    yaml: &str,
+    allow_loss: bool,
+) -> Result<Vec<(CanonicalRouteSpec, Option<CanonicalLossReport>)>, CamelError> {
+    let routes = parse_yaml_to_declarative_inner(yaml)?;
     for route in &routes {
         if route.security_policy.is_some() {
             return Err(CamelError::RouteError(
@@ -163,7 +203,7 @@ fn yaml_source_to_value_source(
     }
 }
 
-pub(crate) fn yaml_route_to_declarative_route(
+pub(crate) fn route_dsl_to_declarative_route(
     route: RouteDslRoute,
 ) -> Result<DeclarativeRoute, CamelError> {
     if route.id.is_empty() {
@@ -1441,7 +1481,13 @@ pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
         error!(path = %path.display(), error = %e, "failed to load routes from file");
         CamelError::Io(format!("Failed to read {}: {e}", path.display()))
     })?;
-    parse_yaml(&content).map_err(|e| CamelError::RouteError(format!("{e} (in {})", path.display())))
+    let annotated = annotate_format(InputFormat::Yaml, parse_yaml_inner(&content));
+    annotated.map_err(|e| match e {
+        CamelError::RouteError(msg) => {
+            CamelError::RouteError(format!("{msg} (in {})", path.display()))
+        }
+        other => other,
+    })
 }
 
 #[cfg(test)]
@@ -3572,6 +3618,49 @@ routes:
         assert!(
             decl.is_err(),
             "must reject catch clause with blank variant name in `exception`"
+        );
+    }
+
+    // ── YAML format annotation tests ──
+
+    #[test]
+    fn semantic_error_carries_yaml_format_prefix() {
+        // A semantic error (empty route id) must be prefixed with "YAML DSL error:".
+        let yaml = r#"
+routes:
+  - id: ""
+    from: "timer:tick"
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("YAML DSL error:"),
+            "expected YAML DSL error prefix, got: {err}"
+        );
+        assert!(
+            err.contains("must not be empty"),
+            "expected original error message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn yaml_parse_error_carries_format_prefix() {
+        // A parse error from serde_yml must be wrapped with "YAML DSL error:".
+        let yaml = r#"
+routes:
+  - id: [invalid
+    from: "timer:tick"
+"#;
+        let err = match parse_yaml(yaml) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected parse error"),
+        };
+        assert!(
+            err.contains("YAML DSL error:"),
+            "expected YAML DSL error prefix, got: {err}"
+        );
+        assert!(
+            err.contains("YAML parse error"),
+            "expected original parse error message, got: {err}"
         );
     }
 }
