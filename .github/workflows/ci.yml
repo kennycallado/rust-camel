@@ -152,3 +152,7 @@ jobs:
         run: cargo xtask lint-unwrap
       - name: lint-secrets
         run: cargo xtask lint-secrets
+      - name: cargo-audit (vulnerability scan)
+        uses: taiki-e/install-action@cargo-audit
+      - name: audit
+        run: cargo audit

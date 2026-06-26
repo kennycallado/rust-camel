@@ -106,6 +106,7 @@
           inputsFrom = [ rust-camel ];
           packages = with pkgs; [
             rustToolchain
+            cargo-audit
             cargo-watch
             cargo-edit
             bacon
