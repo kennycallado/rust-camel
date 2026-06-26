@@ -24,3 +24,23 @@ Before this ADR, `pollEnrich` had a `serde(rename = "pollEnrich")` that forced c
 - The YAML key for poll-enrich is `poll_enrich` (not `pollEnrich`).
 - Existing YAML route files using `pollEnrich` must update to `poll_enrich`.
 - Future DSL additions follow snake_case by default (Rust field naming already enforces this via serde default behavior).
+
+## Amendment (2026-06-26)
+
+The snake_case rule applies to **both YAML and JSON DSL keys**. The original wording
+said "DSL YAML" because YAML was the only authoring format at the time (2026-06-09);
+JSON inherited the rule silently via the shared `RouteDsl*` AST
+(`crates/camel-dsl/src/route_ast.rs`).
+
+ADR-0026 (JSON Canonical Route Authoring Format) formalizes JSON as a first-class
+authoring format. To remove ambiguity, this amendment makes explicit that:
+
+- All DSL keys (step keys AND field names) are snake_case regardless of whether the
+  user authors routes in YAML or JSON.
+- `serde(rename = "...")` policy (Rule 3) is unchanged.
+- EIP pattern names in prose/docs/comments (Rule 4) remain as-is.
+
+No behavior change. Existing JSON route files already follow this rule; the
+amendment is a documentation clarification.
+
+**Referenced by:** ADR-0026.

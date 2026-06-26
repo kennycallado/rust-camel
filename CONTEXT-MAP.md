@@ -3,7 +3,7 @@
 ## Contexts
 
 - [Runtime](./crates/camel-core/CONTEXT.md) — core execution engine: Exchange lifecycle, Route management, and component/language/function/service registries
-- [DSL](./crates/camel-dsl/CONTEXT.md) — route definition via fluent builder API and YAML/JSON configuration files
+- [DSL](./crates/camel-dsl/CONTEXT.md) — route definition via fluent builder API and YAML/JSON configuration files (ADR-0026)
 - [Components](./crates/components/CONTEXT.md) — inbound/outbound adapters (timer, HTTP, Kafka, file, etc.) that feed Exchanges into Routes and send them to external systems
   - [LLM Component](./crates/components/camel-component-llm/CONTEXT.md) — LLM chat and embedding component (OpenAI, Ollama, Mock) with streaming and materialized modes
   - [File Component](./crates/components/camel-file/CONTEXT.md) — polls directories and writes exchange bodies to disk; `atomic_write` helper powers `Override`/`TryRename` write strategies (`Fail` uses `create_new(true)` directly — already atomic)
@@ -40,12 +40,13 @@ Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./doc
 - [0014](./docs/adr/0014-wasm-plugin-config-unification.md) — WASM plugin runtime configuration is unified across plugin types
 - [0015](./docs/adr/0015-endpoint-created-polling-consumer-for-pollenrich.md) — Endpoint-created PollingConsumer powers pollEnrich and WASM camel_poll
 - [0016](./docs/adr/0016-canonical-route-spec-v2-contract.md) — CanonicalRouteSpec v2 adds lifecycle/execution metadata with strict rejection for unsupported fields
-- [0017](./docs/adr/0017-dsl-yaml-snake-case-naming-convention.md) — DSL YAML keys use snake_case to match Rust field names and schema output
+- [0017](./docs/adr/0017-dsl-yaml-snake-case-naming-convention.md) — DSL keys use snake_case (YAML and JSON, amended 2026-06-26) to match Rust field names and schema output
 - [0018](./docs/adr/0018-two-phase-route-lifecycle-persistence.md) — Route lifecycle commands persist intent before side effects, use optimistic versions, and compensate to Failed on side-effect failure
 - [0019](./docs/adr/0019-error-disposition-pipeline-recovery.md) — Error disposition decisions moved inside the pipeline loop via RouteErrorHandler trait injection; ExceptionDisposition enum (Propagate/Handled/Continued) replaces handled:bool
 - [0020](./docs/adr/0020-llm-component-provider-adapter-boundary.md) — LLM component isolates siumai SDK behind a project-owned LlmProvider trait; all siumai imports confined to two files
 - [0021](./docs/adr/0021-llm-retry-retry-after-manual-loop.md) — LLM retry honors provider retry_after via manual loop, diverging from ADR-0013 helpers
 - [0024](./docs/adr/0024-pipeline-outcome-replaces-camel-error-stopped.md) — `PipelineOutcome` enum replaces `CamelError::Stopped` for control flow; Stop EIP becomes successful control flow at the pipeline layer (one above Tower); consumer reply-channel adapter makes Completed/Stopped indistinguishable to consumers
+- [0026](./docs/adr/0026-json-canonical-route-authoring-format.md) — JSON is the canonical full-DSL authoring format for SDKs/generators; YAML is human convenience
 
 ## Key Terms
 
