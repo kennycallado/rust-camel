@@ -6,7 +6,7 @@ use std::sync::Arc;
 ///
 /// Holds the security artifacts captured at add time. Does NOT hold the
 /// pipeline — the runtime pipeline lives in `ManagedRoute.pipeline` as a
-/// `SharedPipeline` (`Arc<ArcSwap<SyncBoxProcessor>>`) so it can be hot-swapped.
+/// `SharedPipeline` (`Arc<ArcSwap<PipelineAssembly>>`) so it can be hot-swapped.
 pub(crate) struct CompiledRoute {
     pub(crate) security_policy: Option<SecurityPolicyConfig>,
     pub(crate) security_authenticator: Option<Arc<dyn TokenAuthenticator>>,

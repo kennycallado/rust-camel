@@ -52,6 +52,7 @@ impl StepCompiler for EndpointsCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: producer,
                     body_contract: contract,
+                    lifecycle: None,
                 }))
             }
 
@@ -65,6 +66,7 @@ impl StepCompiler for EndpointsCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 

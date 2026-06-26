@@ -55,18 +55,22 @@ fn build_pipeline() -> BoxProcessor {
         CompiledStep::Process {
             processor: filter,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: choice,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: splitter,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: log,
             body_contract: None,
+            lifecycle: None,
         },
     ])
 }

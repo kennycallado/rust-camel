@@ -57,14 +57,17 @@ async fn continued_e2e_step3_executes_after_step2_failure() {
             CompiledStep::Process {
                 processor: step1,
                 body_contract: None,
+                lifecycle: None,
             },
             CompiledStep::Process {
                 processor: step2,
                 body_contract: None,
+                lifecycle: None,
             },
             CompiledStep::Process {
                 processor: step3,
                 body_contract: None,
+                lifecycle: None,
             },
         ],
         Some(handler),
@@ -162,14 +165,17 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
             CompiledStep::Process {
                 processor: step1,
                 body_contract: None,
+                lifecycle: None,
             },
             CompiledStep::Process {
                 processor: step2,
                 body_contract: None,
+                lifecycle: None,
             },
             CompiledStep::Process {
                 processor: step3,
                 body_contract: None,
+                lifecycle: None,
             },
         ],
         Some(handler.clone()),

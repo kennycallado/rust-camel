@@ -417,6 +417,7 @@ mod tests {
         let pipeline = compose_pipeline(vec![CompiledStep::Process {
             processor,
             body_contract: None,
+            lifecycle: None,
         }]);
 
         let concurrency: u32 = 10;
@@ -548,10 +549,12 @@ mod tests {
             CompiledStep::Process {
                 processor: step1,
                 body_contract: None,
+                lifecycle: None,
             },
             CompiledStep::Process {
                 processor: step2,
                 body_contract: None,
+                lifecycle: None,
             },
         ]);
         let ex = Exchange::new(Message::new("input"));

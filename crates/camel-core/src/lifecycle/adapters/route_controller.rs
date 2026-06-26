@@ -18,6 +18,7 @@ use camel_api::metrics::MetricsCollector;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, NoOpMetrics,
     NoopPlatformService, PlatformService, ProducerContext, RouteController, RuntimeHandle,
+    StepLifecycle,
 };
 use camel_component_api::{Consumer, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_processor::aggregator::AggregatorService;
@@ -388,6 +389,7 @@ impl DefaultRouteController {
                 staging_mode,
             )?,
         };
+        let lifecycle = super::route_helpers::collect_lifecycle(&processors_with_contracts);
         let route_id_for_tracing = route_id.clone();
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
 
@@ -438,7 +440,9 @@ impl DefaultRouteController {
             managed: ManagedRoute {
                 definition: definition_info,
                 from_uri,
-                pipeline: super::pipeline_runtime::new_shared_pipeline(pipeline),
+                pipeline: super::pipeline_runtime::new_shared_pipeline_with_lifecycle(
+                    pipeline, lifecycle,
+                ),
                 concurrency,
                 consumer_handle: None,
                 pipeline_handle: None,
@@ -634,10 +638,24 @@ impl DefaultRouteController {
         self.routes.shutdown_route_ids()
     }
 
-    /// Atomically swap the pipeline of a route.
+    /// Atomically swap the pipeline of a route (zero-downtime).
     ///
     /// In-flight requests finish with the old pipeline (kept alive by Arc).
     /// New requests immediately use the new pipeline.
+    ///
+    /// ## Rejection policy
+    ///
+    /// Returns an error if the route has lifecycle-bearing steps or an active
+    /// aggregate — these require the **Restart path** (stop → swap → start).
+    ///
+    /// The caller (e.g. `reload_actions::apply_swap`) MUST catch this rejection
+    /// and fall back to:
+    /// 1. `stop_route_reload` — drain lifecycle, stop consumer
+    /// 2. `swap_pipeline_raw` — bypass the lifecycle check (route is stopped)
+    /// 3. `start_route_reload` — re-create consumer with the new pipeline
+    ///
+    /// This is the "reject, don't defer" policy (oracle Fix 3): the swap is
+    /// refused upfront rather than silently deferring or partially swapping.
     pub fn swap_pipeline(
         &self,
         route_id: &str,
@@ -648,15 +666,50 @@ impl DefaultRouteController {
             .get(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
+        let assembly = managed.pipeline.load();
+        let has_lifecycle = !assembly.lifecycle.is_empty();
+
+        if has_lifecycle || managed.agg_service.is_some() {
+            warn!(
+                route_id = %route_id,
+                "Hot-swap rejected — route has lifecycle/agg steps; use Restart path"
+            );
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' contains stateful steps (lifecycle-bearing). Hot-swap not supported — use restart.",
+                route_id
+            )));
+        }
+
+        drop(assembly);
+
         if managed.aggregate_split.is_some() {
-            tracing::warn!(
+            warn!(
                 route_id = %route_id,
                 "swap_pipeline: aggregate routes with timeout do not support hot-reload of pre/post segments"
             );
         }
 
-        super::pipeline_runtime::swap_pipeline(&managed.pipeline, new_pipeline);
+        super::pipeline_runtime::swap_pipeline_raw(&managed.pipeline, new_pipeline);
         info!(route_id = %route_id, "Pipeline swapped atomically");
+        Ok(())
+    }
+
+    /// Non-checking raw pipeline swap — bypasses lifecycle/aggregate rejection.
+    ///
+    /// Only for use after the route has been stopped (Restart path).
+    /// Does NOT check for lifecycle handles or aggregate service — the caller
+    /// is responsible for ensuring the route is safe to swap.
+    pub(crate) fn swap_pipeline_raw(
+        &self,
+        route_id: &str,
+        new_pipeline: BoxProcessor,
+    ) -> Result<(), CamelError> {
+        let managed = self
+            .routes
+            .get(route_id)
+            .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
+        super::pipeline_runtime::swap_pipeline_raw(&managed.pipeline, new_pipeline);
+        info!(route_id = %route_id, "Pipeline swapped (raw — lifecycle bypass)");
         Ok(())
     }
 
@@ -718,7 +771,7 @@ impl DefaultRouteController {
             Arc::clone(&self.languages),
             route_cancel_clone,
         );
-        let agg = Arc::new(std::sync::Mutex::new(svc));
+        let agg = Arc::new(svc);
 
         let pipeline_cancel_for_monitor = pipeline_cancel.clone();
         let agg_for_monitor = Arc::clone(&agg);
@@ -748,7 +801,7 @@ impl DefaultRouteController {
                         match late_ex {
                             Some(ex) => {
                                 let pipe = post_pipeline.load();
-                                if let Err(e) = pipe.clone_inner().oneshot(ex).await {
+                                if let Err(e) = pipe.processor.clone_inner().oneshot(ex).await {
                                     tracing::warn!(error = %e, "late exchange post-pipeline failed");
                                 }
                             }
@@ -761,7 +814,7 @@ impl DefaultRouteController {
                             Some(envelope) => {
                                 let ExchangeEnvelope { exchange, reply_tx } = envelope;
                                 let pre_pipe = pre_pipeline.load();
-                                let ex = match pre_pipe.clone_inner().oneshot(exchange).await {
+                                let ex = match pre_pipe.processor.clone_inner().oneshot(exchange).await {
                                     Ok(ex) => ex,
                                     Err(e) => {
                                         if let Some(tx) = reply_tx { let _ = tx.send(Err(e)); }
@@ -770,10 +823,7 @@ impl DefaultRouteController {
                                 };
 
                                 let ex = {
-                                    let cloned_svc = agg
-                                        .lock()
-                                        .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
-                                        .clone();
+                                    let cloned_svc = agg.as_ref().clone();
                                     cloned_svc.oneshot(ex).await
                                 };
 
@@ -781,7 +831,7 @@ impl DefaultRouteController {
                                     Ok(ex) => {
                                         if !is_pending(&ex) {
                                             let post_pipe = post_pipeline.load();
-                                            let out = post_pipe.clone_inner().oneshot(ex).await;
+                                            let out = post_pipe.processor.clone_inner().oneshot(ex).await;
                                             if let Some(tx) = reply_tx { let _ = tx.send(out); }
                                         } else if let Some(tx) = reply_tx {
                                             let _ = tx.send(Ok(ex));
@@ -797,16 +847,11 @@ impl DefaultRouteController {
                     }
 
                     _ = pipeline_cancel.cancelled() => {
-                        {
-                            let guard = agg
-                                .lock()
-                                .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
-                            guard.force_complete_all();
-                        }
+                        agg.force_complete_all();
                         let mut rx_guard = late_rx.lock().await;
                         while let Ok(late_ex) = rx_guard.try_recv() {
                             let pipe = post_pipeline.load();
-                            let _ = pipe.clone_inner().oneshot(late_ex).await;
+                            let _ = pipe.processor.clone_inner().oneshot(late_ex).await;
                         }
                         break;
                     }
@@ -830,19 +875,11 @@ impl DefaultRouteController {
         // Extend the stored consumer handle through aggregate force-completion.
         // While this monitor drains pending buckets, handle_is_running still reports
         // the Route as running because forced exchanges may still be in post-pipeline.
-        let force_on_stop = agg_for_monitor
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
-            .config()
-            .force_completion_on_stop;
+        let force_on_stop = agg_for_monitor.config().force_completion_on_stop;
         let consumer_handle = tokio::spawn(async move {
             let _ = consumer_handle.await;
             if !pipeline_cancel_for_monitor.is_cancelled() {
-                let guard = agg_for_monitor
-                    .lock()
-                    .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
-                guard.force_complete_all();
-                drop(guard);
+                agg_for_monitor.force_complete_all();
                 if force_on_stop {
                     pipeline_cancel_for_monitor.cancel();
                 }
@@ -862,6 +899,32 @@ impl DefaultRouteController {
         }
 
         info!(route_id = %route_id, "Route started (aggregate with timeout)");
+        Ok(())
+    }
+
+    /// Test-only: inject lifecycle handles into an existing route's pipeline
+    /// assembly.  This makes the route lifecycle-bearing so that swap_pipeline
+    /// rejects it, forcing callers (like reload_actions::apply_swap) to take
+    /// the Restart path instead.
+    #[cfg(test)]
+    pub(crate) fn set_route_lifecycle_for_test(
+        &mut self,
+        route_id: &str,
+        lifecycle: Vec<Arc<dyn StepLifecycle>>,
+    ) -> Result<(), CamelError> {
+        use super::pipeline_runtime::PipelineAssembly;
+        use camel_api::SyncBoxProcessor;
+        use std::sync::Arc;
+
+        let managed = self
+            .routes
+            .get_mut(route_id)
+            .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
+        let old_processor = managed.pipeline.load().processor.clone_inner();
+        managed.pipeline.store(Arc::new(PipelineAssembly::new(
+            SyncBoxProcessor::new(old_processor),
+            lifecycle,
+        )));
         Ok(())
     }
 }

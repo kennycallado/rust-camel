@@ -9,6 +9,7 @@ use camel_api::BoxProcessor;
 
 use super::{
     CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+    pack_lifecycles,
 };
 use crate::lifecycle::adapters::endpoint_resolver_factory;
 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
@@ -38,6 +39,7 @@ impl StepCompiler for RoutingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -79,6 +81,7 @@ impl StepCompiler for RoutingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -93,6 +96,7 @@ impl StepCompiler for RoutingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -131,6 +135,7 @@ impl StepCompiler for RoutingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -150,6 +155,7 @@ impl StepCompiler for RoutingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -200,31 +206,37 @@ impl StepCompiler for RoutingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
             // ── Throttle (recursive — compiles child steps, outcome-aware) ──
             BuilderStep::Throttle { config, steps } => {
-                let sub_segments = match ctx.compile_children_segments(steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (sub_segments, lifecycles) =
+                    match ctx.compile_children_segments(steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let body = compose_outcome_segment(sub_segments);
                 let segment = camel_processor::ThrottleSegment::new(config, body);
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(lifecycles),
                 }))
             }
 
             // ── LoadBalance (recursive — each step compiles to an OutcomeSegment) ──
             BuilderStep::LoadBalance { config, steps } => {
                 let mut destinations: Vec<camel_api::OutcomeSegment> = Vec::new();
+                let mut all_lifecycles = Vec::new();
                 for step in steps {
-                    let sub_segments = match ctx.compile_children_segments(vec![step], registry) {
-                        Ok(s) => s,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    let (sub_segments, lifecycles) =
+                        match ctx.compile_children_segments(vec![step], registry) {
+                            Ok(pair) => pair,
+                            Err(e) => return StepCompileResult::Matched(Err(e)),
+                        };
+                    all_lifecycles.extend(lifecycles);
                     destinations.push(compose_outcome_segment(sub_segments));
                 }
                 let segment = camel_processor::LoadBalanceSegment {
@@ -235,6 +247,7 @@ impl StepCompiler for RoutingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(all_lifecycles),
                 }))
             }
 

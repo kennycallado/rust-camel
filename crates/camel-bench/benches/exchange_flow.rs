@@ -45,22 +45,27 @@ fn build_exchange_flow() -> BoxProcessor {
         CompiledStep::Process {
             processor: step1,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: step2,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: step3,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: step4,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: step5,
             body_contract: None,
+            lifecycle: None,
         },
     ])
 }

@@ -55,6 +55,13 @@ pub(crate) enum RouteControllerCommand {
         pipeline: BoxProcessor,
         reply: oneshot::Sender<Result<(), CamelError>>,
     },
+    /// Raw swap — skips lifecycle/aggregate rejection check.
+    /// Used by the Restart path after the route has been stopped.
+    SwapPipelineRaw {
+        route_id: String,
+        pipeline: BoxProcessor,
+        reply: oneshot::Sender<Result<(), CamelError>>,
+    },
     CompileRouteDefinition {
         definition: RouteDefinition,
         reply: oneshot::Sender<Result<BoxProcessor, CamelError>>,
@@ -266,6 +273,25 @@ impl RouteControllerHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RouteControllerCommand::SwapPipeline {
+                route_id: route_id.into(),
+                pipeline,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    pub(crate) async fn swap_pipeline_raw(
+        &self,
+        route_id: impl Into<String>,
+        pipeline: BoxProcessor,
+    ) -> Result<(), CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::SwapPipelineRaw {
                 route_id: route_id.into(),
                 pipeline,
                 reply: reply_tx,

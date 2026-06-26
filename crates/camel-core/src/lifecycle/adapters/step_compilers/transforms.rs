@@ -41,6 +41,7 @@ impl StepCompiler for TransformsCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -86,6 +87,7 @@ impl StepCompiler for TransformsCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use camel_api::CamelError;
+use camel_api::function::{FunctionDiff, PrepareToken};
 
 use crate::context::RuntimeExecutionHandle;
 use crate::hot_reload::application::drain::drain_route;
@@ -62,6 +63,12 @@ pub(super) fn is_invalid_stop_transition(err: &CamelError) -> bool {
     err.to_string().contains("invalid transition")
 }
 
+pub(super) fn is_lifecycle_rejection(err: &CamelError) -> bool {
+    // Match the unique substring from swap_pipeline's rejection error:
+    // "Route '{}' contains stateful steps (lifecycle-bearing). Hot-swap not supported — use restart."
+    err.to_string().contains("lifecycle-bearing")
+}
+
 pub(super) fn should_stop_before_mutation(runtime_status: Option<&str>) -> bool {
     !matches!(runtime_status, Some("Registered" | "Stopped"))
 }
@@ -75,10 +82,28 @@ pub(super) fn should_start_after_restart(runtime_status: Option<&str>) -> bool {
 // ============================================================================
 
 /// Apply a Swap action: atomic pipeline replacement (zero-downtime).
+///
+/// If the route has lifecycle-bearing steps the atomic swap is rejected,
+/// and this function falls back to the Restart path: stop → swap_raw → start.
+///
+/// ## Staging contract (Case B)
+///
+/// Function resolution is lazy (via `FunctionInvoker` — the `FunctionStep` calls
+/// `invoker.invoke(id, exchange)` at runtime).  `prepare_reload` registers new
+/// function definitions in the invoker; `finalize_reload` commits them (and
+/// unregisters the old ones); `rollback_reload` unregisters the newly-prepared
+/// ones.  This means **rollback must NOT happen before the Restart path's
+/// stop/swap/start** — the compiled pipeline `p` references FunctionIds that
+/// need to be registered at runtime.
+///
+/// The staging lifecycle is therefore:
+/// - **Success** (atomic or Restart) → `finalize_reload`
+/// - **Failure** (any step after prepare) → `rollback_reload`
 pub(super) async fn apply_swap(
     route_id: String,
     new_definitions: &mut Vec<RouteDefinition>,
     controller: &RuntimeExecutionHandle,
+    drain_timeout: Duration,
     function_ctx: Option<&FunctionReloadContext>,
     errors: &mut Vec<ReloadError>,
 ) {
@@ -112,49 +137,117 @@ pub(super) async fn apply_swap(
 
     match pipeline {
         Ok(p) => {
-            let prepare_token = if let Some(ctx) = function_ctx {
-                let diff = compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-                match ctx.invoker.prepare_reload(diff, ctx.generation).await {
-                    Ok(token) => Some(token),
-                    Err(e) => {
+            // Compute function diff and prepare reload.  Both the token and the
+            // diff are kept alive for the duration of this function so that any
+            // branch can finalize (on success) or rollback (on failure).
+            let (prepare_token, function_diff): (Option<PrepareToken>, Option<FunctionDiff>) =
+                if let Some(ctx) = function_ctx {
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
+                    match ctx
+                        .invoker
+                        .prepare_reload(diff.clone(), ctx.generation)
+                        .await
+                    {
+                        Ok(token) => (Some(token), Some(diff)),
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id: route_id.clone(),
+                                action: "Swap (prepare)".into(),
+                                error: CamelError::ProcessorError(format!("{e}")),
+                            });
+                            return;
+                        }
+                    }
+                } else {
+                    (None, None)
+                };
+
+            // Attempt atomic swap.  Clone p because swap_route_pipeline takes
+            // ownership and p may still be needed for the Restart fallback path.
+            // BoxCloneService::clone is ~3 atomic ops (Arc increment).
+            let p_clone = p.clone();
+            let result = controller.swap_route_pipeline(&route_id, p_clone).await;
+            if let Err(e) = result {
+                if is_lifecycle_rejection(&e) {
+                    tracing::info!(
+                        route_id = %route_id,
+                        "Lifecycle-bearing route — using Restart path (stop → swap_raw → start)"
+                    );
+
+                    // 1. Stop route (drains lifecycle handles)
+                    if let Err(stop_err) = controller.stop_route_reload(&route_id).await {
+                        rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Swap (restart-stop)".into(),
+                            error: stop_err,
+                        });
+                        return;
+                    }
+
+                    // 2. Drain in-flight exchanges
+                    let _ = drain_route(&route_id, "swap-restart", controller, drain_timeout).await;
+
+                    // 3. Raw pipeline swap (no lifecycle check — route is stopped)
+                    if let Err(swap_err) = controller.swap_route_pipeline_raw(&route_id, p).await {
+                        rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Swap (restart-raw)".into(),
+                            error: swap_err,
+                        });
+                        return;
+                    }
+
+                    // 4. Start route (re-creates consumer with new pipeline)
+                    if let Err(start_err) = controller.start_route_reload(&route_id).await {
+                        rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Swap (restart-start)".into(),
+                            error: start_err,
+                        });
+                        return;
+                    }
+
+                    // Restart SUCCESS — commit staging (match atomic swap path)
+                    if let Some(ctx) = function_ctx
+                        && let Some(ref diff) = function_diff
+                        && let Err(e) = ctx.invoker.finalize_reload(diff, ctx.generation).await
+                    {
                         errors.push(ReloadError {
                             route_id: route_id.clone(),
-                            action: "Swap (prepare)".into(),
+                            action: "Swap (restart-finalize)".into(),
                             error: CamelError::ProcessorError(format!("{e}")),
                         });
                         return;
                     }
-                }
-            } else {
-                None
-            };
 
-            let result = controller.swap_route_pipeline(&route_id, p).await;
-            if let Err(e) = result {
-                if let Some(ctx) = function_ctx
-                    && let Some(ref token) = prepare_token
-                {
-                    let _ = ctx
-                        .invoker
-                        .rollback_reload(token.clone(), ctx.generation)
-                        .await;
+                    tracing::info!(
+                        route_id = %route_id,
+                        "hot-reload: route restarted via Restart path"
+                    );
+                } else {
+                    // Non-lifecycle error — rollback staging, report
+                    rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
+                    errors.push(ReloadError {
+                        route_id,
+                        action: "Swap".into(),
+                        error: e,
+                    });
                 }
-                errors.push(ReloadError {
-                    route_id,
-                    action: "Swap".into(),
-                    error: e,
-                });
             } else {
-                if let Some(ctx) = function_ctx {
-                    let diff =
-                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-                    if let Err(e) = ctx.invoker.finalize_reload(&diff, ctx.generation).await {
-                        errors.push(ReloadError {
-                            route_id: route_id.clone(),
-                            action: "Finalize".into(),
-                            error: CamelError::ProcessorError(format!("{e}")),
-                        });
-                    }
+                // Atomic swap SUCCESS — commit staging
+                if let Some(ctx) = function_ctx
+                    && let Some(ref diff) = function_diff
+                    && let Err(e) = ctx.invoker.finalize_reload(diff, ctx.generation).await
+                {
+                    errors.push(ReloadError {
+                        route_id: route_id.clone(),
+                        action: "Finalize".into(),
+                        error: CamelError::ProcessorError(format!("{e}")),
+                    });
                 }
                 if in_flight > 0 {
                     tracing::info!(
@@ -176,6 +269,31 @@ pub(super) async fn apply_swap(
                 error: e,
             });
         }
+    }
+}
+
+/// Roll back function staging after a failed reload attempt.
+///
+/// Safe to call when `function_ctx` or `prepare_token` is `None` — the
+/// function becomes a no-op.  Rollback failures are logged as warnings
+/// instead of pushed to errors (the caller already pushes the primary error).
+async fn rollback_staging(
+    function_ctx: Option<&FunctionReloadContext>,
+    prepare_token: Option<&PrepareToken>,
+    route_id: &str,
+) {
+    let Some(ctx) = function_ctx else { return };
+    let Some(token) = prepare_token else { return };
+    if let Err(e) = ctx
+        .invoker
+        .rollback_reload(token.clone(), ctx.generation)
+        .await
+    {
+        tracing::warn!(
+            route_id = %route_id,
+            error = %e,
+            "hot-reload: failed to rollback function staging"
+        );
     }
 }
 
@@ -818,6 +936,20 @@ mod tests {
         assert!(!is_invalid_stop_transition(&other));
     }
 
+    #[test]
+    fn helper_is_lifecycle_rejection_detects_marker() {
+        let err = CamelError::RouteError(
+            "Route 'r1' contains stateful steps (lifecycle-bearing). Hot-swap not supported — use restart.".into(),
+        );
+        assert!(is_lifecycle_rejection(&err));
+
+        let other = CamelError::RouteError("Route not found".into());
+        assert!(!is_lifecycle_rejection(&other));
+
+        let route_err = CamelError::RouteError("invalid transition: Started -> Started".into());
+        assert!(!is_lifecycle_rejection(&route_err));
+    }
+
     // -----------------------------------------------------------------------
     // compute_function_diff_for_route tests
     // -----------------------------------------------------------------------
@@ -886,5 +1018,138 @@ mod tests {
         assert_eq!(diff.added.len(), 0);
         assert_eq!(diff.removed.len(), 0);
         assert_eq!(diff.unchanged.len(), 1);
+    }
+
+    // ── Integration: apply_swap Restart path for lifecycle-bearing routes ──
+
+    #[tokio::test]
+    async fn apply_swap_restart_path_for_lifecycle_route() {
+        // Verifies the full stop→swap_raw→start sequence:
+        //   1. swap_pipeline rejects the lifecycle-bearing route
+        //   2. The Restart path stops the route, drains, raw-swaps, and starts
+        //   3. No errors are produced
+        //   4. The route exists with the new pipeline after restart
+        //
+        // Because function resolution is lazy (Case B — FunctionStep calls
+        // invoker.invoke(id) at runtime), the staging contract is:
+        //   - finalize_reload on success (NOT premature rollback)
+        //   - rollback_reload on failure
+
+        use crate::context::RuntimeExecutionHandle;
+        use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
+        use crate::lifecycle::adapters::in_memory::InMemoryRuntimeStore;
+        use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+        use crate::lifecycle::adapters::runtime_execution::RuntimeExecutionAdapter;
+        use crate::lifecycle::application::runtime_bus::RuntimeBus;
+        use crate::shared::components::domain::Registry;
+        use camel_api::{StepLifecycle, StepShutdownReason};
+        use std::sync::Arc;
+
+        // ── Lifecycle handle for the test route ──
+        #[derive(Debug)]
+        struct TestLifecycle;
+        #[async_trait::async_trait]
+        impl StepLifecycle for TestLifecycle {
+            fn name(&self) -> &'static str {
+                "test-lifecycle"
+            }
+            async fn shutdown(
+                &self,
+                _reason: StepShutdownReason,
+            ) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+        }
+
+        // ── Build controller with a route injected with lifecycle ──
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .register(Arc::new(camel_component_timer::TimerComponent::new()));
+        let mut controller = DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+
+        // Add route via the normal path (compiles identity pipeline).
+        controller
+            .add_route(
+                RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                    .with_route_id("restart-integration"),
+            )
+            .await
+            .unwrap();
+
+        // Inject lifecycle into the pipeline so swap_pipeline rejects it.
+        controller
+            .set_route_lifecycle_for_test(
+                "restart-integration",
+                vec![Arc::new(TestLifecycle) as Arc<dyn StepLifecycle>],
+            )
+            .expect("set_route_lifecycle_for_test should succeed");
+
+        // Spawn the actor — the route is pre-injected with lifecycle.
+        let (ctrl_handle, _actor_join) = spawn_controller_actor(controller);
+
+        // ── Build minimal RuntimeBus ──
+        let store = InMemoryRuntimeStore::default();
+        let execution = Arc::new(RuntimeExecutionAdapter::new(ctrl_handle.clone()));
+        let runtime_bus = Arc::new(
+            RuntimeBus::new(
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+            )
+            .with_execution(execution),
+        );
+
+        // ── Build RuntimeExecutionHandle ──
+        let handle = RuntimeExecutionHandle {
+            controller: ctrl_handle.clone(),
+            runtime: runtime_bus,
+            function_invoker: None,
+        };
+
+        // ── Call apply_swap ──
+        let mut new_defs = vec![
+            RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                .with_route_id("restart-integration"),
+        ];
+        let mut errors = vec![];
+        apply_swap(
+            "restart-integration".into(),
+            &mut new_defs,
+            &handle,
+            Duration::from_secs(5),
+            None,
+            &mut errors,
+        )
+        .await;
+
+        // ── Assert ──
+        assert!(
+            errors.is_empty(),
+            "apply_swap should succeed for lifecycle route via Restart path; got {errors:?}"
+        );
+
+        let exists = ctrl_handle
+            .route_exists("restart-integration")
+            .await
+            .unwrap();
+        assert!(exists, "route should exist after Restart path completes");
+
+        let pipeline = ctrl_handle
+            .get_pipeline("restart-integration")
+            .await
+            .unwrap();
+        assert!(
+            pipeline.is_some(),
+            "pipeline should be present after Restart path completes"
+        );
+
+        // Cleanup: stop the running route (timer consumer was started).
+        let _ = ctrl_handle.stop_route("restart-integration").await;
     }
 }

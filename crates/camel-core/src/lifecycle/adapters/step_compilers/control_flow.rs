@@ -10,6 +10,7 @@ use camel_api::{
 
 use super::{
     CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+    pack_lifecycles,
 };
 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
 use crate::lifecycle::adapters::step_resolution::compile_filter_predicate;
@@ -29,15 +30,17 @@ impl StepCompiler for ControlFlowCompiler {
         match step {
             // ── Loop (programmatic) ──
             BuilderStep::Loop { config, steps } => {
-                let sub_segments = match ctx.compile_children_segments(steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (sub_segments, lifecycles) =
+                    match ctx.compile_children_segments(steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let body = compose_outcome_segment(sub_segments);
                 let loop_segment = camel_processor::LoopSegment { config, body };
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(loop_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(lifecycles),
                 }))
             }
 
@@ -67,25 +70,28 @@ impl StepCompiler for ControlFlowCompiler {
                         )));
                     }
                 };
-                let sub_segments = match ctx.compile_children_segments(steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (sub_segments, lifecycles) =
+                    match ctx.compile_children_segments(steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let body = compose_outcome_segment(sub_segments);
                 let config = LoopConfig { mode };
                 let loop_segment = camel_processor::LoopSegment { config, body };
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(loop_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(lifecycles),
                 }))
             }
 
             // ── Filter (programmatic) ──
             BuilderStep::Filter { predicate, steps } => {
-                let sub_segments = match ctx.compile_children_segments(steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (sub_segments, lifecycles) =
+                    match ctx.compile_children_segments(steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let body_segment = compose_outcome_segment(sub_segments);
                 let filter_segment = camel_processor::FilterSegment {
                     predicate,
@@ -94,6 +100,7 @@ impl StepCompiler for ControlFlowCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(filter_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(lifecycles),
                 }))
             }
 
@@ -103,10 +110,11 @@ impl StepCompiler for ControlFlowCompiler {
                     Ok(p) => p,
                     Err(e) => return StepCompileResult::Matched(Err(e)),
                 };
-                let sub_segments = match ctx.compile_children_segments(steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (sub_segments, lifecycles) =
+                    match ctx.compile_children_segments(steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let body_segment = compose_outcome_segment(sub_segments);
                 let filter_segment = camel_processor::FilterSegment {
                     predicate,
@@ -115,18 +123,21 @@ impl StepCompiler for ControlFlowCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(filter_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(lifecycles),
                 }))
             }
 
             // ── Choice (programmatic) ──
             BuilderStep::Choice { whens, otherwise } => {
                 let mut when_segments = Vec::new();
+                let mut all_lifecycles = Vec::new();
                 for when_step in whens {
-                    let sub_segments =
+                    let (sub_segments, lifecycles) =
                         match ctx.compile_children_segments(when_step.steps, registry) {
-                            Ok(s) => s,
+                            Ok(pair) => pair,
                             Err(e) => return StepCompileResult::Matched(Err(e)),
                         };
+                    all_lifecycles.extend(lifecycles);
                     let body = compose_outcome_segment(sub_segments);
                     when_segments.push(camel_processor::WhenClauseSegment {
                         predicate: when_step.predicate,
@@ -134,11 +145,12 @@ impl StepCompiler for ControlFlowCompiler {
                     });
                 }
                 let otherwise_seg = if let Some(otherwise_steps) = otherwise {
-                    let sub_segments =
+                    let (sub_segments, lifecycles) =
                         match ctx.compile_children_segments(otherwise_steps, registry) {
-                            Ok(s) => s,
+                            Ok(pair) => pair,
                             Err(e) => return StepCompileResult::Matched(Err(e)),
                         };
+                    all_lifecycles.extend(lifecycles);
                     Some(compose_outcome_segment(sub_segments))
                 } else {
                     None
@@ -150,32 +162,36 @@ impl StepCompiler for ControlFlowCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(choice_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(all_lifecycles),
                 }))
             }
 
             // ── DeclarativeChoice ──
             BuilderStep::DeclarativeChoice { whens, otherwise } => {
                 let mut when_segments = Vec::new();
+                let mut all_lifecycles = Vec::new();
                 for when_step in whens {
                     let predicate =
                         match compile_filter_predicate(ctx.languages, &when_step.predicate) {
                             Ok(p) => p,
                             Err(e) => return StepCompileResult::Matched(Err(e)),
                         };
-                    let sub_segments =
+                    let (sub_segments, lifecycles) =
                         match ctx.compile_children_segments(when_step.steps, registry) {
-                            Ok(s) => s,
+                            Ok(pair) => pair,
                             Err(e) => return StepCompileResult::Matched(Err(e)),
                         };
+                    all_lifecycles.extend(lifecycles);
                     let body = compose_outcome_segment(sub_segments);
                     when_segments.push(camel_processor::WhenClauseSegment { predicate, body });
                 }
                 let otherwise_seg = if let Some(otherwise_steps) = otherwise {
-                    let sub_segments =
+                    let (sub_segments, lifecycles) =
                         match ctx.compile_children_segments(otherwise_steps, registry) {
-                            Ok(s) => s,
+                            Ok(pair) => pair,
                             Err(e) => return StepCompileResult::Matched(Err(e)),
                         };
+                    all_lifecycles.extend(lifecycles);
                     Some(compose_outcome_segment(sub_segments))
                 } else {
                     None
@@ -187,6 +203,7 @@ impl StepCompiler for ControlFlowCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(choice_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(all_lifecycles),
                 }))
             }
 
@@ -196,10 +213,11 @@ impl StepCompiler for ControlFlowCompiler {
                 catch,
                 finally,
             } => {
-                let try_sub_segments = match ctx.compile_children_segments(try_steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (try_sub_segments, mut all_lifecycles) =
+                    match ctx.compile_children_segments(try_steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let try_body = compose_outcome_segment(try_sub_segments);
 
                 let mut catch_clauses = Vec::with_capacity(catch.len());
@@ -238,11 +256,12 @@ impl StepCompiler for ControlFlowCompiler {
                         },
                         None => None,
                     };
-                    let clause_sub_segments = match ctx.compile_children_segments(c.steps, registry)
-                    {
-                        Ok(s) => s,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    let (clause_sub_segments, lifecycles) =
+                        match ctx.compile_children_segments(c.steps, registry) {
+                            Ok(pair) => pair,
+                            Err(e) => return StepCompileResult::Matched(Err(e)),
+                        };
+                    all_lifecycles.extend(lifecycles);
                     let body = compose_outcome_segment(clause_sub_segments);
                     catch_clauses.push(CatchClauseSegment {
                         matcher,
@@ -262,10 +281,12 @@ impl StepCompiler for ControlFlowCompiler {
                         },
                         None => None,
                     };
-                    let f_sub_segments = match ctx.compile_children_segments(f.steps, registry) {
-                        Ok(s) => s,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    let (f_sub_segments, lifecycle) =
+                        match ctx.compile_children_segments(f.steps, registry) {
+                            Ok(pair) => pair,
+                            Err(e) => return StepCompileResult::Matched(Err(e)),
+                        };
+                    all_lifecycles.extend(lifecycle);
                     let body = compose_outcome_segment(f_sub_segments);
                     Some(FinallyClauseSegment { on_when, body })
                 } else {
@@ -280,6 +301,7 @@ impl StepCompiler for ControlFlowCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(do_try_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(all_lifecycles),
                 }))
             }
 

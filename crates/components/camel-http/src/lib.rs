@@ -4930,6 +4930,7 @@ mod tests {
                 Box::pin(async move { Ok(ex) })
             }),
             body_contract: None,
+            lifecycle: None,
         };
         let set_status_step = CompiledStep::Process {
             processor: BoxProcessor::from_fn(|mut ex: Exchange| {
@@ -4940,6 +4941,7 @@ mod tests {
                 Box::pin(async move { Ok(ex) })
             }),
             body_contract: None,
+            lifecycle: None,
         };
         let pipeline = compose_pipeline_with_handler(
             vec![set_body_step, set_status_step, CompiledStep::Stop],

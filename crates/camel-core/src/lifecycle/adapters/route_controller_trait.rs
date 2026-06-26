@@ -158,7 +158,7 @@ impl camel_api::RouteController for DefaultRouteController {
                         let ExchangeEnvelope { exchange, reply_tx } = envelope;
 
                         // Load current pipeline from ArcSwap (picks up hot-reloaded pipelines)
-                        let mut pipeline = pipeline.load().clone_inner();
+                        let mut pipeline = pipeline.load().processor.clone_inner();
 
                         if let Err(e) = ready_with_backoff(&mut pipeline, &pipeline_cancel).await {
                             if let Some(tx) = reply_tx {
@@ -204,7 +204,7 @@ impl camel_api::RouteController for DefaultRouteController {
                             };
 
                             // Load current pipeline from ArcSwap
-                            let mut pipe = pipe_ref.load().clone_inner();
+                            let mut pipe = pipe_ref.load().processor.clone_inner();
 
                             // Wait for service ready with circuit breaker backoff
                             if let Err(e) = ready_with_backoff(&mut pipe, &cancel).await {

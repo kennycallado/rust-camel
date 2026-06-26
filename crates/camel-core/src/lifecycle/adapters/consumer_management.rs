@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use camel_api::{CamelError, RuntimeHandle};
+use camel_api::{CamelError, RuntimeHandle, StepLifecycle, StepShutdownReason};
 use camel_component_api::{
     ComponentContext, ConcurrencyModel, Consumer, ConsumerContext, RuntimeObservability,
 };
@@ -17,6 +17,7 @@ use crate::lifecycle::adapters::route_helpers::{
     CrashNotification, ManagedRoute, handle_is_running, publish_runtime_failure,
 };
 use crate::shared::components::domain::Registry;
+use camel_processor::aggregator::AggregatorService;
 
 pub(crate) fn create_route_consumer(
     rt: Arc<dyn RuntimeObservability>,
@@ -156,10 +157,7 @@ pub(super) async fn stop_route_internal(
         .get_mut(route_id)
         .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     if let Some(agg_svc) = &managed.agg_service {
-        let guard = agg_svc
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
-        guard.force_complete_all();
+        agg_svc.force_complete_all();
     }
 
     let managed = routes
@@ -198,6 +196,49 @@ pub(super) async fn stop_route_internal(
         warn!(route_id = %route_id, "Route shutdown timed out after {:.0?} — tasks may still be running", shutdown_timeout);
     }
 
+    // Drain stateful pipeline steps in route order. Intake is cancelled and the
+    // pipeline task is joined, so no process() is in flight.
+    // Read from the ArcSwap snapshot — authoritative, never stale after hot-swap.
+    {
+        let managed = routes
+            .get_mut(route_id)
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+        let assembly = managed.pipeline.load();
+        for step in &assembly.lifecycle {
+            if let Err(e) = step
+                .shutdown(camel_api::StepShutdownReason::RouteStop)
+                .await
+            {
+                tracing::warn!(
+                    step = step.name(),
+                    error = %e,
+                    "StepLifecycle shutdown failed during stop_route for route {}",
+                    route_id
+                );
+            }
+        }
+    }
+
+    // Aggregator shutdown via StepLifecycle trait dispatch (post-join).
+    // force_complete_all already ran pre-join above; this drains any remaining
+    // timeout tasks that the pipeline task's select loop may have spawned.
+    {
+        let managed = routes
+            .get_mut(route_id)
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+        if let Some(agg) = &managed.agg_service
+            && let Err(e) =
+                <AggregatorService as StepLifecycle>::shutdown(agg, StepShutdownReason::RouteStop)
+                    .await
+        {
+            tracing::warn!(
+                route_id = %route_id,
+                error = %e,
+                "Aggregator shutdown failed during stop_route"
+            );
+        }
+    }
+
     let managed = routes
         .get_mut(route_id)
         .expect("invariant: route must exist after prior existence check"); // allow-unwrap
@@ -213,12 +254,14 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::lifecycle::adapters::pipeline_runtime::PipelineAssembly;
     use crate::lifecycle::adapters::route_runtime_state;
     use crate::lifecycle::application::route_definition::RouteDefinition;
     use arc_swap::ArcSwap;
     use async_trait::async_trait;
     use camel_api::SyncBoxProcessor;
     use camel_api::{BoxProcessor, IdentityProcessor};
+    use tokio::sync::oneshot;
 
     struct FailingConsumer {
         message: &'static str,
@@ -245,8 +288,9 @@ mod tests {
                 .with_route_id("route-1")
                 .to_info(),
             from_uri: "timer:test".into(),
-            pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor::new(
-                BoxProcessor::new(IdentityProcessor),
+            pipeline: Arc::new(ArcSwap::from_pointee(PipelineAssembly::new(
+                SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor)),
+                vec![],
             ))),
             concurrency: None,
             consumer_handle,
@@ -482,5 +526,106 @@ mod tests {
             STOP_CALLED.load(Ordering::SeqCst),
             "consumer.stop() should have been called"
         );
+    }
+
+    // ── Task 5: Lifecycle drain ──
+
+    struct LifecycleRecorder {
+        reasons: std::sync::Mutex<Vec<camel_api::StepShutdownReason>>,
+    }
+
+    impl std::fmt::Debug for LifecycleRecorder {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LifecycleRecorder").finish()
+        }
+    }
+
+    #[async_trait]
+    impl camel_api::StepLifecycle for LifecycleRecorder {
+        fn name(&self) -> &'static str {
+            "test-recorder"
+        }
+        async fn shutdown(
+            &self,
+            r: camel_api::StepShutdownReason,
+        ) -> Result<(), camel_api::CamelError> {
+            self.reasons.lock().unwrap().push(r);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_route_drains_lifecycle_handles() {
+        let recorder = Arc::new(LifecycleRecorder {
+            reasons: std::sync::Mutex::new(vec![]),
+        });
+        let lifecycle: Arc<dyn camel_api::StepLifecycle> = recorder.clone();
+
+        let assembly = PipelineAssembly::new(
+            SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor)),
+            vec![lifecycle],
+        );
+
+        let (mpsc_tx, _rx) = mpsc::channel(1);
+
+        // Use oneshot channels to keep spawned tasks alive deterministically.
+        // Tasks block on rx.await, staying "running" until the test cleans up.
+        // stop_route_internal wraps the join in a timeout, so the tasks don't
+        // need to complete — the timeout fires and drain proceeds.
+        let (consumer_tx, consumer_rx) = oneshot::channel::<()>();
+        let (pipeline_tx, pipeline_rx) = oneshot::channel::<()>();
+
+        let consumer_handle = tokio::spawn(async {
+            let _ = consumer_rx.await;
+        });
+        let pipeline_handle = tokio::spawn(async {
+            let _ = pipeline_rx.await;
+        });
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            "route-lifecycle-test".to_string(),
+            ManagedRoute {
+                definition: RouteDefinition::new("timer:test", vec![])
+                    .with_route_id("route-lifecycle-test")
+                    .to_info(),
+                from_uri: "timer:test".into(),
+                pipeline: Arc::new(ArcSwap::from_pointee(assembly)),
+                concurrency: None,
+                consumer_handle: Some(consumer_handle),
+                pipeline_handle: Some(pipeline_handle),
+                consumer_cancel_token: CancellationToken::new(),
+                pipeline_cancel_token: CancellationToken::new(),
+                channel_sender: Some(mpsc_tx),
+                in_flight: None,
+                aggregate_split: None,
+                agg_service: None,
+                compiled: route_runtime_state::CompiledRoute {
+                    security_policy: None,
+                    security_authenticator: None,
+                },
+            },
+        );
+
+        // Short timeout: the spawned tasks block on oneshot receivers and never
+        // complete, so the join times out and the test proceeds to drain lifecycle.
+        let result = stop_route_internal(
+            &mut routes,
+            "route-lifecycle-test",
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(result.is_ok(), "stop_route_internal should succeed");
+
+        let reasons = recorder.reasons.lock().unwrap();
+        assert_eq!(
+            *reasons,
+            vec![camel_api::StepShutdownReason::RouteStop],
+            "lifecycle.shutdown should have been called with RouteStop once"
+        );
+
+        // Clean up: drop senders so spawned tasks can complete.
+        drop(consumer_tx);
+        drop(pipeline_tx);
     }
 }

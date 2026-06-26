@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use camel_api::{BodyType, BoxProcessor, CamelError, FunctionInvoker, ProducerContext};
+use camel_api::{
+    BodyType, BoxProcessor, CamelError, FunctionInvoker, ProducerContext, StepLifecycle,
+};
 use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_endpoint::parse_uri;
 
@@ -42,6 +44,9 @@ pub enum CompiledStep {
     Process {
         processor: BoxProcessor,
         body_contract: Option<BodyType>,
+        /// Lifecycle handle for this processor, if it is stateful.
+        /// `None` for stateless processors (the common case).
+        lifecycle: Option<Arc<dyn StepLifecycle>>,
     },
     /// Stop EIP marker. `run_steps` produces `PipelineOutcome::Stopped(ex)`
     /// without invoking a Tower service. Replaces `StopService` (Task 7).
@@ -52,6 +57,11 @@ pub enum CompiledStep {
     Segment {
         segment: camel_api::OutcomeSegment,
         body_contract: Option<BodyType>,
+        /// Lifecycle handles from children nested inside this segment.
+        /// `Option<Vec<...>>` (not `Option<Arc<...>>`) so multiple stateful
+        /// children (e.g. Idempotent+Resequencer inside Filter) each
+        /// register independently.
+        lifecycle: Option<Vec<Arc<dyn StepLifecycle>>>,
     },
 }
 
@@ -109,19 +119,31 @@ impl<'a> CompilationContext<'a> {
     ///
     /// This replaces the 22-line duplicated closure in Filter/DeclarativeFilter
     /// (and will prevent 14+ more duplicates in T9–T16).
+    #[allow(clippy::type_complexity)]
     pub fn compile_children_segments(
         &self,
         steps: Vec<BuilderStep>,
         registry: &StepCompilerRegistry,
-    ) -> Result<Vec<Box<dyn camel_api::OutcomePipeline>>, CamelError> {
+    ) -> Result<
+        (
+            Vec<Box<dyn camel_api::OutcomePipeline>>,
+            Vec<Arc<dyn camel_api::StepLifecycle>>,
+        ),
+        CamelError,
+    > {
         let pairs = self.compile_children(steps, registry)?;
+        let mut lifecycle_handles: Vec<Arc<dyn camel_api::StepLifecycle>> = Vec::new();
         let segments: Vec<Box<dyn camel_api::OutcomePipeline>> = pairs
             .into_iter()
             .map(|c| match c {
                 CompiledStep::Process {
                     processor,
                     body_contract,
+                    lifecycle,
                 } => {
+                    if let Some(lc) = lifecycle {
+                        lifecycle_handles.push(lc);
+                    }
                     let inner: Box<dyn camel_api::OutcomePipeline> = Box::new(
                         crate::lifecycle::adapters::route_compiler::BoxProcessorSegment::new(
                             processor,
@@ -140,10 +162,19 @@ impl<'a> CompilationContext<'a> {
                     Box::new(crate::lifecycle::adapters::route_compiler::StopSegment)
                         as Box<dyn camel_api::OutcomePipeline>
                 }
-                CompiledStep::Segment { segment, .. } => Box::new(segment),
+                CompiledStep::Segment {
+                    segment,
+                    body_contract: _,
+                    lifecycle,
+                } => {
+                    if let Some(lcs) = lifecycle {
+                        lifecycle_handles.extend(lcs);
+                    }
+                    Box::new(segment)
+                }
             })
             .collect();
-        Ok(segments)
+        Ok((segments, lifecycle_handles))
     }
 }
 
@@ -219,6 +250,18 @@ pub(crate) fn resolve_producer(
     endpoint.create_producer(Arc::clone(&ctx.rt), ctx.producer_ctx)
 }
 
+/// Pack a lifecycle Vec into `None` when empty, `Some` when non-empty.
+/// Preserves the invariant that `Some` always implies ≥1 handle.
+pub(super) fn pack_lifecycles(
+    lifecycles: Vec<Arc<dyn StepLifecycle>>,
+) -> Option<Vec<Arc<dyn StepLifecycle>>> {
+    if lifecycles.is_empty() {
+        None
+    } else {
+        Some(lifecycles)
+    }
+}
+
 #[cfg(test)]
 mod segment_tests {
     use super::*;
@@ -247,6 +290,7 @@ mod segment_tests {
         let step = CompiledStep::Segment {
             segment: seg,
             body_contract: None,
+            lifecycle: None,
         };
         let _cloned = step.clone();
         if let CompiledStep::Segment { segment: _, .. } = _cloned {
@@ -262,6 +306,7 @@ mod segment_tests {
         let step = CompiledStep::Segment {
             segment: seg,
             body_contract: None,
+            lifecycle: None,
         };
         let s = format!("{:?}", step);
         assert!(
@@ -305,6 +350,363 @@ mod segment_tests {
         let mut borrowed = slot.load().as_ref().clone().unwrap();
         let outcome = borrowed.run(Exchange::new(Message::new("ping"))).await;
         assert!(matches!(outcome, PipelineOutcome::Completed(_)));
+    }
+
+    /// Test lifecycle handle used by compile_children_segments_bubbles_child_lifecycle.
+    #[derive(Debug)]
+    struct TestLifecycle;
+
+    #[async_trait::async_trait]
+    impl camel_api::StepLifecycle for TestLifecycle {
+        fn name(&self) -> &'static str {
+            "test-lifecycle"
+        }
+        async fn shutdown(
+            &self,
+            _reason: camel_api::StepShutdownReason,
+        ) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+    }
+
+    /// Custom compiler that injects a lifecycle handle into every
+    /// `BuilderStep::Processor` it compiles.
+    struct LifecycleInjectorCompiler {
+        handle: Arc<dyn camel_api::StepLifecycle>,
+    }
+
+    impl StepCompiler for LifecycleInjectorCompiler {
+        fn compile(
+            &self,
+            step: BuilderStep,
+            _step_index: usize,
+            _ctx: &CompilationContext,
+            _registry: &StepCompilerRegistry,
+        ) -> StepCompileResult {
+            match step {
+                BuilderStep::Processor(svc) => {
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: svc,
+                        body_contract: None,
+                        lifecycle: Some(self.handle.clone()),
+                    }))
+                }
+                other => StepCompileResult::NotHandled(other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compile_children_segments_bubbles_child_lifecycle() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        use camel_api::{BoxProcessor, BoxProcessorExt, StepLifecycle};
+        use camel_bean::BeanRegistry;
+        use camel_component_api::{
+            ComponentContext, NoOpComponentContext, RuntimeObservability,
+            test_support::NoopRuntimeObservability,
+        };
+
+        use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+
+        let handle: Arc<dyn StepLifecycle> = Arc::new(TestLifecycle);
+
+        // Register lifecycle injector + real control-flow compiler so
+        // compile_children_segments runs through a structural EIP path.
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(LifecycleInjectorCompiler {
+            handle: handle.clone(),
+        }));
+        reg.register(Box::new(super::control_flow::ControlFlowCompiler));
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+
+        let ctx = CompilationContext {
+            producer_ctx: &pc,
+            rt,
+            languages: &languages,
+            beans: &beans,
+            function_invoker: None,
+            component_ctx,
+            route_id: None,
+            staging_mode: &staging,
+        };
+
+        // Compile a Filter with a child Processor step.
+        let filter_step = BuilderStep::Filter {
+            predicate: Arc::new(|_| true),
+            steps: vec![BuilderStep::Processor(BoxProcessor::from_fn(|ex| {
+                Box::pin(async move { Ok(ex) })
+            }))],
+        };
+
+        let result = reg.compile_step(filter_step, 0, &ctx);
+        let compiled = result
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        match compiled {
+            CompiledStep::Segment {
+                lifecycle,
+                body_contract,
+                ..
+            } => {
+                assert_eq!(body_contract, None, "body_contract should be None");
+                let handles = lifecycle.expect("Segment should have lifecycle handles");
+                assert_eq!(handles.len(), 1, "expected 1 lifecycle handle");
+                assert_eq!(handles[0].name(), "test-lifecycle", "handle name mismatch");
+            }
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        }
+    }
+
+    /// A lifecycle handle with a configurable name for multi-handle tests.
+    #[derive(Debug)]
+    struct NamedLifecycle(&'static str);
+
+    #[async_trait::async_trait]
+    impl camel_api::StepLifecycle for NamedLifecycle {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        async fn shutdown(
+            &self,
+            _reason: camel_api::StepShutdownReason,
+        ) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+    }
+
+    /// Test A: Multiple stateful children in one Segment → Vec length 2.
+    #[tokio::test]
+    async fn compile_children_segments_multiple_stateful_children() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+        use camel_api::{BoxProcessor, BoxProcessorExt, StepLifecycle};
+        use camel_bean::BeanRegistry;
+        use camel_component_api::{
+            ComponentContext, NoOpComponentContext, RuntimeObservability,
+            test_support::NoopRuntimeObservability,
+        };
+
+        let handle: Arc<dyn StepLifecycle> = Arc::new(NamedLifecycle("multi"));
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(LifecycleInjectorCompiler {
+            handle: handle.clone(),
+        }));
+        reg.register(Box::new(super::control_flow::ControlFlowCompiler));
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+
+        let ctx = CompilationContext {
+            producer_ctx: &pc,
+            rt,
+            languages: &languages,
+            beans: &beans,
+            function_invoker: None,
+            component_ctx,
+            route_id: None,
+            staging_mode: &staging,
+        };
+
+        // Filter with TWO child Processors → both get the same lifecycle handle.
+        let filter_step = BuilderStep::Filter {
+            predicate: Arc::new(|_| true),
+            steps: vec![
+                BuilderStep::Processor(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))),
+                BuilderStep::Processor(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))),
+            ],
+        };
+
+        let result = reg.compile_step(filter_step, 0, &ctx);
+        let compiled = result
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        match compiled {
+            CompiledStep::Segment { lifecycle, .. } => {
+                let handles = lifecycle.expect("Segment should have lifecycle handles");
+                assert_eq!(
+                    handles.len(),
+                    2,
+                    "expected 2 lifecycle handles for 2 children"
+                );
+                for h in &handles {
+                    assert_eq!(h.name(), "multi", "all handles should be 'multi'");
+                }
+            }
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        }
+    }
+
+    /// Test B: Multi-branch accumulation across Choice when-clauses.
+    #[tokio::test]
+    async fn compile_children_segments_multi_branch_accumulation() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+        use crate::lifecycle::application::route_definition::WhenStep;
+        use camel_api::{BoxProcessor, BoxProcessorExt, StepLifecycle};
+        use camel_bean::BeanRegistry;
+        use camel_component_api::{
+            ComponentContext, NoOpComponentContext, RuntimeObservability,
+            test_support::NoopRuntimeObservability,
+        };
+
+        let handle: Arc<dyn StepLifecycle> = Arc::new(NamedLifecycle("branch"));
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(LifecycleInjectorCompiler {
+            handle: handle.clone(),
+        }));
+        reg.register(Box::new(super::control_flow::ControlFlowCompiler));
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+
+        let ctx = CompilationContext {
+            producer_ctx: &pc,
+            rt,
+            languages: &languages,
+            beans: &beans,
+            function_invoker: None,
+            component_ctx,
+            route_id: None,
+            staging_mode: &staging,
+        };
+
+        // Choice with 2 when branches, each containing 1 stateful child.
+        let choice_step = BuilderStep::Choice {
+            whens: vec![
+                WhenStep {
+                    predicate: Arc::new(|_| true),
+                    steps: vec![BuilderStep::Processor(BoxProcessor::from_fn(|ex| {
+                        Box::pin(async move { Ok(ex) })
+                    }))],
+                },
+                WhenStep {
+                    predicate: Arc::new(|_| false),
+                    steps: vec![BuilderStep::Processor(BoxProcessor::from_fn(|ex| {
+                        Box::pin(async move { Ok(ex) })
+                    }))],
+                },
+            ],
+            otherwise: None,
+        };
+
+        let result = reg.compile_step(choice_step, 0, &ctx);
+        let compiled = result
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        match compiled {
+            CompiledStep::Segment { lifecycle, .. } => {
+                let handles = lifecycle.expect("Segment should have lifecycle handles");
+                assert_eq!(
+                    handles.len(),
+                    2,
+                    "expected 2 lifecycle handles from 2 branches"
+                );
+                for h in &handles {
+                    assert_eq!(h.name(), "branch", "all handles should be 'branch'");
+                }
+            }
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        }
+    }
+
+    /// Test C: Nested Segment-in-Segment flattening — outer Segment contains
+    /// innermost lifecycle handle from a grandchild Processor.
+    #[tokio::test]
+    async fn compile_children_segments_nested_segment_flattening() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+        use camel_api::{BoxProcessor, BoxProcessorExt, StepLifecycle};
+        use camel_bean::BeanRegistry;
+        use camel_component_api::{
+            ComponentContext, NoOpComponentContext, RuntimeObservability,
+            test_support::NoopRuntimeObservability,
+        };
+
+        let inner_handle: Arc<dyn StepLifecycle> = Arc::new(NamedLifecycle("deep"));
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(LifecycleInjectorCompiler {
+            handle: inner_handle.clone(),
+        }));
+        reg.register(Box::new(super::control_flow::ControlFlowCompiler));
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+
+        let ctx = CompilationContext {
+            producer_ctx: &pc,
+            rt,
+            languages: &languages,
+            beans: &beans,
+            function_invoker: None,
+            component_ctx,
+            route_id: None,
+            staging_mode: &staging,
+        };
+
+        // Outer Filter containing an inner Filter that has a stateful Processor.
+        // The outer Segment's lifecycle should contain the innermost handle
+        // (proves recursive flattening through compile_children_segments).
+        let inner_filter = BuilderStep::Filter {
+            predicate: Arc::new(|_| true),
+            steps: vec![BuilderStep::Processor(BoxProcessor::from_fn(|ex| {
+                Box::pin(async move { Ok(ex) })
+            }))],
+        };
+
+        let outer_filter = BuilderStep::Filter {
+            predicate: Arc::new(|_| true),
+            steps: vec![inner_filter],
+        };
+
+        let result = reg.compile_step(outer_filter, 0, &ctx);
+        let compiled = result
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        match compiled {
+            CompiledStep::Segment { lifecycle, .. } => {
+                let handles = lifecycle.expect("outer Segment should have lifecycle handles");
+                assert_eq!(handles.len(), 1, "expected 1 innermost lifecycle handle");
+                assert_eq!(
+                    handles[0].name(),
+                    "deep",
+                    "handle should be from innermost child"
+                );
+            }
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        }
     }
 }
 

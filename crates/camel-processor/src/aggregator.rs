@@ -10,8 +10,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
+use async_trait::async_trait;
 use camel_api::{
-    CamelError,
+    CamelError, StepLifecycle, StepShutdownReason,
     aggregator::{
         AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode,
         CompletionReason, CorrelationStrategy,
@@ -62,6 +63,12 @@ pub struct AggregatorService {
     late_tx: mpsc::Sender<Exchange>,
     language_registry: SharedLanguageRegistry,
     route_cancel: CancellationToken,
+}
+
+impl std::fmt::Debug for AggregatorService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AggregatorService").finish_non_exhaustive()
+    }
 }
 
 impl AggregatorService {
@@ -137,7 +144,7 @@ impl AggregatorService {
 
     /// Graceful shutdown: cancel all outstanding timeout tasks and await their
     /// JoinHandles (with a 5s deadline) so that no tasks are leaked.
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown_inner(&self) {
         // Cancel all timeout cancellation tokens.
         {
             let mut guard = self.timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
@@ -167,6 +174,19 @@ impl AggregatorService {
             }
         })
         .await;
+    }
+}
+
+#[async_trait]
+impl StepLifecycle for AggregatorService {
+    fn name(&self) -> &'static str {
+        "aggregator"
+    }
+
+    async fn shutdown(&self, reason: StepShutdownReason) -> Result<(), CamelError> {
+        tracing::debug!(reason = ?reason, "Aggregator shutdown via StepLifecycle");
+        self.shutdown_inner().await;
+        Ok(())
     }
 }
 
@@ -527,6 +547,7 @@ mod tests {
     use std::collections::HashMap;
 
     use camel_api::{
+        StepLifecycle, StepShutdownReason,
         aggregator::{AggregationStrategy, AggregatorConfig},
         body::Body,
         exchange::Exchange,
@@ -1275,6 +1296,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn aggregator_shutdown_via_trait_dispatch() {
+        // RED: builds an AggregatorService, dispatches through Arc<dyn StepLifecycle>,
+        // and asserts idempotent shutdown works.
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(10)
+            .build()
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let svc = AggregatorService::new(config, tx, registry, cancel);
+
+        let step: Arc<dyn StepLifecycle> = Arc::new(svc);
+        step.shutdown(StepShutdownReason::RouteStop)
+            .await
+            .expect("first shutdown should succeed");
+        step.shutdown(StepShutdownReason::RouteStop)
+            .await
+            .expect("second shutdown (idempotent) should succeed");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_shutdown_awaits_timeout_handles() {
         let config = AggregatorConfig::correlate_by("key")
@@ -1299,7 +1342,7 @@ mod tests {
 
         // Shutdown should complete within the 5s deadline (the timeout task
         // gets cancelled so it won't wait for the full 100ms sleep).
-        svc.shutdown().await;
+        svc.shutdown_inner().await;
 
         assert!(
             svc.timeout_handles.lock().unwrap().is_empty(),

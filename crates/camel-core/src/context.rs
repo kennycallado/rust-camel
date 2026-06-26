@@ -102,9 +102,9 @@ impl CamelContext {
 /// This intentionally does not expose direct lifecycle mutation APIs to callers.
 #[derive(Clone)]
 pub struct RuntimeExecutionHandle {
-    controller: RouteControllerHandle,
-    runtime: Arc<RuntimeBus>,
-    function_invoker: Option<Arc<dyn FunctionInvoker>>,
+    pub(crate) controller: RouteControllerHandle,
+    pub(crate) runtime: Arc<RuntimeBus>,
+    pub(crate) function_invoker: Option<Arc<dyn FunctionInvoker>>,
 }
 
 impl RuntimeExecutionHandle {
@@ -175,6 +175,26 @@ impl RuntimeExecutionHandle {
         pipeline: camel_api::BoxProcessor,
     ) -> Result<(), CamelError> {
         self.controller.swap_pipeline(route_id, pipeline).await
+    }
+
+    /// Stop the route via the reload path (graceful lifecycle drain).
+    pub(crate) async fn stop_route_reload(&self, route_id: &str) -> Result<(), CamelError> {
+        self.controller.stop_route_reload(route_id).await
+    }
+
+    /// Start the route via the reload path (re-create consumer).
+    pub(crate) async fn start_route_reload(&self, route_id: &str) -> Result<(), CamelError> {
+        self.controller.start_route_reload(route_id).await
+    }
+
+    /// Raw pipeline swap — bypasses the lifecycle/aggregate rejection check.
+    /// Only safe after the route has been stopped (Restart path).
+    pub(crate) async fn swap_route_pipeline_raw(
+        &self,
+        route_id: &str,
+        pipeline: camel_api::BoxProcessor,
+    ) -> Result<(), CamelError> {
+        self.controller.swap_pipeline_raw(route_id, pipeline).await
     }
 
     pub(crate) async fn execute_runtime_command(

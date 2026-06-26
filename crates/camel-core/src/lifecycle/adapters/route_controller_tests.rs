@@ -1,4 +1,5 @@
 use super::*;
+use crate::lifecycle::adapters::pipeline_runtime::PipelineAssembly;
 use crate::lifecycle::adapters::route_helpers::runtime_failure_command;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
 use crate::shared::components::domain::Registry;
@@ -6,7 +7,8 @@ use arc_swap::ArcSwap;
 use camel_api::function::PrepareToken;
 use camel_api::{
     ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
-    FunctionInvoker, FunctionInvokerSync, RuntimeCommand, SyncBoxProcessor, Value, ValueSourceDef,
+    FunctionInvoker, FunctionInvokerSync, RuntimeCommand, StepLifecycle, StepShutdownReason,
+    SyncBoxProcessor, Value, ValueSourceDef,
 };
 use camel_component_api::ConcurrencyModel;
 
@@ -131,8 +133,9 @@ fn helper_functions_cover_non_async_branches() {
             .with_route_id("r")
             .to_info(),
         from_uri: "timer:a".into(),
-        pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor::new(
-            BoxProcessor::new(IdentityProcessor),
+        pipeline: Arc::new(ArcSwap::from_pointee(PipelineAssembly::new(
+            SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor)),
+            vec![],
         ))),
         concurrency: None,
         consumer_handle: None,
@@ -1304,19 +1307,23 @@ async fn aggregate_without_force_completion_on_stop_discards_pending_bucket() {
 
 #[tokio::test]
 async fn syncbox_processor_concurrent_clone_inner_via_arcswap() {
+    use crate::lifecycle::adapters::pipeline_runtime::PipelineAssembly;
     use arc_swap::ArcSwap;
     use camel_api::{BoxProcessor, IdentityProcessor, SyncBoxProcessor};
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    let processor = SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor));
-    let shared: Arc<ArcSwap<SyncBoxProcessor>> = Arc::new(ArcSwap::from_pointee(processor));
+    let assembly = PipelineAssembly::new(
+        SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor)),
+        vec![],
+    );
+    let shared: Arc<ArcSwap<PipelineAssembly>> = Arc::new(ArcSwap::from_pointee(assembly));
 
     let mut handles = vec![];
     for _ in 0..4 {
         let shared = shared.clone();
         handles.push(tokio::spawn(async move {
-            let mut cloned = shared.load().clone_inner();
+            let mut cloned = shared.load().processor.clone_inner();
             assert!(cloned.ready().await.is_ok());
         }));
     }
@@ -1377,4 +1384,188 @@ async fn aggregate_force_completion_on_natural_consumer_completion_emits_pending
         received[0].property("CamelAggregatedCompletionReason"),
         Some(&serde_json::json!("stop"))
     );
+}
+
+// ── Hot-swap rejection tests (Task 4) ──
+
+#[derive(Debug)]
+struct FakeStep;
+
+#[async_trait::async_trait]
+impl StepLifecycle for FakeStep {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+    async fn shutdown(&self, _reason: StepShutdownReason) -> Result<(), CamelError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn swap_pipeline_rejects_lifecycle_bearing_route() {
+    let mut controller = build_controller();
+
+    let assembly = PipelineAssembly::new(
+        SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor)),
+        vec![Arc::new(FakeStep) as Arc<dyn StepLifecycle>],
+    );
+
+    let managed = ManagedRoute {
+        definition: RouteDefinition::new("timer:test", vec![])
+            .with_route_id("lifecycle-route")
+            .to_info(),
+        from_uri: "timer:test".into(),
+        pipeline: Arc::new(ArcSwap::from_pointee(assembly)),
+        concurrency: None,
+        consumer_handle: None,
+        pipeline_handle: None,
+        consumer_cancel_token: CancellationToken::new(),
+        pipeline_cancel_token: CancellationToken::new(),
+        channel_sender: None,
+        in_flight: None,
+        aggregate_split: None,
+        agg_service: None,
+        compiled: route_runtime_state::CompiledRoute {
+            security_policy: None,
+            security_authenticator: None,
+        },
+    };
+
+    controller.routes.insert("lifecycle-route".into(), managed);
+
+    let result = controller.swap_pipeline("lifecycle-route", BoxProcessor::new(IdentityProcessor));
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("lifecycle-bearing"),
+        "expected 'lifecycle-bearing' error, got: {err}"
+    );
+}
+
+#[test]
+fn swap_pipeline_rejects_agg_service_route() {
+    use camel_api::aggregator::AggregatorConfig;
+    use camel_processor::aggregator::AggregatorService;
+
+    let mut controller = build_controller();
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<camel_api::Exchange>(64);
+    let agg_config = AggregatorConfig::correlate_by("key")
+        .complete_when_size(10)
+        .build()
+        .unwrap();
+    let langs: SharedLanguageRegistry =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let cancel = CancellationToken::new();
+    let svc = AggregatorService::new(agg_config, tx, langs, cancel);
+
+    let assembly = PipelineAssembly::new(
+        SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor)),
+        vec![],
+    );
+
+    let managed = ManagedRoute {
+        definition: RouteDefinition::new("timer:test", vec![])
+            .with_route_id("agg-route")
+            .to_info(),
+        from_uri: "timer:test".into(),
+        pipeline: Arc::new(ArcSwap::from_pointee(assembly)),
+        concurrency: None,
+        consumer_handle: None,
+        pipeline_handle: None,
+        consumer_cancel_token: CancellationToken::new(),
+        pipeline_cancel_token: CancellationToken::new(),
+        channel_sender: None,
+        in_flight: None,
+        aggregate_split: None,
+        agg_service: Some(Arc::new(svc)),
+        compiled: route_runtime_state::CompiledRoute {
+            security_policy: None,
+            security_authenticator: None,
+        },
+    };
+
+    controller.routes.insert("agg-route".into(), managed);
+
+    let result = controller.swap_pipeline("agg-route", BoxProcessor::new(IdentityProcessor));
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("lifecycle-bearing"),
+        "expected 'lifecycle-bearing' error, got: {err}"
+    );
+}
+
+#[test]
+fn swap_pipeline_raw_bypasses_lifecycle_rejection() {
+    let mut controller = build_controller();
+
+    let assembly = PipelineAssembly::new(
+        SyncBoxProcessor::new(BoxProcessor::new(IdentityProcessor)),
+        vec![Arc::new(FakeStep) as Arc<dyn StepLifecycle>],
+    );
+
+    let managed = ManagedRoute {
+        definition: RouteDefinition::new("timer:test", vec![])
+            .with_route_id("lifecycle-route")
+            .to_info(),
+        from_uri: "timer:test".into(),
+        pipeline: Arc::new(ArcSwap::from_pointee(assembly)),
+        concurrency: None,
+        consumer_handle: None,
+        pipeline_handle: None,
+        consumer_cancel_token: CancellationToken::new(),
+        pipeline_cancel_token: CancellationToken::new(),
+        channel_sender: None,
+        in_flight: None,
+        aggregate_split: None,
+        agg_service: None,
+        compiled: route_runtime_state::CompiledRoute {
+            security_policy: None,
+            security_authenticator: None,
+        },
+    };
+
+    controller.routes.insert("lifecycle-route".into(), managed);
+
+    // swap_pipeline rejects lifecycle-bearing routes
+    let reject = controller.swap_pipeline("lifecycle-route", BoxProcessor::new(IdentityProcessor));
+    assert!(
+        reject.is_err(),
+        "swap_pipeline should reject lifecycle route"
+    );
+    assert!(
+        reject
+            .unwrap_err()
+            .to_string()
+            .contains("lifecycle-bearing"),
+        "expected lifecycle-bearing rejection"
+    );
+
+    // swap_pipeline_raw bypasses the check
+    let raw_result =
+        controller.swap_pipeline_raw("lifecycle-route", BoxProcessor::new(IdentityProcessor));
+    assert!(
+        raw_result.is_ok(),
+        "swap_pipeline_raw should accept lifecycle route, got: {:?}",
+        raw_result
+    );
+
+    // Verify pipeline was actually swapped
+    let swapped = controller.get_pipeline("lifecycle-route");
+    assert!(swapped.is_some(), "pipeline should exist after raw swap");
+}
+
+#[tokio::test]
+async fn swap_pipeline_allows_stateless_route() {
+    let mut controller = build_controller();
+
+    controller
+        .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("stateless"))
+        .await
+        .unwrap();
+
+    let result = controller.swap_pipeline("stateless", BoxProcessor::new(IdentityProcessor));
+    assert!(result.is_ok());
+    assert!(controller.get_pipeline("stateless").is_some());
 }

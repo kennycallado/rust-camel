@@ -641,6 +641,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                             .map(|p| CompiledStep::Process {
                                 processor: p,
                                 body_contract: None,
+                                lifecycle: None,
                             })
                             .collect(),
                     ));

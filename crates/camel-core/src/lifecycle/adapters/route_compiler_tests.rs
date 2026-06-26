@@ -136,6 +136,7 @@ fn test_pipeline_poll_ready_delegates_to_first_step() {
         steps: vec![CompiledStep::Process {
             processor: boxed,
             body_contract: None,
+            lifecycle: None,
         }],
         handler: None,
     };
@@ -171,6 +172,7 @@ async fn test_pipeline_stop_returns_ok_with_exchange() {
             Box::pin(async move { Ok(ex) })
         }),
         body_contract: None,
+        lifecycle: None,
     };
 
     let mut pipeline = SequentialPipeline {
@@ -198,6 +200,7 @@ async fn test_run_steps_stop_produces_pipeline_outcome_stopped() {
         CompiledStep::Process {
             processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
             body_contract: None,
+            lifecycle: None,
         },
     ];
     let ex = Exchange::new(camel_api::Message::new("payload"));
@@ -303,6 +306,7 @@ async fn test_compose_traced_pipeline_enabled() {
         vec![CompiledStep::Process {
             processor: step,
             body_contract: None,
+            lifecycle: None,
         }],
         "test-route",
         true,
@@ -332,6 +336,7 @@ async fn test_compose_pipeline_with_contracts_coerces_before_inner_processor() {
         vec![CompiledStep::Process {
             processor: inner,
             body_contract: Some(camel_api::BodyType::Text),
+            lifecycle: None,
         }],
         None,
     );
@@ -351,12 +356,14 @@ async fn test_run_steps_continued_skips_failed_step() {
     let step1 = CompiledStep::Process {
         processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
         body_contract: None,
+        lifecycle: None,
     };
     let step2 = CompiledStep::Process {
         processor: BoxProcessor::from_fn(|_ex| {
             Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
         }),
         body_contract: None,
+        lifecycle: None,
     };
     let step3_hit = Arc::new(AtomicBool::new(false));
     let hit = step3_hit.clone();
@@ -369,6 +376,7 @@ async fn test_run_steps_continued_skips_failed_step() {
             })
         }),
         body_contract: None,
+        lifecycle: None,
     };
 
     let handler: Arc<dyn RouteErrorHandler> = Arc::new(ContinuedHandler);
@@ -402,6 +410,7 @@ async fn test_route_channel_pipeline_propagate_returns_err() {
         vec![CompiledStep::Process {
             processor: failing_step,
             body_contract: None,
+            lifecycle: None,
         }],
         Some(handler.clone()),
     );
@@ -584,6 +593,7 @@ mod run_steps_segment_tests {
         let steps = vec![CompiledStep::Segment {
             segment: seg,
             body_contract: None,
+            lifecycle: None,
         }];
         let ex = Exchange::new(Message::new("original"));
         let outcome = run_steps(steps, ex, None, false).await;
@@ -665,6 +675,7 @@ mod run_steps_segment_tests {
         let steps = vec![CompiledStep::Segment {
             segment: seg,
             body_contract: None,
+            lifecycle: None,
         }];
         let ex = Exchange::new(Message::new("hello"));
         let outcome = run_steps(steps, ex, Some(handler), false).await;

@@ -40,6 +40,7 @@ impl StepCompiler for CoreCompiler {
             BuilderStep::Processor(svc) => StepCompileResult::Matched(Ok(CompiledStep::Process {
                 processor: svc,
                 body_contract: None,
+                lifecycle: None,
             })),
 
             // ── Stop ──
@@ -51,6 +52,7 @@ impl StepCompiler for CoreCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -60,6 +62,7 @@ impl StepCompiler for CoreCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -91,6 +94,7 @@ impl StepCompiler for CoreCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -101,6 +105,7 @@ impl StepCompiler for CoreCompiler {
                     StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
+                        lifecycle: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -116,6 +121,7 @@ impl StepCompiler for CoreCompiler {
                     StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
+                        lifecycle: None,
                     }))
                 }
             },
@@ -127,6 +133,7 @@ impl StepCompiler for CoreCompiler {
                     StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
+                        lifecycle: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -142,6 +149,7 @@ impl StepCompiler for CoreCompiler {
                     StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
+                        lifecycle: None,
                     }))
                 }
             },
@@ -157,6 +165,7 @@ impl StepCompiler for CoreCompiler {
                     StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
+                        lifecycle: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -174,6 +183,7 @@ impl StepCompiler for CoreCompiler {
                     StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
+                        lifecycle: None,
                     }))
                 }
             },
@@ -188,6 +198,7 @@ impl StepCompiler for CoreCompiler {
                     Ok(mut_expr) => StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
                         body_contract: None,
+                        lifecycle: None,
                     })),
                     Err(LanguageError::NotSupported { .. }) => {
                         // Graceful degradation: fall back to read-only Expression → SetBody
@@ -206,6 +217,7 @@ impl StepCompiler for CoreCompiler {
                         StepCompileResult::Matched(Ok(CompiledStep::Process {
                             processor: BoxProcessor::new(svc),
                             body_contract: None,
+                            lifecycle: None,
                         }))
                     }
                     Err(e) => StepCompileResult::Matched(Err(CamelError::RouteError(format!(
@@ -238,6 +250,7 @@ impl StepCompiler for CoreCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(step),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -270,6 +283,7 @@ impl StepCompiler for CoreCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(processor),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
@@ -283,6 +297,7 @@ impl StepCompiler for CoreCompiler {
                     Ok(mut_expr) => StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
                         body_contract: None,
+                        lifecycle: None,
                     })),
                     Err(LanguageError::NotSupported {
                         feature,

@@ -76,14 +76,17 @@ fn concrete_processor_pipeline() -> BoxProcessor {
         CompiledStep::Process {
             processor: noop,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: set_body,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: set_header,
             body_contract: None,
+            lifecycle: None,
         },
     ])
 }
@@ -111,14 +114,17 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
         CompiledStep::Process {
             processor: noop,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: set_body,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: set_header,
             body_contract: None,
+            lifecycle: None,
         },
     ])
 }
@@ -149,6 +155,7 @@ fn deep_pipeline() -> BoxProcessor {
         steps.push(CompiledStep::Process {
             processor: step,
             body_contract: None,
+            lifecycle: None,
         });
     }
 
@@ -178,14 +185,17 @@ fn expression_pipeline() -> BoxProcessor {
         CompiledStep::Process {
             processor: noop.clone(),
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: eval_step,
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: noop,
             body_contract: None,
+            lifecycle: None,
         },
     ])
 }

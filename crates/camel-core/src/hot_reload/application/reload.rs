@@ -146,6 +146,7 @@ pub async fn execute_reload_actions(
                     route_id,
                     &mut new_definitions,
                     controller,
+                    drain_timeout,
                     function_ctx,
                     &mut errors,
                 )

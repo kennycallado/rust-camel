@@ -20,7 +20,34 @@ use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
 
 use crate::lifecycle::adapters::pipeline_runtime::SharedPipeline;
 use crate::lifecycle::adapters::route_runtime_state;
+use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinitionInfo};
+
+/// Extract all lifecycle handles from a slice of compiled steps, preserving
+/// route order. Used at route compilation time to populate
+/// [`PipelineAssembly::lifecycle`](super::pipeline_runtime::PipelineAssembly).
+///
+/// Returns a flat `Vec` of handles. Stateless steps produce no handles;
+/// `CompiledStep::Stop` produces none.
+pub(crate) fn collect_lifecycle(steps: &[CompiledStep]) -> Vec<Arc<dyn camel_api::StepLifecycle>> {
+    let mut out = Vec::new();
+    for step in steps {
+        match step {
+            CompiledStep::Process { lifecycle, .. } => {
+                if let Some(lc) = lifecycle {
+                    out.push(Arc::clone(lc));
+                }
+            }
+            CompiledStep::Segment { lifecycle, .. } => {
+                if let Some(lcs) = lifecycle {
+                    out.extend(lcs.iter().map(Arc::clone));
+                }
+            }
+            CompiledStep::Stop => {}
+        }
+    }
+    out
+}
 
 /// Notification sent when a route crashes.
 #[derive(Debug, Clone)]
@@ -90,7 +117,7 @@ pub(super) struct ManagedRoute {
     /// In-flight exchange counter. `None` when UoW is not configured for this route.
     pub(super) in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
     pub(super) aggregate_split: Option<AggregateSplitInfo>,
-    pub(super) agg_service: Option<Arc<std::sync::Mutex<AggregatorService>>>,
+    pub(super) agg_service: Option<Arc<AggregatorService>>,
     /// Compiled runtime state (security artifacts captured at add time).
     pub(super) compiled: route_runtime_state::CompiledRoute,
 }

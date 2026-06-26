@@ -16,6 +16,7 @@ use camel_api::{
 
 use super::{
     CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+    pack_lifecycles,
 };
 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
@@ -92,10 +93,11 @@ impl StepCompiler for SplittingCompiler {
         match step {
             // ── Split (programmatic) ──
             BuilderStep::Split { config, steps } => {
-                let sub_segments = match ctx.compile_children_segments(steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (sub_segments, lifecycles) =
+                    match ctx.compile_children_segments(steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let body_segment = compose_outcome_segment(sub_segments);
                 let split_segment = camel_processor::SplitSegment {
                     splitter: config.expression,
@@ -108,6 +110,7 @@ impl StepCompiler for SplittingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(split_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(lifecycles),
                 }))
             }
 
@@ -149,10 +152,11 @@ impl StepCompiler for SplittingCompiler {
                         }
                     });
 
-                let sub_segments = match ctx.compile_children_segments(steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (sub_segments, lifecycles) =
+                    match ctx.compile_children_segments(steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let body_segment = compose_outcome_segment(sub_segments);
                 let split_segment = camel_processor::SplitSegment {
                     splitter: split_fn,
@@ -165,6 +169,7 @@ impl StepCompiler for SplittingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(split_segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(lifecycles),
                 }))
             }
 
@@ -180,10 +185,11 @@ impl StepCompiler for SplittingCompiler {
                         "invalid stream config: {e}"
                     ))));
                 }
-                let sub_segments = match ctx.compile_children_segments(steps, registry) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let (sub_segments, lifecycles) =
+                    match ctx.compile_children_segments(steps, registry) {
+                        Ok(pair) => pair,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
                 let body_segment = compose_outcome_segment(sub_segments);
 
                 let config_clone = stream_config.clone();
@@ -326,6 +332,7 @@ impl StepCompiler for SplittingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(lifecycles),
                 }))
             }
 
@@ -340,17 +347,21 @@ impl StepCompiler for SplittingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
+                    lifecycle: None,
                 }))
             }
 
             // ── Multicast ──
             BuilderStep::Multicast { config, steps } => {
                 let mut branch_segments: Vec<camel_api::OutcomeSegment> = Vec::new();
+                let mut all_lifecycles = Vec::new();
                 for step in steps {
-                    let sub_segments = match ctx.compile_children_segments(vec![step], registry) {
-                        Ok(s) => s,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    let (sub_segments, lifecycles) =
+                        match ctx.compile_children_segments(vec![step], registry) {
+                            Ok(pair) => pair,
+                            Err(e) => return StepCompileResult::Matched(Err(e)),
+                        };
+                    all_lifecycles.extend(lifecycles);
                     branch_segments.push(compose_outcome_segment(sub_segments));
                 }
                 let strategy = config.aggregation.clone();
@@ -404,6 +415,7 @@ impl StepCompiler for SplittingCompiler {
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
+                    lifecycle: pack_lifecycles(all_lifecycles),
                 }))
             }
 

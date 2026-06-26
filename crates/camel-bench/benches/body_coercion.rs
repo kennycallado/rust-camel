@@ -17,6 +17,7 @@ fn bench_body_coercion(c: &mut Criterion) {
         vec![CompiledStep::Process {
             processor: noop(),
             body_contract: Some(BodyType::Text),
+            lifecycle: None,
         }],
         None,
     );
@@ -32,6 +33,7 @@ fn bench_body_coercion(c: &mut Criterion) {
         vec![CompiledStep::Process {
             processor: noop(),
             body_contract: None,
+            lifecycle: None,
         }],
         None,
     );
@@ -48,14 +50,17 @@ fn bench_body_coercion(c: &mut Criterion) {
             CompiledStep::Process {
                 processor: noop(),
                 body_contract: Some(BodyType::Text),
+                lifecycle: None,
             },
             CompiledStep::Process {
                 processor: noop(),
                 body_contract: None,
+                lifecycle: None,
             },
             CompiledStep::Process {
                 processor: noop(),
                 body_contract: None,
+                lifecycle: None,
             },
         ],
         None,

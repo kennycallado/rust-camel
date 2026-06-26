@@ -1845,6 +1845,7 @@ mod tests {
                     Value::String("one".into()),
                 )),
                 body_contract: None,
+                lifecycle: None,
             },
             CompiledStep::Process {
                 processor: BoxProcessor::new(MapBody::new(IdentityProcessor, |body: Body| {
@@ -1855,6 +1856,7 @@ mod tests {
                     }
                 })),
                 body_contract: None,
+                lifecycle: None,
             },
         ];
 
@@ -2262,6 +2264,7 @@ mod tests {
                 .map(|p| CompiledStep::Process {
                     processor: p,
                     body_contract: None,
+                    lifecycle: None,
                 })
                 .collect(),
         );
@@ -2293,6 +2296,7 @@ mod tests {
                 .map(|p| CompiledStep::Process {
                     processor: p,
                     body_contract: None,
+                    lifecycle: None,
                 })
                 .collect(),
         );
@@ -2328,6 +2332,7 @@ mod tests {
                 .map(|p| CompiledStep::Process {
                     processor: p,
                     body_contract: None,
+                    lifecycle: None,
                 })
                 .collect(),
         );

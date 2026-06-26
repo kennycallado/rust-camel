@@ -58,6 +58,13 @@ pub fn spawn_controller_actor(
                 } => {
                     let _ = reply.send(controller.swap_pipeline(&route_id, pipeline));
                 }
+                RouteControllerCommand::SwapPipelineRaw {
+                    route_id,
+                    pipeline,
+                    reply,
+                } => {
+                    let _ = reply.send(controller.swap_pipeline_raw(&route_id, pipeline));
+                }
                 RouteControllerCommand::CompileRouteDefinition { definition, reply } => {
                     let _ = reply.send(controller.compile_route_definition(definition));
                 }

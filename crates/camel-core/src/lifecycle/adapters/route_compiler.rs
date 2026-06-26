@@ -86,11 +86,12 @@ pub fn compose_traced_pipeline(
         .into_iter()
         .enumerate()
         .map(|(idx, step)| {
-            let (p, c) = match step {
+            let (p, c, lc) = match step {
                 CompiledStep::Process {
                     processor,
                     body_contract,
-                } => (processor, body_contract),
+                    lifecycle,
+                } => (processor, body_contract, lifecycle),
                 CompiledStep::Stop => return CompiledStep::Stop,
                 CompiledStep::Segment { .. } => return step,
             };
@@ -104,6 +105,7 @@ pub fn compose_traced_pipeline(
             CompiledStep::Process {
                 processor: traced,
                 body_contract: c,
+                lifecycle: lc,
             }
         })
         .collect();
@@ -129,11 +131,13 @@ pub fn compose_pipeline_with_contracts(
             CompiledStep::Process {
                 processor,
                 body_contract,
+                lifecycle,
             } => {
                 let coerced = wrap_if_needed(processor, body_contract);
                 CompiledStep::Process {
                     processor: coerced,
                     body_contract: None,
+                    lifecycle,
                 }
             }
             CompiledStep::Stop => CompiledStep::Stop,
@@ -170,6 +174,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
             CompiledStep::Process {
                 processor,
                 body_contract,
+                lifecycle,
             } => {
                 let coerced = wrap_if_needed(processor, body_contract);
                 let traced = BoxProcessor::new(TracingProcessor::new(
@@ -182,6 +187,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
                 CompiledStep::Process {
                     processor: traced,
                     body_contract: None,
+                    lifecycle,
                 }
             }
             CompiledStep::Stop => CompiledStep::Stop,
@@ -309,6 +315,7 @@ pub async fn run_steps(
             CompiledStep::Process {
                 processor,
                 body_contract,
+                ..
             } => {
                 let boxed: Box<dyn RetryableStep> = Box::new(processor);
                 (boxed, body_contract)
@@ -316,6 +323,7 @@ pub async fn run_steps(
             CompiledStep::Segment {
                 segment,
                 body_contract,
+                ..
             } => {
                 let boxed: Box<dyn RetryableStep> = Box::new(segment);
                 (boxed, body_contract)
