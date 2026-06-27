@@ -22,8 +22,10 @@ pub struct RedisProducer {
     config: RedisEndpointConfig,
     /// Shared connection pool - created lazily on first use
     conn: Arc<Mutex<Option<MultiplexedConnection>>>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
+    /// Runtime observability handle. Currently unused — Redis producer
+    /// errors are handler-owned per ADR-0012 (route ErrorHandler catches
+    /// them). Retained for Phase A API consistency. Crash-health pinning
+    /// stays owned by Runtime supervision per CONTEXT-MAP 'ConsumerRestart'.
     #[allow(dead_code)]
     runtime: Arc<dyn RuntimeObservability>,
 }

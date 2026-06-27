@@ -668,10 +668,12 @@ mod tests {
         }
     }
 
-    fn recording_rt() -> (
+    type RecordingRt = (
         Arc<dyn camel_component_api::RuntimeObservability>,
         Arc<Mutex<Vec<(String, String)>>>,
-    ) {
+    );
+
+    fn recording_rt() -> RecordingRt {
         let errors = Arc::new(Mutex::new(Vec::new()));
         let rt: Arc<dyn camel_component_api::RuntimeObservability> = Arc::new(RecordingRuntime {
             errors: errors.clone(),
@@ -1627,7 +1629,10 @@ mod tests {
             }
         }
         fn offsets(&self) -> Vec<i64> {
-            self.offsets.lock().expect("offsets mutex poisoned").clone()
+            self.offsets
+                .lock()
+                .expect("offsets mutex poisoned") // allow-unwrap
+                .clone()
         }
     }
 
@@ -1641,7 +1646,10 @@ mod tests {
             // Vec<TopicPartitionListElem>; each elem exposes offset().
             for elem in tpl.elements() {
                 if let rdkafka::Offset::Offset(o) = elem.offset() {
-                    self.offsets.lock().expect("offsets mutex poisoned").push(o);
+                    self.offsets
+                        .lock()
+                        .expect("offsets mutex poisoned") // allow-unwrap
+                        .push(o);
                 }
             }
             Ok(())

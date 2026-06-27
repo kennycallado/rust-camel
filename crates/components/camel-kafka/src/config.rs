@@ -1800,8 +1800,10 @@ mod kafka_config_tests {
 
     #[test]
     fn test_kafka_config_rejects_empty_brokers() {
-        let mut cfg = KafkaConfig::default();
-        cfg.brokers = "".into();
+        let cfg = KafkaConfig {
+            brokers: "".into(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
         let msg = cfg.validate().unwrap_err().to_string();
         assert!(msg.contains("brokers"), "got: {msg}");
@@ -1809,22 +1811,28 @@ mod kafka_config_tests {
 
     #[test]
     fn test_kafka_config_rejects_whitespace_only_brokers() {
-        let mut cfg = KafkaConfig::default();
-        cfg.brokers = "   ".into();
+        let cfg = KafkaConfig {
+            brokers: "   ".into(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_kafka_config_accepts_valid_brokers() {
-        let mut cfg = KafkaConfig::default();
-        cfg.brokers = "localhost:9092".into();
+        let cfg = KafkaConfig {
+            brokers: "localhost:9092".into(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn test_kafka_config_rejects_zero_session_timeout() {
-        let mut cfg = KafkaConfig::default();
-        cfg.session_timeout_ms = 0;
+        let cfg = KafkaConfig {
+            session_timeout_ms: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
         let msg = cfg.validate().unwrap_err().to_string();
         assert!(msg.contains("session_timeout_ms"), "got: {msg}");
@@ -1832,8 +1840,10 @@ mod kafka_config_tests {
 
     #[test]
     fn test_kafka_config_rejects_zero_request_timeout() {
-        let mut cfg = KafkaConfig::default();
-        cfg.request_timeout_ms = 0;
+        let cfg = KafkaConfig {
+            request_timeout_ms: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
         let msg = cfg.validate().unwrap_err().to_string();
         assert!(msg.contains("request_timeout_ms"), "got: {msg}");
@@ -1883,15 +1893,19 @@ mod kafka_config_tests {
 
     #[test]
     fn test_kafka_config_rejects_invalid_security_protocol_default() {
-        let mut cfg = KafkaConfig::default();
-        cfg.security_protocol = "BOGUS".to_string();
+        let cfg = KafkaConfig {
+            security_protocol: "BOGUS".to_string(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_kafka_config_rejects_invalid_auto_offset_reset_default() {
-        let mut cfg = KafkaConfig::default();
-        cfg.auto_offset_reset = "bad".to_string();
+        let cfg = KafkaConfig {
+            auto_offset_reset: "bad".to_string(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 }
