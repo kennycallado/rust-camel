@@ -2,6 +2,12 @@
 
 The execution engine for rust-camel. Owns Exchange lifecycle, Route management, and the registries that wire together Components, Languages, Functions, and Services.
 
+> **Scope boundary.** This file is the **behavioral vocabulary** — what the runtime *does* with the
+> contract types. The contract/type definitions themselves (Exchange, Message, Body, CamelError,
+> Processor, BoxProcessor, PipelineOutcome, the CQRS bus traits, CanonicalRouteSpec) are defined in
+> the API Contracts context, [`crates/camel-api/CONTEXT.md`](../camel-api/CONTEXT.md). Terms below
+> describe runtime semantics and intentionally reference rather than re-define those types.
+
 ## Language
 
 **Exchange**:

@@ -2,14 +2,17 @@
 
 ## Contexts
 
+- [API Contracts](./crates/camel-api/CONTEXT.md) — pure contract crate: canonical data types (Exchange, Message, Body, CamelError) and EIP/trait abstractions (Processor, BoxProcessor, PipelineOutcome, CQRS bus traits, CanonicalRouteSpec). Type-definition site; behavioral vocabulary lives in Runtime.
 - [Runtime](./crates/camel-core/CONTEXT.md) — core execution engine: Exchange lifecycle, Route management, and component/language/function/service registries
 - [DSL](./crates/camel-dsl/CONTEXT.md) — route definition via fluent builder API and YAML/JSON configuration files (ADR-0026)
 - [Components](./crates/components/CONTEXT.md) — inbound/outbound adapters (timer, HTTP, Kafka, file, etc.) that feed Exchanges into Routes and send them to external systems
   - [LLM Component](./crates/components/camel-component-llm/CONTEXT.md) — LLM chat and embedding component (OpenAI, Ollama, Mock) with streaming and materialized modes
   - [File Component](./crates/components/camel-file/CONTEXT.md) — polls directories and writes exchange bodies to disk; `atomic_write` helper powers `Override`/`TryRename` write strategies (`Fail` uses `create_new(true)` directly — already atomic)
 - [Languages](./crates/languages/CONTEXT.md) — expression and predicate evaluation against Exchanges (JavaScript, JSONPath, XPath, Simple, Rhai)
+  - [Language SPI](./crates/languages/camel-language-api/CONTEXT.md) — the trait contract every language implements (Language, Expression, Predicate, MutatingExpression/Predicate) and `LanguageError`
 - [Functions](./crates/services/camel-function/CONTEXT.md) — out-of-process executable units invoked as pipeline steps; inspired by serverless functions, running in isolated containers
 - [Services](./crates/services/CONTEXT.md) — cross-cutting infrastructure services: observability (OTel, Prometheus), auth/security, and platform integration (Kubernetes)
+  - [Auth Service](./crates/services/camel-auth/CONTEXT.md) — provider-neutral token validation, claim mapping, and permission evaluation (decision sources behind the route SecurityPolicy boundary)
 
 ## Relationships
 
@@ -22,7 +25,10 @@
 
 ## Architecture Decisions
 
-Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./docs/adr/):
+Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./docs/adr/).
+Each ADR file carries authoritative `Status` / `Amends` metadata in its header; the markers below
+are a convenience index and may lag the file. There is **no ADR-0023** (numbering gap; no file
+currently present).
 
 - [0001](./docs/adr/0001-tower-data-plane-split-from-control-plane.md) — Tower data plane, custom-trait control plane
 - [0002](./docs/adr/0002-cqrs-runtime-bus-for-route-lifecycle.md) — CQRS RuntimeBus for route lifecycle control
@@ -39,13 +45,16 @@ Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./doc
 - [0013](./docs/adr/0013-network-retry-policy-and-migration.md) — NetworkRetryPolicy centralizes adapter retry semantics and migration boundaries
 - [0014](./docs/adr/0014-wasm-plugin-config-unification.md) — WASM plugin runtime configuration is unified across plugin types
 - [0015](./docs/adr/0015-endpoint-created-polling-consumer-for-pollenrich.md) — Endpoint-created PollingConsumer powers pollEnrich and WASM camel_poll
-- [0016](./docs/adr/0016-canonical-route-spec-v2-contract.md) — CanonicalRouteSpec v2 adds lifecycle/execution metadata with strict rejection for unsupported fields
+- [0016](./docs/adr/0016-canonical-route-spec-v2-contract.md) — CanonicalRouteSpec v2 adds lifecycle/execution metadata with strict rejection for unsupported fields _(amends 0011)_
 - [0017](./docs/adr/0017-dsl-yaml-snake-case-naming-convention.md) — DSL keys use snake_case (YAML and JSON, amended 2026-06-26) to match Rust field names and schema output
-- [0018](./docs/adr/0018-two-phase-route-lifecycle-persistence.md) — Route lifecycle commands persist intent before side effects, use optimistic versions, and compensate to Failed on side-effect failure
+- [0018](./docs/adr/0018-two-phase-route-lifecycle-persistence.md) — Route lifecycle commands persist intent before side effects, use optimistic versions, and compensate to Failed on side-effect failure _(amends 0002, 0003, 0004, 0007)_
 - [0019](./docs/adr/0019-error-disposition-pipeline-recovery.md) — Error disposition decisions moved inside the pipeline loop via RouteErrorHandler trait injection; ExceptionDisposition enum (Propagate/Handled/Continued) replaces handled:bool
 - [0020](./docs/adr/0020-llm-component-provider-adapter-boundary.md) — LLM component isolates siumai SDK behind a project-owned LlmProvider trait; all siumai imports confined to two files
 - [0021](./docs/adr/0021-llm-retry-retry-after-manual-loop.md) — LLM retry honors provider retry_after via manual loop, diverging from ADR-0013 helpers
+- [0022](./docs/adr/0022-steplifecycle-trait-and-drain.md) — StepLifecycle trait and drain policy for stateful pipeline steps
+- _(0023 — no ADR; numbering gap)_
 - [0024](./docs/adr/0024-pipeline-outcome-replaces-camel-error-stopped.md) — `PipelineOutcome` enum replaces `CamelError::Stopped` for control flow; Stop EIP becomes successful control flow at the pipeline layer (one above Tower); consumer reply-channel adapter makes Completed/Stopped indistinguishable to consumers
+- [0025](./docs/adr/0025-outcome-aware-structural-eips.md) — Outcome-aware structural EIPs return `PipelineOutcome` directly _(amends 0024)_
 - [0026](./docs/adr/0026-json-canonical-route-authoring-format.md) — JSON is the canonical full-DSL authoring format for SDKs/generators; YAML is human convenience
 
 ## Key Terms
@@ -91,3 +100,44 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 
 - **PipelineOutcome** — Enum (`Completed(Exchange) | Stopped(Exchange) | Failed(CamelError)`) produced by `run_steps` (the pipeline executor). Lives ONE LAYER ABOVE Tower — `BoxProcessor::Response` and every `Service<Exchange>::Response` stays `Result<Exchange, CamelError>`. The pipeline's `Service<Exchange>` impl translates `PipelineOutcome` to `Result` via `into_tower_result()` (Completed/Stopped both → Ok). Stop EIP is successful control flow, not an error. Established by ADR-0024. (camel-api + camel-core + camel-processor)
 - **ConsumerStopping** — `CamelError` variant for producer `poll_ready` shutdown signals. Distinct from Stop EIP — it indicates the producer's semaphore/channel is closing and the call cannot proceed. Used by JMS/OpenSearch producers. Established by ADR-0024. (camel-api + camel-component-jms + camel-component-opensearch)
+
+## Documentation Authority & Refresh
+
+Prose docs can drift from code. To keep them trustworthy, the project uses a fixed authority order
+and an event-driven refresh rule.
+
+**Authority order (highest wins on conflict):**
+
+1. **Source code** — the only ground truth.
+2. **`docs/ARCHITECT.md`** — code-derived snapshot pinned to a git SHA. Authoritative over all
+   other prose, but may itself lag HEAD (see its header).
+3. **`CONTEXT-MAP.md` + crate `CONTEXT.md`** — curated domain language and bounded-context map.
+4. **`README.md` files** — user-facing summaries; most drift-prone (enum tables, Cargo metadata).
+
+**Term-landing rule:** a new cross-cutting domain term lands in `CONTEXT-MAP.md` Key Terms first;
+a crate-local term lands in that crate's `CONTEXT.md`. The defining ADR (if any) is cited inline.
+
+**Refresh is event-driven, not scheduled:**
+
+- After an **architecture-shaping merge** (new EIP, lifecycle change, contract change): regenerate
+  `docs/ARCHITECT.md` from code and re-run the drift cross-check (`docs/ARCHITECT-DRIFT-REPORT.md`).
+- When **adding/renaming a domain term**: update CONTEXT-MAP/CONTEXT in the same change.
+- When an **ADR is superseded or amended**: update both the ADR header metadata and this map's ADR
+  index in the same change.
+
+`AGENTS.md` already requires reading `CONTEXT-MAP.md` before implementation, which is the
+enforcement hook for the term-landing rule.
+
+### CONTEXT.md coverage policy
+
+Not every crate needs a crate-local `CONTEXT.md`. Coverage is role-based:
+
+- **Must have one** — public contract crates (`camel-api`, `camel-component-api`,
+  `camel-language-api`), runtime/control-plane crates with behavioral invariants (`camel-core`),
+  and crates that are user-visible, stateful, security-sensitive, or operationally surprising
+  (e.g. `camel-auth`, leader election, SEDA fanout, control bus, health/platform).
+- **May defer to a parent `CONTEXT.md`** — thin adapters covered by `components/CONTEXT.md`; leaf
+  language implementations with no distinct value/coercion/security semantics beyond
+  `languages/CONTEXT.md`; examples (parent `examples/CONTEXT.md`).
+- **Usually none needed** — macro helpers, bench/test harnesses, generated protobuf/WIT plumbing,
+  and private build tooling, unless they expose user-facing vocabulary or architecture contracts.

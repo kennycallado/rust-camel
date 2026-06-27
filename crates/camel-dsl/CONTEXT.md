@@ -24,6 +24,20 @@ _Avoid_: route spec, route config, route descriptor
 Versioned stable minimal Route contract used by runtime commands, config tooling, and hot-reload paths. v2 adds lifecycle metadata (`auto_startup`, `startup_order`, `concurrency`). Unsupported fields are strictly rejected (no silent loss); lossy escape hatch via `allow_loss` parameter. Not a full RouteDefinition mirror. (ADR-0011, ADR-0016)
 _Avoid_: route definition, full DSL model
 
+### Runtime authority: RouteDefinition is the source of truth
+
+`RouteDefinition` is the runtime source of truth. The normal start/hot path compiles declarative DSL
+straight to `RouteDefinition` and then to a compiled Pipeline (`compile_declarative_route` →
+`RouteDefinition`; used by `yaml.rs` route loading and the template materializer). The controller hot
+path compiles `RouteDefinition` directly (`CompileRouteDefinition { definition: RouteDefinition }`).
+
+`CanonicalRouteSpec` is the stable, minimal **contract** for runtime commands, config tooling, and
+hot-reload (the `compile_declarative_route_to_canonical` path, gated by `allow_loss`). It is **not**
+the compile target of the normal route-start path — declarative DSL does **not** have to pass through
+canonical to run. `RuntimeCommand` registration accepts a `CanonicalRouteSpec` but immediately lowers
+it to a `RouteDefinition`; all runtime compilation still consumes `RouteDefinition`. (Resolves the
+canonical-vs-declarative authority question raised in `docs/ARCHITECT.md` §14.)
+
 **auto_startup**:
 RouteDefinition flag, default `true`. When `false`, CamelContext registers the Route but does not start its Consumer during `CamelContext::start()`; the Route must be started through RuntimeBus, RouteController, or ControlBus.
 _Avoid_: lazy route (informal), disabled route
