@@ -174,12 +174,17 @@ async fn handle_register(
     Ok(RuntimeCommandResult::RouteRegistered { route_id })
 }
 
-// NOTE: handle_register_internal uses runtime-first ordering intentionally.
-// It is called from runtime_bus for internal routes where the runtime context
-// is already validated. The public handle_register uses persist-first for
-// crash-safety. See the Phase 1 remediation plan for the design rationale.
-// TODO(unify-register): After Phase 1, these two functions should be unified
-// (tracked as follow-up bd issue).
+// NOTE: Public registration and internal registration intentionally use
+// different consistency policies.
+//
+// `handle_register` accepts CanonicalRouteSpec at the command boundary,
+// validates the public contract, persists state first for crash-safe replay,
+// then compensates runtime failure by recording Failed state.
+//
+// `handle_register_internal` is used by RuntimeBus internals that already
+// hold a RouteDefinition. It installs runtime first, then persists state;
+// if persistence fails, it rolls back runtime registration to avoid leaving
+// an internal transient route orphaned.
 pub(crate) async fn handle_register_internal(
     deps: &CommandDeps,
     def: RouteDefinition,
