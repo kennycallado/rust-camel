@@ -1171,17 +1171,210 @@ fn is_test_file(path: &std::path::Path) -> bool {
         || name == "build.rs"
 }
 
+/// Core scanner: scan source `src` (a single `.rs` file) for `.unwrap()` / `.expect(` calls
+/// that are NOT in test scope, attribute, or comment lines, and NOT marked with `// allow-unwrap`.
+///
+/// This function is extracted from [`lint_unwrap`] for unit-testability.
+/// It uses a character-level state machine to correctly ignore braces inside
+/// string/char literals, raw strings, line comments, and block comments,
+/// preventing false test-scope-exit when unbalanced braces appear in literals (rc-4fs).
+fn lint_unwrap_src(src: &str, file_path: &str) -> Vec<Violation> {
+    use regex::Regex;
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum ScanState {
+        Normal,
+        StringLit,
+        CharLit,
+        LineComment,
+        BlockComment,
+        RawStr(usize),
+    }
+
+    let unwrap_re = Regex::new(r"\.(unwrap\(\)|expect\()").expect("valid regex"); // allow-unwrap
+    let lines: Vec<&str> = src.lines().collect();
+
+    let mut current_state = ScanState::Normal;
+    let mut pending_test_attr = false;
+    let mut test_scope_entry_depth: Option<i32> = None;
+    let mut brace_depth: i32 = 0;
+    let mut violations = Vec::new();
+
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        let trimmed = raw_line.trim();
+
+        // Detect test attributes only when not already inside a test scope.
+        if test_scope_entry_depth.is_none()
+            && (trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]"))
+        {
+            pending_test_attr = true;
+        }
+
+        let entering_test_scope = pending_test_attr && test_scope_entry_depth.is_none();
+
+        // State-machine brace counting — persists across lines.
+        let mut chars = trimmed.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match current_state {
+                ScanState::Normal => match ch {
+                    '{' => {
+                        brace_depth += 1;
+                        if pending_test_attr && test_scope_entry_depth.is_none() {
+                            test_scope_entry_depth = Some(brace_depth - 1);
+                            pending_test_attr = false;
+                        }
+                    }
+                    '}' => {
+                        brace_depth -= 1;
+                        if let Some(entry) = test_scope_entry_depth
+                            && brace_depth <= entry
+                        {
+                            test_scope_entry_depth = None;
+                        }
+                    }
+                    '/' if chars.peek() == Some(&'/') => {
+                        current_state = ScanState::LineComment;
+                        chars.next();
+                    }
+                    '/' if chars.peek() == Some(&'*') => {
+                        current_state = ScanState::BlockComment;
+                        chars.next();
+                    }
+                    '"' => {
+                        current_state = ScanState::StringLit;
+                    }
+                    '\'' => {
+                        // Distinguish char literal ('a', '\n') from lifetime ('a, 'static, '_).
+                        let next = chars.peek().copied();
+                        let is_lifetime = next
+                            .map(|c| c.is_ascii_alphanumeric() || c == '_')
+                            .unwrap_or(false)
+                            && {
+                                let mut tmp = chars.clone();
+                                tmp.next();
+                                !matches!(tmp.peek(), Some('\'') | Some('\\'))
+                            };
+                        if !is_lifetime {
+                            current_state = ScanState::CharLit;
+                        }
+                    }
+                    'r' => {
+                        // Potential raw string: r"..." or r#"..."# etc.
+                        let mut hash_count: usize = 0;
+                        let mut lookahead = chars.clone();
+                        while lookahead.peek() == Some(&'#') {
+                            hash_count += 1;
+                            lookahead.next();
+                        }
+                        if lookahead.peek() == Some(&'"') {
+                            current_state = ScanState::RawStr(hash_count);
+                            for _ in 0..hash_count {
+                                chars.next();
+                            }
+                            chars.next();
+                        }
+                    }
+                    _ => {}
+                },
+                ScanState::StringLit => match ch {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '"' => {
+                        current_state = ScanState::Normal;
+                    }
+                    _ => {}
+                },
+                ScanState::CharLit => match ch {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '\'' => {
+                        current_state = ScanState::Normal;
+                    }
+                    _ => {}
+                },
+                ScanState::LineComment => {
+                    // Consume remaining chars; state resets at EOL below.
+                }
+                ScanState::BlockComment => {
+                    if ch == '*' && chars.peek() == Some(&'/') {
+                        current_state = ScanState::Normal;
+                        chars.next();
+                    }
+                }
+                ScanState::RawStr(n) => {
+                    if ch == '"' {
+                        let mut count = 0;
+                        let mut lookahead = chars.clone();
+                        while lookahead.peek() == Some(&'#') {
+                            count += 1;
+                            lookahead.next();
+                        }
+                        if count >= n {
+                            current_state = ScanState::Normal;
+                            for _ in 0..count {
+                                chars.next();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Line comments end at the newline boundary.
+        if current_state == ScanState::LineComment {
+            current_state = ScanState::Normal;
+        }
+
+        // Clear pending_test_attr if no brace was opened on a semicolon line.
+        if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
+            pending_test_attr = false;
+        }
+
+        // Skip: the attribute line itself, the line that opens a test scope,
+        // and all lines inside a test scope.
+        if pending_test_attr || entering_test_scope || test_scope_entry_depth.is_some() {
+            continue;
+        }
+
+        // Skip pure comment lines (only when not mid-block-comment).
+        if current_state == ScanState::Normal && trimmed.starts_with("//") {
+            continue;
+        }
+
+        // Skip lines with the escape hatch — also check the next line because
+        // rustfmt sometimes moves `// allow-unwrap` onto the line after `expect(`
+        // when the call opens a block.
+        let next_line_allow = lines
+            .get(line_idx + 1)
+            .map(|l| l.trim() == "// allow-unwrap")
+            .unwrap_or(false);
+        if raw_line.contains("// allow-unwrap") || next_line_allow {
+            continue;
+        }
+
+        if unwrap_re.is_match(raw_line) {
+            violations.push(Violation {
+                file: file_path.to_string(),
+                line: line_idx + 1,
+                snippet: raw_line.to_string(),
+            });
+        }
+    }
+
+    violations
+}
+
 /// Scan all workspace `src/**/*.rs` files (excluding test files and build.rs)
 /// for `.unwrap()` and `.expect(` calls not marked with `// allow-unwrap`.
 ///
 /// NOTE: This is a lexical scanner. UFCS forms like `Option::unwrap(x)` are
 /// not caught. They are rare in this codebase; add `// allow-unwrap` if needed.
 pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
-    use regex::Regex;
     use std::path::Component;
     use walkdir::WalkDir;
 
-    let unwrap_re = Regex::new(r"\.(unwrap\(\)|expect\()").expect("valid regex"); // allow-unwrap
     let mut violations = Vec::new();
 
     for entry in WalkDir::new(workspace_root)
@@ -1215,98 +1408,7 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
 
-        // Collect into a Vec so we can do one-line look-ahead for `// allow-unwrap`
-        // placed on the next line by rustfmt (e.g. after opening `{` on an expect call).
-        let lines: Vec<&str> = content.lines().collect();
-
-        // Use a pending-attribute approach to correctly handle both:
-        //   #[cfg(test)] mod tests { ... }  — a module block
-        //   #[test] fn test_foo() { ... }   — an individual test function
-        // Both open a braced scope, but they must not interfere with each other.
-        let mut pending_test_attr = false;
-        let mut test_scope_entry_depth: Option<i32> = None;
-        let mut brace_depth: i32 = 0;
-
-        for (line_idx, raw_line) in lines.iter().enumerate() {
-            let trimmed = raw_line.trim();
-
-            // Detect test attributes only when not already inside a test scope.
-            // Updating test_mod_depth while already in a scope would cause premature
-            // exit when the inner function closes (the nested-#[test] bug).
-            if test_scope_entry_depth.is_none()
-                && (trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]"))
-            {
-                pending_test_attr = true;
-            }
-
-            // Capture whether this line opens a test scope BEFORE counting braces.
-            // This handles the case where #[test] and fn body are on separate lines
-            // and the body's braces open+close on the same line.
-            let entering_test_scope = pending_test_attr && test_scope_entry_depth.is_none();
-
-            // Count braces on this line.
-            // NOTE: This is a lexical approximation — braces inside string literals
-            // or comments will affect the count. This is acceptable for a build-time
-            // scanner as long as unusual cases can be suppressed with // allow-unwrap.
-            for ch in trimmed.chars() {
-                match ch {
-                    '{' => {
-                        brace_depth += 1;
-                        // The first '{' after a test attribute opens the test scope.
-                        if pending_test_attr && test_scope_entry_depth.is_none() {
-                            test_scope_entry_depth = Some(brace_depth - 1);
-                            pending_test_attr = false;
-                        }
-                    }
-                    '}' => {
-                        brace_depth -= 1;
-                        if let Some(entry) = test_scope_entry_depth
-                            && brace_depth <= entry
-                        {
-                            test_scope_entry_depth = None;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            // If we set pending_test_attr on this line but no brace was opened,
-            // the attribute applies to a non-block item (e.g. `type Foo = ...;`
-            // or `use super::*;`).  Clear the flag so it does not bleed into the
-            // next line's production code.
-            if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
-                pending_test_attr = false;
-            }
-
-            // Skip: the attribute line itself, the line that opens a test scope,
-            // and all lines inside a test scope.
-            if pending_test_attr || entering_test_scope || test_scope_entry_depth.is_some() {
-                continue;
-            }
-            // Skip comment-only lines.
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            // Skip lines with the escape hatch — also check the next line because
-            // rustfmt sometimes moves `// allow-unwrap` onto the line after `expect(`
-            // when the call opens a block (`= RunnerState::Failed { // allow-unwrap`
-            // becomes the body's first line after fmt).
-            let next_line_allow = lines
-                .get(line_idx + 1)
-                .map(|l| l.trim() == "// allow-unwrap")
-                .unwrap_or(false);
-            if raw_line.contains("// allow-unwrap") || next_line_allow {
-                continue;
-            }
-
-            if unwrap_re.is_match(raw_line) {
-                violations.push(Violation {
-                    file: path.to_string_lossy().to_string(),
-                    line: line_idx + 1,
-                    snippet: raw_line.to_string(),
-                });
-            }
-        }
+        violations.extend(lint_unwrap_src(&content, &path.to_string_lossy()));
     }
 
     Ok(violations)
@@ -2682,6 +2784,59 @@ mod tests {
                 "production unwrap after #[cfg(test)] type alias must be detected: {violations:?}"
             );
             fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn ignores_braces_inside_string_literals_when_tracking_test_scope() {
+            // Reproduces rc-4fs: a string literal with unbalanced braces
+            // must NOT drift the test_scope_entry_depth counter.
+            // The old scanner counted `}` inside "..." as real closing braces,
+            // causing the #[cfg(test)] mod tests scope to exit prematurely,
+            // flagging subsequent .expect() calls in test code as violations.
+            // This test uses 9 closing braces to exceed the brace depth of 2
+            // (mod tests { → fn helper { ), and has NO #[test] attribute on
+            // the second function so it cannot re-enter the test scope.
+            let src = "// rc-4fs regression\n\
+                #[cfg(test)]\n\
+                mod tests {\n\
+                    fn helper_one() {\n\
+                        let data = \"}}}\n}}}\n}}}\";\n\
+                    }\n\n\
+                    fn helper_two() {\n\
+                        let v: Option<i32> = None;\n\
+                        v.expect(\"should NOT be flagged - inside mod tests\");\n\
+                    }\n\
+                }\n";
+            let violations = lint_unwrap_src(src, "test.rs");
+            assert!(
+                violations.is_empty(),
+                "expected no violations (string literal braces should be ignored), \
+                 got: {violations:?}"
+            );
+        }
+
+        #[test]
+        fn ignores_braces_inside_raw_strings_and_block_comments() {
+            // rc-4fs extension: raw strings (r#"..."#) and block comments (/* ... */)
+            // may also contain unbalanced braces and must NOT drift the counter.
+            let src = "// rc-4fs regression\n\
+                #[cfg(test)]\n\
+                mod tests {\n\
+                    fn helper_one() {\n\
+                        let _x = r#\"raw string }}}}}}}\"#;\n\
+                        /* block comment with }}} */\n\
+                    }\n\n\
+                    fn helper_two() {\n\
+                        let v: Option<i32> = None;\n\
+                        v.expect(\"should NOT be flagged - inside mod tests\");\n\
+                    }\n\
+                }\n";
+            let violations = lint_unwrap_src(src, "test.rs");
+            assert!(
+                violations.is_empty(),
+                "expected no violations (raw/block-comment braces should be ignored), \
+                 got: {violations:?}"
+            );
         }
     }
 

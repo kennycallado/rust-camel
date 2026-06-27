@@ -1629,10 +1629,7 @@ mod tests {
             }
         }
         fn offsets(&self) -> Vec<i64> {
-            self.offsets
-                .lock()
-                .expect("offsets mutex poisoned") // allow-unwrap
-                .clone()
+            self.offsets.lock().expect("offsets mutex poisoned").clone()
         }
     }
 
@@ -1646,10 +1643,7 @@ mod tests {
             // Vec<TopicPartitionListElem>; each elem exposes offset().
             for elem in tpl.elements() {
                 if let rdkafka::Offset::Offset(o) = elem.offset() {
-                    self.offsets
-                        .lock()
-                        .expect("offsets mutex poisoned") // allow-unwrap
-                        .push(o);
+                    self.offsets.lock().expect("offsets mutex poisoned").push(o);
                 }
             }
             Ok(())
