@@ -60,9 +60,8 @@ pub struct KafkaConsumer {
     /// Set from ConsumerContext in `start()`; used for ADR-0012
     /// `increment_errors(route_id, …)` calls in `stop()`.
     route_id: Option<String>,
-    /// Phase B will use this for `rt.metrics().increment_errors(...)` and
-    /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
-    #[allow(dead_code)]
+    /// Runtime observability handle used for ADR-0012 b-prime metrics.
+    /// Crash-health pinning stays owned by Runtime supervision.
     runtime: Arc<dyn RuntimeObservability>,
 }
 
@@ -141,20 +140,12 @@ impl Consumer for KafkaConsumer {
                 Ok(joined) => match joined {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
-                        self.runtime.metrics().increment_errors(
-                            self.route_id.as_deref().unwrap_or("unknown-kafka"),
-                            "b-prime:kafka:poll-failed-1",
-                        );
-                        // log-policy: outside-contract
+                        // log-policy: system-broken
                         error!("Consumer task error: {}", e);
                         result = Err(e);
                     }
                     Err(e) => {
-                        self.runtime.metrics().increment_errors(
-                            self.route_id.as_deref().unwrap_or("unknown-kafka"),
-                            "b-prime:kafka:poll-failed-2",
-                        );
-                        // log-policy: outside-contract
+                        // log-policy: system-broken
                         error!("Failed to join consumer task: {}", e);
                         result = Err(CamelError::ProcessorError(format!(
                             "Consumer task panicked during shutdown: {e}"
@@ -277,6 +268,100 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Result<Exchange, Ca
     Ok(exchange)
 }
 
+/// Private seam that lets tests inject commit success/failure without a
+/// real Kafka broker. The production path passes a `&ReadyStreamConsumer`,
+/// which has an explicit impl below. Tests implement this trait directly.
+pub(crate) trait KafkaCommitClient: Sync {
+    fn commit(
+        &self,
+        tpl: &rdkafka::TopicPartitionList,
+        mode: rdkafka::consumer::CommitMode,
+    ) -> Result<(), rdkafka::error::KafkaError>;
+}
+
+impl KafkaCommitClient for ReadyStreamConsumer {
+    fn commit(
+        &self,
+        tpl: &rdkafka::TopicPartitionList,
+        mode: rdkafka::consumer::CommitMode,
+    ) -> Result<(), rdkafka::error::KafkaError> {
+        rdkafka::consumer::Consumer::commit(self, tpl, mode)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Q1 auto-commit success gate. Owns the full Ok-path:
+/// 1. send_and_wait the exchange through the route pipeline.
+/// 2. On Ok, build the TPL for (topic, partition, offset+1) and commit
+///    via the `KafkaCommitClient` seam.
+/// 3. Propagate pipeline `Err(e)` verbatim; convert Kafka commit side-effect
+///    failures (TPL build or `consumer.commit`) to `ProcessorError(format!(...))`.
+///    In both error arms, record the appropriate b-prime metric and emit
+///    `error!` with `// log-policy: outside-contract`.
+///
+/// The caller (`run_consumer_loop`) MUST propagate the returned Err to
+/// terminate the consumer so supervision takes over (at-least-once).
+async fn auto_commit_step(
+    ctx: &ConsumerContext,
+    exchange: Exchange,
+    topic: &str,
+    partition: i32,
+    offset: i64,
+    committer: &dyn KafkaCommitClient,
+    runtime: &dyn camel_component_api::RuntimeObservability,
+    route_id: &str,
+) -> Result<(), CamelError> {
+    match ctx.send_and_wait(exchange).await {
+        Ok(_) => {
+            // Pipeline absorbed the exchange; commit offset+1.
+            let mut tpl = rdkafka::TopicPartitionList::new();
+            if let Err(e) =
+                tpl.add_partition_offset(topic, partition, rdkafka::Offset::Offset(offset + 1))
+            {
+                runtime
+                    .metrics()
+                    .increment_errors(route_id, "b-prime:kafka:auto-commit-side-effect");
+                // log-policy: outside-contract
+                tracing::error!(
+                    route = %route_id,
+                    error = %e,
+                    "kafka auto-commit side-effect: failed to build TPL"
+                );
+                return Err(CamelError::ProcessorError(format!(
+                    "Failed to build TPL for auto-commit: {e}"
+                )));
+            }
+            if let Err(e) = committer.commit(&tpl, rdkafka::consumer::CommitMode::Async) {
+                runtime
+                    .metrics()
+                    .increment_errors(route_id, "b-prime:kafka:auto-commit-side-effect");
+                // log-policy: outside-contract
+                tracing::error!(
+                    route = %route_id,
+                    error = %e,
+                    "kafka auto-commit side-effect: consumer.commit failed"
+                );
+                return Err(CamelError::ProcessorError(format!(
+                    "Failed to commit Kafka offset: {e}"
+                )));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            runtime
+                .metrics()
+                .increment_errors(route_id, "b-prime:kafka:auto-commit-dispatch");
+            // log-policy: outside-contract
+            tracing::error!(
+                route = %route_id,
+                error = %e,
+                "kafka dispatch pipeline failed"
+            );
+            Err(e)
+        }
+    }
+}
+
 async fn run_consumer_loop(
     config: ResolvedKafkaEndpointConfig,
     ctx: ConsumerContext,
@@ -285,8 +370,6 @@ async fn run_consumer_loop(
     runtime: Arc<dyn RuntimeObservability>,
     route_id: String,
 ) -> Result<(), CamelError> {
-    use rdkafka::consumer::CommitMode;
-
     let (commit_tx, commit_rx): (
         Option<mpsc::Sender<CommitRequest>>,
         Option<mpsc::Receiver<CommitRequest>>,
@@ -366,9 +449,12 @@ async fn run_consumer_loop(
                     }
                     continue;
                 }
-                let result = consumer_for_commits
-                    .commit(&tpl, CommitMode::Sync)
-                    .map_err(|e| CamelError::ProcessorError(format!("Commit failed: {e}")));
+                let result = rdkafka::consumer::Consumer::commit(
+                    &*consumer_for_commits,
+                    &tpl,
+                    CommitMode::Sync,
+                )
+                .map_err(|e| CamelError::ProcessorError(format!("Commit failed: {e}")));
                 if let Some(reply_tx) = req.reply_tx {
                     let _ = reply_tx.send(result);
                 } else if let Err(ref e) = result {
@@ -457,28 +543,24 @@ async fn run_consumer_loop(
                                 error!(error = %e, "Failed to send exchange to pipeline");
                             }
                         } else {
-                            // Auto-commit mode: dispatch then commit (at-least-once semantics)
-                            if let Err(e) = ctx.send(exchange).await {
-                                runtime.metrics().increment_errors(
-                                    &route_id,
-                                    "b-prime:kafka:auto-commit-dispatch",
-                                );
-                                // log-policy: outside-contract
-                                error!(error = %e, "Failed to send exchange to pipeline");
-                                // TODO(KAFKA-012): route failed messages to DLQ after max retries.
-                                // When dlq_topic is set, produce the message to dlq_topic with
-                                // header X-Camel-DLQ-Error containing the original error.
-                            }
-                            let mut tpl = rdkafka::TopicPartitionList::new();
-                            if let Err(e) = tpl.add_partition_offset(
+                            // Auto commit mode — Q1 success gate (ADR-0012 b').
+                            // The offset is committed ONLY after send_and_wait returns Ok, proving
+                            // the route pipeline absorbed the exchange. A pipeline failure returns
+                            // Err from run_consumer_loop, terminating the consumer so supervision
+                            // takes over and the failed offset is re-delivered (at-least-once).
+                            // NetworkRetryPolicy does NOT apply to pipeline/commit failures — it
+                            // only backs transient recv() errors.
+                            auto_commit_step(
+                                &ctx,
+                                exchange,
                                 owned.topic(),
                                 owned.partition(),
-                                rdkafka::Offset::Offset(owned.offset() + 1),
-                            ) {
-                                warn!(error = %e, "Failed to build TPL for auto-commit; skipping");
-                            } else if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
-                                warn!(error = %e, "Failed to commit Kafka offset");
-                            }
+                                owned.offset(),
+                                consumer.as_ref(),
+                                runtime.as_ref(),
+                                &route_id,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -528,8 +610,10 @@ mod tests {
     use super::*;
     use crate::config::KafkaEndpointConfig;
     use camel_api::{BackoffConfig, BackoffState, NoOpMetrics};
-    use camel_component_api::NoOpHealthCheckRegistry;
+    use camel_component_api::{ExchangeEnvelope, NoOpHealthCheckRegistry};
     use rdkafka::Timestamp;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// No-op `RuntimeObservability` for tests. Returns `NoOpMetrics` and
     /// `NoOpHealthCheckRegistry` so `stop()` paths that call
@@ -548,6 +632,89 @@ mod tests {
 
     fn test_rt() -> Arc<dyn camel_component_api::RuntimeObservability> {
         Arc::new(TestRuntimeObservability)
+    }
+
+    /// Records every `increment_errors(route_id, error_type)` call so tests
+    /// can assert the correct b-prime metric was emitted.
+    struct RecordingMetrics {
+        errors: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl camel_api::MetricsCollector for RecordingMetrics {
+        fn record_exchange_duration(&self, _: &str, _: std::time::Duration) {}
+        fn increment_errors(&self, route_id: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .expect("metrics mutex poisoned")
+                .push((route_id.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    struct RecordingRuntime {
+        errors: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl camel_component_api::RuntimeObservability for RecordingRuntime {
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            Arc::new(RecordingMetrics {
+                errors: self.errors.clone(),
+            })
+        }
+        fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {
+            Arc::new(camel_component_api::NoOpHealthCheckRegistry)
+        }
+    }
+
+    fn recording_rt() -> (
+        Arc<dyn camel_component_api::RuntimeObservability>,
+        Arc<Mutex<Vec<(String, String)>>>,
+    ) {
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let rt: Arc<dyn camel_component_api::RuntimeObservability> = Arc::new(RecordingRuntime {
+            errors: errors.clone(),
+        });
+        (rt, errors)
+    }
+
+    /// Test double for KafkaCommitClient. Returns a predetermined result and
+    /// counts commit invocations so tests can assert commit-was-skipped.
+    struct FakeCommitClient {
+        result: Result<(), rdkafka::error::KafkaError>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl FakeCommitClient {
+        fn always_succeeds() -> Self {
+            Self {
+                result: Ok(()),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+        fn always_fails() -> Self {
+            Self {
+                result: Err(rdkafka::error::KafkaError::Subscription(
+                    "fake commit failure".into(),
+                )),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+        fn call_count(&self) -> Arc<AtomicUsize> {
+            self.calls.clone()
+        }
+    }
+
+    impl KafkaCommitClient for FakeCommitClient {
+        fn commit(
+            &self,
+            _tpl: &rdkafka::TopicPartitionList,
+            _mode: rdkafka::consumer::CommitMode,
+        ) -> Result<(), rdkafka::error::KafkaError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
     }
 
     fn make_resolved_config() -> ResolvedKafkaEndpointConfig {
@@ -1211,6 +1378,342 @@ mod tests {
             calls.load(Ordering::SeqCst),
             3,
             "max_attempts=3 must yield exactly 3 invocations"
+        );
+    }
+
+    /// Q1 regression: when send_and_wait returns Err on the auto-commit path,
+    /// `auto_commit_step` MUST return the original Err (so supervision takes
+    /// over) and MUST NOT invoke the committer. The b-prime:kafka:auto-commit-dispatch
+    /// metric MUST be recorded before the error!.
+    #[tokio::test]
+    async fn auto_commit_pipeline_failure_returns_err_no_commit() {
+        let (rt, errors) = recording_rt();
+
+        // ConsumerContext with a downstream that always fails the pipeline.
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+                }
+            }
+        });
+        let ctx =
+            ConsumerContext::new(tx, CancellationToken::new(), "kafka-test-route".to_string());
+
+        let committer = FakeCommitClient::always_succeeds();
+        let call_count = committer.call_count();
+
+        let result = auto_commit_step(
+            &ctx,
+            Exchange::default(),
+            "test-topic",
+            0,
+            42,
+            &committer,
+            rt.as_ref(),
+            "kafka-test-route",
+        )
+        .await;
+
+        assert!(result.is_err(), "pipeline failure MUST propagate Err");
+        // Lock the contract: the ORIGINAL pipeline error is propagated, not a
+        // wrapped ProcessorError. The downstream returned
+        // `Err(CamelError::ProcessorError("boom".into()))`, so the result must
+        // match that exact error.
+        assert!(
+            matches!(
+                result,
+                Err(CamelError::ProcessorError(ref msg)) if msg == "boom"
+            ),
+            "must propagate the original pipeline ProcessorError verbatim, got {result:?}"
+        );
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "committer MUST NOT be invoked when pipeline fails"
+        );
+        let recorded = errors.lock().expect("metrics mutex poisoned").clone();
+        assert!(
+            recorded
+                .iter()
+                .any(|(_, t)| t == "b-prime:kafka:auto-commit-dispatch"),
+            "expected b-prime:kafka:auto-commit-dispatch metric, got {recorded:?}"
+        );
+    }
+
+    /// Q1 positive path: when send_and_wait returns Ok, the committer MUST be
+    /// invoked exactly once. The unified helper owns the full Ok-path so this
+    /// assertion is possible without a broker.
+    #[tokio::test]
+    async fn auto_commit_pipeline_success_commits_offset() {
+        let (rt, _errors) = recording_rt();
+
+        // ConsumerContext with a downstream that always succeeds.
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let ctx =
+            ConsumerContext::new(tx, CancellationToken::new(), "kafka-test-route".to_string());
+
+        let committer = FakeCommitClient::always_succeeds();
+        let call_count = committer.call_count();
+
+        let result = auto_commit_step(
+            &ctx,
+            Exchange::default(),
+            "test-topic",
+            0,
+            99,
+            &committer,
+            rt.as_ref(),
+            "kafka-test-route",
+        )
+        .await;
+
+        assert!(result.is_ok(), "pipeline success MUST return Ok");
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "committer MUST be invoked exactly once on pipeline success"
+        );
+    }
+
+    /// Q1: when the committer returns Err, `auto_commit_step` MUST return Err
+    /// (NOT warn-and-continue). The b-prime:kafka:auto-commit-side-effect
+    /// metric MUST be recorded.
+    #[tokio::test]
+    async fn auto_commit_side_effect_failure_returns_err() {
+        let (rt, errors) = recording_rt();
+
+        // ConsumerContext with a downstream that always succeeds (so we reach
+        // the commit step).
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let ctx =
+            ConsumerContext::new(tx, CancellationToken::new(), "kafka-test-route".to_string());
+
+        let committer = FakeCommitClient::always_fails();
+
+        let result = auto_commit_step(
+            &ctx,
+            Exchange::default(),
+            "test-topic",
+            0,
+            99,
+            &committer,
+            rt.as_ref(),
+            "kafka-test-route",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "commit side-effect failure MUST return Err"
+        );
+        let recorded = errors.lock().expect("metrics mutex poisoned").clone();
+        assert!(
+            recorded
+                .iter()
+                .any(|(_, t)| t == "b-prime:kafka:auto-commit-side-effect"),
+            "expected b-prime:kafka:auto-commit-side-effect metric, got {recorded:?}"
+        );
+    }
+
+    /// ADR-0012 b' regression: unbridged send_and_wait Err on normal-data
+    /// MUST emit error! (not warn!). The consumer owns the operational signal
+    /// because no route handler absorbed the failure. Kafka equivalent of
+    /// camel-sql/src/consumer.rs unbridged_send_and_wait_failure_emits_error_loud.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn auto_commit_failure_emits_error_loud() {
+        let (rt, _errors) = recording_rt();
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+                }
+            }
+        });
+        let ctx =
+            ConsumerContext::new(tx, CancellationToken::new(), "kafka-test-route".to_string());
+        let committer = FakeCommitClient::always_succeeds();
+
+        let _ = auto_commit_step(
+            &ctx,
+            Exchange::default(),
+            "test-topic",
+            0,
+            99,
+            &committer,
+            rt.as_ref(),
+            "kafka-test-route",
+        )
+        .await;
+
+        assert!(
+            logs_contain("ERROR"),
+            "unbridged send_and_wait failure MUST emit ERROR (consumer owns the signal)"
+        );
+    }
+
+    /// Q1 regression: the manual-commit path stays fire-and-forget ctx.send.
+    /// The auto success-gate contract does not bind manual commit timing.
+    /// Static source assertions on the manual branch block.
+    #[test]
+    fn manual_commit_path_still_fire_and_forget() {
+        let source = include_str!("consumer.rs");
+
+        // The manual branch opens with the commit_tx check and attaches the
+        // KafkaManualCommit extension before dispatching via ctx.send.
+        let manual_open = "if let Some(ref tx) = commit_tx";
+        assert!(
+            source.contains(manual_open),
+            "manual commit branch must open with `{manual_open}`"
+        );
+
+        // The extension attachment must occur in the manual branch.
+        let extension_attach = r#"exchange.set_extension("kafka.manual_commit","#;
+        assert!(
+            source.contains(extension_attach),
+            "manual commit branch must attach the kafka.manual_commit extension"
+        );
+
+        // The auto path uses send_and_wait; the manual path must NOT.
+        // Find the manual block and assert it contains ctx.send but NOT ctx.send_and_wait.
+        let manual_start = source
+            .find(manual_open)
+            .expect("manual branch opening not found");
+        let rest = &source[manual_start..];
+        // The manual branch ends at the first `} else {` after the opening.
+        let else_offset = rest
+            .find("} else {")
+            .or_else(|| rest.find("} else\n"))
+            .expect("manual branch must be followed by an `else` (auto) branch");
+        let manual_block = &rest[..else_offset];
+
+        assert!(
+            manual_block.contains("ctx.send("),
+            "manual commit branch MUST use fire-and-forget ctx.send"
+        );
+        assert!(
+            !manual_block.contains("ctx.send_and_wait("),
+            "manual commit branch MUST NOT use send_and_wait (auto-gate is for auto path only)"
+        );
+    }
+
+    /// Committer that records every offset it was asked to commit. Used to
+    /// assert the at-least-once invariant across multiple gate iterations.
+    struct RecordingCommitClient {
+        offsets: Arc<Mutex<Vec<i64>>>,
+    }
+
+    impl RecordingCommitClient {
+        fn new() -> Self {
+            Self {
+                offsets: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+        fn offsets(&self) -> Vec<i64> {
+            self.offsets.lock().expect("offsets mutex poisoned").clone()
+        }
+    }
+
+    impl KafkaCommitClient for RecordingCommitClient {
+        fn commit(
+            &self,
+            tpl: &rdkafka::TopicPartitionList,
+            _mode: rdkafka::consumer::CommitMode,
+        ) -> Result<(), rdkafka::error::KafkaError> {
+            // rdkafka 0.36: TopicPartitionList::elements() returns
+            // Vec<TopicPartitionListElem>; each elem exposes offset().
+            for elem in tpl.elements() {
+                if let rdkafka::Offset::Offset(o) = elem.offset() {
+                    self.offsets.lock().expect("offsets mutex poisoned").push(o);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Q1 at-least-once invariant: across two gate iterations, offset 99
+    /// success commits offset 100 (since the step commits offset+1), then
+    /// offset 100 pipeline failure returns Err and nothing further is
+    /// committed. Proves no skip, no rollback.
+    #[tokio::test]
+    async fn at_least_once_invariant_no_skip_no_rollback() {
+        let (rt, _errors) = recording_rt();
+
+        // Two envelopes: first succeeds, second fails.
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            let mut n = 0u32;
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    if n == 0 {
+                        let _ = reply_tx.send(Ok(env.exchange));
+                    } else {
+                        let _ =
+                            reply_tx.send(Err(CamelError::ProcessorError("second boom".into())));
+                    }
+                }
+                n += 1;
+            }
+        });
+        let ctx =
+            ConsumerContext::new(tx, CancellationToken::new(), "kafka-test-route".to_string());
+
+        let committer = RecordingCommitClient::new();
+
+        // Iteration 1: offset 99 success → commits offset 100.
+        let first = auto_commit_step(
+            &ctx,
+            Exchange::default(),
+            "t",
+            0,
+            99,
+            &committer,
+            rt.as_ref(),
+            "kafka-test-route",
+        )
+        .await;
+        assert!(first.is_ok(), "first iteration must succeed");
+
+        // Iteration 2: offset 100 failure → returns Err, no commit attempted.
+        let second = auto_commit_step(
+            &ctx,
+            Exchange::default(),
+            "t",
+            0,
+            100,
+            &committer,
+            rt.as_ref(),
+            "kafka-test-route",
+        )
+        .await;
+        assert!(
+            second.is_err(),
+            "second iteration pipeline failure MUST return Err"
+        );
+
+        let committed = committer.offsets();
+        assert_eq!(
+            committed,
+            vec![100],
+            "only offset 100 (offset+1 for first iteration's 99) should be committed; \
+             second iteration's failure MUST NOT commit"
         );
     }
 }

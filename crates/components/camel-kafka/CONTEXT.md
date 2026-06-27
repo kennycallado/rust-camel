@@ -1,14 +1,62 @@
+# camel-component-kafka — CONTEXT
+
 ## Log-level policy
 
-Per ADR-0012, this component's `error!` sites are categorized as:
+Per ADR-0012, this component's `error!`/`warn!` sites are categorized as:
 
-- **(b′) outside-contract** (consumer.rs L148, L157, L364, L378, L456, L466): channel-closed ctx.send failures in poll / commit paths. Each site calls `runtime.metrics().increment_errors(route_id, "b-prime:kafka:<site>")` BEFORE the `error!`. The metric is the operator signal; `error!` provides loud log visibility. Both stay.
+### (b') outside-contract
 
-- **(c) system-broken** (bundle.rs L30, consumer.rs L430):
-  - bundle.rs L30 = startup-time bundle init failure in `register_all`. Lifecycle failure — no route_id, no runtime accessor. Annotation-only.
-  - consumer.rs L430 = "exhausted reconnect attempts" → consumer `break` ends the route lifecycle. Annotation-only.
-  Each site keeps `error!` with `// log-policy: system-broken`. No metric call (operator alert via error! is the signal).
+Each site calls `runtime.metrics().increment_errors(route_id, "b-prime:kafka:<site>")`
+BEFORE the `error!` macro. The metric is the operator signal; `error!` provides
+loud log visibility. Both stay.
 
-- **(a) handler-owned** (producer.rs L263): producer `call()` returns Err → pipeline catches → route ErrorHandler owns ERROR. Downgraded to `warn!` with `// log-policy: handler-owned`. No metric call.
+- **Auto-commit dispatch** (`consumer.rs` `auto_commit_step` helper):
+  `send_and_wait` returns `Err` on normal-data. The route handler did not
+  absorb the failure. Metric: `b-prime:kafka:auto-commit-dispatch`.
+- **Auto-commit side-effect** (`consumer.rs` `auto_commit_step` helper):
+  TPL build or `consumer.commit()` returns `Err`. Metric:
+  `b-prime:kafka:auto-commit-side-effect`.
+- **Manual-commit dispatch** (`consumer.rs` manual branch, UNCHANGED):
+  fire-and-forget `ctx.send` channel-closed failure. The auto success-gate
+  contract does not bind manual commit timing. Metric:
+  `b-prime:kafka:manual-commit-dispatch`.
+- **Manual async commit handler — invalid topic/partition** (`consumer.rs`
+  commit-handler task ~L363): the commit-handler task failed to build the
+  TPL from a `CommitRequest`. Metric: `b-prime:kafka:async-commit-reply`.
+- **Manual async commit handler — commit failure** (`consumer.rs`
+  commit-handler task ~L377): the `consumer.commit()` call failed in the
+  async commit-handler task. Metric: `b-prime:kafka:async-commit-failed`.
+  (Previously mislabeled as poll-path ctx.send — corrected post-Q1.)
 
-Reviewer: r_glm5.1 verifies these classifications against source at Phase C review time.
+### (c) system-broken
+
+Each site keeps `error!` with `// log-policy: system-broken`. No metric
+(operator alert via `error!` is the signal).
+
+- `bundle.rs` `register_all` startup-time bundle init failure (lifecycle
+  failure, no route_id, no runtime accessor).
+- `consumer.rs` recv-loop "exhausted reconnect attempts" — consumer `break`
+  ends the route lifecycle.
+- `consumer.rs` `stop()` task-join errors (~L143-158, shutdown path, NOT
+  ctx.send). Reclassified post-Q1 from a prior incorrect (b') label.
+
+### (a) handler-owned
+
+- `producer.rs` `call()` returns `Err` — the pipeline catches the failure
+  and the route `ErrorHandler` owns the operational signal. Downgraded to
+  `warn!` with `// log-policy: handler-owned`. No metric.
+
+### Sites explicitly NOT in the ADR taxonomy
+
+- `consumer.rs` commit-handler drain warnings during manual shutdown are
+  operational warnings, not ADR error sites. Leave at `warn!`/`info!`.
+
+## Crash health ownership
+
+Per the project-wide contract (CONTEXT-MAP "Supervision / ConsumerRestart"):
+the Kafka consumer does NOT call `force_unhealthy_for_route` on task crash.
+The Runtime pins health via `CrashNotification → RuntimeCommand::FailRoute →
+commands.rs`. The consumer's `runtime` field is metrics-only.
+
+Reviewer: r_glm5.1 verifies these classifications against source at Phase C
+review time.
