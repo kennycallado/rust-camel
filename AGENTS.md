@@ -51,6 +51,26 @@ If a subagent needs ULTRATHINK instructions are in .opencode/instructions/ultrat
   run: cargo audit
 ```
 
+## COMMIT CONVENTION (caveman-commit, strict)
+
+```
+Subject: <type>(<scope>): <imperative summary>  — ≤50 chars when possible, cap 72
+Body:    ONLY when "why" is non-obvious, breaking, migration, or security
+         wrap 72, bullets `-` not `*`, reference bd at end: `Bd: rc-xxx`
+
+Types: feat, fix, refactor, perf, docs, test, chore, build, ci, style, revert
+
+NEVER:
+- Restate what the diff already says ("this commit does X")
+- Explain oracle/reviewer reasoning in commit body (that lives in bd/CONTEXT.md)
+- "Generated with..." / AI attribution / emoji
+- Paste spec/plan text into body
+
+Body length budget: 3-8 lines for normal commits. Major feature merges
+(e.g. new component) may use bullet list of technical changes, still no
+prose. If body exceeds ~15 lines, the commit is doing too much — split it.
+```
+
 ## MERGE TO MAIN
 
 ```
