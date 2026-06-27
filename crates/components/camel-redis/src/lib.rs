@@ -115,13 +115,10 @@ impl Endpoint for RedisEndpoint {
 
     fn create_producer(
         &self,
-        rt: Arc<dyn RuntimeObservability>,
+        _rt: Arc<dyn RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
-        Ok(BoxProcessor::new(RedisProducer::new(
-            self.config.clone(),
-            rt,
-        )))
+        Ok(BoxProcessor::new(RedisProducer::new(self.config.clone())))
     }
 
     fn create_consumer(
@@ -135,9 +132,6 @@ impl Endpoint for RedisEndpoint {
 #[cfg(test)]
 mod tests {
     use camel_component_api::test_support::PanicRuntimeObservability;
-    fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-        std::sync::Arc::new(PanicRuntimeObservability)
-    }
     fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
     }
@@ -237,7 +231,7 @@ mod integration_tests {
             return;
         }
         let config = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=PING").unwrap();
-        let producer = RedisProducer::new(config, test_rt());
+        let producer = RedisProducer::new(config);
         producer
             .check_connection()
             .await
