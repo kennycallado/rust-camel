@@ -32,6 +32,7 @@ testcontainers = { workspace = true, optional = true }
 testcontainers-modules = { workspace = true, features = ["redis", "kafka", "postgres", "k3s"], optional = true }
 camel-component-redis = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }
+camel-component-mqtt = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
 camel-component-jms = { workspace = true, optional = true }
 camel-component-cxf = { workspace = true, optional = true }
@@ -87,6 +88,7 @@ integration-tests = [
     "dep:testcontainers-modules",
     "dep:camel-component-redis",
     "dep:camel-component-kafka",
+    "dep:camel-component-mqtt",
     "dep:camel-component-sql",
     "dep:sqlx",
     "dep:camel-component-jms",

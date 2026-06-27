@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`, `llm`, `surrealdb`, `grpc`, `seda`, `keycloak`, `wasm`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `mqtt`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`, `llm`, `surrealdb`, `grpc`, `seda`, `keycloak`, `wasm`.
 
 ## Architecture
 
@@ -186,6 +186,7 @@ cargo run
 | `camel-http`                | HTTP producer (client) and HTTP consumer (server, native streaming)                                                                                                               |
 | `camel-file`                | File producer and consumer                                                                                                                                                        |
 | `camel-kafka`               | Kafka producer and consumer with SSL/SASL and manual commit                                                                                                                       |
+| `camel-mqtt`               | MQTT 3.1.1 producer and consumer (rumqttc-v4-next) with QoS 0/1/2, manual/auto ack, TLS via mqtts://                                                                              |
 | `camel-redis`               | Redis producer and consumer                                                                                                                                                       |
 | `camel-opensearch`          | OpenSearch producer with 7 operations (INDEX, SEARCH, GET, DELETE, UPDATE, BULK, MULTIGET)                                                                                       |
 | `camel-sql`                 | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                                 |

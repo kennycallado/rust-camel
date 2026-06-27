@@ -45,6 +45,7 @@ camel-component-file.workspace = true
 camel-component-http.workspace = true
 camel-component-jms.workspace = true
 camel-component-kafka = { workspace = true, optional = true }
+camel-component-mqtt = { workspace = true, optional = true }
 camel-component-grpc = { workspace = true, optional = true }
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
@@ -99,6 +100,10 @@ http-static = []
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
 kafka-static = ["dep:camel-component-kafka", "cmake-build"]
+# mqtt activates the MQTT component (rumqttc, no TLS by default).
+# Use mqtt-tls to enable TLS support (mqtts:// URIs).
+mqtt = ["dep:camel-component-mqtt"]
+mqtt-tls = ["mqtt", "camel-component-mqtt/tls"]
 surrealdb = ["dep:camel-component-surrealdb"]
 
 [lints]

@@ -1,0 +1,39 @@
+[package]
+name = "camel-component-mqtt"
+description = "MQTT 3.1.1 component for rust-camel (rumqttc-v4-next)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-component-mqtt"
+readme = "README.md"
+keywords = ["camel", "mqtt", "iot", "messaging", "integration"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+camel-component-api = { workspace = true }
+camel-api           = { workspace = true }
+tokio               = { workspace = true }
+async-trait         = { workspace = true }
+tower               = { workspace = true }
+bytes               = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+toml                = { workspace = true }
+tracing             = { workspace = true }
+tokio-util          = { workspace = true }
+rumqttc             = { workspace = true }
+sha2                = { workspace = true }
+hex                 = { workspace = true }
+
+[dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
+tokio               = { workspace = true, features = ["test-util", "macros"] }
+
+[features]
+default = []
+tls     = ["rumqttc/use-rustls"]
+
+[lints]
+workspace = true

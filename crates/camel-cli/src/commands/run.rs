@@ -352,6 +352,8 @@ pub async fn run(
 
     #[cfg(feature = "kafka")]
     register_bundle!(ctx, camel_config, camel_component_kafka::KafkaBundle);
+    #[cfg(feature = "mqtt")]
+    register_bundle!(ctx, camel_config, camel_component_mqtt::MqttBundle);
     register_bundle!(ctx, camel_config, camel_master::MasterBundle);
     register_bundle!(
         ctx,

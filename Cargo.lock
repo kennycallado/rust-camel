@@ -394,6 +394,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-tungstenite"
+version = "0.34.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8447f02eaa65412035e2d3eeaa3fc82bbb8d7137c84c5976b4af685136012ee9"
+dependencies = [
+ "atomic-waker",
+ "futures-core",
+ "futures-io",
+ "futures-task",
+ "futures-util",
+ "log",
+ "pin-project-lite",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite 0.29.0",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1213,6 +1233,7 @@ dependencies = [
  "camel-component-llm",
  "camel-component-log",
  "camel-component-mock",
+ "camel-component-mqtt",
  "camel-component-opensearch",
  "camel-component-redis",
  "camel-component-seda",
@@ -1551,6 +1572,26 @@ dependencies = [
  "regex",
  "serde_json",
  "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "camel-component-mqtt"
+version = "0.20.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "camel-api",
+ "camel-component-api",
+ "hex",
+ "rumqttc-v4-next",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
  "tower",
  "tracing",
 ]
@@ -2149,6 +2190,7 @@ dependencies = [
  "camel-component-kafka",
  "camel-component-log",
  "camel-component-mock",
+ "camel-component-mqtt",
  "camel-component-opensearch",
  "camel-component-redis",
  "camel-component-seda",
@@ -4065,6 +4107,17 @@ name = "flume"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "spin 0.9.8",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -6270,6 +6323,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqtt-example"
+version = "0.20.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-mqtt",
+ "camel-component-timer",
+ "camel-core",
+ "testcontainers",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "mqttbytes-core-next"
+version = "0.33.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e8f1593f6a8affb39a2df042cc28df033ba18907858cde71993e5780d29a3"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "multi-route-direct"
 version = "0.20.0"
 dependencies = [
@@ -8394,6 +8472,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "rumqttc-core-next"
+version = "0.33.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaa975ffc1af5aac70a0e139491a1fc553ab48f378f909dad5d43fd4b2ad28db"
+dependencies = [
+ "async-tungstenite",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "rumqttc-v4-next"
+version = "0.33.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3728a8e8319e5dc4a5bce788477c8e3250c55dc81d39fa2781fdf0886fec0381"
+dependencies = [
+ "async-tungstenite",
+ "bytes",
+ "fixedbitset 0.5.7",
+ "flume 0.12.0",
+ "futures-util",
+ "log",
+ "mqttbytes-core-next",
+ "rumqttc-core-next",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+]
+
+[[package]]
 name = "rust-ini"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10258,7 +10374,7 @@ checksum = "c2d12fe70b2c1b4401038055f90f151b78208de1f9f89a7dbfd41587a10c3eea"
 dependencies = [
  "atoi",
  "chrono",
- "flume",
+ "flume 0.11.1",
  "futures-channel",
  "futures-core",
  "futures-executor",
@@ -11543,6 +11659,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.4",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
 ]

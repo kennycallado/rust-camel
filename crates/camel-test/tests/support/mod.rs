@@ -54,6 +54,9 @@ use tower::ServiceExt;
 pub mod activemq;
 
 #[cfg(feature = "integration-tests")]
+pub mod mosquitto;
+
+#[cfg(feature = "integration-tests")]
 pub mod artemis;
 
 #[cfg(feature = "integration-tests")]
