@@ -1,3 +1,10 @@
 [advisories]
+# RUSTSEC-2023-0071 (rsa, Marvin Attack) — non-applicable in rust-camel.
+# `rsa` is pulled only by sqlx-mysql (camel-component-sql's sqlx `mysql` feature),
+# used for client-side RSA public-key encryption in MySQL caching_sha2_password auth.
+# Marvin is a private-key timing leak; the rust-camel side is the MySQL client and
+# holds no RSA private key, so the vector does not apply. The auth-issuance path
+# (camel-auth) was migrated off `rsa` to pkcs1/pkcs8 (bd rc-ayu). To fully drop rsa,
+# remove MySQL support from camel-component-sql.
 ignore = ["RUSTSEC-2023-0071"]
 informational_warnings = ["unmaintained"]

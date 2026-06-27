@@ -56,17 +56,40 @@ impl NativeSigningKey {
     }
 
     fn extract_public_pem(private_pem: &str) -> Result<String, AuthError> {
-        use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPublicKey};
-        use rsa::pkcs8::DecodePrivateKey;
+        use pkcs1::der::Decode;
+        use pkcs1::{LineEnding, RsaPrivateKey, RsaPublicKey};
 
-        let private_key = rsa::RsaPrivateKey::from_pkcs1_pem(private_pem)
-            .or_else(|_| rsa::RsaPrivateKey::from_pkcs8_pem(private_pem))
+        let (label, doc) = pkcs1::der::SecretDocument::from_pem(private_pem)
             .map_err(|e| AuthError::ConfigError(format!("failed to parse RSA private key: {e}")))?;
-        let pub_pem = private_key
-            .to_public_key()
-            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+        let der_bytes = doc.as_bytes();
+
+        let rsa_der: &[u8] = match label {
+            "RSA PRIVATE KEY" => der_bytes,
+            "PRIVATE KEY" => {
+                let pki = <pkcs8::PrivateKeyInfo as Decode>::from_der(der_bytes).map_err(|e| {
+                    AuthError::ConfigError(format!("failed to parse RSA private key: {e}"))
+                })?;
+                pki.private_key
+            }
+            other => {
+                return Err(AuthError::ConfigError(format!(
+                    "unsupported RSA key PEM label: {other}"
+                )));
+            }
+        };
+
+        let private_key = <RsaPrivateKey as Decode>::from_der(rsa_der)
+            .map_err(|e| AuthError::ConfigError(format!("failed to parse RSA private key: {e}")))?;
+
+        let public_key = RsaPublicKey {
+            modulus: private_key.modulus,
+            public_exponent: private_key.public_exponent,
+        };
+        let public_doc = <pkcs1::der::Document as TryFrom<&RsaPublicKey>>::try_from(&public_key)
             .map_err(|e| AuthError::ConfigError(format!("failed to encode public key: {e}")))?;
-        Ok(pub_pem)
+        public_doc
+            .to_pem("RSA PUBLIC KEY", LineEnding::LF)
+            .map_err(|e| AuthError::ConfigError(format!("failed to encode public key: {e}")))
     }
 
     pub fn kid(&self) -> &str {
@@ -317,6 +340,32 @@ mod tests {
         let pem = include_str!("../tests/fixtures/test_rsa_private.pem");
         let key = NativeSigningKey::from_pem(pem, "test-key-1".to_string()).unwrap();
         assert_eq!(key.kid(), "test-key-1");
+    }
+
+    #[test]
+    fn signing_key_loads_pkcs1_pem() {
+        let pem = include_str!("../tests/fixtures/test_rsa_private_pkcs1.pem");
+        let key = NativeSigningKey::from_pem(pem, "pkcs1-kid".to_string()).unwrap();
+        assert_eq!(key.kid(), "pkcs1-kid");
+        assert!(
+            key.public_pem()
+                .starts_with("-----BEGIN RSA PUBLIC KEY-----"),
+            "expected PKCS#1 public key PEM, got: {}",
+            key.public_pem()
+        );
+    }
+
+    #[test]
+    fn public_pem_is_pkcs1_rsa_public_key() {
+        let pem = include_str!("../tests/fixtures/test_rsa_private.pem");
+        let key = NativeSigningKey::from_pem(pem, "pkcs1-kid".to_string()).unwrap();
+        let public_pem = key.public_pem();
+        assert!(!public_pem.trim().is_empty());
+        assert!(
+            public_pem.starts_with("-----BEGIN RSA PUBLIC KEY-----"),
+            "expected PKCS#1 public key PEM, got: {public_pem}"
+        );
+        assert!(public_pem.contains("-----END RSA PUBLIC KEY-----"));
     }
 
     #[test]

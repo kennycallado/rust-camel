@@ -34,14 +34,29 @@ impl NativeJwksProvider {
     fn pem_to_jwk_components(pem: &str) -> Result<(String, String), AuthError> {
         use base64::Engine as _;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        use rsa::pkcs1::DecodeRsaPublicKey;
-        use rsa::traits::PublicKeyParts;
+        use pkcs1::RsaPublicKey;
+        use pkcs1::der::Decode;
 
-        let pub_key = rsa::RsaPublicKey::from_pkcs1_pem(pem)
+        let (label, doc) = pkcs1::der::Document::from_pem(pem)
             .map_err(|e| AuthError::ConfigError(format!("failed to parse public key PEM: {e}")))?;
-        let n = URL_SAFE_NO_PAD.encode(pub_key.n().to_bytes_be());
-        let e = URL_SAFE_NO_PAD.encode(pub_key.e().to_bytes_be());
+        if label != "RSA PUBLIC KEY" {
+            return Err(AuthError::ConfigError(format!(
+                "invalid RSA public key PEM label: {label}"
+            )));
+        }
+        let pub_key = <RsaPublicKey as Decode>::from_der(doc.as_bytes())
+            .map_err(|e| AuthError::ConfigError(format!("failed to parse public key PEM: {e}")))?;
+        let n = URL_SAFE_NO_PAD.encode(minimal_bigint_bytes(pub_key.modulus.as_bytes()));
+        let e = URL_SAFE_NO_PAD.encode(minimal_bigint_bytes(pub_key.public_exponent.as_bytes()));
         Ok((n, e))
+    }
+}
+
+fn minimal_bigint_bytes(b: &[u8]) -> &[u8] {
+    if b.len() > 1 && b[0] == 0x00 {
+        &b[1..]
+    } else {
+        b
     }
 }
 
@@ -80,6 +95,30 @@ mod tests {
         let signing_key = NativeSigningKey::from_pem(pem, "test-kid-2".to_string()).unwrap();
         let provider = NativeJwksProvider::new(signing_key).unwrap();
         provider.refresh().await.unwrap();
+    }
+
+    #[test]
+    fn pem_to_jwk_components_extracts_base64url_n_and_e() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let pem = include_str!("../tests/fixtures/test_rsa_private.pem");
+        let signing_key = NativeSigningKey::from_pem(pem, "base64url-kid".to_string()).unwrap();
+        let public_pem = signing_key.public_pem();
+        let (n, e) = NativeJwksProvider::pem_to_jwk_components(public_pem).unwrap();
+        assert!(!n.is_empty(), "modulus (n) must be non-empty");
+        assert!(!e.is_empty(), "exponent (e) must be non-empty");
+        let is_base64url = |s: &str| {
+            s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        };
+        assert!(is_base64url(&n), "modulus must be base64url: {n}");
+        assert!(is_base64url(&e), "exponent must be base64url: {e}");
+
+        let n_bytes = URL_SAFE_NO_PAD.decode(&n).unwrap();
+        assert_eq!(n_bytes.len(), 256, "2048-bit modulus must be 256 octets");
+        let e_bytes = URL_SAFE_NO_PAD.decode(&e).unwrap();
+        assert_eq!(e_bytes.len(), 3, "exponent 65537 must be 3 octets");
     }
 
     #[tokio::test]
