@@ -27,8 +27,7 @@
 
 Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./docs/adr/).
 Each ADR file carries authoritative `Status` / `Amends` metadata in its header; the markers below
-are a convenience index and may lag the file. There is **no ADR-0023** (numbering gap; no file
-currently present).
+are a convenience index and may lag the file.
 
 - [0001](./docs/adr/0001-tower-data-plane-split-from-control-plane.md) — Tower data plane, custom-trait control plane
 - [0002](./docs/adr/0002-cqrs-runtime-bus-for-route-lifecycle.md) — CQRS RuntimeBus for route lifecycle control
@@ -52,10 +51,12 @@ currently present).
 - [0020](./docs/adr/0020-llm-component-provider-adapter-boundary.md) — LLM component isolates siumai SDK behind a project-owned LlmProvider trait; all siumai imports confined to two files
 - [0021](./docs/adr/0021-llm-retry-retry-after-manual-loop.md) — LLM retry honors provider retry_after via manual loop, diverging from ADR-0013 helpers
 - [0022](./docs/adr/0022-steplifecycle-trait-and-drain.md) — StepLifecycle trait and drain policy for stateful pipeline steps
-- _(0023 — no ADR; numbering gap)_
+- [0023](./docs/adr/0023-idempotent-repository-trait.md) — `IdempotentRepository` trait lives in `camel-api` (key-only, `Result`-returning) so any crate can implement it; backends propagate transient read failures. Stores keys, not full messages (Claim Check is ADR-0028)
 - [0024](./docs/adr/0024-pipeline-outcome-replaces-camel-error-stopped.md) — `PipelineOutcome` enum replaces `CamelError::Stopped` for control flow; Stop EIP becomes successful control flow at the pipeline layer (one above Tower); consumer reply-channel adapter makes Completed/Stopped indistinguishable to consumers
 - [0025](./docs/adr/0025-outcome-aware-structural-eips.md) — Outcome-aware structural EIPs return `PipelineOutcome` directly _(amends 0024)_
 - [0026](./docs/adr/0026-json-canonical-route-authoring-format.md) — JSON is the canonical full-DSL authoring format for SDKs/generators; YAML is human convenience
+- [0027](./docs/adr/0027-mqtt-component-3-1-1-per-endpoint-connections.md) — MQTT component uses MQTT 3.1.1 (v1) via `rumqttc`; one connection per Consumer/Producer created lazily (route_id not available at `create_endpoint()`); MQTT 5.0 deferred to v2
+- [0028](./docs/adr/0028-claimcheck-repository-trait.md) — Separate `ClaimCheckRepository` trait (payload-bearing `set`/`get` with `Body` values), distinct from key-only `IdempotentRepository` (ADR-0023); shared `NamedRegistry<T>` wiring pattern cross-referenced, not inherited
 
 ## Key Terms
 
