@@ -409,6 +409,31 @@ pub struct StreamCacheStepDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidateStepDef {
+    pub predicate: LanguageExpressionDef,
+}
+
+/// Idempotent Consumer EIP step definition.
+///
+/// Wraps a child sub-pipeline that runs only when the exchange's message-id
+/// is NOT already present in the named `repository`. See ADR-0023.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdempotentConsumerStepDef {
+    /// Name of the registered `IdempotentRepository` (e.g. `"memory"`).
+    pub repository: String,
+    /// Expression that extracts the message-id key from the exchange.
+    pub expression: LanguageExpressionDef,
+    /// Child sub-pipeline executed on first-time (non-duplicate) exchanges.
+    pub steps: Vec<DeclarativeStep>,
+    /// If `true`, reserve the key in the repository BEFORE running the child
+    /// (eager mode). Default `false` (lazy: add only after the child completes).
+    pub eager: Option<bool>,
+    /// If `true` and `eager` is `true`, remove the key from the repository
+    /// when the child returns `Failed`. Default `false`.
+    pub remove_on_failure: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrichStepDef {
     pub uri: String,
     pub strategy: Option<String>,
@@ -455,11 +480,13 @@ pub enum DeclarativeStep {
     StreamCache(StreamCacheStepDef),
     Marshal(DataFormatDef),
     Unmarshal(DataFormatDef),
+    Validate(ValidateStepDef),
     Bean(BeanStepDef),
     Delay(DelayStepDef),
     Loop(LoopStepDef),
     Enrich(EnrichStepDef),
     PollEnrich(EnrichStepDef),
+    IdempotentConsumer(IdempotentConsumerStepDef),
     DoTry {
         steps: Vec<DeclarativeStep>,
         catch: Vec<DoTryCatchClauseDef>,
@@ -499,11 +526,15 @@ impl DeclarativeStep {
             DeclarativeStep::StreamCache(_) => crate::contract::DeclarativeStepKind::StreamCache,
             DeclarativeStep::Marshal(_) => crate::contract::DeclarativeStepKind::Marshal,
             DeclarativeStep::Unmarshal(_) => crate::contract::DeclarativeStepKind::Unmarshal,
+            DeclarativeStep::Validate(_) => crate::contract::DeclarativeStepKind::Validate,
             DeclarativeStep::Bean(_) => crate::contract::DeclarativeStepKind::Bean,
             DeclarativeStep::Delay(_) => crate::contract::DeclarativeStepKind::Delay,
             DeclarativeStep::Loop(_) => crate::contract::DeclarativeStepKind::Loop,
             DeclarativeStep::Enrich(_) => crate::contract::DeclarativeStepKind::Enrich,
             DeclarativeStep::PollEnrich(_) => crate::contract::DeclarativeStepKind::PollEnrich,
+            DeclarativeStep::IdempotentConsumer(_) => {
+                crate::contract::DeclarativeStepKind::IdempotentConsumer
+            }
             DeclarativeStep::DoTry { .. } => crate::contract::DeclarativeStepKind::DoTry,
         }
     }

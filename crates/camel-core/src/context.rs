@@ -21,6 +21,7 @@ use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::lifecycle::domain::LanguageRegistryError;
+use crate::registry::RegistryError;
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::TracerConfig;
 use crate::template::TemplateRegistry;
@@ -53,6 +54,7 @@ pub struct CamelContext {
     component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     template_registry: Arc<TemplateRegistry>,
+    idempotent_repositories: crate::registry::SharedIdempotentRegistry,
 }
 
 /// Parts bag used by [`CamelContextBuilder::build`] to construct a [`CamelContext`]
@@ -73,6 +75,7 @@ pub(crate) struct FromParts {
     pub(crate) component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     pub(crate) function_invoker: Option<Arc<dyn FunctionInvoker>>,
     pub(crate) template_registry: Arc<TemplateRegistry>,
+    pub(crate) idempotent_repositories: crate::registry::SharedIdempotentRegistry,
 }
 
 impl CamelContext {
@@ -93,6 +96,7 @@ impl CamelContext {
             component_configs: parts.component_configs,
             function_invoker: parts.function_invoker,
             template_registry: parts.template_registry,
+            idempotent_repositories: parts.idempotent_repositories,
         }
     }
 }
@@ -681,6 +685,28 @@ impl CamelContext {
     /// Return all instance records for a given template ID.
     pub fn template_instances(&self, template_id: &str) -> Vec<TemplateInstanceRecord> {
         self.template_registry.instances(template_id)
+    }
+
+    // --- Idempotent Repository Registry ---
+
+    /// Register an idempotent repository.
+    ///
+    /// Returns `Err(RegistryError::AlreadyRegistered)` if a repository with
+    /// the same name is already registered.
+    pub fn register_idempotent_repository(
+        &mut self,
+        name: impl Into<String>,
+        repo: Arc<dyn camel_api::IdempotentRepository>,
+    ) -> Result<(), RegistryError> {
+        self.idempotent_repositories.register(name, repo)
+    }
+
+    /// Retrieve an idempotent repository by name.
+    pub fn idempotent_repository(
+        &self,
+        name: &str,
+    ) -> Option<Arc<dyn camel_api::IdempotentRepository>> {
+        self.idempotent_repositories.get(name)
     }
 }
 

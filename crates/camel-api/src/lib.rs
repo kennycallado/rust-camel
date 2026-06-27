@@ -26,6 +26,7 @@ pub mod filter;
 pub mod from_body;
 pub mod function;
 pub mod health;
+pub mod idempotent;
 pub mod lifecycle;
 pub mod load_balancer;
 pub mod loop_eip;
@@ -91,6 +92,7 @@ pub use function::{
     FunctionInvoker, FunctionInvokerSync, PatchBody,
 };
 pub use health::{AsyncHealthCheck, CheckResult, HealthReport, HealthSource, ServiceHealth};
+pub use idempotent::IdempotentRepository;
 pub use lifecycle::{HealthStatus, Lifecycle, ServiceStatus};
 pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};
 pub use message::Message;

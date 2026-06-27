@@ -299,6 +299,7 @@ pub enum RouteDslStep {
     Validate(ValidateStep),
     Enrich(EnrichStep),
     PollEnrich(PollEnrichStep),
+    IdempotentConsumer(IdempotentConsumerStep),
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -762,6 +763,32 @@ pub struct UnmarshalStep {
 #[derive(Deserialize, Debug)]
 pub struct ValidateStep {
     pub validate: String,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct IdempotentConsumerStep {
+    pub idempotent_consumer: IdempotentConsumerBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct IdempotentConsumerBody {
+    /// Name of the registered IdempotentRepository (e.g. `"memory"`).
+    pub repository: String,
+    /// Simple-language expression that extracts the message-id (e.g. `"${header.messageId}"`).
+    pub expression: String,
+    /// Child sub-pipeline executed on first-time (non-duplicate) exchanges.
+    #[serde(default)]
+    pub steps: Vec<RouteDslStep>,
+    /// Reserve the key before running the child (default `false`).
+    #[serde(default)]
+    pub eager: Option<bool>,
+    /// When `eager`, remove the key if the child fails (default `false`).
+    #[serde(default)]
+    pub remove_on_failure: Option<bool>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

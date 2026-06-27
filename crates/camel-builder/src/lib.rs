@@ -21,7 +21,7 @@ use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
 use camel_api::{
     BoxProcessor, CamelError, CanonicalRouteSpec, Exchange, FilterPredicate, IdentityProcessor,
-    ProcessorFn, Value,
+    LanguageExpressionDef, ProcessorFn, Value,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
@@ -244,22 +244,24 @@ pub trait StepAccumulator: Sized {
         Ok(self)
     }
 
-    /// Validate the exchange body against a schema file.
+    /// Validate the exchange using a predicate expression.
     ///
-    /// Shorthand for `to("validator:path")`. Supports XSD, JSON Schema, and YAML.
+    /// If the expression evaluates to `true`, the exchange continues.
+    /// If `false`, a `CamelError::ValidationError` is returned into the route error handler.
     ///
     /// # Example
     /// ```ignore
-    /// route.validate("schemas/order.xsd").to("direct:out")
+    /// route.validate("${body.size()} > 0").to("direct:out")
     /// ```
-    fn validate(mut self, schema_path: impl Into<String>) -> Self {
-        let path = schema_path.into();
-        let uri = if path.starts_with("validator:") {
-            path
-        } else {
-            format!("validator:{path}")
+    fn validate(mut self, expression: impl Into<String>) -> Self {
+        let source = expression.into();
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source,
         };
-        self.steps_mut().push(BuilderStep::To(uri));
+        self.steps_mut().push(BuilderStep::Validate {
+            predicate: expression,
+        });
         self
     }
 
@@ -1094,6 +1096,8 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::DeclarativeStreamSplit { .. } => "stream_split",
         BuilderStep::Enrich { .. } => "enrich",
         BuilderStep::PollEnrich { .. } => "poll_enrich",
+        BuilderStep::Validate { .. } => "validate",
+        BuilderStep::IdempotentConsumer { .. } => "idempotent_consumer",
         BuilderStep::DeclarativeDoTry { .. } => "do_try",
     }
 }
@@ -2917,7 +2921,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_adds_to_step_with_validator_uri() {
+    fn validate_adds_validate_step() {
         let def = RouteBuilder::from("direct:in")
             .route_id("test")
             .validate("schemas/order.xsd")
@@ -2926,7 +2930,7 @@ mod tests {
         let steps = def.steps();
         assert_eq!(steps.len(), 1);
         assert!(
-            matches!(&steps[0], BuilderStep::To(uri) if uri == "validator:schemas/order.xsd"),
+            matches!(&steps[0], BuilderStep::Validate { predicate } if predicate.language == "simple" && predicate.source == "schemas/order.xsd"),
             "got: {:?}",
             steps[0]
         );
@@ -3062,16 +3066,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_preserves_existing_validator_prefix() {
+    fn test_validate_creates_validate_step_with_expression() {
         let route = RouteBuilder::from("direct:in")
             .route_id("validate-prefix-test")
-            .validate("validator:schemas/order.xsd")
+            .validate("${body.size()} > 0")
             .build()
             .unwrap();
 
         assert!(matches!(
             &route.steps()[0],
-            BuilderStep::To(uri) if uri == "validator:schemas/order.xsd"
+            BuilderStep::Validate { predicate } if predicate.language == "simple" && predicate.source == "${body.size()} > 0"
         ));
     }
 

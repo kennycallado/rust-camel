@@ -69,6 +69,9 @@ pub enum CamelError {
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+
+    #[error("Validation failed: {0}")]
+    ValidationError(String),
 }
 
 impl CamelError {
@@ -90,6 +93,7 @@ impl CamelError {
             Self::ChannelClosed => "channel",
             Self::Unauthenticated(_) => "unauthenticated",
             Self::Unauthorized(_) => "unauthorized",
+            Self::ValidationError(_) => "validation",
             _ => "unknown",
         }
     }
@@ -122,6 +126,7 @@ impl CamelError {
             Self::StreamLimitExceeded(_) => "StreamLimitExceeded",
             Self::Unauthenticated(_) => "Unauthenticated",
             Self::Unauthorized(_) => "Unauthorized",
+            Self::ValidationError(_) => "ValidationError",
         }
     }
 }
@@ -171,6 +176,7 @@ mod tests {
             CamelError::StreamLimitExceeded(42),
             CamelError::Unauthenticated("token expired".to_string()),
             CamelError::Unauthorized("missing admin role".to_string()),
+            CamelError::ValidationError("body does not match schema".to_string()),
         ]
     }
 
@@ -254,6 +260,10 @@ mod tests {
         assert_eq!(CamelError::Config("x".to_string()).classify(), "config");
         assert_eq!(CamelError::AlreadyConsumed.classify(), "type_conversion");
         assert_eq!(CamelError::StreamLimitExceeded(42).classify(), "stream");
+        assert_eq!(
+            CamelError::ValidationError("bad".to_string()).classify(),
+            "validation"
+        );
     }
 
     #[test]
@@ -278,6 +288,14 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_error_classify() {
+        assert_eq!(
+            CamelError::ValidationError("bad".to_string()).classify(),
+            "validation"
+        );
+    }
+
+    #[test]
     fn test_auth_variants_are_clone() {
         let err = CamelError::Unauthenticated("test".to_string());
         let cloned = err.clone();
@@ -294,7 +312,7 @@ mod variant_name_tests {
     use super::CamelError;
     use std::sync::Arc;
 
-    /// Representative value for each of the 18 enum variants. This test fails to compile
+    /// Representative value for each enum variant. This test fails to compile
     /// when a new variant is added to CamelError without updating variant_name().
     /// The enum is `#[non_exhaustive]` but this match lives in the same crate, so internal
     /// exhaustive matching is allowed.
@@ -345,6 +363,7 @@ mod variant_name_tests {
             (CamelError::StreamLimitExceeded(42), "StreamLimitExceeded"),
             (CamelError::Unauthenticated("x".into()), "Unauthenticated"),
             (CamelError::Unauthorized("x".into()), "Unauthorized"),
+            (CamelError::ValidationError("bad".into()), "ValidationError"),
         ];
 
         for (err, expected) in cases {

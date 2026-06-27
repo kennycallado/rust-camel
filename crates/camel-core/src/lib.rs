@@ -63,7 +63,13 @@ mod context_builder;
 pub mod datasource;
 pub mod health_registry;
 pub(crate) mod hot_reload;
+pub mod idempotent;
 pub mod lifecycle;
+mod registry;
+// Re-export idempotent registry types for use in lifecycle layers (which
+// are forbidden by the hexagonal boundary test from importing
+// `crate::registry::` directly). Use `crate::IdempotentRegistry` etc.
+pub(crate) use registry::{IdempotentRegistry, SharedIdempotentRegistry};
 pub(crate) mod shared;
 pub mod step;
 pub mod template;

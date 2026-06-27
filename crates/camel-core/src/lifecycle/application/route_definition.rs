@@ -215,6 +215,21 @@ pub enum BuilderStep {
         strategy: Option<String>,
         timeout_ms: Option<u64>,
     },
+    /// Validate step: evaluates a language expression as predicate.
+    /// Exchange passes if predicate returns true; else CamelError::ValidationError.
+    Validate {
+        predicate: LanguageExpressionDef,
+    },
+    /// Idempotent Consumer step (EIP). Wraps a child sub-pipeline that runs
+    /// only when the message-id is NOT present in the named repository.
+    /// Compiled to a `IdempotentConsumerSegment` (OutcomePipeline, segment-mode).
+    IdempotentConsumer {
+        repository: String,
+        expression: LanguageExpressionDef,
+        steps: Vec<BuilderStep>,
+        eager: bool,
+        remove_on_failure: bool,
+    },
     /// Declarative doTry/doCatch/doFinally, resolved at route-add time.
     DeclarativeDoTry {
         try_steps: Vec<BuilderStep>,
@@ -376,6 +391,27 @@ impl std::fmt::Debug for BuilderStep {
                     "BuilderStep::DeclarativeLoop {{ count: {:?}, while: {}, steps: {} }}",
                     count,
                     while_predicate.is_some(),
+                    steps.len()
+                )
+            }
+            BuilderStep::Validate { predicate } => {
+                write!(
+                    f,
+                    "BuilderStep::Validate {{ language: {:?}, source: {:?} }}",
+                    predicate.language, predicate.source
+                )
+            }
+            BuilderStep::IdempotentConsumer {
+                repository,
+                expression,
+                steps,
+                eager,
+                remove_on_failure,
+            } => {
+                write!(
+                    f,
+                    "BuilderStep::IdempotentConsumer {{ repository: {repository:?}, language: {:?}, steps: {}, eager: {eager}, remove_on_failure: {remove_on_failure} }}",
+                    expression.language,
                     steps.len()
                 )
             }

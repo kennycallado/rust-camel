@@ -496,6 +496,59 @@
       ],
       "type": "object"
     },
+    "IdempotentConsumerBody": {
+      "additionalProperties": false,
+      "properties": {
+        "eager": {
+          "default": null,
+          "description": "Reserve the key before running the child (default `false`).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "expression": {
+          "description": "Simple-language expression that extracts the message-id (e.g. `\"${header.messageId}\"`).",
+          "type": "string"
+        },
+        "remove_on_failure": {
+          "default": null,
+          "description": "When `eager`, remove the key if the child fails (default `false`).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "repository": {
+          "description": "Name of the registered IdempotentRepository (e.g. `\"memory\"`).",
+          "type": "string"
+        },
+        "steps": {
+          "description": "Child sub-pipeline executed on first-time (non-duplicate) exchanges.",
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "repository",
+        "expression"
+      ],
+      "type": "object"
+    },
+    "IdempotentConsumerStep": {
+      "additionalProperties": false,
+      "properties": {
+        "idempotent_consumer": {
+          "$ref": "#/$defs/IdempotentConsumerBody"
+        }
+      },
+      "required": [
+        "idempotent_consumer"
+      ],
+      "type": "object"
+    },
     "LoadBalanceData": {
       "additionalProperties": false,
       "properties": {
@@ -1448,6 +1501,9 @@
         },
         {
           "$ref": "#/$defs/PollEnrichStep"
+        },
+        {
+          "$ref": "#/$defs/IdempotentConsumerStep"
         }
       ]
     },

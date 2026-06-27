@@ -236,6 +236,7 @@ pub(crate) struct RouteCompilerExt<'a> {
     pub(crate) global_error_handler: &'a Option<ErrorHandlerConfig>,
     pub(crate) health_registry: &'a Option<Arc<HealthCheckRegistry>>,
     pub(crate) route_registry: &'a RouteRegistry,
+    pub(crate) idempotent_repositories: crate::SharedIdempotentRegistry,
 }
 
 impl RouteCompilerExt<'_> {
@@ -286,6 +287,7 @@ impl RouteCompilerExt<'_> {
             component_ctx,
             route_id,
             staging_mode,
+            self.idempotent_repositories.as_ref(),
         )
     }
 

@@ -25,28 +25,29 @@ use crate::model::{
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
     DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
     DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DoTryCatchClauseDef, DoTryFinallyDef,
-    DynamicRouterStepDef, EnrichStepDef, LanguageExpressionDef, LoadBalanceStepDef,
-    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
-    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef,
-    SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
+    DynamicRouterStepDef, EnrichStepDef, IdempotentConsumerStepDef, LanguageExpressionDef,
+    LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
+    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
+    ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
     SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
-    ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    ThrottleStrategyDef, ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::route_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
     DelayStep, DynamicRouterData, DynamicRouterStep, EnrichBody, EnrichConfig, EnrichStep,
-    FilterStep, FunctionStep, LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData,
-    LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PollEnrichStep,
-    PredicateBlock, RecipientListData, RecipientListStep, RouteDslRoute, RouteDslRoutes,
-    RouteDslStep, RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig,
-    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep,
-    SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
+    FilterStep, FunctionStep, IdempotentConsumerBody, IdempotentConsumerStep, LoadBalanceData,
+    LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep,
+    MulticastData, MulticastStep, PollEnrichStep, PredicateBlock, RecipientListData,
+    RecipientListStep, RouteDslRoute, RouteDslRoutes, RouteDslStep, RoutingSlipData,
+    RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep,
+    SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, SplitData,
+    SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
     StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
     UnmarshalStep, ValidateStep, WireTapStep,
 };
 use crate::route_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 29] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 31] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -62,6 +63,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 29] = [
     DeclarativeStepKind::Stop,
     DeclarativeStepKind::Script,
     DeclarativeStepKind::StreamCache,
+    DeclarativeStepKind::Validate,
     DeclarativeStepKind::ConvertBodyTo,
     DeclarativeStepKind::Marshal,
     DeclarativeStepKind::Unmarshal,
@@ -76,6 +78,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 29] = [
     DeclarativeStepKind::Enrich,
     DeclarativeStepKind::PollEnrich,
     DeclarativeStepKind::DoTry,
+    DeclarativeStepKind::IdempotentConsumer,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -1051,12 +1054,13 @@ pub(crate) fn route_step_to_declarative_step(
             }))
         }
         RouteDslStep::Validate(ValidateStep { validate }) => {
-            let uri = if validate.starts_with("validator:") {
-                validate
-            } else {
-                format!("validator:{validate}")
+            let expr = LanguageExpressionDef {
+                language: "simple".into(),
+                source: validate,
             };
-            Ok(DeclarativeStep::To(ToStepDef::new(uri)))
+            Ok(DeclarativeStep::Validate(ValidateStepDef {
+                predicate: expr,
+            }))
         }
         RouteDslStep::Enrich(EnrichStep { enrich }) => {
             let (uri, strategy) = unpack_enrich_body(enrich)?;
@@ -1073,6 +1077,37 @@ pub(crate) fn route_step_to_declarative_step(
                 strategy,
                 timeout_ms: timeout,
             }))
+        }
+        RouteDslStep::IdempotentConsumer(IdempotentConsumerStep {
+            idempotent_consumer: body,
+        }) => {
+            if body.repository.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "idempotent_consumer: 'repository' must not be empty".into(),
+                ));
+            }
+            if body.expression.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "idempotent_consumer: 'expression' must not be empty".into(),
+                ));
+            }
+            let steps = body
+                .steps
+                .into_iter()
+                .map(route_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DeclarativeStep::IdempotentConsumer(
+                IdempotentConsumerStepDef {
+                    repository: body.repository,
+                    expression: LanguageExpressionDef {
+                        language: "simple".into(),
+                        source: body.expression,
+                    },
+                    steps,
+                    eager: body.eager,
+                    remove_on_failure: body.remove_on_failure,
+                },
+            ))
         }
         RouteDslStep::DoTry(DoTryStep { do_try: data }) => {
             // Spec §7.2 Rule 4: try steps must be non-empty.
@@ -2680,7 +2715,7 @@ routes:
     }
 
     #[test]
-    fn validate_step_parses_to_validator_uri() {
+    fn validate_step_parses_to_validate_step_def() {
         let yaml = r#"
 routes:
   - id: test
@@ -2691,7 +2726,7 @@ routes:
         let routes = parse_yaml_to_declarative(yaml).unwrap();
         let step = &routes[0].steps[0];
         assert!(
-            matches!(step, DeclarativeStep::To(uri) if uri.uri == "validator:schemas/order.xsd"),
+            matches!(step, DeclarativeStep::Validate(ValidateStepDef { predicate }) if predicate.language == "simple" && predicate.source == "schemas/order.xsd"),
             "got: {step:?}"
         );
     }
@@ -2708,7 +2743,84 @@ routes:
 "#;
         let routes = parse_yaml_to_declarative(yaml).unwrap();
         assert!(matches!(routes[0].steps[0], DeclarativeStep::To(_)));
-        assert!(matches!(routes[0].steps[1], DeclarativeStep::To(_)));
+        assert!(matches!(routes[0].steps[1], DeclarativeStep::Validate(_)));
+    }
+
+    #[test]
+    fn idempotent_consumer_parses_to_step_def_with_defaults() {
+        let yaml = r#"
+routes:
+  - id: idem-test
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: memory
+          expression: "${header.messageId}"
+          steps:
+            - to: "log:info"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::IdempotentConsumer(def) => {
+                assert_eq!(def.repository, "memory");
+                assert_eq!(def.expression.language, "simple");
+                assert_eq!(def.expression.source, "${header.messageId}");
+                assert_eq!(def.steps.len(), 1);
+                assert!(matches!(def.steps[0], DeclarativeStep::To(_)));
+                assert_eq!(def.eager, None, "eager default is None");
+                assert_eq!(
+                    def.remove_on_failure, None,
+                    "remove_on_failure default is None"
+                );
+            }
+            other => panic!("expected IdempotentConsumer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idempotent_consumer_parses_eager_and_remove_on_failure_flags() {
+        let yaml = r#"
+routes:
+  - id: idem-eager
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: memory
+          expression: "${header.messageId}"
+          eager: true
+          remove_on_failure: true
+          steps:
+            - to: "log:info"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::IdempotentConsumer(def) => {
+                assert_eq!(def.eager, Some(true));
+                assert_eq!(def.remove_on_failure, Some(true));
+            }
+            other => panic!("expected IdempotentConsumer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idempotent_consumer_rejects_empty_repository() {
+        let yaml = r#"
+routes:
+  - id: idem-bad
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: ""
+          expression: "${header.messageId}"
+          steps: []
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("repository"),
+            "expected error about repository, got: {msg}"
+        );
     }
 
     #[test]

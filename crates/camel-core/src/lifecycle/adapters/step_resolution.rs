@@ -6,6 +6,7 @@ pub(crate) enum FunctionStagingMode {
     HotReload { generation: u64 },
 }
 
+use crate::IdempotentRegistry;
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use camel_api::{CamelError, Exchange, FilterPredicate, FunctionInvoker, ProducerContext, Value};
 use camel_bean::BeanRegistry;
@@ -95,6 +96,30 @@ pub(crate) fn compile_filter_predicate(
     }))
 }
 
+/// Compile a `LanguageExpressionDef` into a synchronous `MessageIdExpression`
+/// closure for the Idempotent Consumer EIP. Uses `await_eval` to bridge the
+/// sync→async gap (same pattern as `compile_filter_predicate`).
+pub(crate) fn compile_message_id_expression(
+    languages: &SharedLanguageRegistry,
+    expression: &LanguageExpressionDef,
+) -> Result<camel_processor::MessageIdExpression, CamelError> {
+    let expr = compile_language_expression(languages, expression)?;
+    Ok(Arc::new(move |exchange: &Exchange| {
+        let value = await_eval(&expr, exchange);
+        match value {
+            Value::Null => None,
+            Value::String(s) if s.is_empty() => None,
+            Value::String(s) => Some(s),
+            other => {
+                // Non-string, non-null: stringify. Matches Apache Camel's
+                // coercion of expression results to message-id strings.
+                let s = other.to_string();
+                if s.is_empty() { None } else { Some(s) }
+            }
+        }
+    }))
+}
+
 pub(crate) fn resolve_enrichment_strategy(
     name: Option<String>,
 ) -> Result<Arc<dyn EnrichmentStrategy>, CamelError> {
@@ -121,6 +146,7 @@ pub(crate) fn resolve_steps(
     component_ctx: Arc<dyn ComponentContext>,
     route_id: Option<&str>,
     staging_mode: &FunctionStagingMode,
+    idempotent_repositories: &IdempotentRegistry,
 ) -> Result<Vec<CompiledStep>, CamelError> {
     use crate::lifecycle::adapters::step_compilers::{CompilationContext, build_registry};
 
@@ -134,6 +160,7 @@ pub(crate) fn resolve_steps(
         component_ctx,
         route_id,
         staging_mode,
+        idempotent_repositories,
     };
     compiler_registry.compile_steps(steps, &ctx)
 }
@@ -334,6 +361,7 @@ mod tests {
             Arc::clone(&component_ctx),
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
+            &crate::IdempotentRegistry::new(),
         )
         .unwrap_err();
         assert!(
@@ -356,6 +384,7 @@ mod tests {
             component_ctx,
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
+            &crate::IdempotentRegistry::new(),
         )
         .unwrap_err();
         assert!(
@@ -386,6 +415,7 @@ mod tests {
             component_ctx,
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
+            &crate::IdempotentRegistry::new(),
         )
         .unwrap_err();
 
@@ -582,6 +612,7 @@ mod tests {
             component_ctx,
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
+            &crate::IdempotentRegistry::new(),
         )
         .unwrap();
 
@@ -612,6 +643,7 @@ mod tests {
             component_ctx,
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
+            &crate::IdempotentRegistry::new(),
         )
         .unwrap_err();
 

@@ -13,6 +13,7 @@ use camel_api::{
 use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_endpoint::parse_uri;
 
+use crate::IdempotentRegistry;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
 use crate::lifecycle::application::route_definition::BuilderStep;
@@ -97,6 +98,9 @@ pub(crate) struct CompilationContext<'a> {
     pub component_ctx: Arc<dyn ComponentContext>,
     pub route_id: Option<&'a str>,
     pub staging_mode: &'a FunctionStagingMode,
+    /// Idempotent repository registry. Used by the `IdempotentConsumer`
+    /// compiler arm to resolve repository names into `Arc<dyn IdempotentRepository>`.
+    pub idempotent_repositories: &'a IdempotentRegistry,
 }
 
 impl<'a> CompilationContext<'a> {
@@ -426,6 +430,7 @@ mod segment_tests {
         let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
         let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -436,6 +441,7 @@ mod segment_tests {
             component_ctx,
             route_id: None,
             staging_mode: &staging,
+            idempotent_repositories: &idempotent_repositories,
         };
 
         // Compile a Filter with a child Processor step.
@@ -511,6 +517,7 @@ mod segment_tests {
         let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
         let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -521,6 +528,7 @@ mod segment_tests {
             component_ctx,
             route_id: None,
             staging_mode: &staging,
+            idempotent_repositories: &idempotent_repositories,
         };
 
         // Filter with TWO child Processors → both get the same lifecycle handle.
@@ -582,6 +590,7 @@ mod segment_tests {
         let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
         let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -592,6 +601,7 @@ mod segment_tests {
             component_ctx,
             route_id: None,
             staging_mode: &staging,
+            idempotent_repositories: &idempotent_repositories,
         };
 
         // Choice with 2 when branches, each containing 1 stateful child.
@@ -663,6 +673,7 @@ mod segment_tests {
         let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
         let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -673,6 +684,7 @@ mod segment_tests {
             component_ctx,
             route_id: None,
             staging_mode: &staging,
+            idempotent_repositories: &idempotent_repositories,
         };
 
         // Outer Filter containing an inner Filter that has a stateful Processor.

@@ -10,6 +10,7 @@ use camel_language_api::Language;
 
 use super::context::{CamelContext, FromParts};
 use crate::health_registry::HealthCheckRegistry;
+use crate::idempotent::memory_repository::MemoryIdempotentRepository;
 use crate::lifecycle::adapters::RuntimeExecutionAdapter;
 use crate::lifecycle::adapters::controller_actor::{
     RouteControllerHandle, spawn_controller_actor, spawn_supervision_task,
@@ -19,6 +20,7 @@ use crate::lifecycle::adapters::route_controller::{
 };
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::lifecycle::ports::RuntimeExecutionPort;
+use crate::registry::IdempotentRegistry;
 use crate::shared::components::domain::Registry;
 use crate::template::TemplateRegistry;
 
@@ -229,6 +231,20 @@ impl CamelContextBuilder {
             Arc::new(HealthCheckRegistry::new(std::time::Duration::from_secs(5)))
         });
 
+        // Default idempotent repository registry with a built-in memory repo.
+        // Built BEFORE the controller so the same Arc can be shared between
+        // CamelContext (user-facing register API) and DefaultRouteController
+        // (compile-time repository-name resolution for the idempotent_consumer step).
+        let idempotent_repositories: crate::registry::SharedIdempotentRegistry = {
+            let reg = Arc::new(IdempotentRegistry::new());
+            let memory = Arc::new(MemoryIdempotentRepository::new("memory"));
+            // If registration fails (e.g. someone already registered "memory"),
+            // it's a programming error — unwrap is safe.
+            reg.register("memory", memory)
+                .expect("built-in memory idempotent repository registration must succeed"); // allow-unwrap
+            reg
+        };
+
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {
                 let (crash_tx, crash_rx) = tokio::sync::mpsc::channel(64);
@@ -249,6 +265,7 @@ impl CamelContextBuilder {
                 if let Some(invoker) = self.function_invoker.clone() {
                     controller_impl = controller_impl.with_function_invoker(invoker);
                 }
+                controller_impl.set_idempotent_repositories(Arc::clone(&idempotent_repositories));
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
@@ -277,6 +294,7 @@ impl CamelContextBuilder {
                 if let Some(invoker) = self.function_invoker.clone() {
                     controller_impl = controller_impl.with_function_invoker(invoker);
                 }
+                controller_impl.set_idempotent_repositories(Arc::clone(&idempotent_repositories));
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
@@ -314,6 +332,7 @@ impl CamelContextBuilder {
             component_configs: HashMap::new(),
             function_invoker: self.function_invoker,
             template_registry,
+            idempotent_repositories,
         }))
     }
 }
@@ -332,5 +351,18 @@ mod tests {
     fn builder_default_has_sane_timeout() {
         let builder = CamelContextBuilder::new();
         assert_eq!(builder.shutdown_timeout, std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn builder_registers_default_memory_idempotent_repository() {
+        let ctx = CamelContext::builder()
+            .build()
+            .await
+            .expect("build context");
+        let repo = ctx.idempotent_repository("memory");
+        assert!(
+            repo.is_some(),
+            "default 'memory' idempotent repository should be registered"
+        );
     }
 }

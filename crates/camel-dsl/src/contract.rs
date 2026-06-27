@@ -29,14 +29,16 @@ pub enum DeclarativeStepKind {
     SetBodyFn,
     SetHeaderFn,
     StreamCache,
+    Validate,
     Delay,
     Loop,
     Enrich,
     PollEnrich,
     DoTry,
+    IdempotentConsumer,
 }
 
-pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 29] = [
+pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 31] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -52,6 +54,7 @@ pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 29] = [
     DeclarativeStepKind::Stop,
     DeclarativeStepKind::Script,
     DeclarativeStepKind::StreamCache,
+    DeclarativeStepKind::Validate,
     DeclarativeStepKind::ConvertBodyTo,
     DeclarativeStepKind::Marshal,
     DeclarativeStepKind::Unmarshal,
@@ -66,6 +69,7 @@ pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 29] = [
     DeclarativeStepKind::Enrich,
     DeclarativeStepKind::PollEnrich,
     DeclarativeStepKind::DoTry,
+    DeclarativeStepKind::IdempotentConsumer,
 ];
 
 pub fn is_rust_only_kind(kind: DeclarativeStepKind) -> bool {
@@ -128,9 +132,9 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_kinds_has_29_entries() {
-        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 29);
-        assert_eq!(mandatory_declarative_step_kinds().len(), 29);
+    fn mandatory_kinds_has_31_entries() {
+        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 31);
+        assert_eq!(mandatory_declarative_step_kinds().len(), 31);
     }
 
     #[test]

@@ -34,10 +34,10 @@ use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
     DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep, DelayStepDef,
-    DynamicRouterStepDef, FunctionStepDef, LanguageExpressionDef, LoadBalanceStepDef,
-    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
-    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef,
-    SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
+    DynamicRouterStepDef, FunctionStepDef, IdempotentConsumerStepDef, LanguageExpressionDef,
+    LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
+    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
+    ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
     SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
     ToStepDef, ValueSourceDef, WireTapStepDef,
 };
@@ -1021,6 +1021,12 @@ fn compile_declarative_step_with_threshold(
             };
             Ok(BuilderStep::Delay { config })
         }
+        DeclarativeStep::Validate(def) => Ok(BuilderStep::Validate {
+            predicate: def.predicate,
+        }),
+        DeclarativeStep::IdempotentConsumer(def) => {
+            compile_idempotent_consumer_step(def, stream_cache_threshold)
+        }
         DeclarativeStep::Loop(def) => compile_loop_step(def, stream_cache_threshold),
         DeclarativeStep::Enrich(def) => Ok(BuilderStep::Enrich {
             uri: def.uri,
@@ -1088,6 +1094,20 @@ fn compile_loop_step(
         count: def.count,
         while_predicate: def.while_predicate,
         steps: sub_steps,
+    })
+}
+
+fn compile_idempotent_consumer_step(
+    def: IdempotentConsumerStepDef,
+    stream_cache_threshold: usize,
+) -> Result<BuilderStep, CamelError> {
+    let sub_steps = compile_declarative_steps(def.steps, stream_cache_threshold)?;
+    Ok(BuilderStep::IdempotentConsumer {
+        repository: def.repository,
+        expression: def.expression,
+        steps: sub_steps,
+        eager: def.eager.unwrap_or(false),
+        remove_on_failure: def.remove_on_failure.unwrap_or(false),
     })
 }
 
@@ -1170,6 +1190,12 @@ fn compile_declarative_step_to_canonical(
                 "canonical v1 does not support step `loop`: {detail}"
             )))
         }
+        DeclarativeStep::Validate(_) => Err(CamelError::RouteError(
+            "canonical v1 does not support step `validate`".into(),
+        )),
+        DeclarativeStep::IdempotentConsumer(_) => Err(CamelError::RouteError(
+            "canonical v1 does not support step `idempotent_consumer`".into(),
+        )),
         other => {
             let step_name = declarative_step_name(&other);
             let detail = canonical_contract_rejection_reason(step_name)
@@ -1281,10 +1307,12 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Marshal(_) => "marshal",
         DeclarativeStep::Unmarshal(_) => "unmarshal",
         DeclarativeStep::Delay(_) => "delay",
+        DeclarativeStep::Validate(_) => "validate",
         DeclarativeStep::Loop(_) => "loop",
         DeclarativeStep::Function(_) => "function",
         DeclarativeStep::Enrich(_) => "enrich",
         DeclarativeStep::PollEnrich(_) => "poll_enrich",
+        DeclarativeStep::IdempotentConsumer(_) => "idempotent_consumer",
         DeclarativeStep::DoTry { .. } => "do_try",
     }
 }
@@ -1599,6 +1627,21 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
                 ));
             }
         }
+        DeclarativeStep::IdempotentConsumer(def) => {
+            if def.repository.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "idempotent_consumer repository must not be empty".to_string(),
+                ));
+            }
+            if def.expression.source.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "idempotent_consumer expression must not be empty".to_string(),
+                ));
+            }
+            for s in &def.steps {
+                validate_step(s)?;
+            }
+        }
         // Steps without validation-relevant fields
         DeclarativeStep::Log(_)
         | DeclarativeStep::SetBody(_)
@@ -1609,6 +1652,7 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         | DeclarativeStep::Bean(_)
         | DeclarativeStep::Marshal(_)
         | DeclarativeStep::Unmarshal(_)
+        | DeclarativeStep::Validate(_)
         | DeclarativeStep::Function(_)
         | DeclarativeStep::DynamicRouter(_)
         | DeclarativeStep::RoutingSlip(_)

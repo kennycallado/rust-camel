@@ -14,6 +14,7 @@ pub mod endpoint_pipeline;
 pub mod enrichment_strategy;
 pub mod error_handler;
 pub mod filter;
+pub mod idempotent_consumer;
 pub mod load_balancer;
 pub mod log;
 pub mod loop_eip;
@@ -35,6 +36,7 @@ pub mod stream_codec;
 pub mod streaming_split_segment;
 pub mod streaming_splitter;
 pub mod throttler;
+pub mod validate;
 pub mod wire_tap;
 pub mod zip_splitter;
 
@@ -61,6 +63,7 @@ pub use error_handler::{
     invoke_processor,
 };
 pub use filter::{FilterSegment, FilterService};
+pub use idempotent_consumer::{IdempotentConsumerSegment, MessageIdExpression};
 pub use load_balancer::{LoadBalanceSegment, LoadBalancerService};
 pub use log::{LogLevel, LogProcessor};
 pub use loop_eip::{CAMEL_LOOP_INDEX, CAMEL_LOOP_SIZE, LoopSegment, LoopService};
@@ -81,4 +84,5 @@ pub use stream_cache::StreamCacheService;
 pub use streaming_split_segment::StreamingSplitSegment;
 pub use streaming_splitter::StreamingSplitterService;
 pub use throttler::{ThrottleSegment, ThrottlerService};
+pub use validate::ValidateService;
 pub use wire_tap::{WireTapConfig, WireTapLayer, WireTapService};

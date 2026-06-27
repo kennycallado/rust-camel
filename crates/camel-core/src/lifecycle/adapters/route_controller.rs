@@ -76,6 +76,10 @@ pub struct DefaultRouteController {
     pub(super) platform_service: Arc<dyn PlatformService>,
     pub(super) function_invoker: Option<Arc<dyn FunctionInvoker>>,
     pub(super) health_registry: Option<Arc<HealthCheckRegistry>>,
+    /// Shared idempotent repository registry. Defaults to an empty registry;
+    /// the CamelContext builder installs a populated handle that includes the
+    /// built-in `"memory"` repository.
+    pub(super) idempotent_repositories: crate::SharedIdempotentRegistry,
 }
 
 impl DefaultRouteController {
@@ -129,6 +133,7 @@ impl DefaultRouteController {
             platform_service,
             function_invoker: None,
             health_registry: None,
+            idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
         }
     }
 
@@ -152,6 +157,7 @@ impl DefaultRouteController {
             platform_service,
             function_invoker: None,
             health_registry: None,
+            idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
         }
     }
 
@@ -175,12 +181,20 @@ impl DefaultRouteController {
             platform_service,
             function_invoker: None,
             health_registry: None,
+            idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
         }
     }
 
     pub fn with_function_invoker(mut self, function_invoker: Arc<dyn FunctionInvoker>) -> Self {
         self.function_invoker = Some(function_invoker);
         self
+    }
+
+    pub(crate) fn set_idempotent_repositories(
+        &mut self,
+        repositories: crate::SharedIdempotentRegistry,
+    ) {
+        self.idempotent_repositories = repositories;
     }
 
     pub fn set_health_registry(&mut self, registry: Arc<HealthCheckRegistry>) {
@@ -239,6 +253,7 @@ impl DefaultRouteController {
             global_error_handler: &self.global_error_handler,
             health_registry: &self.health_registry,
             route_registry: &self.routes,
+            idempotent_repositories: Arc::clone(&self.idempotent_repositories),
         }
     }
 
@@ -275,6 +290,7 @@ impl DefaultRouteController {
             component_ctx,
             route_id,
             staging_mode,
+            &self.idempotent_repositories,
         )
     }
 

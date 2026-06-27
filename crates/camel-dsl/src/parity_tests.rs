@@ -76,6 +76,7 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
         RouteDslStep::Validate(_) => (),
         RouteDslStep::Enrich(_) => (),
         RouteDslStep::PollEnrich(_) => (),
+        RouteDslStep::IdempotentConsumer(_) => (),
         // Intentionally NO `_ => ()` wildcard.
         // A new variant added to RouteDslStep will cause a compile error here,
         // forcing the author to also add a parity case below.
