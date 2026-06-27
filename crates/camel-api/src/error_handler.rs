@@ -220,6 +220,9 @@ pub struct ErrorHandlerConfig {
     pub dlc_uri: Option<String>,
     /// Per-exception policies evaluated in order; first match wins.
     pub policies: Vec<ExceptionPolicy>,
+    /// When true, restore the original (pre-route, pre-mutation) Message
+    /// (body and headers) before forwarding to the DLC/handler.
+    pub use_original_message: bool,
 }
 
 impl ErrorHandlerConfig {
@@ -228,6 +231,7 @@ impl ErrorHandlerConfig {
         Self {
             dlc_uri: None,
             policies: Vec::new(),
+            use_original_message: false,
         }
     }
 
@@ -236,6 +240,7 @@ impl ErrorHandlerConfig {
         Self {
             dlc_uri: Some(uri.into()),
             policies: Vec::new(),
+            use_original_message: false,
         }
     }
 

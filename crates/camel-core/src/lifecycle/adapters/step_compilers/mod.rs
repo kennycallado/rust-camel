@@ -13,10 +13,10 @@ use camel_api::{
 use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_endpoint::parse_uri;
 
-use crate::IdempotentRegistry;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
 use crate::lifecycle::application::route_definition::BuilderStep;
+use crate::{ClaimCheckRegistry, IdempotentRegistry};
 use camel_bean::BeanRegistry;
 
 mod control_flow;
@@ -101,6 +101,9 @@ pub(crate) struct CompilationContext<'a> {
     /// Idempotent repository registry. Used by the `IdempotentConsumer`
     /// compiler arm to resolve repository names into `Arc<dyn IdempotentRepository>`.
     pub idempotent_repositories: &'a IdempotentRegistry,
+    /// Claim check repository registry. Used by the `ClaimCheck` compiler arm
+    /// to resolve repository names into `Arc<dyn ClaimCheckRepository>`.
+    pub claim_check_repositories: &'a ClaimCheckRegistry,
 }
 
 impl<'a> CompilationContext<'a> {
@@ -431,6 +434,7 @@ mod segment_tests {
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -442,6 +446,7 @@ mod segment_tests {
             route_id: None,
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
+            claim_check_repositories: &claim_check_repositories,
         };
 
         // Compile a Filter with a child Processor step.
@@ -518,6 +523,7 @@ mod segment_tests {
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -529,6 +535,7 @@ mod segment_tests {
             route_id: None,
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
+            claim_check_repositories: &claim_check_repositories,
         };
 
         // Filter with TWO child Processors → both get the same lifecycle handle.
@@ -591,6 +598,7 @@ mod segment_tests {
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -602,6 +610,7 @@ mod segment_tests {
             route_id: None,
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
+            claim_check_repositories: &claim_check_repositories,
         };
 
         // Choice with 2 when branches, each containing 1 stateful child.
@@ -674,6 +683,7 @@ mod segment_tests {
         let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -685,6 +695,7 @@ mod segment_tests {
             route_id: None,
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
+            claim_check_repositories: &claim_check_repositories,
         };
 
         // Outer Filter containing an inner Filter that has a stateful Processor.

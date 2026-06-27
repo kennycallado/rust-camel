@@ -40,6 +40,7 @@ async fn execute_on_steps(
             }
         }
         Err(_) => {
+            // log-policy: handler-owned
             tracing::warn!(error = %original_err, "on_steps pipeline failed, falling back to handler/DLC");
             let mut ex = snapshot;
             ex.set_error(original_err);
@@ -105,6 +106,10 @@ pub trait RouteErrorHandler: Send + Sync {
 pub struct DefaultRouteErrorHandler {
     pub(crate) dlc_producer: Option<SyncBoxProcessor>,
     pub(crate) policies: Vec<(ExceptionPolicy, Option<SyncBoxProcessor>)>,
+    /// When true, restore the original Message (body and headers, pre-route, pre-mutation)
+    /// before forwarding to the DLC/handler. The original message is stashed by
+    /// `RouteChannelService::call` as the `ORIGINAL_MESSAGE_EXTENSION` extension.
+    pub use_original_message: bool,
 }
 
 impl DefaultRouteErrorHandler {
@@ -118,6 +123,25 @@ impl DefaultRouteErrorHandler {
                 .into_iter()
                 .map(|(p, prod)| (p, prod.map(SyncBoxProcessor::new)))
                 .collect(),
+            use_original_message: false,
+        }
+    }
+
+    /// Enable restoration of the original message before forwarding to DLC.
+    pub fn with_use_original_message(mut self, enabled: bool) -> Self {
+        self.use_original_message = enabled;
+        self
+    }
+
+    /// Restore the original message from the `CamelOriginalMessage` extension if
+    /// `use_original_message` is enabled. Called immediately before `send_to_handler`
+    /// dispatch in both `handle_step` and `handle_boundary`.
+    fn restore_original_message_if_enabled(&self, exchange: &mut Exchange) {
+        if self.use_original_message
+            && let Some(orig) =
+                exchange.get_extension::<camel_api::Message>(camel_api::ORIGINAL_MESSAGE_EXTENSION)
+        {
+            exchange.input = orig.clone();
         }
     }
 
@@ -282,6 +306,7 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
 
         // No on_steps, on_steps failed, or Propagate — forward to DLC/handler.
         // BIND the returned exchange (must use handler output).
+        self.restore_original_message_if_enabled(&mut exchange);
         exchange.set_error(error.clone());
         match send_to_handler(exchange, producer).await {
             Ok(handler_ex) => match disposition {
@@ -346,6 +371,7 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
         }
 
         // Forward to DLC/handler — BIND returned exchange
+        self.restore_original_message_if_enabled(&mut exchange);
         exchange.set_error(error.clone());
         match send_to_handler(exchange, producer).await {
             Ok(handler_ex) => match disposition {
@@ -1647,5 +1673,157 @@ mod tests {
         drop(retryable1);
         drop(retryable2);
         drop(sync_bp);
+    }
+
+    // ── use_original_message tests ──
+
+    #[tokio::test]
+    async fn test_use_original_message_restores_body_before_dlc() {
+        // Verifies that when the extension is set, handle_step restores the
+        // original message body before the DLC sees it.
+        let dlc_received = Arc::new(std::sync::Mutex::new(None::<Exchange>));
+        let dlc_received_clone = Arc::clone(&dlc_received);
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let r = Arc::clone(&dlc_received_clone);
+            Box::pin(async move {
+                *r.lock().unwrap() = Some(ex.clone());
+                Ok(ex)
+            })
+        });
+
+        let mut handler = DefaultRouteErrorHandler::new(Some(dlc), vec![]);
+        handler.use_original_message = true;
+
+        // Build exchange with original body, stash it, then mutate.
+        let mut ex = make_exchange();
+        ex.input = Message::new("original-body");
+
+        // Simulate RouteChannelService stashing the original message.
+        let original: Arc<Message> = Arc::new(ex.input.clone());
+        ex.set_extension(camel_api::ORIGINAL_MESSAGE_EXTENSION, original);
+
+        // Mutate the body (simulating a pipeline step that transforms then fails).
+        ex.input.body = camel_api::Body::Bytes("mutated-body".into());
+
+        // Call handle_step — the restore should fire before send_to_handler.
+        let result = handler
+            .handle_step(None, ex, CamelError::ProcessorError("boom".into()))
+            .await;
+        assert!(matches!(result, Ok(StepDisposition::Propagate(_))));
+
+        // The DLC must have received the exchange with the ORIGINAL body.
+        let received = dlc_received
+            .lock()
+            .unwrap()
+            .take()
+            .expect("DLC should have been called");
+        let received_text = match &received.input.body {
+            camel_api::Body::Text(s) => s.clone(),
+            camel_api::Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            camel_api::Body::Json(v) => v.to_string(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            received_text, "original-body",
+            "DLC should receive original message body, not mutated version"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_use_original_message_handle_boundary_restores_before_dlc() {
+        let dlc_received = Arc::new(std::sync::Mutex::new(None::<Exchange>));
+        let dlc_received_clone = Arc::clone(&dlc_received);
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let r = Arc::clone(&dlc_received_clone);
+            Box::pin(async move {
+                *r.lock().unwrap() = Some(ex.clone());
+                Ok(ex)
+            })
+        });
+
+        let mut handler = DefaultRouteErrorHandler::new(Some(dlc), vec![]);
+        handler.use_original_message = true;
+
+        let mut ex = make_exchange();
+        ex.input = Message::new("orig-boundary");
+
+        let original: Arc<Message> = Arc::new(ex.input.clone());
+        ex.set_extension(camel_api::ORIGINAL_MESSAGE_EXTENSION, original);
+
+        // Mutate body before boundary error.
+        ex.input.body = camel_api::Body::Bytes("mutated-boundary".into());
+
+        let result = handler
+            .handle_boundary(
+                BoundaryKind::Security,
+                ex,
+                CamelError::Unauthorized("denied".into()),
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let received = dlc_received
+            .lock()
+            .unwrap()
+            .take()
+            .expect("DLC should have been called");
+        let received_text = match &received.input.body {
+            camel_api::Body::Text(s) => s.clone(),
+            camel_api::Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            camel_api::Body::Json(v) => v.to_string(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            received_text, "orig-boundary",
+            "handle_boundary should restore original message before sending to DLC"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_use_original_message_false_does_not_restore() {
+        // When use_original_message is false (default), the mutation should PASS THROUGH.
+        let dlc_received = Arc::new(std::sync::Mutex::new(None::<Exchange>));
+        let dlc_received_clone = Arc::clone(&dlc_received);
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let r = Arc::clone(&dlc_received_clone);
+            Box::pin(async move {
+                *r.lock().unwrap() = Some(ex.clone());
+                Ok(ex)
+            })
+        });
+
+        let handler = DefaultRouteErrorHandler::new(Some(dlc), vec![]);
+        // use_original_message defaults to false
+
+        let mut ex = make_exchange();
+        ex.input = Message::new("original-body");
+
+        // Stash still set but flag is false — must be ignored.
+        let original: Arc<Message> = Arc::new(ex.input.clone());
+        ex.set_extension(camel_api::ORIGINAL_MESSAGE_EXTENSION, original);
+
+        // Mutate the body.
+        ex.input.body = camel_api::Body::Bytes("mutated-body".into());
+
+        let result = handler
+            .handle_step(None, ex, CamelError::ProcessorError("boom".into()))
+            .await;
+        assert!(matches!(result, Ok(StepDisposition::Propagate(_))));
+
+        let received = dlc_received
+            .lock()
+            .unwrap()
+            .take()
+            .expect("DLC should have been called");
+        let received_text = match &received.input.body {
+            camel_api::Body::Text(s) => s.clone(),
+            camel_api::Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            camel_api::Body::Json(v) => v.to_string(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            received_text, "mutated-body",
+            "When use_original_message=false, DLC should see the mutated body"
+        );
     }
 }

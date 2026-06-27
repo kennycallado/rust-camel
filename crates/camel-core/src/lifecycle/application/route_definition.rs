@@ -220,6 +220,25 @@ pub enum BuilderStep {
     Validate {
         predicate: LanguageExpressionDef,
     },
+    /// Claim Check step (EIP). Transforms the exchange body to/from a
+    /// `ClaimCheckRepository` by key. Process-mode, no child pipeline.
+    ClaimCheck {
+        repository: String,
+        operation: String,
+        key: LanguageExpressionDef,
+    },
+    /// Sampling step (EIP). Passes 1 of every N exchanges (counter-based,
+    /// deterministic). Non-sampled exchanges get CamelStop=true (drop semantics).
+    /// Process-mode, stateless. No StepLifecycle — counter is route-scoped.
+    Sampling {
+        period: usize,
+    },
+    /// Sort step (EIP). Orders a body array by extracting a sort key
+    /// from each element via a language expression. Process-mode, stateless.
+    Sort {
+        expression: LanguageExpressionDef,
+        reverse: bool,
+    },
     /// Idempotent Consumer step (EIP). Wraps a child sub-pipeline that runs
     /// only when the message-id is NOT present in the named repository.
     /// Compiled to a `IdempotentConsumerSegment` (OutcomePipeline, segment-mode).
@@ -433,6 +452,31 @@ impl std::fmt::Debug for BuilderStep {
                 write!(
                     f,
                     "BuilderStep::PollEnrich {{ uri: {uri:?}, strategy: {strategy:?}, timeout_ms: {timeout_ms:?} }}"
+                )
+            }
+            BuilderStep::ClaimCheck {
+                repository,
+                operation,
+                key,
+            } => {
+                write!(
+                    f,
+                    "BuilderStep::ClaimCheck {{ repository: {repository:?}, operation: {operation:?}, \
+                     key: {{ language: {:?}, source: {:?} }} }}",
+                    key.language, key.source
+                )
+            }
+            BuilderStep::Sampling { period } => {
+                write!(f, "BuilderStep::Sampling {{ period: {period} }}")
+            }
+            BuilderStep::Sort {
+                expression,
+                reverse,
+            } => {
+                write!(
+                    f,
+                    "BuilderStep::Sort {{ language: {:?}, source: {:?}, reverse: {reverse} }}",
+                    expression.language, expression.source
                 )
             }
             BuilderStep::DeclarativeDoTry {

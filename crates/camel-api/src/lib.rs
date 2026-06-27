@@ -12,6 +12,7 @@ pub mod backoff;
 pub mod body;
 pub mod body_converter;
 pub mod circuit_breaker;
+pub mod claim_check;
 pub mod data_format;
 pub mod datasource;
 pub mod declarative;
@@ -81,9 +82,12 @@ pub use security_policy::{
     SecurityPolicy, SecurityPolicyConfig, store_principal_properties,
 };
 // Backwards compatibility re-export (deprecated)
+pub use claim_check::ClaimCheckRepository;
 #[allow(deprecated)]
 pub use error_handler::ExponentialBackoff;
-pub use exchange::{Exchange, ExchangePattern};
+pub use exchange::{
+    CAMEL_STOP, Exchange, ExchangePattern, ORIGINAL_MESSAGE_EXTENSION, is_camel_stop,
+};
 pub use exchange_lookup::{ExchangeLookupPath, LookupPathError, PathSegment};
 pub use filter::FilterPredicate;
 pub use from_body::FromBody;

@@ -6,9 +6,8 @@ use std::time::{Duration, Instant};
 
 use tower::Service;
 
+use camel_api::CAMEL_STOP;
 use camel_api::{BoxProcessor, CamelError, Exchange, ThrottleStrategy, ThrottlerConfig, Value};
-
-const CAMEL_STOP: &str = "CamelStop";
 
 pub struct RateLimiter {
     tokens: f64,
@@ -219,7 +218,7 @@ impl camel_api::OutcomePipeline for ThrottleSegment {
                 ThrottleStrategy::Drop => {
                     let mut ex = exchange;
                     ex.set_property(CAMEL_STOP, camel_api::Value::Bool(true));
-                    camel_api::PipelineOutcome::Completed(ex)
+                    camel_api::PipelineOutcome::Stopped(ex)
                 }
             }
         })
@@ -355,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn throttle_segment_drop_strategy_sets_camel_stop_and_completes() {
+    async fn throttle_segment_drop_strategy_returns_stopped() {
         use camel_api::{Exchange, Message, OutcomePipeline, PipelineOutcome};
 
         #[derive(Clone)]
@@ -382,7 +381,7 @@ mod tests {
         let ex = Exchange::new(Message::new("test"));
         let outcome = seg.run(ex).await;
         match outcome {
-            PipelineOutcome::Completed(returned_ex) => {
+            PipelineOutcome::Stopped(returned_ex) => {
                 let stopped_flag = returned_ex.property(CAMEL_STOP).and_then(|v| v.as_bool());
                 assert_eq!(
                     stopped_flag,
@@ -390,7 +389,7 @@ mod tests {
                     "Drop strategy must set CamelStop=true property"
                 );
             }
-            other => panic!("Drop must return Completed, got {:?}", other),
+            other => panic!("Drop must return Stopped, got {:?}", other),
         }
     }
 

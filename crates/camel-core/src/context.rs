@@ -55,6 +55,7 @@ pub struct CamelContext {
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     template_registry: Arc<TemplateRegistry>,
     idempotent_repositories: crate::registry::SharedIdempotentRegistry,
+    claim_check_repositories: crate::registry::SharedClaimCheckRegistry,
 }
 
 /// Parts bag used by [`CamelContextBuilder::build`] to construct a [`CamelContext`]
@@ -76,6 +77,7 @@ pub(crate) struct FromParts {
     pub(crate) function_invoker: Option<Arc<dyn FunctionInvoker>>,
     pub(crate) template_registry: Arc<TemplateRegistry>,
     pub(crate) idempotent_repositories: crate::registry::SharedIdempotentRegistry,
+    pub(crate) claim_check_repositories: crate::registry::SharedClaimCheckRegistry,
 }
 
 impl CamelContext {
@@ -97,6 +99,7 @@ impl CamelContext {
             function_invoker: parts.function_invoker,
             template_registry: parts.template_registry,
             idempotent_repositories: parts.idempotent_repositories,
+            claim_check_repositories: parts.claim_check_repositories,
         }
     }
 }
@@ -707,6 +710,28 @@ impl CamelContext {
         name: &str,
     ) -> Option<Arc<dyn camel_api::IdempotentRepository>> {
         self.idempotent_repositories.get(name)
+    }
+
+    // --- Claim Check Repository Registry ---
+
+    /// Register a claim check repository.
+    ///
+    /// Returns `Err(RegistryError::AlreadyRegistered)` if a repository with
+    /// the same name is already registered.
+    pub fn register_claim_check_repository(
+        &mut self,
+        name: impl Into<String>,
+        repo: Arc<dyn camel_api::ClaimCheckRepository>,
+    ) -> Result<(), RegistryError> {
+        self.claim_check_repositories.register(name, repo)
+    }
+
+    /// Retrieve a claim check repository by name.
+    pub fn claim_check_repository(
+        &self,
+        name: &str,
+    ) -> Option<Arc<dyn camel_api::ClaimCheckRepository>> {
+        self.claim_check_repositories.get(name)
     }
 }
 

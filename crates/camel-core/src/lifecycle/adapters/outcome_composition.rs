@@ -67,6 +67,9 @@ impl OutcomePipeline for SequentialOutcomeSegment {
             for child in self.children.iter_mut() {
                 match child.run(exchange).await {
                     PipelineOutcome::Completed(next) => {
+                        if camel_api::is_camel_stop(&next) {
+                            return PipelineOutcome::Stopped(next);
+                        }
                         exchange = next;
                     }
                     other => return other,
@@ -147,7 +150,13 @@ impl OutcomePipeline for BoxProcessorSegment {
         Box::pin(async move {
             match self.processor.ready().await {
                 Ok(mut ready) => match tower::Service::call(&mut ready, exchange).await {
-                    Ok(ex) => PipelineOutcome::Completed(ex),
+                    Ok(ex) => {
+                        if camel_api::is_camel_stop(&ex) {
+                            PipelineOutcome::Stopped(ex)
+                        } else {
+                            PipelineOutcome::Completed(ex)
+                        }
+                    }
                     Err(err) => PipelineOutcome::Failed(err),
                 },
                 Err(err) => PipelineOutcome::Failed(err),

@@ -193,6 +193,49 @@
       ],
       "type": "object"
     },
+    "ClaimCheckBody": {
+      "additionalProperties": false,
+      "properties": {
+        "filter": {
+          "default": null,
+          "description": "Filter is not yet supported — rejected at parse time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Simple-language expression for the claim-check key (e.g. \"${header.claimKey}\").",
+          "type": "string"
+        },
+        "operation": {
+          "description": "Operation: \"set\", \"get\", \"get_and_remove\", \"push\", \"pop\".",
+          "type": "string"
+        },
+        "repository": {
+          "description": "Name of the registered ClaimCheckRepository (e.g. \"memory\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "operation",
+        "key"
+      ],
+      "type": "object"
+    },
+    "ClaimCheckStep": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_check": {
+          "$ref": "#/$defs/ClaimCheckBody"
+        }
+      },
+      "required": [
+        "claim_check"
+      ],
+      "type": "object"
+    },
     "ConvertBodyToStep": {
       "properties": {
         "convert_body_to": {
@@ -538,7 +581,6 @@
       "type": "object"
     },
     "IdempotentConsumerStep": {
-      "additionalProperties": false,
       "properties": {
         "idempotent_consumer": {
           "$ref": "#/$defs/IdempotentConsumerBody"
@@ -1045,6 +1087,10 @@
               "type": "null"
             }
           ]
+        },
+        "use_original_message": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1504,6 +1550,15 @@
         },
         {
           "$ref": "#/$defs/IdempotentConsumerStep"
+        },
+        {
+          "$ref": "#/$defs/ClaimCheckStep"
+        },
+        {
+          "$ref": "#/$defs/SamplingStep"
+        },
+        {
+          "$ref": "#/$defs/SortStep"
         }
       ]
     },
@@ -1563,6 +1618,45 @@
       },
       "required": [
         "routing_slip"
+      ],
+      "type": "object"
+    },
+    "SamplingBody": {
+      "anyOf": [
+        {
+          "description": "Shorthand: `sampling: 5` (period)",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "$ref": "#/$defs/SamplingConfig",
+          "description": "Full form: `sampling: { period: 5 }`"
+        }
+      ]
+    },
+    "SamplingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "period": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "period"
+      ],
+      "type": "object"
+    },
+    "SamplingStep": {
+      "properties": {
+        "sampling": {
+          "$ref": "#/$defs/SamplingBody"
+        }
+      },
+      "required": [
+        "sampling"
       ],
       "type": "object"
     },
@@ -1796,6 +1890,44 @@
       },
       "required": [
         "set_property"
+      ],
+      "type": "object"
+    },
+    "SortBody": {
+      "additionalProperties": false,
+      "properties": {
+        "expression": {
+          "description": "Expression that extracts a sort key from each body element (e.g. simple: \"${body.field}\").",
+          "type": "string"
+        },
+        "language": {
+          "default": null,
+          "description": "Optional language specification (default: \"simple\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reverse": {
+          "default": false,
+          "description": "Reverse (descending) sort. Default false.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "expression"
+      ],
+      "type": "object"
+    },
+    "SortStep": {
+      "additionalProperties": false,
+      "properties": {
+        "sort": {
+          "$ref": "#/$defs/SortBody"
+        }
+      },
+      "required": [
+        "sort"
       ],
       "type": "object"
     },

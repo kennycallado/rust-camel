@@ -1,6 +1,7 @@
 pub mod aggregator;
 pub mod choice;
 pub mod circuit_breaker;
+pub mod claim_check;
 pub mod content_enricher;
 pub mod convert_body;
 pub mod data_format;
@@ -24,11 +25,13 @@ pub mod multicast;
 pub mod multicast_segment;
 pub mod recipient_list;
 pub mod routing_slip;
+pub mod sampling;
 pub mod script_mutator;
 pub mod security_policy_layer;
 pub mod set_body;
 pub mod set_header;
 pub mod set_property;
+pub mod sort;
 pub mod split_segment;
 pub mod splitter;
 pub mod stream_cache;
@@ -45,6 +48,7 @@ pub use choice::{ChoiceSegment, ChoiceService, WhenClause, WhenClauseSegment};
 pub use circuit_breaker::{
     CircuitBreakerDecision, CircuitBreakerGate, CircuitBreakerLayer, CircuitBreakerService,
 };
+pub use claim_check::{ClaimCheckOp, ClaimCheckService, KeyExpression};
 pub use content_enricher::{EnrichService, PollEnrichService};
 pub use convert_body::ConvertBodyTo;
 pub use data_format::{JsonDataFormat, XmlDataFormat, ZipDataFormat, builtin_data_format};
@@ -55,7 +59,7 @@ pub use dynamic_router::DynamicRouterService;
 pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
 pub use dynamic_set_property::{DynamicSetProperty, DynamicSetPropertyLayer};
 pub use endpoint_pipeline::EndpointPipelineService;
-pub use enrichment_strategy::{EnrichmentStrategy, UseEnrichedBody};
+pub use enrichment_strategy::{EnrichmentStrategy, ThrowOnNoPoll, UseEnrichedBody};
 #[rustfmt::skip]
 #[allow(deprecated)]
 pub use error_handler::{
@@ -73,11 +77,13 @@ pub use multicast::{CAMEL_MULTICAST_COMPLETE, CAMEL_MULTICAST_INDEX, MulticastSe
 pub use multicast_segment::MulticastSegment;
 pub use recipient_list::RecipientListService;
 pub use routing_slip::RoutingSlipService;
+pub use sampling::SamplingService;
 pub use script_mutator::ScriptMutator;
 pub use security_policy_layer::{SecurityPolicyLayer, SecurityPolicyService};
 pub use set_body::{SetBody, SetBodyLayer};
 pub use set_header::{SetHeader, SetHeaderLayer};
 pub use set_property::{SetProperty, SetPropertyLayer};
+pub use sort::{SortExpression, SortKey, SortService};
 pub use split_segment::SplitSegment;
 pub use splitter::SplitterService;
 pub use stream_cache::StreamCacheService;

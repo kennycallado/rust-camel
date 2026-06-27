@@ -9,6 +9,7 @@ use camel_api::{
 use camel_language_api::Language;
 
 use super::context::{CamelContext, FromParts};
+use crate::claim_check::memory_repository::MemoryClaimCheckRepository;
 use crate::health_registry::HealthCheckRegistry;
 use crate::idempotent::memory_repository::MemoryIdempotentRepository;
 use crate::lifecycle::adapters::RuntimeExecutionAdapter;
@@ -20,7 +21,7 @@ use crate::lifecycle::adapters::route_controller::{
 };
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::lifecycle::ports::RuntimeExecutionPort;
-use crate::registry::IdempotentRegistry;
+use crate::registry::{ClaimCheckRegistry, IdempotentRegistry};
 use crate::shared::components::domain::Registry;
 use crate::template::TemplateRegistry;
 
@@ -245,6 +246,15 @@ impl CamelContextBuilder {
             reg
         };
 
+        // Default claim check repository registry with a built-in memory repo.
+        let claim_check_repositories: crate::registry::SharedClaimCheckRegistry = {
+            let reg = Arc::new(ClaimCheckRegistry::new());
+            let memory = Arc::new(MemoryClaimCheckRepository::new("memory"));
+            reg.register("memory", memory)
+                .expect("built-in memory claim check repository registration must succeed"); // allow-unwrap
+            reg
+        };
+
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {
                 let (crash_tx, crash_rx) = tokio::sync::mpsc::channel(64);
@@ -266,6 +276,7 @@ impl CamelContextBuilder {
                     controller_impl = controller_impl.with_function_invoker(invoker);
                 }
                 controller_impl.set_idempotent_repositories(Arc::clone(&idempotent_repositories));
+                controller_impl.set_claim_check_repositories(Arc::clone(&claim_check_repositories));
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
@@ -295,6 +306,7 @@ impl CamelContextBuilder {
                     controller_impl = controller_impl.with_function_invoker(invoker);
                 }
                 controller_impl.set_idempotent_repositories(Arc::clone(&idempotent_repositories));
+                controller_impl.set_claim_check_repositories(Arc::clone(&claim_check_repositories));
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
@@ -333,6 +345,7 @@ impl CamelContextBuilder {
             function_invoker: self.function_invoker,
             template_registry,
             idempotent_repositories,
+            claim_check_repositories,
         }))
     }
 }

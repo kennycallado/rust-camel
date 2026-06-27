@@ -89,10 +89,10 @@ pub(super) fn resolve_error_handler(
         resolved_policies.push((policy, handler_producer));
     }
 
-    Ok(DefaultRouteErrorHandler::new(
-        dlc_producer,
-        resolved_policies,
-    ))
+    Ok(
+        DefaultRouteErrorHandler::new(dlc_producer, resolved_policies)
+            .with_use_original_message(config.use_original_message),
+    )
 }
 
 /// Resolve a `UnitOfWorkConfig` into an `(ExchangeUoWLayer, Arc<AtomicU64>)`.
@@ -192,7 +192,13 @@ pub(crate) fn build_eh_config_pipeline(
         // CircuitBreaker: explicit gate
         let cb_gate = circuit_breaker.map(CircuitBreakerGate::new);
 
-        let channel = RouteChannelService::new(handler, security, cb_gate, pipeline);
+        let channel = RouteChannelService::new(
+            handler,
+            security,
+            cb_gate,
+            pipeline,
+            config.use_original_message,
+        );
         BoxProcessor::new(channel)
     } else {
         // ── Old path: Tower layer wrapping (no error handler configured) ──
@@ -237,6 +243,7 @@ pub(crate) struct RouteCompilerExt<'a> {
     pub(crate) health_registry: &'a Option<Arc<HealthCheckRegistry>>,
     pub(crate) route_registry: &'a RouteRegistry,
     pub(crate) idempotent_repositories: crate::SharedIdempotentRegistry,
+    pub(crate) claim_check_repositories: crate::SharedClaimCheckRegistry,
 }
 
 impl RouteCompilerExt<'_> {
@@ -288,6 +295,7 @@ impl RouteCompilerExt<'_> {
             route_id,
             staging_mode,
             self.idempotent_repositories.as_ref(),
+            self.claim_check_repositories.as_ref(),
         )
     }
 

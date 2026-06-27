@@ -15,7 +15,7 @@ use super::{
 };
 use crate::lifecycle::adapters::step_resolution::{
     FunctionStagingMode, await_eval, compile_filter_predicate, compile_language_expression,
-    compile_message_id_expression, resolve_language,
+    compile_message_id_expression, compile_sort_expression, resolve_language,
 };
 use crate::lifecycle::application::route_definition::{BuilderStep, ValueSourceDef};
 
@@ -381,6 +381,75 @@ impl StepCompiler for CoreCompiler {
                 }
             }
 
+            // ── ClaimCheck ──
+            BuilderStep::ClaimCheck {
+                repository,
+                operation,
+                key,
+            } => {
+                let repo = match ctx.claim_check_repositories.get(&repository) {
+                    Some(r) => r,
+                    None => {
+                        return StepCompileResult::Matched(Err(CamelError::ComponentNotFound(
+                            format!("claim_check: repository '{repository}' is not registered"),
+                        )));
+                    }
+                };
+                let op = match operation.as_str() {
+                    "set" => camel_processor::claim_check::ClaimCheckOp::Set,
+                    "get" => camel_processor::claim_check::ClaimCheckOp::Get,
+                    "get_and_remove" => camel_processor::claim_check::ClaimCheckOp::GetAndRemove,
+                    "push" => camel_processor::claim_check::ClaimCheckOp::Push,
+                    "pop" => camel_processor::claim_check::ClaimCheckOp::Pop,
+                    other => {
+                        return StepCompileResult::Matched(Err(CamelError::RouteError(format!(
+                            "claim_check: unsupported operation '{other}'"
+                        ))));
+                    }
+                };
+                let key_expr =
+                    match crate::lifecycle::adapters::step_resolution::compile_key_expression(
+                        ctx.languages,
+                        &key,
+                    ) {
+                        Ok(k) => k,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
+                let svc = camel_processor::ClaimCheckService::new(repo, op, key_expr);
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                    lifecycle: None,
+                }))
+            }
+
+            // ── Sampling (Process-mode, stateless, no StepLifecycle) ──
+            BuilderStep::Sampling { period } => {
+                let svc = camel_processor::SamplingService::new(period);
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                    lifecycle: None,
+                }))
+            }
+
+            // ── Sort (Process-mode, stateless) ──
+            BuilderStep::Sort {
+                expression,
+                reverse,
+            } => {
+                let sort_expr = match compile_sort_expression(ctx.languages, &expression) {
+                    Ok(e) => e,
+                    Err(e) => return StepCompileResult::Matched(Err(e)),
+                };
+                let svc = camel_processor::SortService::new(sort_expr, reverse);
+                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                    lifecycle: None,
+                }))
+            }
+
             // ── Everything else: not handled ──
             _ => StepCompileResult::NotHandled(step),
         }
@@ -430,6 +499,7 @@ mod tests {
         idempotent_repositories
             .register("memory", repo)
             .expect("register repo");
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
 
         // ── registry with only CoreCompiler ──
         let mut reg = StepCompilerRegistry::new();
@@ -452,6 +522,7 @@ mod tests {
             route_id: None,
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
+            claim_check_repositories: &claim_check_repositories,
         };
 
         // ── IdempotentConsumer step ──

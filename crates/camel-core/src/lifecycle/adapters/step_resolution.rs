@@ -6,13 +6,13 @@ pub(crate) enum FunctionStagingMode {
     HotReload { generation: u64 },
 }
 
-use crate::IdempotentRegistry;
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
+use crate::{ClaimCheckRegistry, IdempotentRegistry};
 use camel_api::{CamelError, Exchange, FilterPredicate, FunctionInvoker, ProducerContext, Value};
 use camel_bean::BeanRegistry;
 use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_language_api::{Expression, Language, Predicate};
-use camel_processor::{EnrichmentStrategy, UseEnrichedBody};
+use camel_processor::{EnrichmentStrategy, ThrowOnNoPoll, UseEnrichedBody};
 
 /// Helper to evaluate an async expression from a sync closure context.
 ///
@@ -96,6 +96,31 @@ pub(crate) fn compile_filter_predicate(
     }))
 }
 
+/// Compile a `LanguageExpressionDef` into a `SortExpression` closure.
+/// Uses `await_eval` to bridge the sync→async gap (same pattern as `compile_filter_predicate`).
+/// Returns a `SortKey` for each element's value.
+pub(crate) fn compile_sort_expression(
+    languages: &SharedLanguageRegistry,
+    expression: &LanguageExpressionDef,
+) -> Result<camel_processor::SortExpression, CamelError> {
+    let expr = compile_language_expression(languages, expression)?;
+    Ok(std::sync::Arc::new(move |value: &serde_json::Value| {
+        // Create a minimal exchange containing the element as body,
+        // evaluate the language expression against it, then convert result to SortKey.
+        let msg = camel_api::Message::new(camel_api::body::Body::Json(value.clone()));
+        let exchange = camel_api::Exchange::new(msg);
+        let result = await_eval(&expr, &exchange);
+        // Reject non-scalar keys (Array/Object)
+        if result.is_array() || result.is_object() {
+            return Err(CamelError::ProcessorError(
+                "sort expression returned a non-scalar value (array/object); expected null/bool/number/string"
+                    .into(),
+            ));
+        }
+        Ok(camel_processor::SortKey(result))
+    }))
+}
+
 /// Compile a `LanguageExpressionDef` into a synchronous `MessageIdExpression`
 /// closure for the Idempotent Consumer EIP. Uses `await_eval` to bridge the
 /// sync→async gap (same pattern as `compile_filter_predicate`).
@@ -120,13 +145,41 @@ pub(crate) fn compile_message_id_expression(
     }))
 }
 
+/// Compile a `LanguageExpressionDef` into a `KeyExpression` closure for the
+/// Claim Check EIP. Uses `await_eval` to bridge sync→async (same pattern as
+/// `compile_message_id_expression`). Returns a `CamelError::ValidationError`
+/// if the expression evaluates to null or empty — Claim Check keys are
+/// REQUIRED non-empty strings, otherwise it's a user error.
+pub(crate) fn compile_key_expression(
+    languages: &SharedLanguageRegistry,
+    expression: &LanguageExpressionDef,
+) -> Result<camel_processor::KeyExpression, CamelError> {
+    let expr = compile_language_expression(languages, expression)?;
+    Ok(std::sync::Arc::new(
+        move |exchange: &camel_api::Exchange| {
+            let value = await_eval(&expr, exchange);
+            match value {
+                Value::Null => Err(CamelError::ValidationError(
+                    "claim_check key expression evaluated to null or empty".into(),
+                )),
+                Value::String(s) if s.is_empty() => Err(CamelError::ValidationError(
+                    "claim_check key expression evaluated to null or empty".into(),
+                )),
+                Value::String(s) => Ok(s),
+                other => Ok(other.to_string()),
+            }
+        },
+    ))
+}
+
 pub(crate) fn resolve_enrichment_strategy(
     name: Option<String>,
 ) -> Result<Arc<dyn EnrichmentStrategy>, CamelError> {
     match name.as_deref() {
         None | Some("useEnrichedBody") => Ok(Arc::new(UseEnrichedBody)),
+        Some("throwOnNoPoll") => Ok(Arc::new(ThrowOnNoPoll::new(Arc::new(UseEnrichedBody)))),
         Some(other) => Err(CamelError::ProcessorError(format!(
-            "unknown EnrichmentStrategy `{}`; v1 only supports `useEnrichedBody` (or none for default)",
+            "unknown EnrichmentStrategy `{}`; supported: useEnrichedBody (default), throwOnNoPoll",
             other
         ))),
     }
@@ -147,6 +200,7 @@ pub(crate) fn resolve_steps(
     route_id: Option<&str>,
     staging_mode: &FunctionStagingMode,
     idempotent_repositories: &IdempotentRegistry,
+    claim_check_repositories: &ClaimCheckRegistry,
 ) -> Result<Vec<CompiledStep>, CamelError> {
     use crate::lifecycle::adapters::step_compilers::{CompilationContext, build_registry};
 
@@ -161,6 +215,7 @@ pub(crate) fn resolve_steps(
         route_id,
         staging_mode,
         idempotent_repositories,
+        claim_check_repositories,
     };
     compiler_registry.compile_steps(steps, &ctx)
 }
@@ -362,6 +417,7 @@ mod tests {
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
+            &crate::ClaimCheckRegistry::new(),
         )
         .unwrap_err();
         assert!(
@@ -385,6 +441,7 @@ mod tests {
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
+            &crate::ClaimCheckRegistry::new(),
         )
         .unwrap_err();
         assert!(
@@ -416,6 +473,7 @@ mod tests {
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
+            &crate::ClaimCheckRegistry::new(),
         )
         .unwrap_err();
 
@@ -613,6 +671,7 @@ mod tests {
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
+            &crate::ClaimCheckRegistry::new(),
         )
         .unwrap();
 
@@ -644,6 +703,7 @@ mod tests {
             Some("r1"),
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
+            &crate::ClaimCheckRegistry::new(),
         )
         .unwrap_err();
 
@@ -656,5 +716,50 @@ mod tests {
             err_msg.contains("exposes a PollingConsumer"),
             "expected error about missing PollingConsumer, got: {err_msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_enrichment_strategy_none_returns_default_passthrough() {
+        let strategy = resolve_enrichment_strategy(None).unwrap();
+        let exchange = Exchange::new(camel_api::Message::new("test"));
+        let result = strategy.on_no_poll(exchange).await.unwrap();
+        match &result.input.body {
+            Body::Text(s) => assert_eq!(s, "test"),
+            other => panic!("expected Text body, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_enrichment_strategy_use_enriched_body_returns_default_passthrough() {
+        let strategy = resolve_enrichment_strategy(Some("useEnrichedBody".into())).unwrap();
+        let exchange = Exchange::new(camel_api::Message::new("test"));
+        let result = strategy.on_no_poll(exchange).await.unwrap();
+        match &result.input.body {
+            Body::Text(s) => assert_eq!(s, "test"),
+            other => panic!("expected Text body, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_enrichment_strategy_throw_on_no_poll_returns_error() {
+        let strategy = resolve_enrichment_strategy(Some("throwOnNoPoll".into())).unwrap();
+        let exchange = Exchange::new(camel_api::Message::new("test"));
+        let err = strategy.on_no_poll(exchange).await.unwrap_err();
+        assert!(
+            err.to_string().contains("no message available"),
+            "throwOnNoPoll should return error on no poll, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_enrichment_strategy_unknown_name_returns_error() {
+        let result = resolve_enrichment_strategy(Some("bogus".into()));
+        match result {
+            Ok(_) => panic!("expected error for unknown strategy name"),
+            Err(err) => assert!(
+                err.to_string().contains("unknown EnrichmentStrategy"),
+                "unexpected error message: {err}"
+            ),
+        }
     }
 }

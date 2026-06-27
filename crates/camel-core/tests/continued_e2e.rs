@@ -193,7 +193,7 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
     let cb_gate_clone = cb_gate.clone();
 
     // Build RouteChannelService — the full gate chain
-    let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline);
+    let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline, false);
     let service = BoxProcessor::new(channel);
 
     // Execute the exchange

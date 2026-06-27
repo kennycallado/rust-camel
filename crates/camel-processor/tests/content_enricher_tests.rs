@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use camel_api::{Body, BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message};
 use camel_component_api::endpoint::PollingConsumer;
-use camel_processor::{EnrichService, PollEnrichService, UseEnrichedBody};
+use camel_processor::{EnrichService, PollEnrichService, ThrowOnNoPoll, UseEnrichedBody};
 use tower::{Service, ServiceExt};
 
 /// A mock PollingConsumer that returns a fixed exchange with "from-poller" body.
@@ -74,6 +74,28 @@ async fn poll_enrich_service_passes_through_when_no_message() {
         },
         "original"
     );
+}
+
+#[tokio::test]
+async fn poll_enrich_service_throws_when_no_message_with_throw_strategy() {
+    let strategy = Arc::new(ThrowOnNoPoll::new(Arc::new(UseEnrichedBody)));
+    let mut svc =
+        PollEnrichService::new(Box::new(EmptyPoller), Duration::from_millis(10), strategy);
+    svc.ready().await.unwrap();
+    let result = svc
+        .call(Exchange::new(Message::new(Body::Text(
+            "original".to_string(),
+        ))))
+        .await;
+    match result {
+        Err(CamelError::ProcessorError(msg)) => {
+            assert!(
+                msg.contains("no message"),
+                "expected error about 'no message', got: {msg}"
+            );
+        }
+        other => panic!("expected Err(ProcessorError), got {other:?}"),
+    }
 }
 
 #[tokio::test]

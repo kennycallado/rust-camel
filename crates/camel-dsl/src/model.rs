@@ -112,11 +112,12 @@ pub struct DeclarativeOnException {
     pub continued: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct DeclarativeErrorHandler {
     pub dead_letter_channel: Option<String>,
     pub retry: Option<DeclarativeRedeliveryPolicy>,
     pub on_exceptions: Option<Vec<DeclarativeOnException>>,
+    pub use_original_message: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -413,6 +414,19 @@ pub struct ValidateStepDef {
     pub predicate: LanguageExpressionDef,
 }
 
+/// Claim Check EIP step definition.
+///
+/// Stashes/retrieves the message body from a `ClaimCheckRepository` by key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimCheckStepDef {
+    /// Name of the registered `ClaimCheckRepository` (e.g. `"memory"`).
+    pub repository: String,
+    /// Operation: "set", "get", "get_and_remove", "push", "pop".
+    pub operation: String,
+    /// Expression that extracts the claim-check key from the exchange.
+    pub key: LanguageExpressionDef,
+}
+
 /// Idempotent Consumer EIP step definition.
 ///
 /// Wraps a child sub-pipeline that runs only when the exchange's message-id
@@ -431,6 +445,27 @@ pub struct IdempotentConsumerStepDef {
     /// If `true` and `eager` is `true`, remove the key from the repository
     /// when the child returns `Failed`. Default `false`.
     pub remove_on_failure: Option<bool>,
+}
+
+/// Sampling EIP step definition.
+///
+/// Passes 1 of every N exchanges (counter-based, deterministic).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SamplingStepDef {
+    /// Sampling period: 1 of every `period` exchanges passes.
+    pub period: usize,
+}
+
+/// Sort EIP step definition.
+///
+/// Orders a body collection by extracting a sort key from each element
+/// via a language expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortStepDef {
+    /// Expression that produces the sort key for each element.
+    pub expression: LanguageExpressionDef,
+    /// Reverse (descending) sort when true. Default false (ascending).
+    pub reverse: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -487,6 +522,9 @@ pub enum DeclarativeStep {
     Enrich(EnrichStepDef),
     PollEnrich(EnrichStepDef),
     IdempotentConsumer(IdempotentConsumerStepDef),
+    ClaimCheck(ClaimCheckStepDef),
+    Sampling(SamplingStepDef),
+    Sort(SortStepDef),
     DoTry {
         steps: Vec<DeclarativeStep>,
         catch: Vec<DoTryCatchClauseDef>,
@@ -535,6 +573,9 @@ impl DeclarativeStep {
             DeclarativeStep::IdempotentConsumer(_) => {
                 crate::contract::DeclarativeStepKind::IdempotentConsumer
             }
+            DeclarativeStep::ClaimCheck(_) => crate::contract::DeclarativeStepKind::ClaimCheck,
+            DeclarativeStep::Sampling(_) => crate::contract::DeclarativeStepKind::Sampling,
+            DeclarativeStep::Sort(_) => crate::contract::DeclarativeStepKind::Sort,
             DeclarativeStep::DoTry { .. } => crate::contract::DeclarativeStepKind::DoTry,
         }
     }

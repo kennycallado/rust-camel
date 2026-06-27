@@ -1098,6 +1098,9 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::PollEnrich { .. } => "poll_enrich",
         BuilderStep::Validate { .. } => "validate",
         BuilderStep::IdempotentConsumer { .. } => "idempotent_consumer",
+        BuilderStep::ClaimCheck { .. } => "claim_check",
+        BuilderStep::Sampling { .. } => "sampling",
+        BuilderStep::Sort { .. } => "sort",
         BuilderStep::DeclarativeDoTry { .. } => "do_try",
     }
 }

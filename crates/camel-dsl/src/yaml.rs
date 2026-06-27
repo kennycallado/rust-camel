@@ -21,33 +21,34 @@ use crate::compile::{
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::input_format::{InputFormat, annotate_format};
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
-    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
-    DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
+    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef,
+    ClaimCheckStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
+    DeclarativeErrorHandler, DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
     DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DoTryCatchClauseDef, DoTryFinallyDef,
     DynamicRouterStepDef, EnrichStepDef, IdempotentConsumerStepDef, LanguageExpressionDef,
     LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
     MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
-    ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
-    SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
-    ThrottleStrategyDef, ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    SamplingStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef,
+    SetPropertyStepDef, SortStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
+    StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValidateStepDef,
+    ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::route_ast::{
-    AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
-    DelayStep, DynamicRouterData, DynamicRouterStep, EnrichBody, EnrichConfig, EnrichStep,
-    FilterStep, FunctionStep, IdempotentConsumerBody, IdempotentConsumerStep, LoadBalanceData,
-    LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep,
-    MulticastData, MulticastStep, PollEnrichStep, PredicateBlock, RecipientListData,
-    RecipientListStep, RouteDslRoute, RouteDslRoutes, RouteDslStep, RoutingSlipData,
-    RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep,
-    SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, SplitData,
-    SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
-    StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
-    UnmarshalStep, ValidateStep, WireTapStep,
+    AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, ClaimCheckBody,
+    ClaimCheckStep, DelayBody, DelayStep, DynamicRouterData, DynamicRouterStep, EnrichBody,
+    EnrichConfig, EnrichStep, FilterStep, FunctionStep, IdempotentConsumerBody,
+    IdempotentConsumerStep, LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData,
+    LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PollEnrichStep,
+    PredicateBlock, RecipientListData, RecipientListStep, RouteDslRoute, RouteDslRoutes,
+    RouteDslStep, RoutingSlipData, RoutingSlipStep, SamplingBody, SamplingConfig, SamplingStep,
+    ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
+    SetPropertyData, SetPropertyStep, SortBody, SortStep, SplitData, SplitExpressionConfig,
+    SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
+    ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
 };
 use crate::route_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 31] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 34] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -79,6 +80,9 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 31] = [
     DeclarativeStepKind::PollEnrich,
     DeclarativeStepKind::DoTry,
     DeclarativeStepKind::IdempotentConsumer,
+    DeclarativeStepKind::ClaimCheck,
+    DeclarativeStepKind::Sampling,
+    DeclarativeStepKind::Sort,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -276,6 +280,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                     handled_by: retry.handled_by,
                 }),
                 on_exceptions,
+                use_original_message: eh.use_original_message,
             })
         })
         .transpose()?;
@@ -1108,6 +1113,86 @@ pub(crate) fn route_step_to_declarative_step(
                     remove_on_failure: body.remove_on_failure,
                 },
             ))
+        }
+        RouteDslStep::ClaimCheck(ClaimCheckStep {
+            claim_check:
+                ClaimCheckBody {
+                    repository,
+                    operation,
+                    key,
+                    filter,
+                },
+        }) => {
+            if repository.trim().is_empty() {
+                return Err(CamelError::ValidationError(
+                    "claim_check: repository is required".into(),
+                ));
+            }
+            if operation.trim().is_empty() {
+                return Err(CamelError::ValidationError(
+                    "claim_check: operation is required".into(),
+                ));
+            }
+            if key.trim().is_empty() {
+                return Err(CamelError::ValidationError(
+                    "claim_check: key is required".into(),
+                ));
+            }
+            match operation.as_str() {
+                "set" | "get" | "get_and_remove" | "push" | "pop" => {}
+                other => {
+                    return Err(CamelError::ValidationError(format!(
+                        "claim_check: unknown operation '{other}'"
+                    )));
+                }
+            }
+            if filter.is_some() {
+                return Err(CamelError::ValidationError(
+                    "claim_check filter not yet supported".into(),
+                ));
+            }
+            Ok(DeclarativeStep::ClaimCheck(ClaimCheckStepDef {
+                repository,
+                operation,
+                key: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: key,
+                },
+            }))
+        }
+        RouteDslStep::Sampling(SamplingStep { sampling }) => {
+            let period = match sampling {
+                SamplingBody::Short(n) => n,
+                SamplingBody::Full(cfg) => cfg.period,
+            };
+            if period == 0 {
+                return Err(CamelError::ValidationError(
+                    "sampling: period must be > 0".into(),
+                ));
+            }
+            Ok(DeclarativeStep::Sampling(SamplingStepDef { period }))
+        }
+        RouteDslStep::Sort(SortStep {
+            sort:
+                SortBody {
+                    expression,
+                    reverse,
+                    language,
+                },
+        }) => {
+            let lang = language.unwrap_or_else(|| "simple".to_string());
+            if expression.trim().is_empty() {
+                return Err(CamelError::ValidationError(
+                    "sort: expression is required".into(),
+                ));
+            }
+            Ok(DeclarativeStep::Sort(SortStepDef {
+                expression: LanguageExpressionDef {
+                    language: lang,
+                    source: expression,
+                },
+                reverse,
+            }))
         }
         RouteDslStep::DoTry(DoTryStep { do_try: data }) => {
             // Spec §7.2 Rule 4: try steps must be non-empty.
@@ -2245,6 +2330,52 @@ routes:
         let defs = parse_yaml(yaml).unwrap();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].route_id(), "all-steps");
+    }
+
+    #[test]
+    fn test_parse_yaml_claim_check() {
+        let yaml = r#"
+routes:
+  - id: "cc-test"
+    from: "direct:in"
+    steps:
+      - claim_check:
+          repository: memory
+          operation: set
+          key: "${header.claimKey}"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        let step = &routes[0].steps[0];
+        assert!(
+            matches!(step, DeclarativeStep::ClaimCheck(ClaimCheckStepDef {
+            repository,
+            operation,
+            ..
+        }) if repository == "memory" && operation == "set")
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_claim_check_filter_rejected() {
+        let yaml = r#"
+routes:
+  - id: "cc-filter"
+    from: "direct:in"
+    steps:
+      - claim_check:
+          repository: memory
+          operation: set
+          key: "${header.claimKey}"
+          filter: "someFilter"
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("filter"),
+            "error should mention filter rejection: {err}"
+        );
     }
 
     #[test]

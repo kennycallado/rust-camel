@@ -10,6 +10,28 @@ use crate::from_body::FromBody;
 use crate::message::Message;
 use crate::value::Value;
 
+/// Extension key used by use_original_message: stashes the pre-route Message
+/// so the error handler can restore body+headers before DLC dispatch.
+pub const ORIGINAL_MESSAGE_EXTENSION: &str = "CamelOriginalMessage";
+
+/// Pipeline-executor-recognized stop signal. Set by processors (ThrottleStrategy::Drop,
+/// SamplingService) that cannot return PipelineOutcome::Stopped directly because they
+/// are Tower Service<Exchange> (Process mode), not OutcomePipeline (Segment).
+/// The executor checks this after each step completion. See ADR-0024 amendment.
+pub const CAMEL_STOP: &str = "CamelStop";
+
+/// Check whether the exchange carries the CamelStop signal.
+///
+/// Returns `true` if the `CamelStop` property is set to a boolean `true` value.
+/// Used by the pipeline executor (`run_steps`) and segment adapters to detect
+/// Process-mode processors that cannot return `PipelineOutcome::Stopped` directly.
+pub fn is_camel_stop(exchange: &Exchange) -> bool {
+    exchange
+        .property(CAMEL_STOP)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// Property key for the exception message (error Display string).
 pub const PROPERTY_EXCEPTION_MESSAGE: &str = "CamelExceptionMessage";
 /// Property key for the exception kind (error variant name via classify()).

@@ -2,6 +2,7 @@
 import type { AggregateStep } from "./AggregateStep";
 import type { BeanStep } from "./BeanStep";
 import type { ChoiceStep } from "./ChoiceStep";
+import type { ClaimCheckStep } from "./ClaimCheckStep";
 import type { ConvertBodyToStep } from "./ConvertBodyToStep";
 import type { DelayStep } from "./DelayStep";
 import type { DoTryStep } from "./DoTryStep";
@@ -18,10 +19,12 @@ import type { MulticastStep } from "./MulticastStep";
 import type { PollEnrichStep } from "./PollEnrichStep";
 import type { RecipientListStep } from "./RecipientListStep";
 import type { RoutingSlipStep } from "./RoutingSlipStep";
+import type { SamplingStep } from "./SamplingStep";
 import type { ScriptStep } from "./ScriptStep";
 import type { SetBodyStep } from "./SetBodyStep";
 import type { SetHeaderStep } from "./SetHeaderStep";
 import type { SetPropertyStep } from "./SetPropertyStep";
+import type { SortStep } from "./SortStep";
 import type { SplitStep } from "./SplitStep";
 import type { StopStep } from "./StopStep";
 import type { StreamCacheStep } from "./StreamCacheStep";
@@ -32,4 +35,4 @@ import type { UnmarshalStep } from "./UnmarshalStep";
 import type { ValidateStep } from "./ValidateStep";
 import type { WireTapStep } from "./WireTapStep";
 
-export type RouteDslStep = ToStep | SetHeaderStep | SetPropertyStep | SetBodyStep | BeanStep | ChoiceStep | DynamicRouterStep | FilterStep | FunctionStep | LoadBalanceStep | LogStep | SplitStep | AggregateStep | WireTapStep | MulticastStep | RoutingSlipStep | RecipientListStep | StopStep | StreamCacheStep | ThrottleStep | TransformStep | ScriptStep | ConvertBodyToStep | MarshalStep | UnmarshalStep | DelayStep | DoTryStep | LoopStep | ValidateStep | EnrichStep | PollEnrichStep | IdempotentConsumerStep;
+export type RouteDslStep = ToStep | SetHeaderStep | SetPropertyStep | SetBodyStep | BeanStep | ChoiceStep | DynamicRouterStep | FilterStep | FunctionStep | LoadBalanceStep | LogStep | SplitStep | AggregateStep | WireTapStep | MulticastStep | RoutingSlipStep | RecipientListStep | StopStep | StreamCacheStep | ThrottleStep | TransformStep | ScriptStep | ConvertBodyToStep | MarshalStep | UnmarshalStep | DelayStep | DoTryStep | LoopStep | ValidateStep | EnrichStep | PollEnrichStep | IdempotentConsumerStep | ClaimCheckStep | SamplingStep | SortStep;

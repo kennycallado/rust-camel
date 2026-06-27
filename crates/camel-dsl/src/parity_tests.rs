@@ -77,6 +77,9 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
         RouteDslStep::Enrich(_) => (),
         RouteDslStep::PollEnrich(_) => (),
         RouteDslStep::IdempotentConsumer(_) => (),
+        RouteDslStep::ClaimCheck(_) => (),
+        RouteDslStep::Sampling(_) => (),
+        RouteDslStep::Sort(_) => (),
         // Intentionally NO `_ => ()` wildcard.
         // A new variant added to RouteDslStep will cause a compile error here,
         // forcing the author to also add a parity case below.
@@ -470,6 +473,44 @@ routes:
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"do_try":{"steps":[{"to":"direct:risky"}],"catch":[{"exception":["MyError"],"steps":[{"to":"direct:handle"}]}]}}]}]}"#,
         },
+        ParityCase {
+            name: "Sampling",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - sampling: 5
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"sampling":5}]}]}"#,
+        },
+        ParityCase {
+            name: "Sort",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - sort:
+          expression: "${body.field}"
+          reverse: true
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"sort":{"expression":"${body.field}","reverse":true}}]}]}"#,
+        },
+        ParityCase {
+            name: "ClaimCheck",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - claim_check:
+          repository: memory
+          operation: set
+          key: "${header.claimKey}"
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"claim_check":{"repository":"memory","operation":"set","key":"${header.claimKey}"}}]}]}"#,
+        },
     ]
 }
 
@@ -523,7 +564,7 @@ fn test_variant_count_matches_matrix() {
     //   2. Bumped EXPECTED_VARIANTS below.
     //   3. Added a ParityCase for the new variant.
     // Step 3 is not mechanically enforced; review discipline applies.
-    const EXPECTED_VARIANTS: usize = 31;
+    const EXPECTED_VARIANTS: usize = 34;
     let actual = parity_cases().len();
     assert!(
         actual >= EXPECTED_VARIANTS,

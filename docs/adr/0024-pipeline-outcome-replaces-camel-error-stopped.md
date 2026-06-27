@@ -212,3 +212,41 @@ After Phase 4 (bd rc-5uv, ADR-0025) implementation:
 - Stopped-exchange-state-preservation invariant locked as tested contract.
 
 Zero remaining sites misuse `CamelError::Stopped` for control flow.
+
+## Phase 4a amendment: CamelStop drop signal (2026-06-27)
+
+**Context:** `SamplingService` and `ThrottleService::Drop` set a `CamelStop=true` property on
+the exchange, but this property was NEVER checked by the pipeline executor (`run_steps`).
+Non-sampled/throttled exchanges continued through the pipeline — the "drop semantics" were
+phantom for Process-mode processors and only partially effective for Segment-mode throttlers.
+
+**Decision (e_gpt BLESS Option A+):** Honor the `CamelStop` property at ALL pipeline-executor
+boundaries:
+
+1. **Shared constant** — `CAMEL_STOP` moved to `camel-api` as `pub const CAMEL_STOP`
+   (previously local in `throttler.rs` and `sampling.rs`). Re-exported from `camel_api`.
+
+2. **Helper** — `pub fn is_camel_stop(exchange: &Exchange) -> bool` in camel-api checks
+   `exchange.property(CAMEL_STOP)` → `as_bool()` → `unwrap_or(false)`.
+
+3. **`run_steps`** — after each `CompiledStep::Process` step returns `Ok(next)`, checks
+   `is_camel_stop(&next)`. If true → `PipelineOutcome::Stopped(next)`.
+
+4. **`BoxProcessorSegment`** — when converting `Ok(ex)` to `PipelineOutcome`, checks
+   `is_camel_stop`. If true → `PipelineOutcome::Stopped(ex)`.
+
+5. **`SequentialOutcomeSegment`** — defensive check after child `Completed(next)`. If
+   `is_camel_stop` → `Stopped(next)`.
+
+6. **`ThrottleSegment::Drop`** — changed to return `PipelineOutcome::Stopped(ex)` directly.
+   Still sets the property for backward compat + executor check catches Process-mode paths.
+
+**Rationale:** Process-mode processors (`SamplingService`, `ThrottleService`) cannot return
+`PipelineOutcome::Stopped` directly because they implement Tower `Service<Exchange>`, not
+`OutcomePipeline`. The executor checks are the single, universal enforcement point.
+Segment-mode throttlers (`ThrottleSegment::Drop`) use the direct return for minimal latency.
+
+**Regression tests (3):**
+- Top-level Sampling drop stops following step (`run_steps` level)
+- Sampling inside `BoxProcessorSegment` stops sibling (`Segment` level)
+- Throttle Drop exchange does not reach mock:sink (full route integration)

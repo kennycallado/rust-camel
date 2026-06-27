@@ -93,7 +93,7 @@ impl Service<Exchange> for PollEnrichService {
             drop(guard); // release before strategy to minimize critical section
             match enriched_opt {
                 Some(enriched) => Ok(strategy.aggregate(original, enriched)),
-                None => Ok(original), // no message in window: pass through
+                None => strategy.on_no_poll(original).await,
             }
         })
     }

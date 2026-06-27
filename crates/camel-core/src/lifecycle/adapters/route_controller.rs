@@ -80,6 +80,7 @@ pub struct DefaultRouteController {
     /// the CamelContext builder installs a populated handle that includes the
     /// built-in `"memory"` repository.
     pub(super) idempotent_repositories: crate::SharedIdempotentRegistry,
+    pub(super) claim_check_repositories: crate::SharedClaimCheckRegistry,
 }
 
 impl DefaultRouteController {
@@ -134,6 +135,7 @@ impl DefaultRouteController {
             function_invoker: None,
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
+            claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
         }
     }
 
@@ -158,6 +160,7 @@ impl DefaultRouteController {
             function_invoker: None,
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
+            claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
         }
     }
 
@@ -182,6 +185,7 @@ impl DefaultRouteController {
             function_invoker: None,
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
+            claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
         }
     }
 
@@ -195,6 +199,13 @@ impl DefaultRouteController {
         repositories: crate::SharedIdempotentRegistry,
     ) {
         self.idempotent_repositories = repositories;
+    }
+
+    pub(crate) fn set_claim_check_repositories(
+        &mut self,
+        repositories: crate::SharedClaimCheckRegistry,
+    ) {
+        self.claim_check_repositories = repositories;
     }
 
     pub fn set_health_registry(&mut self, registry: Arc<HealthCheckRegistry>) {
@@ -254,6 +265,7 @@ impl DefaultRouteController {
             health_registry: &self.health_registry,
             route_registry: &self.routes,
             idempotent_repositories: Arc::clone(&self.idempotent_repositories),
+            claim_check_repositories: Arc::clone(&self.claim_check_repositories),
         }
     }
 
@@ -291,6 +303,7 @@ impl DefaultRouteController {
             route_id,
             staging_mode,
             &self.idempotent_repositories,
+            &self.claim_check_repositories,
         )
     }
 

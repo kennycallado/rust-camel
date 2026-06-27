@@ -58,6 +58,7 @@
 //! //! Configuration types for the Tracer EIP live in `camel-core` rather than `camel-config`
 //! //! to avoid a circular dependency — `camel-config` depends on `camel-core`.
 //!
+pub mod claim_check;
 pub mod context;
 mod context_builder;
 pub mod datasource;
@@ -69,7 +70,9 @@ mod registry;
 // Re-export idempotent registry types for use in lifecycle layers (which
 // are forbidden by the hexagonal boundary test from importing
 // `crate::registry::` directly). Use `crate::IdempotentRegistry` etc.
-pub(crate) use registry::{IdempotentRegistry, SharedIdempotentRegistry};
+pub(crate) use registry::{
+    ClaimCheckRegistry, IdempotentRegistry, SharedClaimCheckRegistry, SharedIdempotentRegistry,
+};
 pub(crate) mod shared;
 pub mod step;
 pub mod template;

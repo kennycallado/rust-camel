@@ -86,6 +86,15 @@ pub(crate) type IdempotentRegistry = NamedRegistry<dyn camel_api::IdempotentRepo
 /// protection so concurrent reads/writes from both sides are safe.
 pub(crate) type SharedIdempotentRegistry = Arc<IdempotentRegistry>;
 
+/// Convenience alias for the claim check repository registry.
+pub(crate) type ClaimCheckRegistry = NamedRegistry<dyn camel_api::ClaimCheckRepository>;
+
+/// Shareable handle to the claim check repository registry.
+///
+/// Mirrors `SharedIdempotentRegistry` — shared between `CamelContext` and
+/// `DefaultRouteController` for step-compile-time repository resolution.
+pub(crate) type SharedClaimCheckRegistry = Arc<ClaimCheckRegistry>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

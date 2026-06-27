@@ -11,7 +11,10 @@ use std::task::{Context, Poll};
 use tower::Service;
 
 use camel_api::metrics::MetricsCollector;
-use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, PipelineOutcome};
+use camel_api::{
+    BoxProcessor, CamelError, Exchange, IdentityProcessor, Message, ORIGINAL_MESSAGE_EXTENSION,
+    PipelineOutcome,
+};
 
 use camel_api::error_handler::{BoundaryKind, RetryOutcome, StepDisposition};
 use camel_processor::{
@@ -339,6 +342,9 @@ pub async fn run_steps(
 
         match outcome {
             PipelineOutcome::Completed(next) => {
+                if camel_api::is_camel_stop(&next) {
+                    return PipelineOutcome::Stopped(next);
+                }
                 ex = next;
             }
             PipelineOutcome::Stopped(stopped_ex) => {
@@ -415,6 +421,9 @@ pub struct RouteChannelService {
     security: Option<BoxProcessor>,
     cb_gate: Option<CircuitBreakerGate>,
     pipeline: BoxProcessor,
+    /// When true, stash the original Message as `ORIGINAL_MESSAGE_EXTENSION`
+    /// before any gate runs, so the error handler can restore it on failure.
+    use_original_message: bool,
 }
 
 impl RouteChannelService {
@@ -423,12 +432,14 @@ impl RouteChannelService {
         security: Option<BoxProcessor>,
         cb_gate: Option<CircuitBreakerGate>,
         pipeline: BoxProcessor,
+        use_original_message: bool,
     ) -> Self {
         Self {
             handler,
             security,
             cb_gate,
             pipeline,
+            use_original_message,
         }
     }
 }
@@ -459,9 +470,18 @@ impl Service<Exchange> for RouteChannelService {
         let security = self.security.clone();
         let cb_gate = self.cb_gate.clone();
         let mut pipeline = self.pipeline.clone();
+        let use_original_message = self.use_original_message;
 
         Box::pin(async move {
             let mut ex = exchange;
+
+            // Stash original message for use_original_message support.
+            // Done BEFORE any gate so the DLC can restore the pre-route message.
+            // Only stashes when the flag is true to avoid perf regression on every Exchange.
+            if use_original_message {
+                let original: Arc<Message> = Arc::new(ex.input.clone());
+                ex.set_extension(ORIGINAL_MESSAGE_EXTENSION, original);
+            }
 
             // Gate 1: Security
             if let Some(mut sec) = security {

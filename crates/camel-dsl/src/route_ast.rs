@@ -113,6 +113,8 @@ pub struct RouteDslErrorHandler {
     pub retry: Option<RouteDslRedeliveryPolicy>,
     #[serde(default)]
     pub on_exceptions: Option<Vec<RouteDslOnException>>,
+    #[serde(default)]
+    pub use_original_message: bool,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -300,6 +302,9 @@ pub enum RouteDslStep {
     Enrich(EnrichStep),
     PollEnrich(PollEnrichStep),
     IdempotentConsumer(IdempotentConsumerStep),
+    ClaimCheck(ClaimCheckStep),
+    Sampling(SamplingStep),
+    Sort(SortStep),
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -768,6 +773,72 @@ pub struct ValidateStep {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
+pub struct ClaimCheckStep {
+    pub claim_check: ClaimCheckBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimCheckBody {
+    /// Name of the registered ClaimCheckRepository (e.g. "memory").
+    pub repository: String,
+    /// Operation: "set", "get", "get_and_remove", "push", "pop".
+    pub operation: String,
+    /// Simple-language expression for the claim-check key (e.g. "${header.claimKey}").
+    pub key: String,
+    /// Filter is not yet supported — rejected at parse time.
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+pub struct SamplingStep {
+    pub sampling: SamplingBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
+pub enum SamplingBody {
+    /// Shorthand: `sampling: 5` (period)
+    Short(usize),
+    /// Full form: `sampling: { period: 5 }`
+    Full(SamplingConfig),
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct SamplingConfig {
+    pub period: usize,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct SortStep {
+    pub sort: SortBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct SortBody {
+    /// Expression that extracts a sort key from each body element (e.g. simple: "${body.field}").
+    pub expression: String,
+    /// Reverse (descending) sort. Default false.
+    #[serde(default)]
+    pub reverse: bool,
+    /// Optional language specification (default: "simple").
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
 pub struct IdempotentConsumerStep {
     pub idempotent_consumer: IdempotentConsumerBody,
 }

@@ -143,3 +143,29 @@ fn poll_enrich_empty_uri_fails() {
         "Expected empty URI error, got: {err}"
     );
 }
+
+#[test]
+fn poll_enrich_verbose_form_with_strategy() {
+    let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - poll_enrich:
+          uri: "file:/tmp/inbox"
+          strategy: "throwOnNoPoll"
+          timeout: 5000
+"#;
+    let routes = camel_dsl::yaml::parse_yaml_to_declarative(yaml).unwrap();
+    assert_eq!(routes.len(), 1);
+    let route = &routes[0];
+    assert_eq!(route.steps.len(), 1);
+    match &route.steps[0] {
+        DeclarativeStep::PollEnrich(def) => {
+            assert_eq!(def.uri, "file:/tmp/inbox");
+            assert_eq!(def.strategy.as_deref(), Some("throwOnNoPoll"));
+            assert_eq!(def.timeout_ms, Some(5000));
+        }
+        other => panic!("expected PollEnrich step, got {other:?}"),
+    }
+}

@@ -2,6 +2,7 @@ use super::*;
 use camel_api::error_handler::{BoundaryKind, PolicyId, RetryOutcome, StepDisposition};
 use camel_api::{Body, BoxProcessorExt, CircuitBreakerConfig, Message, Value};
 use camel_processor::RouteErrorHandler;
+use camel_processor::error_handler::DefaultRouteErrorHandler;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -414,7 +415,7 @@ async fn test_route_channel_pipeline_propagate_returns_err() {
         }],
         Some(handler.clone()),
     );
-    let channel = RouteChannelService::new(handler.clone(), None, None, pipeline);
+    let channel = RouteChannelService::new(handler.clone(), None, None, pipeline, false);
     let mut svc = BoxProcessor::new(channel);
     let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
     assert!(result.is_err(), "Propagate should return Err");
@@ -427,7 +428,7 @@ async fn test_route_channel_security_error_calls_boundary() {
         Box::pin(async { Err(CamelError::Unauthorized("denied".into())) })
     });
     let pipeline = compose_pipeline_with_handler(vec![], Some(handler.clone()));
-    let channel = RouteChannelService::new(handler.clone(), Some(deny_all), None, pipeline);
+    let channel = RouteChannelService::new(handler.clone(), Some(deny_all), None, pipeline, false);
     let mut svc = BoxProcessor::new(channel);
     let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
     assert!(
@@ -447,7 +448,7 @@ async fn test_route_channel_cb_reject_calls_boundary() {
     });
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
     let pipeline = compose_pipeline_with_handler(vec![], Some(handler.clone()));
-    let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline);
+    let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline, false);
     let mut svc = BoxProcessor::new(channel);
     let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
     assert!(
@@ -473,7 +474,7 @@ async fn test_route_channel_cb_fallback_executes_fallback() {
     });
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
     let pipeline = compose_pipeline_with_handler(vec![], Some(handler.clone()));
-    let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline);
+    let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline, false);
     let mut svc = BoxProcessor::new(channel);
     let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
     assert!(result.is_ok(), "fallback should succeed");
@@ -500,7 +501,7 @@ async fn test_route_channel_cb_fallback_failure_calls_boundary() {
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
 
     let pipeline = compose_pipeline_with_handler(vec![], Some(handler.clone()));
-    let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline);
+    let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline, false);
 
     let mut svc = BoxProcessor::new(channel);
     let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
@@ -528,7 +529,7 @@ async fn test_route_channel_cb_counts_stopped_as_success() {
     // Pipeline emits Stop as the only step — top-level maps Stop to Ok(ex).
     let pipeline = compose_pipeline_with_handler(vec![CompiledStep::Stop], None);
 
-    let channel = RouteChannelService::new(handler, None, Some(cb_gate), pipeline);
+    let channel = RouteChannelService::new(handler, None, Some(cb_gate), pipeline, false);
 
     // Two Stop invocations — would trip a 2-failure CB if Stop counted as failure.
     let ex1 = Exchange::new(camel_api::Message::new("a"));
@@ -543,6 +544,280 @@ async fn test_route_channel_cb_counts_stopped_as_success() {
         matches!(cb_clone.before_call(), CircuitBreakerDecision::Allow),
         "CB should count Stop as success"
     );
+}
+
+// ── use_original_message full-path integration test (N5) ──
+
+#[tokio::test]
+async fn test_use_original_message_stash_survives_full_route_channel() {
+    // Full path: RouteChannelService stashes original message, pipeline mutates
+    // then fails, DefaultRouteErrorHandler restores before DLC.
+    use std::sync::Mutex;
+
+    let dlc_received = Arc::new(Mutex::new(None::<Exchange>));
+    let dlc_received_clone = Arc::clone(&dlc_received);
+    let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+        let r = Arc::clone(&dlc_received_clone);
+        Box::pin(async move {
+            *r.lock().unwrap() = Some(ex.clone());
+            Ok(ex)
+        })
+    });
+
+    let mut handler = DefaultRouteErrorHandler::new(Some(dlc), vec![]);
+    handler.use_original_message = true;
+    let handler: Arc<dyn RouteErrorHandler> = Arc::new(handler);
+
+    // Pipeline: step that mutates body, then step that fails.
+    let mutating_step = BoxProcessor::from_fn(|mut ex: Exchange| {
+        Box::pin(async move {
+            ex.input.body = Body::Bytes("mutated".into());
+            Ok(ex)
+        })
+    });
+    let failing_step = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async { Err::<Exchange, CamelError>(CamelError::ProcessorError("boom".into())) })
+    });
+
+    let pipeline = compose_pipeline_with_handler(
+        vec![
+            CompiledStep::Process {
+                processor: mutating_step,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: failing_step,
+                body_contract: None,
+                lifecycle: None,
+            },
+        ],
+        Some(handler.clone()),
+    );
+
+    let channel = RouteChannelService::new(handler, None, None, pipeline, true);
+
+    let ex = Exchange::new(Message::new("original-body"));
+    let result = tower::ServiceExt::oneshot(channel, ex).await;
+
+    // Pipeline error should propagate (no policy configured, no on_steps, disposition=Propagate).
+    assert!(
+        result.is_err(),
+        "RouteChannelService should propagate error when no policy matches"
+    );
+
+    // But the DLC must have been called with the ORIGINAL body (pre-mutation).
+    let received = dlc_received
+        .lock()
+        .unwrap()
+        .take()
+        .expect("DLC should have been called");
+    let received_text = match &received.input.body {
+        camel_api::Body::Text(s) => s.clone(),
+        camel_api::Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        camel_api::Body::Json(v) => v.to_string(),
+        _ => String::new(),
+    };
+    assert_eq!(
+        received_text, "original-body",
+        "DLC should receive the pre-route original body, not the mutated version"
+    );
+}
+
+#[tokio::test]
+async fn test_use_original_message_wholesale_exchange_replacement() {
+    // When a step returns a brand-new Exchange (not the original one), the stash
+    // extension is LOST because extensions live on the original Exchange object.
+    // This test documents the limitation: use_original_message only works when
+    // steps mutate the existing Exchange in place.
+    use std::sync::Mutex;
+
+    let dlc_received = Arc::new(Mutex::new(None::<Exchange>));
+    let dlc_received_clone = Arc::clone(&dlc_received);
+    let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+        let r = Arc::clone(&dlc_received_clone);
+        Box::pin(async move {
+            *r.lock().unwrap() = Some(ex.clone());
+            Ok(ex)
+        })
+    });
+
+    let mut handler = DefaultRouteErrorHandler::new(Some(dlc), vec![]);
+    handler.use_original_message = true;
+    let handler: Arc<dyn RouteErrorHandler> = Arc::new(handler);
+
+    // Step that returns a BRAND-NEW Exchange (wholesale replacement).
+    let replace_step = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async { Ok(Exchange::new(Message::new("new-body"))) })
+    });
+    let failing_step = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async { Err::<Exchange, CamelError>(CamelError::ProcessorError("boom".into())) })
+    });
+
+    let pipeline = compose_pipeline_with_handler(
+        vec![
+            CompiledStep::Process {
+                processor: replace_step,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: failing_step,
+                body_contract: None,
+                lifecycle: None,
+            },
+        ],
+        Some(handler.clone()),
+    );
+
+    let channel = RouteChannelService::new(handler, None, None, pipeline, true);
+
+    let ex = Exchange::new(Message::new("original-body"));
+    let result = tower::ServiceExt::oneshot(channel, ex).await;
+
+    // Error propagates (no policy configured).
+    assert!(
+        result.is_err(),
+        "RouteChannelService should propagate error when no policy matches"
+    );
+
+    // Because the stash was on the original Exchange (now gone), the DLC gets
+    // the new Exchange's body — not the original.
+    let received = dlc_received
+        .lock()
+        .unwrap()
+        .take()
+        .expect("DLC should have been called");
+    let received_text = match &received.input.body {
+        camel_api::Body::Text(s) => s.clone(),
+        camel_api::Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        camel_api::Body::Json(v) => v.to_string(),
+        _ => String::new(),
+    };
+    assert_eq!(
+        received_text, "new-body",
+        "When a step replaces the Exchange wholesale, use_original_message cannot \
+         restore the pre-route Message — the stash lives on the original Exchange"
+    );
+}
+
+// ── CamelStop drop signal tests ──
+//
+// Verifies that the CamelStop property is honored at all executor boundaries:
+// - run_steps (Process mode: SamplingService, ThrottlerService)
+// - BoxProcessorSegment (legacy Tower processor wrapped as OutcomePipeline)
+// - SequentialOutcomeSegment (defensive check after child Completed)
+
+#[tokio::test]
+async fn test_sampling_drop_stops_following_process_step() {
+    // Route: sampling(period=2) → process(set captured=true)
+    // Exchange 1 (counter=1, 1%2≠0): CamelStop=true → executor stops → "captured" NOT set
+    // Exchange 2 (counter=2, 2%2=0): passes through → "captured" IS set
+    use camel_api::PipelineOutcome;
+    use camel_processor::SamplingService;
+
+    let captured = Arc::new(AtomicBool::new(false));
+    let captured1 = captured.clone();
+
+    let steps = vec![
+        CompiledStep::Process {
+            processor: BoxProcessor::new(SamplingService::new(2)),
+            body_contract: None,
+            lifecycle: None,
+        },
+        CompiledStep::Process {
+            processor: BoxProcessor::from_fn(move |mut ex: Exchange| {
+                let cap = captured1.clone();
+                Box::pin(async move {
+                    cap.store(true, Ordering::SeqCst);
+                    ex.set_property("captured", Value::Bool(true));
+                    Ok(ex)
+                })
+            }),
+            body_contract: None,
+            lifecycle: None,
+        },
+    ];
+
+    // Exchange 1 — should be stopped by sampling (counter=1, 1%2≠0)
+    captured.store(false, Ordering::SeqCst);
+    let ex1 = Exchange::new(Message::new("first"));
+    let outcome1 = run_steps(steps.clone(), ex1, None, false).await;
+    match &outcome1 {
+        PipelineOutcome::Stopped(returned) => {
+            assert!(
+                camel_api::is_camel_stop(returned),
+                "dropped exchange must have CamelStop property set"
+            );
+            assert!(
+                !captured.load(Ordering::SeqCst),
+                "dropped exchange must NOT reach the step after sampling"
+            );
+        }
+        other => panic!("exchange 1 should be Stopped, got {:?}", other),
+    }
+
+    // Exchange 2 — should pass through (counter=2, 2%2=0)
+    captured.store(false, Ordering::SeqCst);
+    let ex2 = Exchange::new(Message::new("second"));
+    let outcome2 = run_steps(steps.clone(), ex2, None, false).await;
+    match &outcome2 {
+        PipelineOutcome::Completed(returned) => {
+            assert!(
+                !camel_api::is_camel_stop(returned),
+                "passing exchange must NOT have CamelStop"
+            );
+            assert!(
+                captured.load(Ordering::SeqCst),
+                "passing exchange MUST reach the step after sampling"
+            );
+        }
+        other => panic!("exchange 2 should be Completed, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_sampling_drop_inside_box_processor_segment_stops_sibling() {
+    // Verifies BoxProcessorSegment checks is_camel_stop after Tower call.
+    // Segment sequence: [BoxProcessorSegment(SamplingService(period=2)), BoxProcessorSegment(marker)]
+    use camel_api::{OutcomePipeline, PipelineOutcome};
+    use camel_processor::SamplingService;
+
+    let captured = Arc::new(AtomicBool::new(false));
+    let captured1 = captured.clone();
+
+    let sampling_seg = BoxProcessorSegment::new(BoxProcessor::new(SamplingService::new(2)));
+    let marker_seg = BoxProcessorSegment::new(BoxProcessor::from_fn(move |mut ex: Exchange| {
+        let cap = captured1.clone();
+        Box::pin(async move {
+            cap.store(true, Ordering::SeqCst);
+            ex.set_property("captured", Value::Bool(true));
+            Ok(ex)
+        })
+    }));
+
+    let children: Vec<Box<dyn OutcomePipeline>> =
+        vec![Box::new(sampling_seg), Box::new(marker_seg)];
+    let mut seq =
+        crate::lifecycle::adapters::outcome_composition::SequentialOutcomeSegment::new(children);
+
+    // Exchange 1 — should be stopped at sampling
+    captured.store(false, Ordering::SeqCst);
+    let ex1 = Exchange::new(Message::new("first"));
+    let outcome1 = seq.run(ex1).await;
+    match &outcome1 {
+        PipelineOutcome::Stopped(returned) => {
+            assert!(
+                camel_api::is_camel_stop(returned),
+                "dropped exchange must have CamelStop property set"
+            );
+            assert!(
+                !captured.load(Ordering::SeqCst),
+                "marker step must NOT execute after drop"
+            );
+        }
+        other => panic!("exchange 1 should be Stopped, got {:?}", other),
+    }
 }
 
 #[cfg(test)]

@@ -2,4 +2,4 @@
 import type { RouteDslOnException } from "./RouteDslOnException";
 import type { RouteDslRedeliveryPolicy } from "./RouteDslRedeliveryPolicy";
 
-export type RouteDslErrorHandler = { dead_letter_channel: string | null, retry: RouteDslRedeliveryPolicy | null, on_exceptions: Array<RouteDslOnException> | null, };
+export type RouteDslErrorHandler = { dead_letter_channel: string | null, retry: RouteDslRedeliveryPolicy | null, on_exceptions: Array<RouteDslOnException> | null, use_original_message: boolean, };

@@ -31,15 +31,15 @@ use camel_processor::{
 };
 
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
-    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
-    DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep, DelayStepDef,
-    DynamicRouterStepDef, FunctionStepDef, IdempotentConsumerStepDef, LanguageExpressionDef,
-    LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
-    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
-    ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
-    SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
-    ToStepDef, ValueSourceDef, WireTapStepDef,
+    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef,
+    ClaimCheckStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
+    DeclarativeErrorHandler, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
+    DelayStepDef, DynamicRouterStepDef, FunctionStepDef, IdempotentConsumerStepDef,
+    LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
+    LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
+    RoutingSlipStepDef, SamplingStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef,
+    SetHeaderStepDef, SetPropertyStepDef, SortStepDef, SplitAggregationDef, SplitExpressionDef,
+    SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
 fn require_authenticator(
@@ -1027,6 +1027,25 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::IdempotentConsumer(def) => {
             compile_idempotent_consumer_step(def, stream_cache_threshold)
         }
+        DeclarativeStep::ClaimCheck(ClaimCheckStepDef {
+            repository,
+            operation,
+            key,
+        }) => Ok(BuilderStep::ClaimCheck {
+            repository,
+            operation,
+            key,
+        }),
+        DeclarativeStep::Sampling(SamplingStepDef { period }) => {
+            Ok(BuilderStep::Sampling { period })
+        }
+        DeclarativeStep::Sort(SortStepDef {
+            expression,
+            reverse,
+        }) => Ok(BuilderStep::Sort {
+            expression,
+            reverse,
+        }),
         DeclarativeStep::Loop(def) => compile_loop_step(def, stream_cache_threshold),
         DeclarativeStep::Enrich(def) => Ok(BuilderStep::Enrich {
             uri: def.uri,
@@ -1196,6 +1215,15 @@ fn compile_declarative_step_to_canonical(
         DeclarativeStep::IdempotentConsumer(_) => Err(CamelError::RouteError(
             "canonical v1 does not support step `idempotent_consumer`".into(),
         )),
+        DeclarativeStep::ClaimCheck(_) => Err(CamelError::RouteError(
+            "canonical v1 does not support step `claim_check`".into(),
+        )),
+        DeclarativeStep::Sampling(_) => Err(CamelError::RouteError(
+            "canonical v1 does not support step `sampling`".into(),
+        )),
+        DeclarativeStep::Sort(_) => Err(CamelError::RouteError(
+            "canonical v1 does not support step `sort`".into(),
+        )),
         other => {
             let step_name = declarative_step_name(&other);
             let detail = canonical_contract_rejection_reason(step_name)
@@ -1313,6 +1341,9 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Enrich(_) => "enrich",
         DeclarativeStep::PollEnrich(_) => "poll_enrich",
         DeclarativeStep::IdempotentConsumer(_) => "idempotent_consumer",
+        DeclarativeStep::ClaimCheck(_) => "claim_check",
+        DeclarativeStep::Sampling(_) => "sampling",
+        DeclarativeStep::Sort(_) => "sort",
         DeclarativeStep::DoTry { .. } => "do_try",
     }
 }
@@ -1658,7 +1689,10 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         | DeclarativeStep::RoutingSlip(_)
         | DeclarativeStep::RecipientList(_)
         | DeclarativeStep::Enrich(_)
-        | DeclarativeStep::PollEnrich(_) => {}
+        | DeclarativeStep::PollEnrich(_)
+        | DeclarativeStep::ClaimCheck(_)
+        | DeclarativeStep::Sampling(_)
+        | DeclarativeStep::Sort(_) => {}
         DeclarativeStep::DoTry {
             steps,
             catch,
@@ -1776,6 +1810,7 @@ mod tests {
                     continued: None,
                 },
             ]),
+            use_original_message: false,
         })
         .expect("compile should succeed");
 
@@ -1803,6 +1838,7 @@ mod tests {
                 handled: None,
                 continued: None,
             }]),
+            use_original_message: false,
         })
         .err()
         .expect("should fail");
@@ -1823,6 +1859,7 @@ mod tests {
                 handled: None,
                 continued: None,
             }]),
+            use_original_message: false,
         })
         .err()
         .expect("should fail");
@@ -1843,6 +1880,7 @@ mod tests {
                 handled_by: None,
             }),
             on_exceptions: None,
+            use_original_message: false,
         })
         .expect("compile should succeed");
 
@@ -1913,6 +1951,7 @@ mod tests {
                     continued: None,
                 },
             ]),
+            use_original_message: false,
         })
         .expect("compile should succeed");
 
@@ -1943,6 +1982,7 @@ mod tests {
                 handled: None,
                 continued: None,
             }]),
+            use_original_message: false,
         })
         .expect("compile should succeed");
 
@@ -1968,6 +2008,7 @@ mod tests {
                 handled: None,
                 continued: None,
             }]),
+            use_original_message: false,
         })
         .expect("compile should succeed");
 
@@ -1992,6 +2033,7 @@ mod tests {
                 handled: Some(true),
                 continued: None,
             }]),
+            use_original_message: false,
         };
         let config = compile_error_handler(def).unwrap();
         assert_eq!(config.policies.len(), 1);
@@ -2015,6 +2057,7 @@ mod tests {
                 handled: Some(true),
                 continued: None,
             }]),
+            use_original_message: false,
         };
         let config = compile_error_handler(def).expect("compile should succeed");
         assert_eq!(
@@ -2036,6 +2079,7 @@ mod tests {
                 handled: None,
                 continued: Some(true),
             }]),
+            use_original_message: false,
         })
         .expect("compile should succeed");
         assert_eq!(
@@ -2057,6 +2101,7 @@ mod tests {
                 handled: Some(true),
                 continued: Some(true),
             }]),
+            use_original_message: false,
         });
         assert!(result.is_err());
     }
@@ -2074,6 +2119,7 @@ mod tests {
                 handled: Some(true),
                 continued: Some(false),
             }]),
+            use_original_message: false,
         })
         .expect("compile should succeed");
         assert_eq!(
@@ -2095,6 +2141,7 @@ mod tests {
                 handled: None,
                 continued: None,
             }]),
+            use_original_message: false,
         })
         .expect("compile should succeed");
         assert_eq!(
@@ -3021,6 +3068,7 @@ mod tests {
                 dead_letter_channel: Some("log:dlq".into()),
                 retry: None,
                 on_exceptions: None,
+                use_original_message: false,
             }),
             circuit_breaker: None,
             security_policy: None,
@@ -3497,6 +3545,7 @@ mod tests {
                 handled_by: None,
             }),
             on_exceptions: None,
+            use_original_message: false,
         });
         assert_config_error(compile_declarative_route(route), "max_attempts");
     }
@@ -3810,6 +3859,7 @@ mod tests {
                 dead_letter_channel: Some("log:dlq".into()),
                 retry: None,
                 on_exceptions: None,
+                use_original_message: false,
             }),
             circuit_breaker: None,
             security_policy: None,
@@ -3888,6 +3938,7 @@ mod tests {
                 dead_letter_channel: Some("log:dlq".into()),
                 retry: None,
                 on_exceptions: None,
+                use_original_message: false,
             }),
             circuit_breaker: None,
             security_policy: None,
@@ -4038,6 +4089,7 @@ mod tests {
                 dead_letter_channel: Some("log:dlq".into()),
                 retry: None,
                 on_exceptions: None,
+                use_original_message: false,
             }),
             circuit_breaker: None,
             security_policy: None,
