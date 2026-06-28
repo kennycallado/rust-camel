@@ -14,6 +14,7 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tower::Service;
 use tracing::{debug, warn};
 
+use crate::broker_config::apply_rdkafka_config;
 use crate::config::{ResolvedKafkaEndpointConfig, apply_security_config};
 
 type AcquireFut =
@@ -51,6 +52,7 @@ impl KafkaProducer {
             .set("client.id", &config.client_id);
 
         apply_security_config(&config, &mut cc);
+        apply_rdkafka_config(&config, &mut cc);
 
         let producer: FutureProducer = cc.create().map_err(|e| {
             CamelError::ProcessorError(format!("Failed to create Kafka producer: {}", e))
@@ -139,6 +141,7 @@ impl KafkaProducer {
             .set("request.timeout.ms", timeout.as_millis().to_string())
             .set("client.id", &config.client_id);
         apply_security_config(config, &mut cc);
+        apply_rdkafka_config(config, &mut cc);
 
         let admin: AdminClient<_> = cc.create().map_err(|e| {
             CamelError::ProcessorError(format!("Health check: failed to create admin client: {e}"))

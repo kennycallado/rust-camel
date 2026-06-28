@@ -25,6 +25,7 @@
 //! When using the `KafkaComponent` trait implementation, resolution happens automatically
 //! in `create_endpoint`, so no changes are needed for component-based usage.
 
+pub mod broker_config;
 pub mod bundle;
 pub mod config;
 pub mod consumer;
@@ -32,6 +33,8 @@ pub mod health;
 pub mod manual_commit;
 pub mod producer;
 
+pub use broker_config::KafkaBrokerConfig;
+use broker_config::apply_broker_name;
 pub use bundle::KafkaBundle;
 pub use config::{KafkaConfig, KafkaEndpointConfig, ResolvedKafkaEndpointConfig};
 pub use consumer::KafkaConsumer;
@@ -95,7 +98,14 @@ impl Component for KafkaComponent {
         let mut config = KafkaEndpointConfig::from_uri(uri)?;
         // Apply global config defaults if available
         if let Some(ref global_cfg) = self.config {
+            // Resolve named broker FIRST (before apply_defaults)
+            apply_broker_name(&mut config, global_cfg)?;
+            // Then fill remaining None fields from component defaults
             config.apply_defaults(global_cfg);
+        } else if config.broker_name.is_some() {
+            return Err(CamelError::Config(
+                "brokerName requires global KafkaConfig with brokers_named section".into(),
+            ));
         }
         // Resolve all fields and validate — returns ResolvedKafkaEndpointConfig
         let resolved = config.resolve()?;
@@ -260,6 +270,55 @@ mod tests {
             .create_producer(rt(), &ProducerContext::default())
             .expect("producer should be created from endpoint");
         drop(producer);
+    }
+
+    #[test]
+    fn test_endpoint_with_broker_name() {
+        let mut global_cfg = KafkaConfig::default();
+        global_cfg.brokers_named.insert(
+            "dev".into(),
+            KafkaBrokerConfig {
+                brokers: "dev-cluster:9092".into(),
+                ..KafkaBrokerConfig::default()
+            },
+        );
+        let component = KafkaComponent::with_config(global_cfg).expect("valid config");
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint("kafka:orders?brokerName=dev", &ctx)
+            .expect("endpoint should be created");
+        assert!(endpoint.uri().contains("brokerName=dev"));
+    }
+
+    #[test]
+    fn test_endpoint_without_broker_name_regression() {
+        let component = KafkaComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                "kafka:orders?brokers=localhost:9092&groupId=test-group",
+                &ctx,
+            )
+            .expect("endpoint should be created");
+        assert_eq!(
+            endpoint.uri(),
+            "kafka:orders?brokers=localhost:9092&groupId=test-group"
+        );
+    }
+
+    #[test]
+    fn test_endpoint_broker_name_without_global_config_errors() {
+        let component = KafkaComponent::new();
+        let ctx = NoOpComponentContext;
+        let result = component.create_endpoint("kafka:orders?brokerName=dev", &ctx);
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("brokerName requires global")
+        );
     }
 }
 

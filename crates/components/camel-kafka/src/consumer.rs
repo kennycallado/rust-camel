@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::broker_config::apply_rdkafka_config;
 use crate::config::ResolvedKafkaEndpointConfig;
 use crate::config::apply_security_config;
 use crate::manual_commit::{CommitRequest, KafkaManualCommit};
@@ -401,6 +402,7 @@ async fn run_consumer_loop(
     );
 
     apply_security_config(&config, &mut client_cfg);
+    apply_rdkafka_config(&config, &mut client_cfg);
 
     let consumer: ReadyStreamConsumer = client_cfg
         .create_with_context(ReadyContext { ready })

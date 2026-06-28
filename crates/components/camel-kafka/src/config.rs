@@ -1,7 +1,9 @@
+use crate::broker_config::{KafkaBrokerConfig, validate_rdkafka_config, validate_sasl_creds};
 use camel_component_api::CamelError;
 use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::UriConfig;
 use rdkafka::config::ClientConfig;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Minimum / maximum bounds for numeric URI parameters
@@ -19,7 +21,7 @@ const MIN_COMMIT_TIMEOUT_MS: u32 = 100;
 const MAX_COMMIT_TIMEOUT_MS: u32 = 60_000; // 60 s
 const DEFAULT_COMMIT_TIMEOUT_MS: u32 = 10_000;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SecurityProtocol {
     #[default]
     Plaintext,
@@ -28,7 +30,7 @@ pub enum SecurityProtocol {
     SaslSsl,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SaslAuthType {
     #[default]
     None,
@@ -120,6 +122,10 @@ pub struct KafkaConfig {
     /// Reconnect/backoff policy for the Kafka consumer poll loop.
     #[serde(default = "kafka_reconnect_default")]
     pub reconnect: NetworkRetryPolicy,
+
+    /// Named broker configurations for multi-cluster setups.
+    #[serde(default)]
+    pub brokers_named: HashMap<String, KafkaBrokerConfig>,
 }
 
 fn kafka_reconnect_default() -> NetworkRetryPolicy {
@@ -144,6 +150,7 @@ impl Default for KafkaConfig {
                 max_attempts: 0, // unlimited
                 ..NetworkRetryPolicy::default()
             },
+            brokers_named: HashMap::new(),
         }
     }
 }
@@ -179,6 +186,10 @@ impl KafkaConfig {
     }
     pub fn with_security_protocol(mut self, v: impl Into<String>) -> Self {
         self.security_protocol = v.into();
+        self
+    }
+    pub fn with_brokers_named(mut self, v: HashMap<String, KafkaBrokerConfig>) -> Self {
+        self.brokers_named = v;
         self
     }
 
@@ -241,6 +252,26 @@ impl KafkaConfig {
                 "KafkaConfig.isolation_level must be 'read_uncommitted' or 'read_committed', got '{}'",
                 self.isolation_level
             )));
+        }
+        for (name, broker_cfg) in &self.brokers_named {
+            if broker_cfg.brokers.trim().is_empty() {
+                return Err(CamelError::Config(format!(
+                    "KafkaConfig.brokers_named.{name}.brokers must not be empty"
+                )));
+            }
+            validate_rdkafka_config(&broker_cfg.rdkafka_config).map_err(|e| {
+                CamelError::Config(format!("KafkaConfig.brokers_named.{name}: {e}"))
+            })?;
+            if let Some(auth_type) = broker_cfg.sasl_auth_type {
+                validate_sasl_creds(
+                    auth_type,
+                    &broker_cfg.sasl_username,
+                    &broker_cfg.sasl_password,
+                )
+                .map_err(|e| {
+                    CamelError::Config(format!("KafkaConfig.brokers_named.{name}: {e}"))
+                })?;
+            }
         }
         Ok(())
     }
@@ -377,6 +408,13 @@ pub struct KafkaEndpointConfig {
     /// Reconnect/backoff policy. `None` if not set in URI.
     /// Filled by `apply_defaults()` from global config, then `resolve_defaults()`.
     pub reconnect: Option<NetworkRetryPolicy>,
+
+    /// Named broker reference (from URI param "brokerName").
+    /// Resolved by `apply_broker_name()` before `apply_defaults()`.
+    pub broker_name: Option<String>,
+
+    /// Escape hatch from named broker — carried through to resolved config.
+    pub rdkafka_config: HashMap<String, String>,
 }
 
 impl KafkaEndpointConfig {
@@ -511,6 +549,8 @@ impl KafkaEndpointConfig {
 
         let client_id = parts.params.get("clientId").cloned();
 
+        let broker_name = parts.params.get("brokerName").cloned();
+
         let commit_timeout_ms = match parts.params.get("commitTimeoutMs") {
             Some(raw) => raw.parse::<u32>().map_err(|_| {
                 CamelError::InvalidUri(format!(
@@ -560,6 +600,8 @@ impl KafkaEndpointConfig {
             dlq_topic,
             dlq_max_retries,
             reconnect: None,
+            broker_name,
+            rdkafka_config: HashMap::new(),
         };
 
         config.validate()
@@ -870,6 +912,7 @@ impl KafkaEndpointConfig {
             dlq_topic: cfg.dlq_topic,
             dlq_max_retries: cfg.dlq_max_retries,
             reconnect: cfg.reconnect.unwrap_or_default(),
+            rdkafka_config: cfg.rdkafka_config,
         })
     }
 }
@@ -913,6 +956,10 @@ pub struct ResolvedKafkaEndpointConfig {
 
     /// Reconnect/backoff policy for the consumer poll loop.
     pub reconnect: NetworkRetryPolicy,
+
+    /// Escape-hatch rdkafka config keys not modeled as dedicated fields.
+    /// Populated from named broker config or URI `rdkafkaConfig` params.
+    pub rdkafka_config: HashMap<String, String>,
 }
 
 impl ResolvedKafkaEndpointConfig {
@@ -966,6 +1013,10 @@ impl std::fmt::Debug for ResolvedKafkaEndpointConfig {
             .field("dlq_topic", &self.dlq_topic)
             .field("dlq_max_retries", &self.dlq_max_retries)
             .field("reconnect", &self.reconnect)
+            .field(
+                "rdkafka_config",
+                &format!("{} keys [REDACTED]", self.rdkafka_config.len()),
+            )
             .finish()
     }
 }
@@ -1014,6 +1065,11 @@ impl std::fmt::Debug for KafkaEndpointConfig {
             .field("dlq_topic", &self.dlq_topic)
             .field("dlq_max_retries", &self.dlq_max_retries)
             .field("reconnect", &self.reconnect)
+            .field("broker_name", &self.broker_name)
+            .field(
+                "rdkafka_config",
+                &format!("{} keys [REDACTED]", self.rdkafka_config.len()),
+            )
             .finish()
     }
 }
@@ -1325,6 +1381,27 @@ mod tests {
             "error should mention partitionAssignmentStrategy: {msg}"
         );
     }
+
+    #[test]
+    fn test_config_parses_broker_name() {
+        let c = KafkaEndpointConfig::from_uri("kafka:orders?brokerName=prod").unwrap();
+        assert_eq!(c.broker_name.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn test_config_broker_name_absent_by_default() {
+        let c = KafkaEndpointConfig::from_uri("kafka:orders?brokers=localhost:9092").unwrap();
+        assert!(c.broker_name.is_none());
+    }
+
+    #[test]
+    fn test_config_rdkafka_config_empty_by_default() {
+        let c = KafkaEndpointConfig::from_uri("kafka:orders?brokers=localhost:9092").unwrap();
+        assert!(c.rdkafka_config.is_empty());
+
+        let resolved = c.resolve().unwrap();
+        assert!(resolved.rdkafka_config.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -1466,6 +1543,44 @@ mod security_config_tests {
 }
 
 #[cfg(test)]
+mod serde_roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn test_security_protocol_serde_roundtrip() {
+        let variants = [
+            (SecurityProtocol::Plaintext, "\"Plaintext\""),
+            (SecurityProtocol::Ssl, "\"Ssl\""),
+            (SecurityProtocol::SaslPlaintext, "\"SaslPlaintext\""),
+            (SecurityProtocol::SaslSsl, "\"SaslSsl\""),
+        ];
+        for (variant, expected) in &variants {
+            let serialized = serde_json::to_string(variant).expect("serialize");
+            assert_eq!(&serialized, expected);
+            let deserialized: SecurityProtocol =
+                serde_json::from_str(expected).expect("deserialize");
+            assert_eq!(deserialized, *variant);
+        }
+    }
+
+    #[test]
+    fn test_sasl_auth_type_serde_roundtrip() {
+        let variants = [
+            (SaslAuthType::None, "\"None\""),
+            (SaslAuthType::Plain, "\"Plain\""),
+            (SaslAuthType::ScramSha256, "\"ScramSha256\""),
+            (SaslAuthType::Ssl, "\"Ssl\""),
+        ];
+        for (variant, expected) in &variants {
+            let serialized = serde_json::to_string(variant).expect("serialize");
+            assert_eq!(&serialized, expected);
+            let deserialized: SaslAuthType = serde_json::from_str(expected).expect("deserialize");
+            assert_eq!(deserialized, *variant);
+        }
+    }
+}
+
+#[cfg(test)]
 mod kafka_config_tests {
     use super::*;
 
@@ -1533,6 +1648,8 @@ mod kafka_config_tests {
             dlq_topic: None,
             dlq_max_retries: 3,
             reconnect: None,
+            broker_name: None,
+            rdkafka_config: HashMap::new(),
         };
 
         let defaults = KafkaConfig::default()
@@ -1907,5 +2024,74 @@ mod kafka_config_tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_config_brokers_named() {
+        let toml_str = r#"
+            brokers = "default:9092"
+            [brokers_named]
+            prod = { brokers = "prod1:9092,prod2:9092" }
+            dev = { brokers = "dev:9092" }
+        "#;
+        let cfg: super::KafkaConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.brokers, "default:9092");
+        assert_eq!(cfg.brokers_named.len(), 2);
+        assert_eq!(
+            cfg.brokers_named.get("prod").unwrap().brokers,
+            "prod1:9092,prod2:9092"
+        );
+    }
+
+    #[test]
+    fn test_kafka_config_brokers_named_empty_by_default() {
+        let cfg = super::KafkaConfig::default();
+        assert!(cfg.brokers_named.is_empty());
+    }
+
+    #[test]
+    fn test_kafka_config_validate_rejects_empty_named_broker() {
+        let mut cfg = super::KafkaConfig::default();
+        cfg.brokers_named
+            .insert("bad".into(), KafkaBrokerConfig::default());
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("brokers must not be empty"));
+        assert!(err.to_string().contains("bad"));
+    }
+
+    #[test]
+    fn test_kafka_config_validate_rejects_named_broker_reserved_keys() {
+        let mut cfg = super::KafkaConfig::default();
+        let mut rdkafka = std::collections::HashMap::new();
+        rdkafka.insert("bootstrap.servers".into(), "evil:9092".into());
+        cfg.brokers_named.insert(
+            "reserved".into(),
+            KafkaBrokerConfig {
+                brokers: "broker:9092".into(),
+                rdkafka_config: rdkafka,
+                ..Default::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("reserved"));
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn test_kafka_config_validate_rejects_named_broker_missing_sasl_password() {
+        let mut cfg = super::KafkaConfig::default();
+        cfg.brokers_named.insert(
+            "nopass".into(),
+            KafkaBrokerConfig {
+                brokers: "broker:9092".into(),
+                sasl_auth_type: Some(SaslAuthType::Plain),
+                sasl_username: Some("user".into()),
+                sasl_password: None,
+                ..Default::default()
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("sasl_password"));
+        assert!(err.to_string().contains("nopass"));
     }
 }
