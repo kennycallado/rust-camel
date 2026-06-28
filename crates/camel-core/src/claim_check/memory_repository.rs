@@ -6,12 +6,12 @@
 
 use camel_api::CamelError;
 use camel_api::ClaimCheckRepository;
-use camel_api::body::Body;
+use camel_api::message::Message;
 use dashmap::DashMap;
 use std::collections::VecDeque;
 
-/// In-memory claim check repository backed by `DashMap<String, Body>` for
-/// single-value keys and `DashMap<String, VecDeque<Body>>` for LIFO stacks.
+/// In-memory claim check repository backed by `DashMap<String, Message>` for
+/// single-value keys and `DashMap<String, VecDeque<Message>>` for LIFO stacks.
 ///
 /// # Thread safety
 ///
@@ -21,9 +21,9 @@ use std::collections::VecDeque;
 pub struct MemoryClaimCheckRepository {
     name: String,
     /// Single-value keys (set/get/get_and_remove/remove).
-    keys: DashMap<String, Body>,
+    keys: DashMap<String, Message>,
     /// Stack keys for push/pop.
-    stacks: DashMap<String, VecDeque<Body>>,
+    stacks: DashMap<String, VecDeque<Message>>,
 }
 
 impl MemoryClaimCheckRepository {
@@ -43,19 +43,19 @@ impl ClaimCheckRepository for MemoryClaimCheckRepository {
         &self.name
     }
 
-    async fn set(&self, key: &str, payload: Body) -> Result<(), CamelError> {
+    async fn set(&self, key: &str, payload: Message) -> Result<(), CamelError> {
         self.keys.insert(key.to_string(), payload);
         Ok(())
     }
 
-    async fn get(&self, key: &str) -> Result<Body, CamelError> {
+    async fn get(&self, key: &str) -> Result<Message, CamelError> {
         self.keys
             .get(key)
             .map(|r| r.clone())
             .ok_or_else(|| CamelError::RouteError(format!("Claim check key not found: {key}")))
     }
 
-    async fn get_and_remove(&self, key: &str) -> Result<Body, CamelError> {
+    async fn get_and_remove(&self, key: &str) -> Result<Message, CamelError> {
         self.keys
             .remove(key)
             .map(|(_, v)| v)
@@ -67,7 +67,7 @@ impl ClaimCheckRepository for MemoryClaimCheckRepository {
         Ok(())
     }
 
-    async fn push(&self, key: &str, payload: Body) -> Result<(), CamelError> {
+    async fn push(&self, key: &str, payload: Message) -> Result<(), CamelError> {
         self.stacks
             .entry(key.to_string())
             .or_default()
@@ -75,7 +75,7 @@ impl ClaimCheckRepository for MemoryClaimCheckRepository {
         Ok(())
     }
 
-    async fn pop(&self, key: &str) -> Result<Body, CamelError> {
+    async fn pop(&self, key: &str) -> Result<Message, CamelError> {
         self.stacks
             .entry(key.to_string())
             .or_default()
@@ -89,6 +89,7 @@ impl ClaimCheckRepository for MemoryClaimCheckRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::body::Body;
 
     fn new_repo() -> MemoryClaimCheckRepository {
         MemoryClaimCheckRepository::new("test")
@@ -97,20 +98,20 @@ mod tests {
     #[tokio::test]
     async fn set_then_get() {
         let repo = new_repo();
-        let payload = Body::Text("hello".to_string());
-        repo.set("key-1", payload.clone()).await.unwrap();
+        let msg = Message::new(Body::Text("hello".to_string()));
+        repo.set("key-1", msg.clone()).await.unwrap();
         let result = repo.get("key-1").await.unwrap();
-        assert_eq!(result, payload);
+        assert_eq!(result.body, Body::Text("hello".to_string()));
     }
 
     #[tokio::test]
     async fn get_and_remove_removes() {
         let repo = new_repo();
-        let payload = Body::Text("will-be-removed".to_string());
+        let payload = Message::new(Body::Text("will-be-removed".to_string()));
         repo.set("key-1", payload.clone()).await.unwrap();
 
         let retrieved = repo.get_and_remove("key-1").await.unwrap();
-        assert_eq!(retrieved, payload);
+        assert_eq!(retrieved.body, Body::Text("will-be-removed".to_string()));
 
         // Second get should fail
         let err = repo.get("key-1").await.unwrap_err();
@@ -123,18 +124,18 @@ mod tests {
     #[tokio::test]
     async fn push_pop_lifo() {
         let repo = new_repo();
-        let first = Body::Text("first".to_string());
-        let second = Body::Text("second".to_string());
+        let first = Message::new(Body::Text("first".to_string()));
+        let second = Message::new(Body::Text("second".to_string()));
 
         repo.push("stack-1", first).await.unwrap();
         repo.push("stack-1", second.clone()).await.unwrap();
 
         // Pop should return the last pushed (LIFO)
         let popped = repo.pop("stack-1").await.unwrap();
-        assert_eq!(popped, second);
+        assert_eq!(popped.body, Body::Text("second".to_string()));
 
         let popped = repo.pop("stack-1").await.unwrap();
-        assert_eq!(popped, Body::Text("first".to_string()));
+        assert_eq!(popped.body, Body::Text("first".to_string()));
     }
 
     #[tokio::test]
@@ -166,10 +167,14 @@ mod tests {
     #[tokio::test]
     async fn set_overwrites() {
         let repo = new_repo();
-        repo.set("k", Body::Text("old".into())).await.unwrap();
-        repo.set("k", Body::Text("new".into())).await.unwrap();
+        repo.set("k", Message::new(Body::Text("old".into())))
+            .await
+            .unwrap();
+        repo.set("k", Message::new(Body::Text("new".into())))
+            .await
+            .unwrap();
         let body = repo.get("k").await.unwrap();
-        assert_eq!(body, Body::Text("new".into()));
+        assert_eq!(body.body, Body::Text("new".into()));
     }
 
     #[test]

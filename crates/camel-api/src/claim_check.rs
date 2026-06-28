@@ -1,11 +1,11 @@
 //! ClaimCheckRepository trait — pluggable payload store for Claim Check EIP.
 //!
-//! Contract C1: `set()` and `get()` work with `Body` payloads (NOT key-only
+//! Contract C1: `set()` and `get()` work with `Message` payloads (NOT key-only
 //! like `IdempotentRepository`). The repository owns the payload until
 //! `remove()` or `get_and_remove()` is called.
 
 use crate::CamelError;
-use crate::body::Body;
+use crate::message::Message;
 
 /// Pluggable payload store for the Claim Check EIP.
 ///
@@ -29,33 +29,34 @@ pub trait ClaimCheckRepository: Send + Sync + std::fmt::Debug + 'static {
     fn name(&self) -> &str;
 
     /// Store `payload` under `key`. Overwrites any existing value.
-    async fn set(&self, key: &str, payload: Body) -> Result<(), CamelError>;
+    async fn set(&self, key: &str, payload: Message) -> Result<(), CamelError>;
 
     /// Retrieve payload by key without removing it.
     ///
     /// Returns `Err(CamelError::NotFound(...))` if the key does not exist.
-    async fn get(&self, key: &str) -> Result<Body, CamelError>;
+    async fn get(&self, key: &str) -> Result<Message, CamelError>;
 
     /// Retrieve and remove in one atomic step.
     ///
     /// Returns `Err(CamelError::NotFound(...))` if the key does not exist.
-    async fn get_and_remove(&self, key: &str) -> Result<Body, CamelError>;
+    async fn get_and_remove(&self, key: &str) -> Result<Message, CamelError>;
 
     /// Remove payload by key. Succeeds even if the key does not exist.
     async fn remove(&self, key: &str) -> Result<(), CamelError>;
 
     /// Push payload onto a LIFO stack for `key`.
-    async fn push(&self, key: &str, payload: Body) -> Result<(), CamelError>;
+    async fn push(&self, key: &str, payload: Message) -> Result<(), CamelError>;
 
     /// Pop payload from a LIFO stack for `key`.
     ///
     /// Returns `Err(CamelError::NotFound(...))` if the stack is empty.
-    async fn pop(&self, key: &str) -> Result<Body, CamelError>;
+    async fn pop(&self, key: &str) -> Result<Message, CamelError>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body::Body;
     use std::sync::Arc;
 
     /// Stub that returns empty bodies for all read operations.
@@ -68,28 +69,28 @@ mod tests {
             "stub"
         }
 
-        async fn set(&self, _key: &str, _payload: Body) -> Result<(), CamelError> {
+        async fn set(&self, _key: &str, _payload: Message) -> Result<(), CamelError> {
             Ok(())
         }
 
-        async fn get(&self, _key: &str) -> Result<Body, CamelError> {
-            Ok(Body::Empty)
+        async fn get(&self, _key: &str) -> Result<Message, CamelError> {
+            Ok(Message::new(Body::Empty))
         }
 
-        async fn get_and_remove(&self, _key: &str) -> Result<Body, CamelError> {
-            Ok(Body::Empty)
+        async fn get_and_remove(&self, _key: &str) -> Result<Message, CamelError> {
+            Ok(Message::new(Body::Empty))
         }
 
         async fn remove(&self, _key: &str) -> Result<(), CamelError> {
             Ok(())
         }
 
-        async fn push(&self, _key: &str, _payload: Body) -> Result<(), CamelError> {
+        async fn push(&self, _key: &str, _payload: Message) -> Result<(), CamelError> {
             Ok(())
         }
 
-        async fn pop(&self, _key: &str) -> Result<Body, CamelError> {
-            Ok(Body::Empty)
+        async fn pop(&self, _key: &str) -> Result<Message, CamelError> {
+            Ok(Message::new(Body::Empty))
         }
     }
 
@@ -103,16 +104,18 @@ mod tests {
     #[tokio::test]
     async fn stub_set_and_get() {
         let repo = StubRepo;
-        repo.set("k", Body::Text("v".into())).await.unwrap();
+        repo.set("k", Message::new(Body::Text("v".into())))
+            .await
+            .unwrap();
         let body = repo.get("k").await.unwrap();
-        assert!(body.is_empty());
+        assert!(body.body.is_empty());
     }
 
     #[tokio::test]
     async fn stub_get_and_remove() {
         let repo = StubRepo;
         let body = repo.get_and_remove("k").await.unwrap();
-        assert!(body.is_empty());
+        assert!(body.body.is_empty());
     }
 
     #[tokio::test]
@@ -124,8 +127,10 @@ mod tests {
     #[tokio::test]
     async fn stub_push_pop() {
         let repo = StubRepo;
-        repo.push("k", Body::Text("v".into())).await.unwrap();
+        repo.push("k", Message::new(Body::Text("v".into())))
+            .await
+            .unwrap();
         let body = repo.pop("k").await.unwrap();
-        assert!(body.is_empty());
+        assert!(body.body.is_empty());
     }
 }

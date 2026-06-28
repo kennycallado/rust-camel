@@ -123,18 +123,22 @@ fn claim_check_unknown_operation_rejected() {
 }
 
 #[test]
-fn claim_check_filter_rejected_at_parse_time() {
+fn claim_check_filter_accepted_and_stored() {
     let yaml = claim_check_yaml(
         r#"claim_check:
             repository: memory
             operation: set
             key: "${header.claimKey}"
-            filter: '${body.field}'"#,
+            filter: "body,header:foo*""#,
     );
-    let err = yaml::parse_yaml_to_declarative(&yaml).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("filter not yet supported"),
-        "expected validation error about filter, got: {msg}"
-    );
+    let routes = yaml::parse_yaml_to_declarative(&yaml).unwrap();
+    assert_eq!(routes.len(), 1);
+    let route = &routes[0];
+    assert_eq!(route.steps.len(), 1);
+    match &route.steps[0] {
+        DeclarativeStep::ClaimCheck(def) => {
+            assert_eq!(def.filter.as_deref(), Some("body,header:foo*"));
+        }
+        other => panic!("expected ClaimCheck step, got {other:?}"),
+    }
 }

@@ -1,14 +1,14 @@
 # ADR-0028: Claim Check Repository Trait Boundary
 
 **Date:** 2026-06-27
-**Status:** Accepted (Phase 2)
-**References:** ADR-0022, ADR-0023
+**Status:** Amended by rc-7qf (originally Accepted, Phase 2)
+**References:** ADR-0022, ADR-0023, rc-7qf
 
 ## Decision
 
 ### Separate `ClaimCheckRepository` trait (not on `IdempotentRepository`)
 
-Claim Check EIP stashes large message payloads by key so the Exchange carries only a lightweight reference. This is a payload-bearing pattern (`set`/`get` with `Body` values), structurally distinct from the Idempotent Consumer (key-only `contains`/`add`). Each pattern owns its own trait; the shared `NamedRegistry<T>` wiring pattern is cross-referenced but not inherited.
+Claim Check EIP stashes large message payloads by key so the Exchange carries only a lightweight reference. This is a payload-bearing pattern (`set`/`get` with `Message` values), structurally distinct from the Idempotent Consumer (key-only `contains`/`add`). Each pattern owns its own trait; the shared `NamedRegistry<T>` wiring pattern is cross-referenced but not inherited.
 
 File: `crates/camel-api/src/claim_check.rs:16-52`
 
@@ -16,20 +16,20 @@ File: `crates/camel-api/src/claim_check.rs:16-52`
 #[async_trait]
 pub trait ClaimCheckRepository: Send + Sync + std::fmt::Debug + 'static {
     fn name(&self) -> &str;
-    async fn set(&self, key: &str, payload: Body) -> Result<(), CamelError>;
-    async fn get(&self, key: &str) -> Result<Body, CamelError>;
-    async fn get_and_remove(&self, key: &str) -> Result<Body, CamelError>;
+    async fn set(&self, key: &str, payload: Message) -> Result<(), CamelError>;
+    async fn get(&self, key: &str) -> Result<Message, CamelError>;
+    async fn get_and_remove(&self, key: &str) -> Result<Message, CamelError>;
     async fn remove(&self, key: &str) -> Result<(), CamelError>;
-    async fn push(&self, key: &str, payload: Body) -> Result<(), CamelError>;
-    async fn pop(&self, key: &str) -> Result<Body, CamelError>;
+    async fn push(&self, key: &str, payload: Message) -> Result<(), CamelError>;
+    async fn pop(&self, key: &str) -> Result<Message, CamelError>;
 }
 ```
 
-### Payload type: `Body` (NOT `bytes::Bytes`)
+### Payload type: `Message` (body + headers)
 
-The trait uses `camel_api::Body` as its payload type, preserving `Text`, `Json`, `Xml`, and `Stream` variants alongside `Bytes`. Callers who need raw bytes materialize via `Body::into_bytes()` or `Body::materialize()`.
+The trait stores `camel_api::Message` (body + headers) instead of `Body` alone. This preserves headers across Claim Check operations — a Set stashes the full `exchange.input` Message, and a Get can selectively merge back headers via the `filter` option. Callers who only care about the body access `stashed.body`.
 
-File: `crates/camel-api/src/claim_check.rs:13` (import), `crates/camel-api/src/body.rs:162` (Body enum).
+File: `crates/camel-api/src/claim_check.rs:13` (import), `crates/camel-api/src/message.rs:8` (Message struct).
 
 ### Stack operations: `push` / `pop`
 
@@ -83,9 +83,16 @@ File: `crates/camel-api/src/step_lifecycle.rs:31` (StepLifecycle trait).
 
 `Body` implements `Clone` (file: `crates/camel-api/src/body.rs:178-189`). The memory repository stores `Body` values directly (not `Arc<Body>`). This is safe because `Body` variants clone cheaply: `Bytes` (Arc-backed copy-on-write), `Text`/`Xml` (String clone), `Json` (serde_json::Value clone), `Stream` (Arc<Mutex<Option<...>>> clone — shared stream handle).
 
-### Filter deferred
+### Filter for selective merge-back (rc-7qf)
 
-Phase 2 implements whole-body store/retrieve only. Partial-body filter (selectively stashing certain exchange properties/headers while keeping others inline) is deferred to a follow-up issue (bd rc-7qf). The current API is additive — `set`/`get` with full `Body` — and does not preclude a future `FilteredClaimCheckRepository` wrapper.
+Phase 2 (rc-blw) implemented full-Message store/retrieve. Phase 2b (rc-7qf) adds a `filter` option on Get/GetAndRemove/Pop that controls which parts of the stashed `Message` are merged back into the current exchange:
+
+- `body`: Include (restore), Exclude (keep current), Remove (clear body)
+- `headers`: Include all, Exclude all, Remove all, or by pattern (include/exclude/remove matching header keys)
+- Patterns support exact match, `*` prefix wildcard, and regex
+- `attachments` keyword is parsed as no-op (no attachment support in Phase 2b)
+
+The filter is parsed at route-compile time into `ClaimCheckFilter` (`camel-processor`). `ClaimCheckService::call()` applies it via the `merge_stashed()` helper. No-filter = backward-compatible body-only restore.
 
 ### `CamelError::RouteError` for "not found"
 

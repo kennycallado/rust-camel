@@ -425,6 +425,8 @@ pub struct ClaimCheckStepDef {
     pub operation: String,
     /// Expression that extracts the claim-check key from the exchange.
     pub key: LanguageExpressionDef,
+    /// Optional filter string for selective merge-back during checkout operations.
+    pub filter: Option<String>,
 }
 
 /// Idempotent Consumer EIP step definition.

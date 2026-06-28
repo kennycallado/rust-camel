@@ -1226,11 +1226,6 @@ pub(crate) fn route_step_to_declarative_step(
                     )));
                 }
             }
-            if filter.is_some() {
-                return Err(CamelError::ValidationError(
-                    "claim_check filter not yet supported".into(),
-                ));
-            }
             Ok(DeclarativeStep::ClaimCheck(ClaimCheckStepDef {
                 repository,
                 operation,
@@ -1238,6 +1233,7 @@ pub(crate) fn route_step_to_declarative_step(
                     language: "simple".into(),
                     source: key,
                 },
+                filter,
             }))
         }
         RouteDslStep::Sampling(SamplingStep { sampling }) => {
@@ -2480,7 +2476,7 @@ routes:
     }
 
     #[test]
-    fn test_parse_yaml_claim_check_filter_rejected() {
+    fn test_parse_yaml_claim_check_filter_accepted() {
         let yaml = r#"
 routes:
   - id: "cc-filter"
@@ -2492,13 +2488,14 @@ routes:
           key: "${header.claimKey}"
           filter: "someFilter"
 "#;
-        let result = parse_yaml_to_declarative(yaml);
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(
-            err.to_string().contains("filter"),
-            "error should mention filter rejection: {err}"
-        );
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::ClaimCheck(def) => {
+                assert_eq!(def.filter.as_deref(), Some("someFilter"));
+            }
+            other => panic!("expected ClaimCheck, got {other:?}"),
+        }
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::task::{Context, Poll};
 use tower::Service;
 
 use camel_api::body::Body;
-use camel_api::{CamelError, ClaimCheckRepository, Exchange};
+use camel_api::{CamelError, ClaimCheckRepository, Exchange, Message};
 
 /// Extracts a claim-check key string from the exchange (e.g. from header/property/body).
 /// Returns an error if the key cannot be resolved (null or empty).
@@ -43,12 +43,15 @@ pub enum ClaimCheckOp {
 /// Claim Check EIP processor.
 ///
 /// Transforms the exchange body to/from a `ClaimCheckRepository` using the
-/// configured operation and key expression.
+/// configured operation and key expression. An optional `filter` controls
+/// which parts of the stashed Message are merged back during checkout
+/// operations (Get/GetAndRemove/Pop).
 #[derive(Clone)]
 pub struct ClaimCheckService {
     repository: Arc<dyn ClaimCheckRepository>,
     operation: ClaimCheckOp,
     key_expression: KeyExpression,
+    filter: Option<ClaimCheckFilter>,
 }
 
 impl std::fmt::Debug for ClaimCheckService {
@@ -56,12 +59,13 @@ impl std::fmt::Debug for ClaimCheckService {
         f.debug_struct("ClaimCheckService")
             .field("repository", &self.repository.name())
             .field("operation", &self.operation)
+            .field("filter", &self.filter)
             .finish()
     }
 }
 
 impl ClaimCheckService {
-    /// Create a new `ClaimCheckService`.
+    /// Create a new `ClaimCheckService` without a filter.
     pub fn new(
         repository: Arc<dyn ClaimCheckRepository>,
         operation: ClaimCheckOp,
@@ -71,6 +75,61 @@ impl ClaimCheckService {
             repository,
             operation,
             key_expression,
+            filter: None,
+        }
+    }
+
+    /// Attach a filter for selective merge-back during checkout operations.
+    pub fn with_filter(mut self, filter: ClaimCheckFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+}
+
+/// Merge cached headers from a stashed message into the current message
+/// according to filter rules. Called from the async `call` future with
+/// all data cloned in advance.
+fn merge_stashed(current: &mut Message, stashed: &Message, filter: &ClaimCheckFilter) {
+    match filter.body {
+        FilterAction::Include => current.body = stashed.body.clone(),
+        FilterAction::Exclude => {}
+        FilterAction::Remove => current.body = Body::Empty,
+    }
+
+    match &filter.headers_action {
+        HeadersAction::All(action) => match action {
+            FilterAction::Include => {
+                for (k, v) in &stashed.headers {
+                    current.headers.insert(k.clone(), v.clone());
+                }
+            }
+            FilterAction::Exclude => {}
+            FilterAction::Remove => current.headers.clear(),
+        },
+        HeadersAction::ByPattern {
+            include,
+            exclude,
+            remove,
+        } => {
+            if !include.is_empty() {
+                for (k, v) in &stashed.headers {
+                    if include.iter().any(|p| p.matches(k)) {
+                        current.headers.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            if !exclude.is_empty() {
+                for (k, v) in &stashed.headers {
+                    if !exclude.iter().any(|p| p.matches(k)) {
+                        current.headers.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            if !remove.is_empty() {
+                current
+                    .headers
+                    .retain(|k, _| !remove.iter().any(|p| p.matches(k)));
+            }
         }
     }
 }
@@ -88,35 +147,48 @@ impl Service<Exchange> for ClaimCheckService {
         let repository = self.repository.clone();
         let operation = self.operation.clone();
         let key_result = (self.key_expression)(&exchange);
+        let filter = self.filter.clone();
 
         Box::pin(async move {
             let key = key_result?;
             match operation {
                 ClaimCheckOp::Set => {
-                    let body = std::mem::replace(&mut exchange.input.body, Body::Empty);
-                    repository.set(&key, body).await?;
+                    let stashed = exchange.input.clone();
+                    repository.set(&key, stashed).await?;
                     exchange.input.body = Body::Text(key);
                     Ok(exchange)
                 }
                 ClaimCheckOp::Get => {
-                    let body = repository.get(&key).await?;
-                    exchange.input.body = body;
+                    let stashed = repository.get(&key).await?;
+                    if let Some(ref f) = filter {
+                        merge_stashed(&mut exchange.input, &stashed, f);
+                    } else {
+                        exchange.input.body = stashed.body;
+                    }
                     Ok(exchange)
                 }
                 ClaimCheckOp::GetAndRemove => {
-                    let body = repository.get_and_remove(&key).await?;
-                    exchange.input.body = body;
+                    let stashed = repository.get_and_remove(&key).await?;
+                    if let Some(ref f) = filter {
+                        merge_stashed(&mut exchange.input, &stashed, f);
+                    } else {
+                        exchange.input.body = stashed.body;
+                    }
                     Ok(exchange)
                 }
                 ClaimCheckOp::Push => {
-                    let body = std::mem::replace(&mut exchange.input.body, Body::Empty);
-                    repository.push(&key, body).await?;
+                    let stashed = exchange.input.clone();
+                    repository.push(&key, stashed).await?;
                     exchange.input.body = Body::Text(key);
                     Ok(exchange)
                 }
                 ClaimCheckOp::Pop => {
-                    let body = repository.pop(&key).await?;
-                    exchange.input.body = body;
+                    let stashed = repository.pop(&key).await?;
+                    if let Some(ref f) = filter {
+                        merge_stashed(&mut exchange.input, &stashed, f);
+                    } else {
+                        exchange.input.body = stashed.body;
+                    }
                     Ok(exchange)
                 }
             }
@@ -124,223 +196,193 @@ impl Service<Exchange> for ClaimCheckService {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use camel_api::{Exchange, Message};
-    use std::collections::{HashMap, VecDeque};
-    use std::sync::Mutex;
-    use tower::ServiceExt;
+fn has_regex_metachars(s: &str) -> bool {
+    s.contains(['^', '$', '(', ')', '[', ']', '{', '}', '|', '+', '.', '\\'])
+}
 
-    /// In-memory test repository backed by `Mutex<HashMap>`.
-    #[derive(Debug)]
-    struct TestRepo {
-        name: String,
-        keys: Mutex<HashMap<String, Body>>,
-        stacks: Mutex<HashMap<String, VecDeque<Body>>>,
+#[derive(Debug, Clone)]
+pub(crate) enum HeaderPattern {
+    All,
+    Prefix(String),
+    Exact(String),
+    Regex(regex::Regex),
+}
+
+impl PartialEq for HeaderPattern {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::All, Self::All) => true,
+            (Self::Prefix(a), Self::Prefix(b)) => a == b,
+            (Self::Exact(a), Self::Exact(b)) => a == b,
+            (Self::Regex(a), Self::Regex(b)) => a.as_str() == b.as_str(),
+            _ => false,
+        }
+    }
+}
+
+impl HeaderPattern {
+    fn compile(pattern: &str) -> Result<Self, FilterParseError> {
+        if pattern == "*" {
+            return Ok(Self::All);
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return Ok(Self::Prefix(prefix.to_string()));
+        }
+        if has_regex_metachars(pattern) {
+            match regex::Regex::new(pattern) {
+                Ok(re) => Ok(Self::Regex(re)),
+                Err(_) => Err(FilterParseError::InvalidPattern(pattern.to_string())),
+            }
+        } else {
+            Ok(Self::Exact(pattern.to_string()))
+        }
     }
 
-    impl TestRepo {
-        fn new(name: impl Into<String>) -> Self {
-            Self {
-                name: name.into(),
-                keys: Mutex::new(HashMap::new()),
-                stacks: Mutex::new(HashMap::new()),
+    fn matches(&self, header_key: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Prefix(prefix) => header_key.starts_with(prefix),
+            Self::Exact(exact) => header_key == exact,
+            Self::Regex(re) => re.is_match(header_key),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimCheckFilter {
+    pub body: FilterAction,
+    pub headers_action: HeadersAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterAction {
+    Include,
+    Exclude,
+    Remove,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeadersAction {
+    All(FilterAction),
+    ByPattern {
+        include: Vec<HeaderPattern>,
+        exclude: Vec<HeaderPattern>,
+        remove: Vec<HeaderPattern>,
+    },
+}
+
+#[derive(Debug)]
+pub enum FilterParseError {
+    InvalidToken(String),
+    InvalidPattern(String),
+    MixedIncludeExclude,
+}
+
+impl std::fmt::Display for FilterParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidToken(tok) => write!(f, "invalid filter token '{tok}'"),
+            Self::InvalidPattern(pat) => write!(f, "invalid header pattern '{pat}'"),
+            Self::MixedIncludeExclude => {
+                write!(f, "cannot mix include (+) and exclude (-) header patterns")
             }
         }
     }
+}
 
-    #[async_trait::async_trait]
-    impl ClaimCheckRepository for TestRepo {
-        fn name(&self) -> &str {
-            &self.name
+impl ClaimCheckFilter {
+    /// Parse a Camel 4.x filter string into structured rules.
+    /// `attachments` tokens are accepted as no-op but do not affect body/headers defaults.
+    pub fn parse(input: &str) -> Result<Self, FilterParseError> {
+        let mut body_action: Option<FilterAction> = None;
+        let mut headers_action: Option<HeadersAction> = None;
+        let mut has_positive_include = false;
+
+        for token in input.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+
+            let (prefix, rule) = if let Some(rest) = token.strip_prefix("--") {
+                (FilterAction::Remove, rest)
+            } else if let Some(rest) = token.strip_prefix('-') {
+                (FilterAction::Exclude, rest)
+            } else {
+                let rest = token.strip_prefix('+').unwrap_or(token);
+                (FilterAction::Include, rest)
+            };
+
+            match rule {
+                "body" => {
+                    if prefix == FilterAction::Include {
+                        has_positive_include = true;
+                    }
+                    body_action = Some(prefix);
+                }
+                "headers" | "header" => {
+                    if prefix == FilterAction::Include {
+                        has_positive_include = true;
+                    }
+                    headers_action = Some(HeadersAction::All(prefix));
+                }
+                "attachments" | "attachment" => {
+                    // Accepted as no-op; never affects has_positive_include or defaults
+                }
+                r if r.starts_with("header:") || r.starts_with("headers:") => {
+                    let pattern_str = r.split_once(':').unwrap().1;
+                    let pattern = HeaderPattern::compile(pattern_str)?;
+
+                    if prefix == FilterAction::Include {
+                        has_positive_include = true;
+                    }
+
+                    let (mut include, mut exclude, mut remove) = match headers_action.take() {
+                        Some(HeadersAction::ByPattern {
+                            include,
+                            exclude,
+                            remove,
+                        }) => (include, exclude, remove),
+                        _ => (vec![], vec![], vec![]),
+                    };
+                    match prefix {
+                        FilterAction::Include => {
+                            if !exclude.is_empty() {
+                                return Err(FilterParseError::MixedIncludeExclude);
+                            }
+                            include.push(pattern);
+                        }
+                        FilterAction::Exclude => {
+                            if !include.is_empty() {
+                                return Err(FilterParseError::MixedIncludeExclude);
+                            }
+                            exclude.push(pattern);
+                        }
+                        FilterAction::Remove => remove.push(pattern),
+                    }
+                    headers_action = Some(HeadersAction::ByPattern {
+                        include,
+                        exclude,
+                        remove,
+                    });
+                }
+                other => return Err(FilterParseError::InvalidToken(other.to_string())),
+            }
         }
 
-        async fn set(&self, key: &str, payload: Body) -> Result<(), CamelError> {
-            self.keys
-                .lock()
-                .expect("mutex poisoned") // allow-unwrap
-                .insert(key.to_string(), payload);
-            Ok(())
-        }
+        let default_if_omitted = if has_positive_include {
+            FilterAction::Exclude
+        } else {
+            FilterAction::Include
+        };
 
-        async fn get(&self, key: &str) -> Result<Body, CamelError> {
-            self.keys
-                .lock()
-                .expect("mutex poisoned") // allow-unwrap
-                .get(key)
-                .cloned()
-                .ok_or_else(|| CamelError::RouteError(format!("Claim check key not found: {key}")))
-        }
-
-        async fn get_and_remove(&self, key: &str) -> Result<Body, CamelError> {
-            self.keys
-                .lock()
-                .expect("mutex poisoned") // allow-unwrap
-                .remove(key)
-                .ok_or_else(|| CamelError::RouteError(format!("Claim check key not found: {key}")))
-        }
-
-        async fn remove(&self, key: &str) -> Result<(), CamelError> {
-            self.keys
-                .lock()
-                .expect("mutex poisoned") // allow-unwrap
-                .remove(key);
-            Ok(())
-        }
-
-        async fn push(&self, key: &str, payload: Body) -> Result<(), CamelError> {
-            self.stacks
-                .lock()
-                .expect("mutex poisoned") // allow-unwrap
-                .entry(key.to_string())
-                .or_default()
-                .push_back(payload);
-            Ok(())
-        }
-
-        async fn pop(&self, key: &str) -> Result<Body, CamelError> {
-            self.stacks
-                .lock()
-                .expect("mutex poisoned") // allow-unwrap
-                .get_mut(key)
-                .and_then(|s| s.pop_back())
-                .ok_or_else(|| {
-                    CamelError::RouteError(format!("Claim check stack empty for key: {key}"))
-                })
-        }
-    }
-
-    fn make_key_expr(key: &str) -> KeyExpression {
-        let k = key.to_string();
-        Arc::new(move |_ex: &Exchange| Ok(k.clone()))
-    }
-
-    fn make_exchange(body: Body) -> Exchange {
-        Exchange::new(Message::new(body))
-    }
-
-    #[tokio::test]
-    async fn set_moves_body_to_repo() {
-        let repo = Arc::new(TestRepo::new("test"));
-        let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Set, make_key_expr("mykey"));
-        let exchange = make_exchange(Body::Text("secret-data".to_string()));
-
-        let result = svc.oneshot(exchange).await.unwrap();
-        // Exchange body is now the key reference
-        assert_eq!(result.input.body, Body::Text("mykey".to_string()));
-
-        // The original body is stashed in the repo
-        let stashed = repo.get("mykey").await.unwrap();
-        assert_eq!(stashed, Body::Text("secret-data".to_string()));
-    }
-
-    #[tokio::test]
-    async fn get_restores_body() {
-        let repo = Arc::new(TestRepo::new("test"));
-        repo.set("k1", Body::Text("stashed-body".to_string()))
-            .await
-            .unwrap();
-
-        let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Get, make_key_expr("k1"));
-        let exchange = make_exchange(Body::Empty);
-
-        let result = svc.oneshot(exchange).await.unwrap();
-        assert_eq!(result.input.body, Body::Text("stashed-body".to_string()));
-    }
-
-    #[tokio::test]
-    async fn get_and_remove_restores_and_deletes() {
-        let repo = Arc::new(TestRepo::new("test"));
-        repo.set("k2", Body::Text("will-be-removed".to_string()))
-            .await
-            .unwrap();
-
-        let svc = ClaimCheckService::new(
-            repo.clone(),
-            ClaimCheckOp::GetAndRemove,
-            make_key_expr("k2"),
-        );
-        let exchange = make_exchange(Body::Empty);
-
-        let result = svc.oneshot(exchange).await.unwrap();
-        assert_eq!(result.input.body, Body::Text("will-be-removed".to_string()));
-
-        // Repo should be empty after get_and_remove
-        let err = repo.get("k2").await.unwrap_err();
-        assert!(
-            matches!(&err, CamelError::RouteError(msg) if msg.contains("not found")),
-            "expected RouteError with 'not found', got: {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn push_pop_lifo() {
-        let repo = Arc::new(TestRepo::new("test"));
-        let first = Body::Text("first".to_string());
-        let second = Body::Text("second".to_string());
-
-        // Push first
-        let svc =
-            ClaimCheckService::new(repo.clone(), ClaimCheckOp::Push, make_key_expr("stack-key"));
-        svc.oneshot(make_exchange(first)).await.unwrap();
-
-        // Push second
-        let svc =
-            ClaimCheckService::new(repo.clone(), ClaimCheckOp::Push, make_key_expr("stack-key"));
-        svc.oneshot(make_exchange(second.clone())).await.unwrap();
-
-        // Pop should return second (LIFO)
-        let svc =
-            ClaimCheckService::new(repo.clone(), ClaimCheckOp::Pop, make_key_expr("stack-key"));
-        let result = svc.oneshot(make_exchange(Body::Empty)).await.unwrap();
-        assert_eq!(result.input.body, second);
-
-        // Pop should return first
-        let svc =
-            ClaimCheckService::new(repo.clone(), ClaimCheckOp::Pop, make_key_expr("stack-key"));
-        let result = svc.oneshot(make_exchange(Body::Empty)).await.unwrap();
-        assert_eq!(result.input.body, Body::Text("first".to_string()));
-    }
-
-    #[tokio::test]
-    async fn get_missing_propagates_error() {
-        let repo = Arc::new(TestRepo::new("test"));
-        let svc = ClaimCheckService::new(
-            repo.clone(),
-            ClaimCheckOp::Get,
-            make_key_expr("nonexistent"),
-        );
-        let exchange = make_exchange(Body::Empty);
-        let result = svc.oneshot(exchange).await;
-        assert!(
-            matches!(&result, Err(CamelError::RouteError(msg)) if msg.contains("not found")),
-            "expected Err with 'not found', got: {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn set_overwrites_existing() {
-        let repo = Arc::new(TestRepo::new("test"));
-        repo.set("k", Body::Text("old".to_string())).await.unwrap();
-
-        let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Set, make_key_expr("k"));
-        let exchange = make_exchange(Body::Text("new".to_string()));
-        svc.oneshot(exchange).await.unwrap();
-
-        let stashed = repo.get("k").await.unwrap();
-        assert_eq!(stashed, Body::Text("new".to_string()));
-    }
-
-    #[tokio::test]
-    async fn pop_empty_stack_propagates_error() {
-        let repo = Arc::new(TestRepo::new("test"));
-        let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Pop, make_key_expr("empty"));
-        let exchange = make_exchange(Body::Empty);
-        let result = svc.oneshot(exchange).await;
-        assert!(
-            matches!(&result, Err(CamelError::RouteError(msg)) if msg.contains("empty")),
-            "expected Err with 'empty', got: {result:?}"
-        );
+        Ok(ClaimCheckFilter {
+            body: body_action.unwrap_or(default_if_omitted),
+            headers_action: headers_action.unwrap_or(HeadersAction::All(default_if_omitted)),
+        })
     }
 }
+
+#[cfg(test)]
+#[path = "claim_check_tests.rs"]
+mod tests;

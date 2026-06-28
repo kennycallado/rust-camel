@@ -198,7 +198,7 @@
       "properties": {
         "filter": {
           "default": null,
-          "description": "Filter is not yet supported — rejected at parse time.",
+          "description": "Optional filter string for selective merge-back during checkout operations.\nGrammar: comma-separated tokens with optional `+`/`-`/`--` prefix.",
           "type": [
             "string",
             "null"

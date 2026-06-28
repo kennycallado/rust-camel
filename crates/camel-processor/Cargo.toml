@@ -25,6 +25,7 @@ tokio-util.workspace = true
 tower.workspace = true
 tracing.workspace = true
 rand.workspace = true
+regex.workspace = true
 zip.workspace = true
 async-stream.workspace = true
 

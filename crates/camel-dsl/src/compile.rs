@@ -1031,10 +1031,12 @@ fn compile_declarative_step_with_threshold(
             repository,
             operation,
             key,
+            filter,
         }) => Ok(BuilderStep::ClaimCheck {
             repository,
             operation,
             key,
+            filter,
         }),
         DeclarativeStep::Sampling(SamplingStepDef { period }) => {
             Ok(BuilderStep::Sampling { period })

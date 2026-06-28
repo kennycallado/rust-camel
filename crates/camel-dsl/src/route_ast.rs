@@ -809,7 +809,8 @@ pub struct ClaimCheckBody {
     pub operation: String,
     /// Simple-language expression for the claim-check key (e.g. "${header.claimKey}").
     pub key: String,
-    /// Filter is not yet supported — rejected at parse time.
+    /// Optional filter string for selective merge-back during checkout operations.
+    /// Grammar: comma-separated tokens with optional `+`/`-`/`--` prefix.
     #[serde(default)]
     pub filter: Option<String>,
 }

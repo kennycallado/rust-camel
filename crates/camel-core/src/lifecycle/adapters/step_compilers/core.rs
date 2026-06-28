@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, Value, body::Body};
 use camel_language_api::LanguageError;
+use camel_processor::claim_check::ClaimCheckFilter;
 use camel_processor::{LogProcessor, log::DynamicLog, script_mutator::ScriptMutator, set_property};
 use tracing::warn;
 
@@ -391,6 +392,7 @@ impl StepCompiler for CoreCompiler {
                 repository,
                 operation,
                 key,
+                filter,
             } => {
                 let repo = match ctx.claim_check_repositories.get(&repository) {
                     Some(r) => r,
@@ -420,7 +422,19 @@ impl StepCompiler for CoreCompiler {
                         Ok(k) => k,
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
-                let svc = camel_processor::ClaimCheckService::new(repo, op, key_expr);
+                let mut svc = camel_processor::ClaimCheckService::new(repo, op, key_expr);
+                if let Some(filter_str) = filter {
+                    match ClaimCheckFilter::parse(&filter_str) {
+                        Ok(f) => {
+                            svc = svc.with_filter(f);
+                        }
+                        Err(e) => {
+                            return StepCompileResult::Matched(Err(CamelError::RouteError(
+                                format!("claim_check: invalid filter '{filter_str}': {e}"),
+                            )));
+                        }
+                    }
+                }
                 StepCompileResult::Matched(Ok(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,

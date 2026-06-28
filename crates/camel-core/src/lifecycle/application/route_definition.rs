@@ -225,10 +225,12 @@ pub enum BuilderStep {
     },
     /// Claim Check step (EIP). Transforms the exchange body to/from a
     /// `ClaimCheckRepository` by key. Process-mode, no child pipeline.
+    /// `filter` enables selective merge-back of body/headers during checkout.
     ClaimCheck {
         repository: String,
         operation: String,
         key: LanguageExpressionDef,
+        filter: Option<String>,
     },
     /// Sampling step (EIP). Passes 1 of every N exchanges (counter-based,
     /// deterministic). Non-sampled exchanges get CamelStop=true (drop semantics).
@@ -466,11 +468,12 @@ impl std::fmt::Debug for BuilderStep {
                 repository,
                 operation,
                 key,
+                filter,
             } => {
                 write!(
                     f,
                     "BuilderStep::ClaimCheck {{ repository: {repository:?}, operation: {operation:?}, \
-                     key: {{ language: {:?}, source: {:?} }} }}",
+                     key: {{ language: {:?}, source: {:?} }}, filter: {filter:?} }}",
                     key.language, key.source
                 )
             }

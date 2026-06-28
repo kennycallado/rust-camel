@@ -2128,6 +2128,7 @@ dependencies = [
  "criterion",
  "futures",
  "rand 0.10.1",
+ "regex",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
