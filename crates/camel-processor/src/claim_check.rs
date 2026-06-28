@@ -201,7 +201,7 @@ fn has_regex_metachars(s: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum HeaderPattern {
+pub enum HeaderPattern {
     All,
     Prefix(String),
     Exact(String),
@@ -281,7 +281,7 @@ pub enum FilterParseError {
 impl std::fmt::Display for FilterParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidToken(tok) => write!(f, "invalid filter token '{tok}'"),
+            Self::InvalidToken(tok) => write!(f, "invalid filter segment '{tok}'"),
             Self::InvalidPattern(pat) => write!(f, "invalid header pattern '{pat}'"),
             Self::MixedIncludeExclude => {
                 write!(f, "cannot mix include (+) and exclude (-) header patterns")
@@ -330,7 +330,9 @@ impl ClaimCheckFilter {
                     // Accepted as no-op; never affects has_positive_include or defaults
                 }
                 r if r.starts_with("header:") || r.starts_with("headers:") => {
-                    let pattern_str = r.split_once(':').unwrap().1;
+                    let (_, pattern_str) = r
+                        .split_once(':')
+                        .ok_or_else(|| FilterParseError::InvalidToken(r.to_string()))?;
                     let pattern = HeaderPattern::compile(pattern_str)?;
 
                     if prefix == FilterAction::Include {

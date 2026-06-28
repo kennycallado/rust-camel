@@ -54,10 +54,7 @@ impl ClaimCheckRepository for TestRepo {
     }
 
     async fn remove(&self, key: &str) -> Result<(), CamelError> {
-        self.keys
-            .lock()
-            .expect("mutex poisoned")
-            .remove(key);
+        self.keys.lock().expect("mutex poisoned").remove(key);
         Ok(())
     }
 
@@ -77,7 +74,9 @@ impl ClaimCheckRepository for TestRepo {
             .expect("mutex poisoned")
             .get_mut(key)
             .and_then(|s| s.pop_back())
-            .ok_or_else(|| CamelError::RouteError(format!("Claim check stack empty for key: {key}")))
+            .ok_or_else(|| {
+                CamelError::RouteError(format!("Claim check stack empty for key: {key}"))
+            })
     }
 }
 
@@ -150,21 +149,17 @@ async fn push_pop_lifo() {
     let first = Body::Text("first".to_string());
     let second = Body::Text("second".to_string());
 
-    let svc =
-        ClaimCheckService::new(repo.clone(), ClaimCheckOp::Push, make_key_expr("stack-key"));
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Push, make_key_expr("stack-key"));
     svc.oneshot(make_exchange(first)).await.unwrap();
 
-    let svc =
-        ClaimCheckService::new(repo.clone(), ClaimCheckOp::Push, make_key_expr("stack-key"));
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Push, make_key_expr("stack-key"));
     svc.oneshot(make_exchange(second.clone())).await.unwrap();
 
-    let svc =
-        ClaimCheckService::new(repo.clone(), ClaimCheckOp::Pop, make_key_expr("stack-key"));
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Pop, make_key_expr("stack-key"));
     let result = svc.oneshot(make_exchange(Body::Empty)).await.unwrap();
     assert_eq!(result.input.body, second);
 
-    let svc =
-        ClaimCheckService::new(repo.clone(), ClaimCheckOp::Pop, make_key_expr("stack-key"));
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Pop, make_key_expr("stack-key"));
     let result = svc.oneshot(make_exchange(Body::Empty)).await.unwrap();
     assert_eq!(result.input.body, Body::Text("first".to_string()));
 }
@@ -337,9 +332,8 @@ async fn get_and_remove_with_filter() {
     repo.set("k", stashed_msg).await.unwrap();
 
     let filter = ClaimCheckFilter::parse("body,header:K").unwrap();
-    let svc =
-        ClaimCheckService::new(repo.clone(), ClaimCheckOp::GetAndRemove, make_key_expr("k"))
-            .with_filter(filter);
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::GetAndRemove, make_key_expr("k"))
+        .with_filter(filter);
 
     let exchange = make_exchange(Body::Empty);
     let result = svc.oneshot(exchange).await.unwrap();
@@ -599,9 +593,7 @@ fn parse_exact_header() {
     let f = ClaimCheckFilter::parse("header:Content-Type").unwrap();
     match &f.headers_action {
         HeadersAction::ByPattern { include, .. } => {
-            assert!(
-                matches!(&include[0], HeaderPattern::Exact(s) if s == "Content-Type")
-            );
+            assert!(matches!(&include[0], HeaderPattern::Exact(s) if s == "Content-Type"));
         }
         other => panic!("expected ByPattern, got {other:?}"),
     }
