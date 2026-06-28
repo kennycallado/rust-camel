@@ -1249,10 +1249,6 @@ dependencies = [
  "camel-dataformat-protobuf",
  "camel-dsl",
  "camel-function",
- "camel-language-js",
- "camel-language-jsonpath",
- "camel-language-rhai",
- "camel-language-xpath",
  "camel-master",
  "camel-proto-compiler",
  "camel-wit",
@@ -1809,6 +1805,7 @@ dependencies = [
  "camel-core",
  "camel-dsl",
  "camel-health",
+ "camel-language-api",
  "camel-otel",
  "camel-platform-kubernetes",
  "camel-processor",
@@ -1978,8 +1975,10 @@ version = "0.21.0"
 dependencies = [
  "async-trait",
  "camel-api",
+ "serde",
  "thiserror 2.0.18",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]

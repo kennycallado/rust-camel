@@ -147,37 +147,7 @@ impl CamelContextBuilder {
     }
 
     fn built_in_languages() -> SharedLanguageRegistry {
-        let mut languages: HashMap<String, Arc<dyn Language>> = HashMap::new();
-        languages.insert(
-            "simple".to_string(),
-            Arc::new(camel_language_simple::SimpleLanguage::new()),
-        );
-        #[cfg(feature = "lang-js")]
-        {
-            let js_lang = camel_language_js::JsLanguage::new();
-            languages.insert("js".to_string(), Arc::new(js_lang.clone()));
-            languages.insert("javascript".to_string(), Arc::new(js_lang));
-        }
-        #[cfg(feature = "lang-rhai")]
-        {
-            let rhai_lang = camel_language_rhai::RhaiLanguage::new();
-            languages.insert("rhai".to_string(), Arc::new(rhai_lang));
-        }
-        #[cfg(feature = "lang-jsonpath")]
-        {
-            languages.insert(
-                "jsonpath".to_string(),
-                Arc::new(camel_language_jsonpath::JsonPathLanguage::new()),
-            );
-        }
-        #[cfg(feature = "lang-xpath")]
-        {
-            languages.insert(
-                "xpath".to_string(),
-                Arc::new(camel_language_xpath::XPathLanguage::new()),
-            );
-        }
-        Arc::new(std::sync::Mutex::new(languages))
+        crate::language_registry::from_config(&camel_language_api::LanguagesConfig::default())
     }
 
     fn build_runtime(

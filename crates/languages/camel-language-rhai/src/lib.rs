@@ -3,35 +3,94 @@
 //! Main types: `RhaiLanguage`, `RhaiExpression`, `RhaiPredicate`, `RhaiMutatingExpression`.
 //! Scripts have access to `body`, `headers`, `header()`, `set_header()`, `property()`, `set_property()`.
 //!
-//! # Sandboxing status
+//! # Resource Limits
 //!
-//! Scripts are resource-limited (max 100 000 operations) and the `eval` and `import`
-//! symbols are disabled. Full filesystem/network sandboxing is not yet applied —
-//! see TODO(RHL-001) in `create_base_engine`.
+//! Scripts are bounded by configurable limits sourced from `[languages.rhai.limits]`
+//! in `Camel.toml`. When absent, the rust-camel runtime defaults apply:
 //!
-//! # Limitations
+//! | Limit | Default |
+//! |---|---|
+//! | `max-operations` | 100,000 |
+//! | `max-string-size` | 1 MiB |
+//! | `max-array-size` | 10,000 elements |
+//! | `max-map-size` | 10,000 entries |
+//! | `max-expression-depth` | 64 |
+//! | `max-function-expression-depth` | 32 |
+//! | `execution-timeout-ms` | 5,000 |
 //!
-//! - Resource limits are enforced (default: 100 000 operations, 1 MB strings, 10 000-element
-//!   arrays/maps). Scripts exceeding these limits will fail with an `EvalError`.
-//! - The `body` variable is always a string. Structured access to JSON/XML bodies requires
-//!   explicit parsing within the script using Rhai's built-in map/array types.
+//! Every limit is `Option<_>`; `None` means "use rust-camel runtime default" (no
+//! default-lie per ADR-0011).
+//!
+//! ## Covered threats
+//!
+//! - Infinite loops (`loop {}`) — trip `max-operations` and `execution-timeout-ms`
+//!   (whichever fires first).
+//! - Oversized allocations — strings, arrays, maps each have size caps.
+//! - Pathological nesting — expression and function-expression depths are bounded.
+//!
+//! ## NOT covered (separate issue rc-d8f9 / RHL-001)
+//!
+//! Rhai built-in packages can still reach the host OS: filesystem reads/writes,
+//! network calls, and module imports beyond `eval`/`import` (which ARE disabled).
+//! A script with route-author privileges can read `/etc/passwd` or make HTTP
+//! requests. This is the same trust boundary as `function:` (ADR-0005). Full
+//! FS/network sandboxing is tracked separately in bd issue `rc-d8f9`.
+//!
+//! ## Timeout caveat
+//!
+//! `execution-timeout-ms` wraps `eval_with_scope` in `tokio::time::timeout` +
+//! `spawn_blocking`. When the timeout fires, the route future resolves to an
+//! error, but the blocking thread may continue executing until the script
+//! trips `max-operations` or finishes. This is the same partial-mitigation
+//! caveat shared with the Boa engine.
 
 use async_trait::async_trait;
 use camel_language_api::{
-    Body, Exchange, Expression, Language, LanguageError, MutatingExpression, Predicate, Value,
+    Body, Exchange, Expression, Language, LanguageError, MutatingExpression, Predicate,
+    RhaiLimitsConfig, Value,
 };
 use rhai::{Engine, Scope};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tracing::{debug, warn};
 
-/// Default maximum number of Rhai operations per evaluation (prevents infinite loops).
-const DEFAULT_MAX_OPERATIONS: u64 = 100_000;
-/// Default maximum string size in bytes.
-const DEFAULT_MAX_STRING_SIZE: usize = 1_048_576; // 1 MB
-/// Default maximum array size.
-const DEFAULT_MAX_ARRAY_SIZE: usize = 10_000;
-/// Default maximum map size.
-const DEFAULT_MAX_MAP_SIZE: usize = 10_000;
+/// Result type for mutating eval (returns value + modified exchange fields).
+type EvalMutResult = Result<
+    (
+        Value,
+        Body,
+        std::collections::HashMap<String, Value>,
+        std::collections::HashMap<String, Value>,
+    ),
+    LanguageError,
+>;
+
+/// Resolved limits — every `Option<T>` folded to rust-camel runtime default.
+struct ResolvedRhaiLimits {
+    max_operations: u64,
+    max_string_size: usize,
+    max_array_size: usize,
+    max_map_size: usize,
+    max_expression_depth: u32,
+    max_function_expression_depth: u32,
+    execution_timeout_ms: u64,
+}
+
+/// Fold `RhaiLimitsConfig` (all-`Option<T>`) to concrete values using rust-camel
+/// runtime defaults. Free function — NOT an inherent method on `RhaiLimitsConfig`
+/// (orphan rule: type is defined in `camel-language-api`, this is `camel-language-rhai`).
+fn resolve_rhai_limits(limits: &RhaiLimitsConfig) -> ResolvedRhaiLimits {
+    ResolvedRhaiLimits {
+        max_operations: limits.max_operations.unwrap_or(100_000),
+        max_string_size: limits.max_string_size.unwrap_or(1_048_576),
+        max_array_size: limits.max_array_size.unwrap_or(10_000),
+        max_map_size: limits.max_map_size.unwrap_or(10_000),
+        max_expression_depth: limits.max_expression_depth.unwrap_or(64),
+        max_function_expression_depth: limits.max_function_expression_depth.unwrap_or(32),
+        execution_timeout_ms: limits.execution_timeout_ms.unwrap_or(5_000),
+    }
+}
 
 /// Rhai scripting language for rust-camel.
 ///
@@ -49,30 +108,34 @@ const DEFAULT_MAX_MAP_SIZE: usize = 10_000;
 ///
 /// ## Resource Limits
 ///
-/// The engine enforces limits to prevent denial-of-service:
-/// - Max operations: 100,000 (prevents infinite loops)
-/// - Max string size: 1 MB
-/// - Max array size: 10,000 elements
-/// - Max map size: 10,000 entries
-/// - Max expression depth: 64 (32 in functions)
+/// Limits are configurable via `[languages.rhai.limits]` in `Camel.toml`; see the
+/// crate-level `# Resource Limits` and `# NOT covered` sections for the knobs,
+/// rust-camel runtime defaults, and the FS/network reach gap (rc-d8f9 / RHL-001).
 pub struct RhaiLanguage {
-    engine: Engine,
+    limits: RhaiLimitsConfig,
 }
 
 impl RhaiLanguage {
     pub fn new() -> Self {
-        let engine = Self::create_base_engine();
-        Self { engine }
+        Self::with_limits(RhaiLimitsConfig::default())
+    }
+
+    pub fn with_limits(limits: RhaiLimitsConfig) -> Self {
+        Self { limits }
     }
 
     /// Create a base engine with all resource limits configured.
-    fn create_base_engine() -> Engine {
+    fn create_base_engine(limits: &RhaiLimitsConfig) -> Engine {
+        let r = resolve_rhai_limits(limits);
         let mut engine = Engine::new();
-        engine.set_max_expr_depths(64, 32);
-        engine.set_max_operations(DEFAULT_MAX_OPERATIONS);
-        engine.set_max_string_size(DEFAULT_MAX_STRING_SIZE);
-        engine.set_max_array_size(DEFAULT_MAX_ARRAY_SIZE);
-        engine.set_max_map_size(DEFAULT_MAX_MAP_SIZE);
+        engine.set_max_expr_depths(
+            r.max_expression_depth as usize,
+            r.max_function_expression_depth as usize,
+        );
+        engine.set_max_operations(r.max_operations);
+        engine.set_max_string_size(r.max_string_size);
+        engine.set_max_array_size(r.max_array_size);
+        engine.set_max_map_size(r.max_map_size);
         // TODO(RHL-001): Full sandboxing is not yet applied. The engine currently
         // allows file I/O, network access, and other host OS interactions via
         // Rhai's built-in packages. To fully sandbox, register a custom `Module`
@@ -106,8 +169,12 @@ impl RhaiLanguage {
     /// Create a fresh engine with `header()`, `set_header()`, `property()`, and
     /// `set_property()` registered as native functions. A new engine per eval
     /// avoids sharing mutable state between evaluations.
-    fn create_eval_engine(headers: rhai::Map, properties: rhai::Map) -> Engine {
-        let mut engine = Self::create_base_engine();
+    fn create_eval_engine(
+        limits: &RhaiLimitsConfig,
+        headers: rhai::Map,
+        properties: rhai::Map,
+    ) -> Engine {
+        let mut engine = Self::create_base_engine(limits);
 
         // Shared mutable headers map: header() reads, set_header() writes
         let h = Arc::new(RwLock::new(headers));
@@ -154,9 +221,20 @@ impl RhaiLanguage {
         engine
     }
 
-    fn eval_to_value(script: &str, exchange: &Exchange) -> Result<Value, LanguageError> {
-        let (mut scope, headers, properties) = Self::make_scope(exchange);
-        let engine = Self::create_eval_engine(headers, properties);
+    /// Sync eval for non-mutating expressions. Extracts exchange data into owned
+    /// values, builds engine+scope, evaluates, and returns the result.
+    fn eval_sync(
+        script: &str,
+        limits: &RhaiLimitsConfig,
+        body_text: String,
+        headers_map: rhai::Map,
+        properties_map: rhai::Map,
+    ) -> Result<Value, LanguageError> {
+        let mut scope = Scope::new();
+        scope.push("body", body_text);
+        scope.push("headers", headers_map.clone());
+
+        let engine = Self::create_eval_engine(limits, headers_map, properties_map);
 
         let result: rhai::Dynamic = engine
             .eval_with_scope::<rhai::Dynamic>(&mut scope, script)
@@ -181,6 +259,80 @@ impl RhaiLanguage {
             })?;
 
         dynamic_to_json(result)
+    }
+
+    /// Sync eval for mutating expressions. Takes owned exchange fields, runs the
+    /// script, and returns the result value + modified fields. The caller writes
+    /// fields back on success (implicit rollback on error).
+    fn eval_mut_sync(
+        script: &str,
+        limits: &RhaiLimitsConfig,
+        body: Body,
+        headers: HashMap<String, Value>,
+        properties: HashMap<String, Value>,
+    ) -> EvalMutResult {
+        // 1. Create scope with Rhai Map variables
+        let mut scope = Scope::new();
+
+        let mut headers_map = rhai::Map::new();
+        for (k, v) in &headers {
+            headers_map.insert(k.clone().into(), json_to_dynamic(v));
+        }
+
+        let mut properties_map = rhai::Map::new();
+        for (k, v) in &properties {
+            properties_map.insert(k.clone().into(), json_to_dynamic(v));
+        }
+
+        let body_str = body.as_text().unwrap_or("").to_string();
+
+        scope.push("headers", headers_map);
+        scope.push("properties", properties_map);
+        scope.push("body", body_str);
+
+        // 2. Evaluate script
+        let engine = RhaiLanguage::create_base_engine(limits);
+
+        let result: rhai::Dynamic = match engine.eval_with_scope(&mut scope, script) {
+            Ok(v) => v,
+            Err(e) => {
+                let pos = e.position();
+                let location = match (pos.line(), pos.position()) {
+                    (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
+                    (Some(l), None) => format!(" at line {l}"),
+                    _ => String::new(),
+                };
+                let safe_kind = if matches!(*e, rhai::EvalAltResult::ErrorRuntime(_, _)) {
+                    "script threw an exception (thrown value not logged)".to_string()
+                } else {
+                    format!("{e}")
+                };
+                let err_msg = format!("rhai evaluation error{location}: {safe_kind}");
+                warn!("rhai expression eval failed{location}");
+                return Err(LanguageError::EvalError(err_msg));
+            }
+        };
+
+        // 3. Sync changes back
+        let mut out_headers = headers;
+        if let Some(h) = scope.get_value::<rhai::Map>("headers") {
+            out_headers = rhai_map_to_value_map(&h);
+        }
+        let mut out_properties = properties;
+        if let Some(p) = scope.get_value::<rhai::Map>("properties") {
+            out_properties = rhai_map_to_value_map(&p);
+        }
+        let mut out_body = body;
+        if let Some(b) = scope.get_value::<String>("body") {
+            out_body = Body::Text(b);
+        }
+
+        Ok((
+            dynamic_to_value(result),
+            out_body,
+            out_headers,
+            out_properties,
+        ))
     }
 }
 
@@ -257,23 +409,50 @@ fn rhai_map_to_value_map(map: &rhai::Map) -> std::collections::HashMap<String, V
 
 struct RhaiExpression {
     script: String,
+    limits: RhaiLimitsConfig,
 }
 
 struct RhaiPredicate {
     script: String,
+    limits: RhaiLimitsConfig,
+}
+
+/// Shared async eval helper used by both [`RhaiExpression`] and [`RhaiPredicate`].
+/// Resolves limits, applies the timeout, and runs the script via `spawn_blocking`.
+async fn eval_async(
+    script: &str,
+    limits: &RhaiLimitsConfig,
+    exchange: &Exchange,
+) -> Result<Value, LanguageError> {
+    let r = resolve_rhai_limits(limits);
+    let timeout = Duration::from_millis(r.execution_timeout_ms);
+    let body_text = exchange.input.body.as_text().unwrap_or("").to_string();
+    let (_, headers_map, properties_map) = RhaiLanguage::make_scope(exchange);
+    let limits = limits.clone();
+    let script = script.to_string();
+
+    tokio::time::timeout(timeout, async move {
+        tokio::task::spawn_blocking(move || {
+            RhaiLanguage::eval_sync(&script, &limits, body_text, headers_map, properties_map)
+        })
+        .await
+        .map_err(|join| LanguageError::EvalError(format!("rhai execution join error: {join}")))?
+    })
+    .await
+    .map_err(|_| LanguageError::EvalError("rhai execution timeout".to_string()))?
 }
 
 #[async_trait]
 impl Expression for RhaiExpression {
     async fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
-        RhaiLanguage::eval_to_value(&self.script, exchange)
+        eval_async(&self.script, &self.limits, exchange).await
     }
 }
 
 #[async_trait]
 impl Predicate for RhaiPredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
-        let val = RhaiLanguage::eval_to_value(&self.script, exchange)?;
+        let val = eval_async(&self.script, &self.limits, exchange).await?;
         Ok(match &val {
             Value::Bool(b) => *b,
             Value::Null => false,
@@ -306,76 +485,50 @@ impl Predicate for RhaiPredicate {
 /// ```
 struct RhaiMutatingExpression {
     script: String,
+    limits: RhaiLimitsConfig,
 }
 
 #[async_trait]
 impl MutatingExpression for RhaiMutatingExpression {
     async fn evaluate(&self, exchange: &mut Exchange) -> Result<Value, LanguageError> {
-        // 1. Snapshot original state for rollback on error
-        let original_headers = exchange.input.headers.clone();
-        let original_properties = exchange.properties.clone();
-        let original_body = exchange.input.body.clone();
+        let r = resolve_rhai_limits(&self.limits);
+        let timeout = Duration::from_millis(r.execution_timeout_ms);
 
-        // 2. Create scope with Rhai Map variables
-        let mut scope = Scope::new();
+        // Snapshot owned fields — the script mutates inside spawn_blocking;
+        // original exchange is untouched until success.
+        let headers = exchange.input.headers.clone();
+        let properties = exchange.properties.clone();
+        let body = exchange.input.body.clone();
+        let script = self.script.clone();
+        let limits = self.limits.clone();
 
-        let mut headers_map = rhai::Map::new();
-        for (k, v) in &exchange.input.headers {
-            headers_map.insert(k.clone().into(), json_to_dynamic(v));
-        }
+        let join = tokio::task::spawn_blocking(move || {
+            RhaiLanguage::eval_mut_sync(&script, &limits, body, headers, properties)
+        });
 
-        let mut properties_map = rhai::Map::new();
-        for (k, v) in &exchange.properties {
-            properties_map.insert(k.clone().into(), json_to_dynamic(v));
-        }
-
-        let body_str = exchange.input.body.as_text().unwrap_or("").to_string();
-
-        scope.push("headers", headers_map);
-        scope.push("properties", properties_map);
-        scope.push("body", body_str);
-
-        // 3. Evaluate script
-        let engine = RhaiLanguage::create_base_engine();
-
-        let result: rhai::Dynamic = match engine.eval_with_scope(&mut scope, &self.script) {
-            Ok(v) => v,
-            Err(e) => {
-                exchange.input.headers = original_headers;
-                exchange.properties = original_properties;
-                exchange.input.body = original_body;
-                let pos = e.position();
-                let location = match (pos.line(), pos.position()) {
-                    (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
-                    (Some(l), None) => format!(" at line {l}"),
-                    _ => String::new(),
-                };
-                // EvalAltResult::ErrorRuntime embeds the thrown value verbatim,
-                // which may contain exchange body/header secrets (e.g. `throw headers["Authorization"]`).
-                // Emit only the error kind and position; never the thrown value.
-                let safe_kind = if matches!(*e, rhai::EvalAltResult::ErrorRuntime(_, _)) {
-                    "script threw an exception (thrown value not logged)".to_string()
-                } else {
-                    format!("{e}")
-                };
-                let err_msg = format!("rhai evaluation error{location}: {safe_kind}");
-                warn!("rhai expression eval failed{location}");
-                return Err(LanguageError::EvalError(err_msg));
+        // spawn_blocking gives Result<Result<..., JoinErr>, timeout gives Result<Result<..., JoinErr>, Elapsed>
+        match tokio::time::timeout(timeout, join).await {
+            Ok(Ok(Ok((value, out_body, out_headers, out_properties)))) => {
+                // Success — write back to exchange
+                exchange.input.headers = out_headers;
+                exchange.properties = out_properties;
+                exchange.input.body = out_body;
+                Ok(value)
             }
-        };
-
-        // 4. Sync changes back to exchange
-        if let Some(h) = scope.get_value::<rhai::Map>("headers") {
-            exchange.input.headers = rhai_map_to_value_map(&h);
+            Ok(Ok(Err(e))) => {
+                // Eval error — exchange untouched (implicit rollback)
+                Err(e)
+            }
+            Ok(Err(join_err)) => Err(LanguageError::EvalError(format!(
+                "rhai execution join error: {join_err}"
+            ))),
+            Err(_) => {
+                // Timeout — exchange untouched
+                Err(LanguageError::EvalError(
+                    "rhai execution timeout".to_string(),
+                ))
+            }
         }
-        if let Some(p) = scope.get_value::<rhai::Map>("properties") {
-            exchange.properties = rhai_map_to_value_map(&p);
-        }
-        if let Some(b) = scope.get_value::<String>("body") {
-            exchange.input.body = Body::Text(b);
-        }
-
-        Ok(dynamic_to_value(result))
     }
 }
 
@@ -385,8 +538,9 @@ impl Language for RhaiLanguage {
     }
 
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
+        let engine = Self::create_base_engine(&self.limits);
         // Syntax-only validation — function resolution happens at eval time
-        self.engine.compile(script).map_err(|e| {
+        engine.compile(script).map_err(|e| {
             warn!(error = %e, "rhai expression compile failed");
             LanguageError::ParseError {
                 expr: script.to_string(),
@@ -396,11 +550,13 @@ impl Language for RhaiLanguage {
         debug!("rhai expression compiled");
         Ok(Box::new(RhaiExpression {
             script: script.to_string(),
+            limits: self.limits.clone(),
         }))
     }
 
     fn create_predicate(&self, script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
-        self.engine.compile(script).map_err(|e| {
+        let engine = Self::create_base_engine(&self.limits);
+        engine.compile(script).map_err(|e| {
             warn!(error = %e, "rhai expression compile failed");
             LanguageError::ParseError {
                 expr: script.to_string(),
@@ -410,18 +566,20 @@ impl Language for RhaiLanguage {
         debug!("rhai expression compiled");
         Ok(Box::new(RhaiPredicate {
             script: script.to_string(),
+            limits: self.limits.clone(),
         }))
     }
 
     /// Create a mutating Rhai expression.
     ///
     /// The script can modify `headers`, `properties`, and `body` via assignment syntax.
-    /// See [`RhaiMutatingExpression`] for full documentation.
+    /// See `RhaiMutatingExpression` for full documentation.
     fn create_mutating_expression(
         &self,
         script: &str,
     ) -> Result<Box<dyn MutatingExpression>, LanguageError> {
-        self.engine.compile(script).map_err(|e| {
+        let engine = Self::create_base_engine(&self.limits);
+        engine.compile(script).map_err(|e| {
             warn!(error = %e, "rhai expression compile failed");
             LanguageError::ParseError {
                 expr: script.to_string(),
@@ -431,6 +589,7 @@ impl Language for RhaiLanguage {
         debug!("rhai expression compiled");
         Ok(Box::new(RhaiMutatingExpression {
             script: script.to_string(),
+            limits: self.limits.clone(),
         }))
     }
 }
@@ -573,6 +732,118 @@ mod tests {
         assert!(
             msg.contains("rhai evaluation error"),
             "error should contain 'rhai evaluation error', got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rhai_infinite_loop_trips_max_operations() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("loop {}").unwrap();
+        let ex = exchange_with_body("test");
+        let result = expr.evaluate(&ex).await;
+        assert!(result.is_err(), "infinite loop must trip max_operations");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.to_lowercase().contains("operation")
+                || msg.to_lowercase().contains("limit")
+                || msg.to_lowercase().contains("exceeded"),
+            "error should reference the limit: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rhai_oversize_string_trips_max_string_size() {
+        let lang = RhaiLanguage::new();
+        // Build a string larger than 1 MiB by concat.
+        let script =
+            "let s = \"\"; loop { s = s + \"aaaaaaaaaa\"; if s.len() > 2000000 { break; } } s";
+        let expr = lang.create_expression(script).unwrap();
+        let ex = exchange_with_body("test");
+        let result = expr.evaluate(&ex).await;
+        assert!(result.is_err(), "oversize string must trip limit");
+    }
+
+    #[tokio::test]
+    async fn test_rhai_oversize_array_trips_max_array_size() {
+        let lang = RhaiLanguage::new();
+        // Default max_array_size = 10_000; push past it.
+        let script = "let a = []; loop { a.push(1); if a.len() > 20_000 { break; } } a";
+        let expr = lang.create_expression(script).unwrap();
+        let ex = exchange_with_body("test");
+        let result = expr.evaluate(&ex).await;
+        assert!(result.is_err(), "oversize array must trip max_array_size");
+    }
+
+    #[tokio::test]
+    async fn test_rhai_oversize_map_trips_max_map_size() {
+        let lang = RhaiLanguage::new();
+        // Default max_map_size = 10_000.
+        let script = "let m = #{}; loop { let k = m.len().to_string(); m[k] = 1; if m.len() > 20_000 { break; } } m";
+        let expr = lang.create_expression(script).unwrap();
+        let ex = exchange_with_body("test");
+        let result = expr.evaluate(&ex).await;
+        assert!(result.is_err(), "oversize map must trip max_map_size");
+    }
+
+    #[tokio::test]
+    async fn test_rhai_with_limits_lowers_max_operations() {
+        use camel_language_api::RhaiLimitsConfig;
+        let limits = RhaiLimitsConfig {
+            max_operations: Some(10),
+            ..Default::default()
+        };
+        let lang = RhaiLanguage::with_limits(limits);
+        // 100 cheap ops should trip a limit of 10.
+        let expr = lang
+            .create_expression("let x = 0; loop { x += 1; if x > 100 { break; } } x")
+            .unwrap();
+        let ex = exchange_with_body("test");
+        let result = expr.evaluate(&ex).await;
+        assert!(
+            result.is_err(),
+            "max_operations=10 should trip a 100-iteration loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rhai_with_limits_preserves_none_as_runtime_default() {
+        use camel_language_api::RhaiLimitsConfig;
+        // None should resolve to rust-camel default (100_000 ops), not upstream unlimited.
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig::default());
+        let expr = lang.create_expression("loop {}").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(
+            expr.evaluate(&ex).await.is_err(),
+            "default limits must still trip infinite loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rhai_timeout_fires_when_ops_limit_high() {
+        use camel_language_api::RhaiLimitsConfig;
+        // Set max_operations very high (not u64::MAX which disables counting in Rhai)
+        // and a low timeout. Either the timeout or ops limit must fire.
+        let limits = RhaiLimitsConfig {
+            max_operations: Some(50_000_000),
+            execution_timeout_ms: Some(50),
+            ..Default::default()
+        };
+        let lang = RhaiLanguage::with_limits(limits);
+        // CPU-bound loop; either ops limit or timeout must terminate it fast.
+        let expr = lang.create_expression("loop {}").unwrap();
+        let ex = exchange_with_body("test");
+        let start = std::time::Instant::now();
+        let result = expr.evaluate(&ex).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "must error");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "must terminate fast: {elapsed:?}"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.to_lowercase().contains("timeout") || msg.to_lowercase().contains("operation"),
+            "error should reference timeout or op limit: {msg}"
         );
     }
 

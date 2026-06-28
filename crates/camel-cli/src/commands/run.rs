@@ -11,10 +11,6 @@
 use camel_api::datasource::DatasourceCatalog;
 use camel_bean::BeanProcessor;
 use camel_core::datasource::RuntimeDatasourceCatalog;
-use camel_language_js::JsLanguage;
-use camel_language_jsonpath::JsonPathLanguage;
-use camel_language_rhai::RhaiLanguage;
-use camel_language_xpath::XPathLanguage;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -423,13 +419,11 @@ pub async fn run(
         );
     }
 
-    // Register language plugins bundled in camel-cli.
-    // These languages are optional in core, so the CLI wires them explicitly.
-    ctx.register_language("js", Box::new(JsLanguage::new()))?;
-    ctx.register_language("javascript", Box::new(JsLanguage::new()))?;
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))?;
-    ctx.register_language("jsonpath", Box::new(JsonPathLanguage::new()))?;
-    ctx.register_language("xpath", Box::new(XPathLanguage::new()))?;
+    // Languages are registered in `configure_context_with_beans` (camel-config)
+    // via `camel_core::languages_from_config(&config.languages)`, which applies
+    // Camel.toml [languages.*.limits] and registers js/javascript/rhai/
+    // jsonpath/xpath under feature gates. A direct `CamelContext::builder().build()`
+    // caller gets `LanguagesConfig::default()` (rust-camel runtime defaults).
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes_with_threshold_and_security(

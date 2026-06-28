@@ -101,6 +101,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: Default::default(),
         beans: Default::default(),
+        languages: Default::default(),
         security: SecurityConfig::default(),
         datasources: Default::default(),
         _extra: HashMap::new(),

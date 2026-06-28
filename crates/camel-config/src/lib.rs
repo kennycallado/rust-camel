@@ -13,6 +13,9 @@ pub mod properties;
 pub mod wasm_limits;
 pub mod yaml;
 
+pub use camel_language_api::{
+    JsEngineConfig, JsLimitsConfig, LanguagesConfig, RhaiEngineConfig, RhaiLimitsConfig,
+};
 pub use config::{
     CamelConfig, ComponentsConfig, HealthCamelConfig, JournalConfig, JournalDurability,
     KeycloakIntrospectionConfig, KeycloakJwksConfig, KeycloakSecurityConfig,

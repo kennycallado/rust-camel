@@ -65,6 +65,7 @@ pub mod datasource;
 pub mod health_registry;
 pub(crate) mod hot_reload;
 pub mod idempotent;
+pub mod language_registry;
 pub mod lifecycle;
 mod registry;
 // Re-export idempotent registry types for use in lifecycle layers (which
@@ -145,6 +146,7 @@ pub use crate::shared::observability::domain::{
     DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
 };
 pub use context::CamelContext;
+pub use language_registry::from_config as languages_from_config;
 pub use template::TemplateRegistry;
 
 // Re-export route controller types from camel-api (they live there to avoid cyclic dependencies).

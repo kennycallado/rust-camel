@@ -6,6 +6,7 @@
 //! Main modules: `error`.
 
 pub mod error;
+pub mod language_limits;
 
 pub use async_trait::async_trait;
 pub use camel_api::Value;
@@ -13,6 +14,9 @@ pub use camel_api::body::Body;
 pub use camel_api::exchange::Exchange;
 pub use camel_api::message::Message;
 pub use error::LanguageError;
+pub use language_limits::{
+    JsEngineConfig, JsLimitsConfig, LanguagesConfig, RhaiEngineConfig, RhaiLimitsConfig,
+};
 
 /// A Language factory: produces Expression and Predicate objects.
 pub trait Language: Send + Sync {

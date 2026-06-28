@@ -154,6 +154,11 @@ impl CamelConfig {
             Self::build_platform_service(&config.platform, k8s_health_source).await?;
         builder = builder.platform_service(platform_service);
 
+        // Thread language limits from Camel.toml [languages.*.limits] into the registry,
+        // so Rhai/JS language engines respect user-configured resource caps.
+        let languages = camel_core::languages_from_config(&config.languages);
+        builder = builder.languages(languages);
+
         if let Some(beans) = beans {
             builder = builder.beans(beans);
         }

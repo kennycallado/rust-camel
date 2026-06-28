@@ -252,7 +252,7 @@ mod tests {
     }
 
     fn engine() -> Arc<dyn JsEngine> {
-        Arc::new(BoaEngine::new())
+        Arc::new(BoaEngine::default())
     }
 
     #[derive(Debug)]

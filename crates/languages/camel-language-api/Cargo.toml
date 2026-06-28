@@ -14,10 +14,12 @@ categories.workspace = true
 [dependencies]
 camel-api.workspace = true
 async-trait.workspace = true
+serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+toml = { workspace = true }
 
 [lints]
 workspace = true

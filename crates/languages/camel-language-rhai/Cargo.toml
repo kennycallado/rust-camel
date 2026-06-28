@@ -15,10 +15,8 @@ categories.workspace = true
 camel-language-api.workspace = true
 async-trait.workspace = true
 rhai.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
 tracing.workspace = true
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

@@ -2,13 +2,32 @@
 
 use std::sync::Arc;
 
-use camel_language_api::{Expression, Language, LanguageError, MutatingExpression, Predicate};
+use camel_language_api::{
+    Expression, JsLimitsConfig, Language, LanguageError, MutatingExpression, Predicate,
+};
 
 use crate::{
     engine::JsEngine,
     engines::boa::BoaEngine,
     expression::{JsExpression, JsMutatingExpression, JsPredicate, validate_to_parse_error},
 };
+
+// ── Resource limits ───────────────────────────────────────────────────────────
+//
+// Coverage (via Boa 0.21 RuntimeLimits):
+//   - Loop iteration count
+//   - Recursion depth
+//   - Stack size
+//
+// Not covered (Boa 0.21 does not expose):
+//   - Heap cap — `deny_unknown_fields` in serde rejects any `max-heap-size`
+//     field in Camel.toml if a user tries to set it.
+//
+// Defaults when not configured (rust-camel runtime defaults, ADR-0011):
+//   - execution_timeout_ms: 5_000
+//   - max_loop_iterations: 100_000  (Boa upstream is u64::MAX)
+//   - max_recursion_depth: 512      (Boa 0.21 upstream default, pinned)
+//   - max_stack_size:     10_240     (Boa 0.21 upstream default, pinned)
 
 /// JavaScript language plugin backed by [Boa](https://boajs.dev).
 ///
@@ -32,47 +51,44 @@ use crate::{
 #[derive(Clone)]
 pub struct JsLanguage {
     engine: Arc<dyn JsEngine>,
-    config: JsLanguageConfig,
-}
-
-#[derive(Debug, Clone)]
-pub struct JsLanguageConfig {
-    pub execution_timeout_ms: u64,
-}
-
-impl Default for JsLanguageConfig {
-    fn default() -> Self {
-        Self {
-            execution_timeout_ms: 5_000,
-        }
-    }
+    limits: JsLimitsConfig,
 }
 
 impl JsLanguage {
-    /// Create a new `JsLanguage` with the default [`BoaEngine`].
+    /// Create a new `JsLanguage` with the default [`BoaEngine`] and default limits.
     pub fn new() -> Self {
-        Self::with_config(JsLanguageConfig::default())
+        Self::with_limits(JsLimitsConfig::default())
     }
 
-    pub fn with_config(config: JsLanguageConfig) -> Self {
+    /// Create a `JsLanguage` with a custom [`JsLimitsConfig`].
+    ///
+    /// Uses the default [`BoaEngine`] internally.
+    pub fn with_limits(limits: JsLimitsConfig) -> Self {
         Self {
-            engine: Arc::new(BoaEngine::new()),
-            config,
+            engine: Arc::new(BoaEngine::new(limits.clone())),
+            limits,
         }
     }
 
     /// Create a `JsLanguage` with a custom [`JsEngine`] implementation.
     ///
     /// Useful for testing or providing an alternative JS runtime.
+    /// Uses default limits.
     pub fn with_engine<E: JsEngine>(engine: E) -> Self {
-        Self::with_engine_and_config(engine, JsLanguageConfig::default())
+        Self::with_engine_and_limits(engine, JsLimitsConfig::default())
     }
 
-    pub fn with_engine_and_config<E: JsEngine>(engine: E, config: JsLanguageConfig) -> Self {
+    /// Create a `JsLanguage` with a custom engine and custom limits.
+    pub fn with_engine_and_limits<E: JsEngine>(engine: E, limits: JsLimitsConfig) -> Self {
         Self {
             engine: Arc::new(engine),
-            config,
+            limits,
         }
+    }
+
+    /// Resolve the execution timeout from limits or the default rust-camel value.
+    fn execution_timeout_ms(&self) -> u64 {
+        self.limits.execution_timeout_ms.unwrap_or(5_000)
     }
 }
 
@@ -92,7 +108,7 @@ impl Language for JsLanguage {
         Ok(Box::new(JsExpression::new(
             script.to_string(),
             Arc::clone(&self.engine),
-            self.config.execution_timeout_ms,
+            self.execution_timeout_ms(),
         )))
     }
 
@@ -101,7 +117,7 @@ impl Language for JsLanguage {
         Ok(Box::new(JsPredicate::new(
             script.to_string(),
             Arc::clone(&self.engine),
-            self.config.execution_timeout_ms,
+            self.execution_timeout_ms(),
         )))
     }
 
@@ -113,7 +129,7 @@ impl Language for JsLanguage {
         Ok(Box::new(JsMutatingExpression::new(
             script.to_string(),
             Arc::clone(&self.engine),
-            self.config.execution_timeout_ms,
+            self.execution_timeout_ms(),
         )))
     }
 }

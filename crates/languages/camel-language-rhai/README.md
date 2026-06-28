@@ -85,6 +85,43 @@ let mut ctx = CamelContext::new();
 ctx.register_language("rhai", Box::new(RhaiLanguage::new())).unwrap();
 ```
 
+## Resource Limits
+
+Scripts are resource-limited to mitigate CPU/memory denial-of-service. Limits are
+configurable in `Camel.toml`; `RhaiLanguage::new()` uses the rust-camel runtime defaults.
+
+```toml
+[languages.rhai.limits]
+max-operations = 500000              # default 100,000
+max-string-size = 10485760           # default 1 MiB (1,048,576)
+max-array-size = 100000              # default 10,000
+max-map-size = 100000                # default 10,000
+max-expression-depth = 64
+max-function-expression-depth = 32
+execution-timeout-ms = 5000
+```
+
+Programmatic construction with custom limits:
+
+```rust
+use camel_language_api::RhaiLimitsConfig;
+use camel_language_rhai::RhaiLanguage;
+
+let limits = RhaiLimitsConfig {
+    max_operations: Some(50_000),
+    execution_timeout_ms: Some(2_000),
+    ..Default::default()
+};
+let lang = RhaiLanguage::with_limits(limits);
+```
+
+> **Security boundary — what is NOT covered.** These limits mitigate CPU/memory DoS only.
+> Rhai's built-in packages can still reach the **filesystem and network** (read/write files,
+> HTTP calls, native module loading) beyond the disabled `eval`/`import` symbols. Full host-OS
+> reach sandboxing is tracked separately (bd `rc-d8f9` / RHL-001). Do not run untrusted scripts
+> until that work lands. See the crate-level rustdoc (`cargo doc -p camel-language-rhai`) for
+> the full threat model.
+
 ## License
 
 Apache-2.0

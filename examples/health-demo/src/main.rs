@@ -38,6 +38,7 @@ async fn main() -> Result<(), CamelError> {
         datasources: Default::default(),
         beans: Default::default(),
         security: Default::default(),
+        languages: Default::default(),
         _extra: Default::default(),
     };
 
