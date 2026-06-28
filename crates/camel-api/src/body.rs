@@ -1,7 +1,7 @@
 use crate::error::CamelError;
 /// General-purpose default limit for [`Body::materialize()`] (10 MB).
 ///
-/// This is separate from [`stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD`] (128 KB),
+/// This is separate from `stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD` (128 KB),
 /// which is the OOM-protection limit used by `StreamCacheService`.
 pub const DEFAULT_MATERIALIZE_LIMIT: usize = 10 * 1024 * 1024;
 
@@ -261,7 +261,7 @@ impl Body {
     ///
     /// Convenience method for common cases where you need the stream content
     /// but don't want to specify a custom limit. For the tighter stream-cache
-    /// threshold (128 KB), use [`stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD`]
+    /// threshold (128 KB), use `stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD`
     /// with [`Body::into_bytes()`] instead.
     ///
     /// # Example

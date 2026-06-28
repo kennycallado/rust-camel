@@ -2,7 +2,7 @@
 //!
 //! Provides typed deserialization from a [`Body`] variant.
 //! For custom types that implement [`serde::de::DeserializeOwned`],
-//! use the [`impl_from_body_via_serde!`] macro.
+//! use the `impl_from_body_via_serde!` macro.
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -16,7 +16,7 @@ use crate::error::CamelError;
 /// and `serde_json::Value`.
 ///
 /// For custom types, implement this trait manually or use
-/// [`impl_from_body_via_serde!`].
+/// the `impl_from_body_via_serde!` macro.
 pub trait FromBody: Sized {
     fn from_body(body: &Body) -> Result<Self, CamelError>;
 }

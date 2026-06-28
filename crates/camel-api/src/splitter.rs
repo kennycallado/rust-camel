@@ -13,7 +13,7 @@ pub type SplitExpression = Arc<dyn Fn(&Exchange) -> Vec<Exchange> + Send + Sync>
 
 /// A function that lazily produces a stream of exchange fragments.
 ///
-/// Used by [`StreamingSplitterService`] for v1 sequential streaming split
+/// Used by `StreamingSplitterService` (camel-processor) for v1 sequential streaming split
 /// (e.g., ZIP entry extraction, CSV/JSON streaming in future work).
 ///
 /// Each call returns a `Stream` that yields fragments one at a time.

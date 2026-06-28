@@ -16,7 +16,7 @@ pub const ORIGINAL_MESSAGE_EXTENSION: &str = "CamelOriginalMessage";
 
 /// Pipeline-executor-recognized stop signal. Set by processors (ThrottleStrategy::Drop,
 /// SamplingService) that cannot return PipelineOutcome::Stopped directly because they
-/// are Tower Service<Exchange> (Process mode), not OutcomePipeline (Segment).
+/// are Tower `Service<Exchange>` (Process mode), not OutcomePipeline (Segment).
 /// The executor checks this after each step completion. See ADR-0024 amendment.
 pub const CAMEL_STOP: &str = "CamelStop";
 
@@ -184,7 +184,7 @@ impl Exchange {
     ///
     /// Uses built-in conversions for `String`, `Vec<u8>`, [`bytes::Bytes`], and
     /// `serde_json::Value`. For custom types, implement [`FromBody`] or use
-    /// [`impl_from_body_via_serde!`].
+    /// the `impl_from_body_via_serde!` macro.
     ///
     /// # Example
     /// ```rust,ignore
