@@ -8,10 +8,10 @@
 use std::sync::Arc;
 
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{BoxProcessor, CamelError, FunctionInvoker, RuntimeHandle};
+use camel_api::{BoxProcessor, CamelError, FunctionInvoker, RuntimeHandle, StepLifecycle};
 use tokio::sync::{mpsc, oneshot};
 
-use super::route_helpers::PreparedRoute;
+use super::route_helpers::{CompiledPipeline, PreparedRoute};
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::shared::observability::domain::TracerConfig;
 
@@ -60,6 +60,7 @@ pub(crate) enum RouteControllerCommand {
     SwapPipelineRaw {
         route_id: String,
         pipeline: BoxProcessor,
+        lifecycle: Vec<Arc<dyn StepLifecycle>>,
         reply: oneshot::Sender<Result<(), CamelError>>,
     },
     CompileRouteDefinition {
@@ -70,6 +71,17 @@ pub(crate) enum RouteControllerCommand {
         definition: RouteDefinition,
         generation: u64,
         reply: oneshot::Sender<Result<BoxProcessor, CamelError>>,
+    },
+    CompileRouteDefinitionPipeline {
+        definition: RouteDefinition,
+        generation: u64,
+        reply: oneshot::Sender<Result<CompiledPipeline, CamelError>>,
+    },
+    /// Compile without function generation, returning full CompiledPipeline.
+    /// Oracle Fix 1: stateless hot-reload path preserves lifecycle handles.
+    CompileRouteDefinitionDryPipeline {
+        definition: RouteDefinition,
+        reply: oneshot::Sender<Result<CompiledPipeline, CamelError>>,
     },
     PrepareRouteDefinitionWithGeneration {
         definition: RouteDefinition,
@@ -135,6 +147,10 @@ pub(crate) enum RouteControllerCommand {
     RouteSourceHash {
         route_id: String,
         reply: oneshot::Sender<Option<u64>>,
+    },
+    RouteHasLifecycle {
+        route_id: String,
+        reply: oneshot::Sender<bool>,
     },
     Shutdown,
 }
@@ -288,12 +304,14 @@ impl RouteControllerHandle {
         &self,
         route_id: impl Into<String>,
         pipeline: BoxProcessor,
+        lifecycle: Vec<Arc<dyn StepLifecycle>>,
     ) -> Result<(), CamelError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RouteControllerCommand::SwapPipelineRaw {
                 route_id: route_id.into(),
                 pipeline,
+                lifecycle,
                 reply: reply_tx,
             })
             .await
@@ -334,6 +352,43 @@ impl RouteControllerHandle {
                     reply: reply_tx,
                 },
             )
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    pub(crate) async fn compile_route_definition_pipeline(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<CompiledPipeline, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::CompileRouteDefinitionPipeline {
+                definition,
+                generation,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    /// Compile without function generation, returning full [`CompiledPipeline`].
+    pub(crate) async fn compile_route_definition_dry_pipeline(
+        &self,
+        definition: RouteDefinition,
+    ) -> Result<CompiledPipeline, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::CompileRouteDefinitionDryPipeline {
+                definition,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
         reply_rx
@@ -599,6 +654,23 @@ impl RouteControllerHandle {
             .await
             .ok()?;
         reply_rx.await.ok()?
+    }
+
+    pub(crate) async fn route_has_lifecycle(
+        &self,
+        route_id: impl Into<String>,
+    ) -> Result<bool, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::RouteHasLifecycle {
+                route_id: route_id.into(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))
     }
 
     pub async fn shutdown(&self) -> Result<(), CamelError> {

@@ -67,10 +67,18 @@ pub(crate) fn new_identity_pipeline() -> SharedPipeline {
 }
 
 /// Raw swap — no lifecycle drain. Only for non-lifecycle routes.
-pub(crate) fn swap_pipeline_raw(pipeline: &SharedPipeline, new_processor: BoxProcessor) {
+///
+/// Accepts `lifecycle` so that the new pipeline assembly records the
+/// lifecycle handles from the compiled steps.  When the route is subsequently
+/// stopped, these handles are drained.
+pub(crate) fn swap_pipeline_raw(
+    pipeline: &SharedPipeline,
+    new_processor: BoxProcessor,
+    lifecycle: Vec<Arc<dyn StepLifecycle>>,
+) {
     pipeline.store(Arc::new(PipelineAssembly::new(
         SyncBoxProcessor::new(new_processor),
-        vec![],
+        lifecycle,
     )));
 }
 
@@ -92,7 +100,7 @@ mod tests {
         assert!(p1.ready().await.is_ok());
 
         let new_proc = BoxProcessor::new(IdentityProcessor);
-        swap_pipeline_raw(&shared, new_proc);
+        swap_pipeline_raw(&shared, new_proc, vec![]);
 
         let mut p2 = get_pipeline(&shared);
         assert!(p2.ready().await.is_ok());
@@ -113,7 +121,7 @@ mod tests {
                 if i % 2 == 0 {
                     // writer
                     let new_proc = BoxProcessor::new(IdentityProcessor);
-                    swap_pipeline_raw(&s, new_proc);
+                    swap_pipeline_raw(&s, new_proc, vec![]);
                     c.fetch_add(1, Ordering::Relaxed);
                 } else {
                     // reader

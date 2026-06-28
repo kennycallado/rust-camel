@@ -6,6 +6,8 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+#[cfg(test)]
+use camel_api::StepLifecycle;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
     CamelError, FunctionInvoker, HealthReport, Lifecycle, MetricsCollector, PlatformIdentity,
@@ -112,6 +114,12 @@ pub struct RuntimeExecutionHandle {
     pub(crate) controller: RouteControllerHandle,
     pub(crate) runtime: Arc<RuntimeBus>,
     pub(crate) function_invoker: Option<Arc<dyn FunctionInvoker>>,
+    /// Lifecycle handles to inject into the compiled pipeline during
+    /// `apply_swap`.  Used in tests to simulate lifecycle-bearing routes
+    /// (e.g. resequencer).  Always `None` in production.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) test_lifecycle_inject: Arc<std::sync::Mutex<Option<Vec<Arc<dyn StepLifecycle>>>>>,
 }
 
 impl RuntimeExecutionHandle {
@@ -126,6 +134,9 @@ impl RuntimeExecutionHandle {
             .map_err(Into::into)
     }
 
+    /// Compile a route definition into a bare BoxProcessor (no lifecycle).
+    /// Kept for tests; hot-reload uses the lifecycle-preserving variant instead.
+    #[allow(dead_code)]
     pub(crate) async fn compile_route_definition(
         &self,
         definition: RouteDefinition,
@@ -133,6 +144,7 @@ impl RuntimeExecutionHandle {
         self.controller.compile_route_definition(definition).await
     }
 
+    #[allow(dead_code)] // kept for potential future hot-reload paths
     pub(crate) async fn compile_route_definition_with_generation(
         &self,
         definition: RouteDefinition,
@@ -140,6 +152,27 @@ impl RuntimeExecutionHandle {
     ) -> Result<camel_api::BoxProcessor, CamelError> {
         self.controller
             .compile_route_definition_with_generation(definition, generation)
+            .await
+    }
+
+    pub(crate) async fn compile_route_definition_pipeline(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<crate::lifecycle::adapters::route_helpers::CompiledPipeline, CamelError> {
+        self.controller
+            .compile_route_definition_pipeline(definition, generation)
+            .await
+    }
+
+    /// Compile without function generation, returning full CompiledPipeline.
+    /// Oracle Fix 1: stateless hot-reload path preserves lifecycle handles.
+    pub(crate) async fn compile_route_definition_dry_pipeline(
+        &self,
+        definition: RouteDefinition,
+    ) -> Result<crate::lifecycle::adapters::route_helpers::CompiledPipeline, CamelError> {
+        self.controller
+            .compile_route_definition_dry_pipeline(definition)
             .await
     }
 
@@ -200,8 +233,11 @@ impl RuntimeExecutionHandle {
         &self,
         route_id: &str,
         pipeline: camel_api::BoxProcessor,
+        lifecycle: Vec<Arc<dyn camel_api::StepLifecycle>>,
     ) -> Result<(), CamelError> {
-        self.controller.swap_pipeline_raw(route_id, pipeline).await
+        self.controller
+            .swap_pipeline_raw(route_id, pipeline, lifecycle)
+            .await
     }
 
     pub(crate) async fn execute_runtime_command(
@@ -257,6 +293,14 @@ impl RuntimeExecutionHandle {
             .in_flight_count(route_id)
             .await?
             .unwrap_or(0))
+    }
+
+    /// Check whether the running route has lifecycle-bearing steps.
+    pub(crate) async fn route_has_lifecycle(&self, route_id: &str) -> bool {
+        self.controller
+            .route_has_lifecycle(route_id)
+            .await
+            .unwrap_or(false)
     }
 
     pub(crate) fn function_invoker(&self) -> Option<Arc<dyn FunctionInvoker>> {
@@ -432,6 +476,8 @@ impl CamelContext {
             controller: self.route_controller.clone(),
             runtime: Arc::clone(&self.runtime),
             function_invoker: self.function_invoker.clone(),
+            #[cfg(test)]
+            test_lifecycle_inject: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

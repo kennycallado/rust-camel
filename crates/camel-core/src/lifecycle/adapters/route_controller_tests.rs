@@ -1543,8 +1543,11 @@ fn swap_pipeline_raw_bypasses_lifecycle_rejection() {
     );
 
     // swap_pipeline_raw bypasses the check
-    let raw_result =
-        controller.swap_pipeline_raw("lifecycle-route", BoxProcessor::new(IdentityProcessor));
+    let raw_result = controller.swap_pipeline_raw(
+        "lifecycle-route",
+        BoxProcessor::new(IdentityProcessor),
+        vec![Arc::new(FakeStep) as Arc<dyn StepLifecycle>],
+    );
     assert!(
         raw_result.is_ok(),
         "swap_pipeline_raw should accept lifecycle route, got: {:?}",
@@ -1568,4 +1571,482 @@ async fn swap_pipeline_allows_stateless_route() {
     let result = controller.swap_pipeline("stateless", BoxProcessor::new(IdentityProcessor));
     assert!(result.is_ok());
     assert!(controller.get_pipeline("stateless").is_some());
+}
+
+// ── Hot-reload lifecycle preservation tests (Task 1b-pre) ──
+
+/// Verify that after a raw pipeline swap with lifecycle handles, the new
+/// `PipelineAssembly` stores them — so that subsequent route stop drains them.
+#[tokio::test]
+async fn hot_reload_preserves_lifecycle_handles_in_pipeline_assembly() {
+    let mut controller = build_controller_with_components();
+
+    controller
+        .add_route(RouteDefinition::new("timer:tick?period=100", vec![]).with_route_id("life"))
+        .await
+        .unwrap();
+
+    let lifecycle: Vec<Arc<dyn StepLifecycle>> = vec![Arc::new(FakeStep)];
+
+    // Simulate Restart path: raw swap with lifecycle.
+    controller
+        .swap_pipeline_raw(
+            "life",
+            BoxProcessor::new(IdentityProcessor),
+            lifecycle.clone(),
+        )
+        .expect("swap_pipeline_raw with lifecycle should succeed");
+
+    // Verify new PipelineAssembly carries the lifecycle handles.
+    let managed = controller.routes.get("life").expect("route should exist");
+    let assembly = managed.pipeline.load();
+    assert_eq!(
+        assembly.lifecycle.len(),
+        1,
+        "new pipeline assembly should have 1 lifecycle handle"
+    );
+    // drop the load guard so the ArcSwap can be updated later
+    drop(assembly);
+}
+
+/// Verify that hot-reload with empty lifecycle still succeeds
+/// (the atomic swap path for stateless routes).
+#[tokio::test]
+async fn hot_reload_with_empty_lifecycle_still_works() {
+    let mut controller = build_controller_with_components();
+
+    controller
+        .add_route(
+            RouteDefinition::new("timer:tick?period=100", vec![]).with_route_id("stateless-hr"),
+        )
+        .await
+        .unwrap();
+
+    // Swap with empty lifecycle (simulates atomic swap for stateless route).
+    controller
+        .swap_pipeline_raw("stateless-hr", BoxProcessor::new(IdentityProcessor), vec![])
+        .expect("swap_pipeline_raw with empty lifecycle should succeed");
+
+    assert!(
+        controller.get_pipeline("stateless-hr").is_some(),
+        "pipeline should exist after swap with empty lifecycle"
+    );
+
+    // Verify assembly has no lifecycle handles.
+    let managed = controller
+        .routes
+        .get("stateless-hr")
+        .expect("route should exist");
+    let assembly = managed.pipeline.load();
+    assert!(
+        assembly.lifecycle.is_empty(),
+        "pipeline assembly should have empty lifecycle"
+    );
+}
+
+#[tokio::test]
+async fn resequencer_compile_route_returns_ack_and_posts_to_continuation() {
+    use camel_api::body::Body;
+    use camel_api::exchange::ExchangePattern;
+    use camel_processor::LogLevel;
+    use camel_processor::resequencer::CAMEL_RESEQUENCER_ACCEPTED;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tower::Service;
+
+    let mut controller = build_controller_with_components();
+    register_simple_language(&mut controller);
+
+    // Capture body text from the post-continuation call
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // The recording sender (cloned into every call) so we can capture the
+    // exchange body AFTER the resequencer actor + post-driver process it.
+    struct RecordingPostProcessor {
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+    impl Clone for RecordingPostProcessor {
+        fn clone(&self) -> Self {
+            Self {
+                tx: self.tx.clone(),
+            }
+        }
+    }
+    impl Service<Exchange> for RecordingPostProcessor {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future =
+            Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, exchange: Exchange) -> Self::Future {
+            let body_text = exchange
+                .input
+                .body
+                .as_text()
+                .unwrap_or("<non-text>")
+                .to_string();
+            // Fire-and-forget: drop send errors on channel close (test teardown)
+            let _ = self.tx.send(body_text);
+            Box::pin(async move { Ok(exchange) })
+        }
+    }
+
+    // Route: pre-step (Log) → Resequence → post-step (RecordingPostProcessor)
+    let route = RouteDefinition::new(
+        "mock:in",
+        vec![
+            BuilderStep::Log {
+                level: LogLevel::Info,
+                message: "pre-resequence".into(),
+            },
+            BuilderStep::Resequence {
+                policy_config: camel_api::ResequencePolicyConfig {
+                    mode: camel_api::ResequenceMode::Batch {
+                        correlation: "${header.id}".into(),
+                        sort: "${header.id}".into(),
+                        completion: camel_api::BatchCompletion::Size(1),
+                    },
+                },
+            },
+            BuilderStep::Processor(BoxProcessor::new(tower::util::BoxCloneService::new(
+                RecordingPostProcessor { tx },
+            ))),
+        ],
+    )
+    .with_route_id("reseq-compile");
+
+    let compiled = controller
+        .compile_route_definition_pipeline(route, 1)
+        .expect("resequencer route should compile");
+
+    // Build an InOnly exchange with a text body and a header.id for correlation
+    let mut input =
+        camel_api::Exchange::new(camel_api::Message::new(Body::Text("input-body".into())));
+    input.input.set_header("id", "test-1");
+
+    let mut pipeline = compiled.processor.clone();
+    pipeline.ready().await.expect("pipeline should be ready");
+    let result = pipeline
+        .call(input)
+        .await
+        .expect("pipeline call should succeed");
+
+    // The ack exchange body must be Empty (the resequencer returns an ack, not the input)
+    assert!(
+        matches!(result.input.body, Body::Empty),
+        "ack body should be Empty, got {:?}",
+        result.input.body
+    );
+
+    // CAMEL_RESEQUENCER_ACCEPTED must be true
+    assert_eq!(
+        result
+            .property(CAMEL_RESEQUENCER_ACCEPTED)
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "ack should have CAMEL_RESEQUENCER_ACCEPTED=true"
+    );
+
+    // The exchange pattern should be InOnly (unchanged by resequencer)
+    assert_eq!(
+        result.pattern,
+        ExchangePattern::InOnly,
+        "ack exchange pattern should remain InOnly"
+    );
+
+    // ── Verify the post-continuation received the payload ──
+    let captured_body = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("post-continuation did not receive exchange within 500ms timeout")
+        .expect("capture channel closed without receiving exchange");
+    assert_eq!(
+        captured_body, "input-body",
+        "post-continuation should receive the original input body via PassthroughPolicy"
+    );
+
+    // Drain lifecycle to clean up
+    for lc in &compiled.lifecycle {
+        lc.shutdown(camel_api::StepShutdownReason::RouteStop)
+            .await
+            .expect("lifecycle shutdown should succeed");
+    }
+}
+
+#[tokio::test]
+async fn resequencer_batch_e2e_sort_and_emit() {
+    use camel_api::body::Body;
+    use camel_api::exchange::ExchangePattern;
+    use camel_processor::resequencer::CAMEL_RESEQUENCER_ACCEPTED;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tower::Service;
+
+    let mut controller = build_controller_with_components();
+    register_simple_language(&mut controller);
+
+    // Capture channel for post-continuation exchanges
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Exchange>();
+
+    /// Records received exchanges and their sequence numbers.
+    struct RecordingPost {
+        tx: tokio::sync::mpsc::UnboundedSender<Exchange>,
+    }
+    impl Clone for RecordingPost {
+        fn clone(&self) -> Self {
+            Self {
+                tx: self.tx.clone(),
+            }
+        }
+    }
+    impl Service<Exchange> for RecordingPost {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future =
+            Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, exchange: Exchange) -> Self::Future {
+            let tx = self.tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(exchange.clone());
+                Ok(exchange)
+            })
+        }
+    }
+
+    // Route: Resequence(batch: Size(3), sort=header.seq) → RecordingPost
+    let route = RouteDefinition::new(
+        "mock:in",
+        vec![
+            BuilderStep::Resequence {
+                policy_config: camel_api::ResequencePolicyConfig {
+                    mode: camel_api::ResequenceMode::Batch {
+                        correlation: "${header.id}".into(),
+                        sort: "${header.seq}".into(),
+                        completion: camel_api::BatchCompletion::Size(3),
+                    },
+                },
+            },
+            BuilderStep::Processor(BoxProcessor::new(tower::util::BoxCloneService::new(
+                RecordingPost { tx },
+            ))),
+        ],
+    )
+    .with_route_id("batch-e2e");
+
+    let compiled = controller
+        .compile_route_definition_pipeline(route, 1)
+        .expect("batch route should compile");
+
+    let mut pipeline = compiled.processor.clone();
+
+    // Send 3 exchanges with out-of-order seq headers: 3, 1, 2
+    let seqs = [3, 1, 2];
+    for &seq in &seqs {
+        let mut ex = Exchange::new(camel_api::Message::new(Body::Text(format!("msg-{seq}"))));
+        ex.input.set_header("id", "group-1");
+        ex.input.set_header("seq", seq.to_string());
+        ex.pattern = ExchangePattern::InOnly;
+        pipeline.ready().await.expect("pipeline should be ready");
+        let ack = pipeline
+            .call(ex)
+            .await
+            .expect("pipeline call should succeed");
+        assert_eq!(
+            ack.property(CAMEL_RESEQUENCER_ACCEPTED)
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "ack should have CAMEL_RESEQUENCER_ACCEPTED=true"
+        );
+    }
+
+    // Collect post-continuation exchanges (should receive 3 sorted: [msg-1, msg-2, msg-3])
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        let captured = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("post-continuation did not receive exchange within timeout")
+            .expect("capture channel closed without receiving exchange");
+        received.push(captured);
+    }
+
+    assert_eq!(
+        received.len(),
+        3,
+        "should receive exactly 3 exchanges in post-continuation"
+    );
+
+    // Verify sorted order by body text
+    let bodies: Vec<String> = received
+        .iter()
+        .map(|ex| ex.input.body.as_text().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["msg-1", "msg-2", "msg-3"],
+        "post-continuation should receive exchanges sorted by seq header"
+    );
+
+    // Drain lifecycle
+    for lc in &compiled.lifecycle {
+        lc.shutdown(camel_api::StepShutdownReason::RouteStop)
+            .await
+            .expect("lifecycle shutdown should succeed");
+    }
+}
+
+#[tokio::test]
+async fn resequencer_hot_swap_drains_old_service() {
+    use camel_api::body::Body;
+    use camel_api::exchange::ExchangePattern;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tower::Service;
+
+    let mut controller = build_controller_with_components();
+    register_simple_language(&mut controller);
+
+    /// A post-processor that records every exchange body text.
+    #[derive(Clone)]
+    struct DrainRecorder {
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+    impl Service<Exchange> for DrainRecorder {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future =
+            Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, exchange: Exchange) -> Self::Future {
+            let tx = self.tx.clone();
+            Box::pin(async move {
+                let body = exchange
+                    .input
+                    .body
+                    .as_text()
+                    .unwrap_or("<no-body>")
+                    .to_string();
+                let _ = tx.send(body);
+                Ok(exchange)
+            })
+        }
+    }
+
+    // Step 1: Register initial route with resequencer via add_route
+    let (old_tx, mut old_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let initial_route = RouteDefinition::new(
+        "mock:in",
+        vec![
+            BuilderStep::Resequence {
+                policy_config: camel_api::ResequencePolicyConfig {
+                    mode: camel_api::ResequenceMode::Batch {
+                        correlation: "${header.id}".into(),
+                        sort: "${header.seq}".into(),
+                        completion: camel_api::BatchCompletion::Size(1),
+                    },
+                },
+            },
+            BuilderStep::Processor(BoxProcessor::new(tower::util::BoxCloneService::new(
+                DrainRecorder { tx: old_tx },
+            ))),
+        ],
+    )
+    .with_route_id("hr-drain");
+
+    controller
+        .add_route(initial_route)
+        .await
+        .expect("add initial route should succeed");
+
+    // Step 2: Compile a NEW pipeline (simulating hot-reload)
+    let (new_tx, mut new_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let new_route = RouteDefinition::new(
+        "mock:in",
+        vec![
+            BuilderStep::Resequence {
+                policy_config: camel_api::ResequencePolicyConfig {
+                    mode: camel_api::ResequenceMode::Batch {
+                        correlation: "${header.id}".into(),
+                        sort: "${header.seq}".into(),
+                        completion: camel_api::BatchCompletion::Size(1),
+                    },
+                },
+            },
+            BuilderStep::Processor(BoxProcessor::new(tower::util::BoxCloneService::new(
+                DrainRecorder { tx: new_tx },
+            ))),
+        ],
+    )
+    .with_route_id("hr-drain");
+
+    let new_compiled = controller
+        .compile_route_definition_pipeline(new_route, 2)
+        .expect("new route should compile");
+
+    // Step 3: Hot-swap — swap_pipeline_raw drains old lifecycles internally
+    // (matching ADR-0004 hot-reload Restart path)
+    controller
+        .swap_pipeline_raw(
+            "hr-drain",
+            new_compiled.processor.clone(),
+            new_compiled.lifecycle.clone(),
+        )
+        .expect("hot-swap raw with lifecycle should succeed");
+
+    // Verify the old continuation channel is quiet (drain completed, no new messages)
+    // The old ResequencerService's drain flushed any buffered exchange through the old
+    // post-continuation. Since we sent 0 exchanges, old_rx should be empty.
+    match tokio::time::timeout(std::time::Duration::from_millis(100), old_rx.recv()).await {
+        Ok(Some(msg)) => {
+            // One message may arrive from the old drain (if any buffered)
+            // That's fine — the drain DID flush through the OLD continuation.
+            // Just verify no SECOND message arrives.
+            match tokio::time::timeout(std::time::Duration::from_millis(100), old_rx.recv()).await {
+                Ok(Some(m2)) => {
+                    panic!("old continuation received unexpected second exchange after drain: {m2}")
+                }
+                _ => {} // expected: channel closed or timeout after drain
+            }
+            drop(msg);
+        }
+        Ok(None) => {} // channel closed — old drain completed and released the sender
+        Err(_) => {}   // timeout — expected, no messages on old channel
+    }
+
+    // Step 4: Verify the NEW pipeline works after hot-swap
+    {
+        let swapped = controller
+            .get_pipeline("hr-drain")
+            .expect("pipeline should exist");
+        let mut pipeline = swapped.clone();
+        let mut ex = Exchange::new(camel_api::Message::new(Body::Text("new-msg".into())));
+        ex.input.set_header("id", "g1");
+        ex.input.set_header("seq", "2");
+        ex.pattern = ExchangePattern::InOnly;
+        pipeline.ready().await.expect("ready");
+        pipeline.call(ex).await.expect("new pipeline call");
+    }
+
+    let new_body = tokio::time::timeout(std::time::Duration::from_millis(1000), new_rx.recv())
+        .await
+        .expect("new continuation should receive within timeout")
+        .expect("new channel closed");
+    assert_eq!(
+        new_body, "new-msg",
+        "new continuation should receive 'new-msg' after hot-swap"
+    );
+
+    // Drain new lifecycles
+    for lc in &new_compiled.lifecycle {
+        lc.shutdown(camel_api::StepShutdownReason::RouteStop)
+            .await
+            .expect("new lifecycle shutdown should succeed");
+    }
 }

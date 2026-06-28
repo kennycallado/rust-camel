@@ -80,6 +80,8 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
         RouteDslStep::ClaimCheck(_) => (),
         RouteDslStep::Sampling(_) => (),
         RouteDslStep::Sort(_) => (),
+        RouteDslStep::Resequence(_) => (),
+        RouteDslStep::ScatterGather(_) => (),
         // Intentionally NO `_ => ()` wildcard.
         // A new variant added to RouteDslStep will cause a compile error here,
         // forcing the author to also add a parity case below.
@@ -511,6 +513,56 @@ routes:
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"claim_check":{"repository":"memory","operation":"set","key":"${header.claimKey}"}}]}]}"#,
         },
+        ParityCase {
+            name: "Resequence",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - resequence:
+          batch:
+            correlation: "${header.region}"
+            sort: "${header.sequence}"
+            completion:
+              size: 100
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"resequence":{"batch":{"correlation":"${header.region}","sort":"${header.sequence}","completion":{"size":100}}}}]}]}"#,
+        },
+        ParityCase {
+            name: "ResequenceStream",
+            yaml: r#"
+routes:
+  - id: r2
+    from: direct:start
+    steps:
+      - resequence:
+          stream:
+            sequence: "${header.seqNum}"
+            capacity: 1000
+            gap_timeout: 5000
+            on_gap: emit_partial
+            on_capacity_exceeded: log_and_drop
+            dedup: false
+"#,
+            json: r#"{"routes":[{"id":"r2","from":"direct:start","steps":[{"resequence":{"stream":{"sequence":"${header.seqNum}","capacity":1000,"gap_timeout":5000,"on_gap":"emit_partial","on_capacity_exceeded":"log_and_drop","dedup":false}}}]}]}"#,
+        },
+        ParityCase {
+            name: "ScatterGather",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - scatter_gather:
+          endpoints:
+            - direct:a
+            - direct:b
+            - direct:c
+          aggregation: collect_all
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"scatter_gather":{"endpoints":["direct:a","direct:b","direct:c"],"aggregation":"collect_all"}}]}]}"#,
+        },
     ]
 }
 
@@ -564,7 +616,7 @@ fn test_variant_count_matches_matrix() {
     //   2. Bumped EXPECTED_VARIANTS below.
     //   3. Added a ParityCase for the new variant.
     // Step 3 is not mechanically enforced; review discipline applies.
-    const EXPECTED_VARIANTS: usize = 34;
+    const EXPECTED_VARIANTS: usize = 36;
     let actual = parity_cases().len();
     assert!(
         actual >= EXPECTED_VARIANTS,

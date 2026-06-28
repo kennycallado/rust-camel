@@ -8,7 +8,10 @@ use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::loop_eip::LoopConfig;
 use camel_api::security_policy::SecurityPolicyConfig;
-use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
+use camel_api::{
+    AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, ResequencePolicyConfig,
+    SplitterConfig,
+};
 use camel_auth::TokenAuthenticator;
 use camel_component_api::ConcurrencyModel;
 
@@ -255,6 +258,11 @@ pub enum BuilderStep {
         catch: Vec<DoTryCatchClauseBuilder>,
         finally: Option<DoTryFinallyBuilder>,
     },
+    /// Resequencer EIP: resequences exchanges by sequence number.
+    /// Must be a top-level step (not nested inside structural EIPs).
+    Resequence {
+        policy_config: ResequencePolicyConfig,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -492,6 +500,7 @@ impl std::fmt::Debug for BuilderStep {
                     if finally.is_some() { "Some" } else { "None" }
                 )
             }
+            BuilderStep::Resequence { .. } => write!(f, "BuilderStep::Resequence {{ .. }}"),
         }
     }
 }

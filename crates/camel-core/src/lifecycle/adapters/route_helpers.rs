@@ -14,7 +14,7 @@ use tower::ServiceExt;
 use tracing::warn;
 
 use camel_api::aggregator::AggregatorConfig;
-use camel_api::{CamelError, Exchange, RuntimeCommand, RuntimeHandle};
+use camel_api::{CamelError, Exchange, ResequencePolicyConfig, RuntimeCommand, RuntimeHandle};
 use camel_component_api::{ConcurrencyModel, consumer::ExchangeEnvelope};
 use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
 
@@ -85,7 +85,7 @@ pub(super) fn emit_start_route_event(event: &'static str) {
 
 /// Internal state for a managed route.
 #[derive(Clone)]
-pub(super) struct AggregateSplitInfo {
+pub(crate) struct AggregateSplitInfo {
     pub(super) pre_pipeline: SharedPipeline,
     pub(super) agg_config: AggregatorConfig,
     pub(super) post_pipeline: SharedPipeline,
@@ -120,6 +120,16 @@ pub(super) struct ManagedRoute {
     pub(super) agg_service: Option<Arc<AggregatorService>>,
     /// Compiled runtime state (security artifacts captured at add time).
     pub(super) compiled: route_runtime_state::CompiledRoute,
+}
+
+/// A compiled pipeline bundle carrying both the processor and its lifecycle
+/// handles.  Returned by [`RouteCompilerExt::compile_route_impl`] so that the
+/// hot-reload Restart path can thread lifecycle into
+/// [`swap_pipeline_raw`](super::pipeline_runtime::swap_pipeline_raw).
+#[derive(Debug)]
+pub(crate) struct CompiledPipeline {
+    pub(crate) processor: camel_api::BoxProcessor,
+    pub(crate) lifecycle: Vec<Arc<dyn camel_api::StepLifecycle>>,
 }
 
 /// A prepared route (compiled but not yet inserted into the registry).
@@ -159,6 +169,59 @@ pub(super) fn find_top_level_aggregate_requiring_split(
         }
     }
     None
+}
+
+/// Info about the top-level resequencer split (N3: at most one).
+#[derive(Debug, Clone)]
+pub(super) struct ResequenceSplitInfo {
+    pub(super) index: usize,
+    pub(super) policy_config: ResequencePolicyConfig,
+}
+
+/// Find the top-level resequencer step.
+///
+/// Returns `Some(info)` if there is exactly ONE top-level `BuilderStep::Resequence`.
+/// **N3:** Returns an error if more than one top-level `Resequence` is found
+/// (the "resequencer is the LAST main-pipeline step" invariant holds for exactly one).
+pub(super) fn find_top_level_resequencer_requiring_split(
+    steps: &[BuilderStep],
+) -> Result<Option<ResequenceSplitInfo>, CamelError> {
+    let mut found: Option<ResequenceSplitInfo> = None;
+    for (i, step) in steps.iter().enumerate() {
+        if let BuilderStep::Resequence { policy_config } = step {
+            if found.is_some() {
+                return Err(CamelError::RouteError(
+                    "Multiple top-level Resequence steps found — at most one allowed".into(),
+                ));
+            }
+            found = Some(ResequenceSplitInfo {
+                index: i,
+                policy_config: policy_config.clone(),
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// N2: Reject any route containing BOTH a top-level aggregate-requiring-split
+/// step AND a top-level `BuilderStep::Resequence`. The two split mechanisms are
+/// mutually exclusive.
+///
+/// **Predicate (M9):** Detects "aggregate-requiring-split" by testing timeout
+/// / force-completion on EVERY top-level `Aggregate`, not just the first match.
+pub(super) fn assert_no_mixed_top_level_splits(steps: &[BuilderStep]) -> Result<(), CamelError> {
+    let has_aggregate_split = steps
+        .iter()
+        .any(|step| matches!(step, BuilderStep::Aggregate { config } if has_timeout_condition(&config.completion) || config.force_completion_on_stop));
+    let has_resequence = steps
+        .iter()
+        .any(|step| matches!(step, BuilderStep::Resequence { .. }));
+    if has_aggregate_split && has_resequence {
+        return Err(CamelError::RouteError(
+            "Route contains both a top-level Aggregate (requiring split) and a Resequence step — these split mechanisms are mutually exclusive".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Check if an exchange is pending in the aggregator.
@@ -231,6 +294,180 @@ pub(super) async fn publish_runtime_failure(
             route_id = %route_id,
             error = %runtime_error,
             "failed to synchronize route crash with runtime projection"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resequence_tests {
+    use super::*;
+    use camel_api::aggregator::AggregatorConfig;
+
+    fn make_aggregate_with_timeout() -> BuilderStep {
+        BuilderStep::Aggregate {
+            config: AggregatorConfig::correlate_by("id")
+                .complete_on_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .expect("build aggregate config"), // allow-unwrap: test-only
+        }
+    }
+
+    fn make_aggregate_with_force_completion() -> BuilderStep {
+        BuilderStep::Aggregate {
+            config: AggregatorConfig::correlate_by("id")
+                .complete_when_size(1)
+                .force_completion_on_stop(true)
+                .build()
+                .expect("build aggregate config"), // allow-unwrap: test-only
+        }
+    }
+
+    fn make_aggregate_simple() -> BuilderStep {
+        BuilderStep::Aggregate {
+            config: AggregatorConfig::correlate_by("id")
+                .complete_when_size(5)
+                .build()
+                .expect("build aggregate config"), // allow-unwrap: test-only
+        }
+    }
+
+    fn make_resequence() -> BuilderStep {
+        BuilderStep::Resequence {
+            policy_config: ResequencePolicyConfig::default(),
+        }
+    }
+
+    fn make_log(msg: &str) -> BuilderStep {
+        BuilderStep::Log {
+            level: camel_processor::LogLevel::Info,
+            message: msg.to_string(),
+        }
+    }
+
+    fn make_set_body(body: &str) -> BuilderStep {
+        use camel_api::{LanguageExpressionDef, ValueSourceDef};
+        BuilderStep::DeclarativeSetBody {
+            value: ValueSourceDef::Expression(LanguageExpressionDef {
+                language: "simple".into(),
+                source: body.to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn find_top_level_resequencer_requiring_split_detects_single() {
+        let steps = vec![
+            make_log("A"),
+            make_resequence(),
+            make_set_body("B"),
+            make_log("C"),
+        ];
+        let result = find_top_level_resequencer_requiring_split(&steps);
+        let info = result
+            .expect("should succeed")
+            .expect("should detect resequence");
+        assert_eq!(info.index, 1);
+        let pre = &steps[..info.index];
+        let post = &steps[info.index + 1..];
+        assert_eq!(pre.len(), 1);
+        assert!(matches!(pre[0], BuilderStep::Log { .. }));
+        assert_eq!(post.len(), 2);
+    }
+
+    #[test]
+    fn find_top_level_resequencer_requiring_split_rejects_multiple() {
+        let steps = vec![make_resequence(), make_resequence()];
+        let result = find_top_level_resequencer_requiring_split(&steps);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CamelError::RouteError(_)),
+            "should be RouteError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn find_top_level_resequencer_requiring_split_none_when_absent() {
+        let steps = vec![make_log("A"), make_set_body("B")];
+        let result = find_top_level_resequencer_requiring_split(&steps);
+        assert!(result.expect("should succeed").is_none());
+    }
+
+    #[test]
+    fn assert_no_mixed_top_level_splits_rejects_aggregate_plus_resequencer() {
+        let steps = vec![make_aggregate_with_timeout(), make_resequence()];
+        let result = assert_no_mixed_top_level_splits(&steps);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn assert_no_mixed_top_level_splits_rejects_force_completion_aggregate() {
+        let steps = vec![make_resequence(), make_aggregate_with_force_completion()];
+        let result = assert_no_mixed_top_level_splits(&steps);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn assert_no_mixed_top_level_splits_allows_no_split() {
+        let steps = vec![make_log("A"), make_set_body("B")];
+        let result = assert_no_mixed_top_level_splits(&steps);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn assert_no_mixed_top_level_splits_allows_aggregate_only() {
+        let steps = vec![make_aggregate_with_timeout()];
+        let result = assert_no_mixed_top_level_splits(&steps);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn assert_no_mixed_top_level_splits_allows_simple_aggregate() {
+        let steps = vec![make_aggregate_simple(), make_resequence()];
+        let result = assert_no_mixed_top_level_splits(&steps);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn assert_no_mixed_top_level_splits_allows_resequence_only() {
+        let steps = vec![make_resequence()];
+        let result = assert_no_mixed_top_level_splits(&steps);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn find_top_level_resequencer_requiring_split_at_index_zero() {
+        // Resequence is the first step — pre is empty, post is [Log, SetBody]
+        let steps = vec![make_resequence(), make_log("C"), make_set_body("D")];
+        let result = find_top_level_resequencer_requiring_split(&steps);
+        let info = result
+            .expect("should succeed")
+            .expect("should detect resequence at index 0");
+        assert_eq!(info.index, 0);
+        let pre = &steps[..info.index];
+        let post = &steps[info.index + 1..];
+        assert!(
+            pre.is_empty(),
+            "pre should be empty when resequence is first"
+        );
+        assert_eq!(post.len(), 2, "post should contain Log and SetBody");
+    }
+
+    #[test]
+    fn find_top_level_resequencer_requiring_split_at_last_index() {
+        // Resequence is the last step — pre is [Log, SetBody], post is empty
+        let steps = vec![make_log("A"), make_set_body("B"), make_resequence()];
+        let result = find_top_level_resequencer_requiring_split(&steps);
+        let info = result
+            .expect("should succeed")
+            .expect("should detect resequence at last index");
+        assert_eq!(info.index, 2);
+        let pre = &steps[..info.index];
+        let post = &steps[info.index + 1..];
+        assert_eq!(pre.len(), 2, "pre should contain Log and SetBody");
+        assert!(
+            post.is_empty(),
+            "post should be empty when resequence is last"
         );
     }
 }

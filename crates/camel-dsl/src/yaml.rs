@@ -27,11 +27,11 @@ use crate::model::{
     DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DoTryCatchClauseDef, DoTryFinallyDef,
     DynamicRouterStepDef, EnrichStepDef, IdempotentConsumerStepDef, LanguageExpressionDef,
     LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
-    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
-    SamplingStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef,
-    SetPropertyStepDef, SortStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
-    StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValidateStepDef,
-    ValueSourceDef, WhenStepDef, WireTapStepDef,
+    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, ResequenceModeDef,
+    ResequenceStepDef, RoutingSlipStepDef, SamplingStepDef, ScriptStepDef, SecurityCompileContext,
+    SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SortStepDef, SplitAggregationDef,
+    SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef,
+    ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::route_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, ClaimCheckBody,
@@ -39,16 +39,19 @@ pub use crate::route_ast::{
     EnrichConfig, EnrichStep, FilterStep, FunctionStep, IdempotentConsumerBody,
     IdempotentConsumerStep, LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData,
     LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PollEnrichStep,
-    PredicateBlock, RecipientListData, RecipientListStep, RouteDslRoute, RouteDslRoutes,
-    RouteDslStep, RoutingSlipData, RoutingSlipStep, SamplingBody, SamplingConfig, SamplingStep,
-    ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
-    SetPropertyData, SetPropertyStep, SortBody, SortStep, SplitData, SplitExpressionConfig,
-    SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
-    ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
+    PredicateBlock, RecipientListData, RecipientListStep, ResequenceBatchYaml, ResequenceData,
+    ResequenceStep, ResequenceStreamYaml, RouteDslRoute, RouteDslRoutes, RouteDslStep,
+    RoutingSlipData, RoutingSlipStep, SamplingBody, SamplingConfig, SamplingStep,
+    ScatterGatherData, ScatterGatherStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData,
+    SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, SortBody,
+    SortStep, SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep,
+    StreamCacheBody, StreamCacheConfig, StreamCacheStep, StreamCapacityPolicyYaml,
+    StreamGapPolicyYaml, ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep,
+    ValidateStep, WireTapStep,
 };
 use crate::route_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 34] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 35] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -83,6 +86,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 34] = [
     DeclarativeStepKind::ClaimCheck,
     DeclarativeStepKind::Sampling,
     DeclarativeStepKind::Sort,
+    DeclarativeStepKind::Resequence,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -423,6 +427,62 @@ pub(crate) fn route_dsl_to_declarative_route(
         unit_of_work,
         steps,
     })
+}
+
+/// Parse a `ResequenceCompletionYaml` into a `BatchCompletion`.
+/// Exactly one of `size`, `timeout`, or `size_or_timeout` must be set.
+fn parse_resequence_completion(
+    c: &crate::route_ast::ResequenceCompletionYaml,
+) -> Result<camel_api::resequencer::BatchCompletion, CamelError> {
+    use camel_api::resequencer::BatchCompletion;
+    match (c.size, c.timeout, &c.size_or_timeout) {
+        (Some(s), None, None) => {
+            if s == 0 {
+                return Err(CamelError::ValidationError(
+                    "resequence: batch completion size must be > 0".into(),
+                ));
+            }
+            Ok(BatchCompletion::Size(s))
+        }
+        (None, Some(t), None) => {
+            if t == 0 {
+                return Err(CamelError::ValidationError(
+                    "resequence: batch completion timeout must be > 0".into(),
+                ));
+            }
+            Ok(BatchCompletion::Timeout(t))
+        }
+        (None, None, Some(v)) => {
+            if v.len() != 2 {
+                return Err(CamelError::ValidationError(format!(
+                    "resequence: size_or_timeout must be [size, timeout_ms], got {} elements",
+                    v.len()
+                )));
+            }
+            let size = v[0] as usize;
+            let timeout = v[1];
+            if size == 0 || timeout == 0 {
+                return Err(CamelError::ValidationError(
+                    "resequence: both size and timeout in size_or_timeout must be > 0".into(),
+                ));
+            }
+            Ok(BatchCompletion::SizeOrTimeout(size, timeout))
+        }
+        _ => Err(CamelError::ValidationError(
+            "resequence: completion must specify exactly one of 'size', 'timeout', or 'size_or_timeout'".into(),
+        )),
+    }
+}
+
+fn parse_multicast_aggregation(s: &str) -> Result<MulticastAggregationDef, CamelError> {
+    match s {
+        "last_wins" => Ok(MulticastAggregationDef::LastWins),
+        "collect_all" => Ok(MulticastAggregationDef::CollectAll),
+        "original" => Ok(MulticastAggregationDef::Original),
+        other => Err(CamelError::ValidationError(format!(
+            "unknown aggregation strategy: {other}"
+        ))),
+    }
 }
 
 pub(crate) fn route_step_to_declarative_step(
@@ -781,16 +841,7 @@ pub(crate) fn route_step_to_declarative_step(
             }))
         }
         RouteDslStep::Multicast(MulticastStep { multicast }) => {
-            let aggregation = match multicast.aggregation.as_str() {
-                "last_wins" => MulticastAggregationDef::LastWins,
-                "collect_all" => MulticastAggregationDef::CollectAll,
-                "original" => MulticastAggregationDef::Original,
-                other => {
-                    return Err(CamelError::RouteError(format!(
-                        "unsupported multicast.aggregation `{other}`"
-                    )));
-                }
-            };
+            let aggregation = parse_multicast_aggregation(multicast.aggregation.as_str())?;
 
             let steps = multicast
                 .steps
@@ -804,6 +855,41 @@ pub(crate) fn route_step_to_declarative_step(
                 parallel_limit: multicast.parallel_limit,
                 stop_on_exception: multicast.stop_on_exception,
                 timeout_ms: multicast.timeout_ms,
+                aggregation,
+            }))
+        }
+        // ponytail: scatter_gather is pure DSL sugar over Multicast — lowers directly,
+        // no new DeclarativeStep variant, no new processor.
+        RouteDslStep::ScatterGather(step) => {
+            let aggregation =
+                parse_multicast_aggregation(step.scatter_gather.aggregation.as_str())?;
+
+            if step.scatter_gather.endpoints.is_empty() {
+                return Err(CamelError::ValidationError(
+                    "scatter_gather requires at least one endpoint".into(),
+                ));
+            }
+
+            let steps: Vec<DeclarativeStep> = step
+                .scatter_gather
+                .endpoints
+                .into_iter()
+                .map(|endpoint| {
+                    if endpoint.trim().is_empty() {
+                        return Err(CamelError::RouteError(
+                            "scatter_gather: endpoint URI must not be empty".into(),
+                        ));
+                    }
+                    Ok(DeclarativeStep::To(ToStepDef::new(endpoint)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(DeclarativeStep::Multicast(MulticastStepDef {
+                steps,
+                parallel: true,
+                parallel_limit: None,
+                stop_on_exception: false,
+                timeout_ms: None,
                 aggregation,
             }))
         }
@@ -970,14 +1056,8 @@ pub(crate) fn route_step_to_declarative_step(
                 "recipient_list",
             )?;
             let aggregation = match strategy.as_deref() {
-                None | Some("last_wins") => MulticastAggregationDef::LastWins,
-                Some("collect_all") => MulticastAggregationDef::CollectAll,
-                Some("original") => MulticastAggregationDef::Original,
-                Some(other) => {
-                    return Err(CamelError::RouteError(format!(
-                        "unsupported recipient_list.strategy `{other}`"
-                    )));
-                }
+                None => MulticastAggregationDef::LastWins,
+                Some(s) => parse_multicast_aggregation(s)?,
             };
             Ok(DeclarativeStep::RecipientList(RecipientListStepDef {
                 expression,
@@ -1193,6 +1273,49 @@ pub(crate) fn route_step_to_declarative_step(
                 },
                 reverse,
             }))
+        }
+        RouteDslStep::Resequence(ResequenceStep {
+            resequence: ResequenceData { batch, stream },
+        }) => {
+            let mode = match (batch, stream) {
+                (Some(b), None) => {
+                    let completion = parse_resequence_completion(&b.completion)?;
+                    ResequenceModeDef::Batch {
+                        correlation: b.correlation,
+                        sort: b.sort,
+                        completion,
+                    }
+                }
+                (None, Some(s)) => ResequenceModeDef::Stream {
+                    sequence: s.sequence,
+                    capacity: s.capacity,
+                    gap_timeout: s.gap_timeout,
+                    on_gap: match s.on_gap {
+                        StreamGapPolicyYaml::EmitPartial => camel_api::GapPolicy::EmitPartial,
+                        StreamGapPolicyYaml::DropAndLog => camel_api::GapPolicy::DropAndLog,
+                    },
+                    on_capacity_exceeded: match s.on_capacity_exceeded {
+                        StreamCapacityPolicyYaml::LogAndDrop => {
+                            camel_api::CapacityPolicy::LogAndDrop
+                        }
+                        StreamCapacityPolicyYaml::DropOldest => {
+                            camel_api::CapacityPolicy::DropOldest
+                        }
+                    },
+                    dedup: s.dedup,
+                },
+                (Some(_), Some(_)) => {
+                    return Err(CamelError::ValidationError(
+                        "resequence: must specify exactly one of 'batch' or 'stream'".into(),
+                    ));
+                }
+                (None, None) => {
+                    return Err(CamelError::ValidationError(
+                        "resequence: must specify 'batch' or 'stream'".into(),
+                    ));
+                }
+            };
+            Ok(DeclarativeStep::Resequence(ResequenceStepDef { mode }))
         }
         RouteDslStep::DoTry(DoTryStep { do_try: data }) => {
             // Spec §7.2 Rule 4: try steps must be non-empty.
@@ -3904,6 +4027,104 @@ routes:
         assert!(
             err.contains("YAML parse error"),
             "expected original parse error message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn scatter_gather_lowers_to_multicast() {
+        let yaml = r#"
+routes:
+  - id: sg-route
+    from: direct:start
+    steps:
+      - scatter_gather:
+          endpoints:
+            - direct:a
+            - direct:b
+            - direct:c
+          aggregation: collect_all
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].steps.len(), 1);
+
+        match &routes[0].steps[0] {
+            DeclarativeStep::Multicast(def) => {
+                assert_eq!(def.steps.len(), 3);
+                assert!(matches!(def.steps[0], DeclarativeStep::To(_)));
+                assert!(matches!(def.steps[1], DeclarativeStep::To(_)));
+                assert!(matches!(def.steps[2], DeclarativeStep::To(_)));
+                assert_eq!(def.aggregation, MulticastAggregationDef::CollectAll);
+                assert!(def.parallel);
+                assert!(def.parallel_limit.is_none());
+                assert!(!def.stop_on_exception);
+            }
+            other => panic!("expected Multicast, got {:?}", other.kind()),
+        }
+    }
+
+    #[test]
+    fn scatter_gather_default_aggregation_is_last_wins() {
+        let yaml = r#"
+routes:
+  - id: sg-route
+    from: direct:start
+    steps:
+      - scatter_gather:
+          endpoints:
+            - direct:a
+            - direct:b
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::Multicast(def) => {
+                assert_eq!(def.aggregation, MulticastAggregationDef::LastWins);
+            }
+            other => panic!("expected Multicast, got {:?}", other.kind()),
+        }
+    }
+
+    #[test]
+    fn scatter_gather_rejects_empty_endpoint() {
+        let yaml = r#"
+routes:
+  - id: sg-route
+    from: direct:start
+    steps:
+      - scatter_gather:
+          endpoints:
+            - "  "
+          aggregation: collect_all
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
+    }
+
+    #[test]
+    fn scatter_gather_rejects_bad_aggregation() {
+        let yaml = r#"
+routes:
+  - id: sg-route
+    from: direct:start
+    steps:
+      - scatter_gather:
+          endpoints:
+            - direct:a
+          aggregation: bad_strategy
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown aggregation strategy")
         );
     }
 }

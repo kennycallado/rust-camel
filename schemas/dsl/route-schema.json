@@ -1043,6 +1043,133 @@
       ],
       "type": "object"
     },
+    "ResequenceBatchYaml": {
+      "additionalProperties": false,
+      "properties": {
+        "completion": {
+          "$ref": "#/$defs/ResequenceCompletionYaml"
+        },
+        "correlation": {
+          "type": "string"
+        },
+        "sort": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "correlation",
+        "sort",
+        "completion"
+      ],
+      "type": "object"
+    },
+    "ResequenceCompletionYaml": {
+      "additionalProperties": false,
+      "properties": {
+        "size": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "size_or_timeout": {
+          "default": null,
+          "items": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ResequenceData": {
+      "additionalProperties": false,
+      "properties": {
+        "batch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResequenceBatchYaml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stream": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResequenceStreamYaml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ResequenceStep": {
+      "properties": {
+        "resequence": {
+          "$ref": "#/$defs/ResequenceData"
+        }
+      },
+      "required": [
+        "resequence"
+      ],
+      "type": "object"
+    },
+    "ResequenceStreamYaml": {
+      "additionalProperties": false,
+      "properties": {
+        "capacity": {
+          "default": 1000,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dedup": {
+          "default": false,
+          "type": "boolean"
+        },
+        "gap_timeout": {
+          "default": 5000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "on_capacity_exceeded": {
+          "$ref": "#/$defs/StreamCapacityPolicyYaml"
+        },
+        "on_gap": {
+          "$ref": "#/$defs/StreamGapPolicyYaml"
+        },
+        "sequence": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sequence"
+      ],
+      "type": "object"
+    },
     "RouteDslCircuitBreaker": {
       "properties": {
         "failure_threshold": {
@@ -1507,6 +1634,9 @@
           "$ref": "#/$defs/RecipientListStep"
         },
         {
+          "$ref": "#/$defs/ScatterGatherStep"
+        },
+        {
           "$ref": "#/$defs/StopStep"
         },
         {
@@ -1559,6 +1689,9 @@
         },
         {
           "$ref": "#/$defs/SortStep"
+        },
+        {
+          "$ref": "#/$defs/ResequenceStep"
         }
       ]
     },
@@ -1657,6 +1790,35 @@
       },
       "required": [
         "sampling"
+      ],
+      "type": "object"
+    },
+    "ScatterGatherData": {
+      "additionalProperties": false,
+      "description": "Scatter-Gather EIP — stateless parallel fan-out + gather.\nLowers to Multicast with aggregation. No correlation key\n(spec §5 \"correlation key\" wording corrected: stateless form\nhas none; stateful aggregation is the separate Aggregator EIP).",
+      "properties": {
+        "aggregation": {
+          "default": "last_wins",
+          "type": "string"
+        },
+        "endpoints": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ScatterGatherStep": {
+      "properties": {
+        "scatter_gather": {
+          "$ref": "#/$defs/ScatterGatherData"
+        }
+      },
+      "required": [
+        "scatter_gather"
       ],
       "type": "object"
     },
@@ -2104,6 +2266,14 @@
       ],
       "type": "object"
     },
+    "StreamCapacityPolicyYaml": {
+      "description": "Stream resequencer capacity policy (YAML representation).",
+      "enum": [
+        "log_and_drop",
+        "drop_oldest"
+      ],
+      "type": "string"
+    },
     "StreamConfigYaml": {
       "additionalProperties": false,
       "properties": {
@@ -2143,6 +2313,14 @@
         }
       },
       "type": "object"
+    },
+    "StreamGapPolicyYaml": {
+      "description": "Stream resequencer gap policy (YAML representation).",
+      "enum": [
+        "emit_partial",
+        "drop_and_log"
+      ],
+      "type": "string"
     },
     "ThrottleData": {
       "additionalProperties": false,

@@ -287,6 +287,7 @@ pub enum RouteDslStep {
     Multicast(MulticastStep),
     RoutingSlip(RoutingSlipStep),
     RecipientList(RecipientListStep),
+    ScatterGather(ScatterGatherStep),
     Stop(StopStep),
     StreamCache(StreamCacheStep),
     Throttle(ThrottleStep),
@@ -305,6 +306,7 @@ pub enum RouteDslStep {
     ClaimCheck(ClaimCheckStep),
     Sampling(SamplingStep),
     Sort(SortStep),
+    Resequence(ResequenceStep),
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -709,6 +711,26 @@ pub struct MulticastData {
 
 fn default_multicast_aggregation() -> String {
     "last_wins".to_string()
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+pub struct ScatterGatherStep {
+    pub scatter_gather: ScatterGatherData,
+}
+
+/// Scatter-Gather EIP — stateless parallel fan-out + gather.
+/// Lowers to Multicast with aggregation. No correlation key
+/// (spec §5 "correlation key" wording corrected: stateless form
+/// has none; stateful aggregation is the separate Aggregator EIP).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ScatterGatherData {
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    #[serde(default = "default_multicast_aggregation")]
+    pub aggregation: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -1483,4 +1505,91 @@ pub struct BeanStep {
 pub struct BeanStepData {
     pub name: String,
     pub method: String,
+}
+
+// ── Resequence step (Phase 3) ──
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+pub struct ResequenceStep {
+    pub resequence: ResequenceData,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ResequenceData {
+    #[serde(default)]
+    pub batch: Option<ResequenceBatchYaml>,
+    #[serde(default)]
+    pub stream: Option<ResequenceStreamYaml>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ResequenceBatchYaml {
+    pub correlation: String,
+    pub sort: String,
+    pub completion: ResequenceCompletionYaml,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ResequenceCompletionYaml {
+    #[serde(default)]
+    pub size: Option<usize>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub size_or_timeout: Option<Vec<u64>>,
+}
+
+// NOTE: ResequenceStreamYaml intentionally omitted — stream resequencing is
+// not yet implemented (Task 3). Scaffolding will be added when Stream is ready.
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ResequenceStreamYaml {
+    pub sequence: String,
+    #[serde(default = "default_stream_capacity")]
+    pub capacity: usize,
+    #[serde(default = "default_gap_timeout")]
+    pub gap_timeout: u64,
+    #[serde(default)]
+    pub on_gap: StreamGapPolicyYaml,
+    #[serde(default)]
+    pub on_capacity_exceeded: StreamCapacityPolicyYaml,
+    #[serde(default)]
+    pub dedup: bool,
+}
+
+fn default_stream_capacity() -> usize {
+    1000
+}
+
+fn default_gap_timeout() -> u64 {
+    5000
+}
+
+/// Stream resequencer gap policy (YAML representation).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamGapPolicyYaml {
+    #[default]
+    EmitPartial,
+    DropAndLog,
+}
+
+/// Stream resequencer capacity policy (YAML representation).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamCapacityPolicyYaml {
+    #[default]
+    LogAndDrop,
+    DropOldest,
 }

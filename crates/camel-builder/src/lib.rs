@@ -1102,6 +1102,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::Sampling { .. } => "sampling",
         BuilderStep::Sort { .. } => "sort",
         BuilderStep::DeclarativeDoTry { .. } => "do_try",
+        BuilderStep::Resequence { .. } => "resequence",
     }
 }
 

@@ -61,9 +61,11 @@ pub fn spawn_controller_actor(
                 RouteControllerCommand::SwapPipelineRaw {
                     route_id,
                     pipeline,
+                    lifecycle,
                     reply,
                 } => {
-                    let _ = reply.send(controller.swap_pipeline_raw(&route_id, pipeline));
+                    let _ =
+                        reply.send(controller.swap_pipeline_raw(&route_id, pipeline, lifecycle));
                 }
                 RouteControllerCommand::CompileRouteDefinition { definition, reply } => {
                     let _ = reply.send(controller.compile_route_definition(definition));
@@ -76,6 +78,18 @@ pub fn spawn_controller_actor(
                     let _ = reply.send(
                         controller.compile_route_definition_with_generation(definition, generation),
                     );
+                }
+                RouteControllerCommand::CompileRouteDefinitionPipeline {
+                    definition,
+                    generation,
+                    reply,
+                } => {
+                    let _ = reply
+                        .send(controller.compile_route_definition_pipeline(definition, generation));
+                }
+                RouteControllerCommand::CompileRouteDefinitionDryPipeline { definition, reply } => {
+                    let _ =
+                        reply.send(controller.compile_route_definition_dry_pipeline(definition));
                 }
                 RouteControllerCommand::PrepareRouteDefinitionWithGeneration {
                     definition,
@@ -140,6 +154,9 @@ pub fn spawn_controller_actor(
                 }
                 RouteControllerCommand::RouteSourceHash { route_id, reply } => {
                     let _ = reply.send(controller.route_source_hash(&route_id));
+                }
+                RouteControllerCommand::RouteHasLifecycle { route_id, reply } => {
+                    let _ = reply.send(controller.route_has_lifecycle(&route_id));
                 }
                 RouteControllerCommand::Shutdown => {
                     break;

@@ -15,7 +15,7 @@ use camel_api::metrics::MetricsCollector;
 use camel_api::security_policy::SecurityPolicyConfig;
 use camel_api::{
     BoxProcessor, CamelError, FunctionInvoker, IdentityProcessor, NoOpMetrics, PlatformService,
-    ProducerContext, RuntimeHandle, UnitOfWorkConfig,
+    ProducerContext, RuntimeHandle, StepLifecycle, UnitOfWorkConfig,
 };
 use camel_bean::BeanRegistry;
 use camel_component_api::{ComponentContext, RuntimeObservability};
@@ -23,6 +23,9 @@ use camel_processor::aggregator::SharedLanguageRegistry;
 use camel_processor::circuit_breaker::CircuitBreakerGate;
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::{DefaultRouteErrorHandler, RouteErrorHandler};
+use camel_processor::resequencer::{
+    ResequencePolicy, ResequencerService, batch::BatchPolicy, stream::StreamPolicy,
+};
 use camel_processor::security_policy_layer::SecurityPolicyLayer;
 use tower::Layer;
 
@@ -30,7 +33,12 @@ use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 use crate::lifecycle::adapters::route_compiler::{
-    RouteChannelService, compose_traced_pipeline_with_contracts,
+    RouteChannelService, compose_pipeline, compose_pipeline_with_contracts,
+    compose_traced_pipeline_with_contracts,
+};
+use crate::lifecycle::adapters::route_helpers::{
+    AggregateSplitInfo, find_top_level_aggregate_requiring_split,
+    find_top_level_resequencer_requiring_split,
 };
 use crate::lifecycle::adapters::route_registry::RouteRegistry;
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
@@ -299,25 +307,242 @@ impl RouteCompilerExt<'_> {
         )
     }
 
+    /// Detect whether a route definition contains a top-level aggregate or
+    /// resequencer step that requires the split-processing pipeline.
+    ///
+    /// **Aggregate split:** builds pre/post [`SharedPipeline`]s and returns
+    /// `AggregateSplitInfo`.
+    ///
+    /// **Resequencer split (Phase 3):** partitions into pre / resequencer /
+    /// post, compiles pre normally, compiles post into a
+    /// `BoxProcessor` continuation owned by a `ResequencerService`, and
+    /// returns the main pipeline as `pre + [resequencer_step]`.  The whole
+    /// route is ONE `PipelineAssembly`.
+    ///
+    /// Returns `(Option<AggregateSplitInfo>, Vec<CompiledStep>)`:
+    /// - When aggregate split is detected, `Vec` is empty (split info carries the
+    ///   pipelines).
+    /// - When resequencer split is detected, `aggregate_split` is `None` and
+    ///   `Vec` carries the compiled main-pipeline steps.
+    /// - When no split is found, `Vec` contains all resolved steps (lifecycle
+    ///   collected by the caller).
+    ///
+    /// Centralised here so both [`build_managed_route`] and
+    /// [`compile_route_impl`] share the same split-or-resolve logic.
+    pub(crate) fn detect_and_validate_route_split(
+        &self,
+        steps: Vec<BuilderStep>,
+        producer_ctx: &ProducerContext,
+        route_id: &str,
+        staging_mode: &super::step_resolution::FunctionStagingMode,
+    ) -> Result<(Option<AggregateSplitInfo>, Vec<CompiledStep>), CamelError> {
+        // ── Aggregate split (existing) ──
+        if let Some((idx, agg_config)) = find_top_level_aggregate_requiring_split(&steps) {
+            let mut pre_steps = steps;
+            let mut rest = pre_steps.split_off(idx);
+            let _agg_step = rest.remove(0); // invariant: idx points to Aggregate variant
+            let post_steps = rest;
+
+            let pre_pairs = self.resolve_steps(
+                pre_steps,
+                producer_ctx,
+                self.registry,
+                Some(route_id),
+                staging_mode,
+            )?;
+            let pre_pipeline =
+                super::pipeline_runtime::new_shared_pipeline(compose_pipeline(pre_pairs));
+
+            let post_pairs = self.resolve_steps(
+                post_steps,
+                producer_ctx,
+                self.registry,
+                Some(route_id),
+                staging_mode,
+            )?;
+            let post_pipeline =
+                super::pipeline_runtime::new_shared_pipeline(compose_pipeline(post_pairs));
+
+            return Ok((
+                Some(AggregateSplitInfo {
+                    pre_pipeline,
+                    agg_config,
+                    post_pipeline,
+                }),
+                vec![],
+            ));
+        }
+
+        // ── Resequencer split (Phase 3) ──
+        if let Some(reseq_info) = find_top_level_resequencer_requiring_split(&steps)? {
+            let idx = reseq_info.index;
+            let mut pre_steps = steps;
+            let mut rest = pre_steps.split_off(idx);
+            let _reseq_step = rest.remove(0); // invariant: idx points to Resequence variant
+            let post_steps = rest;
+
+            // Compile pre-steps normally
+            let pre_compiled = self.resolve_steps(
+                pre_steps,
+                producer_ctx,
+                self.registry,
+                Some(route_id),
+                staging_mode,
+            )?;
+
+            // Compile post-steps into a BoxProcessor continuation
+            let post_compiled = self.resolve_steps(
+                post_steps,
+                producer_ctx,
+                self.registry,
+                Some(route_id),
+                staging_mode,
+            )?;
+
+            // Phase 3 minimal: reject lifecycle-bearing post steps
+            if post_compiled.iter().any(|s| match s {
+                CompiledStep::Process { lifecycle, .. } => lifecycle.is_some(),
+                CompiledStep::Segment { lifecycle, .. } => lifecycle.is_some(),
+                CompiledStep::Stop => false,
+            }) {
+                return Err(CamelError::RouteError(
+                    "lifecycle-bearing steps after resequencer are not supported".into(),
+                ));
+            }
+
+            let post_continuation = compose_pipeline_with_contracts(post_compiled, None);
+
+            // Create the resequencer policy from the config
+            let policy: Arc<dyn ResequencePolicy> = match &reseq_info.policy_config.mode {
+                camel_api::ResequenceMode::Batch {
+                    correlation,
+                    sort,
+                    completion,
+                } => {
+                    // Compile the correlation expression (Simple language)
+                    let correlation_def = camel_api::declarative::LanguageExpressionDef {
+                        language: "simple".to_string(),
+                        source: correlation.clone(),
+                    };
+                    let correlation_expr = super::step_resolution::compile_language_expression(
+                        self.languages,
+                        &correlation_def,
+                    )?;
+
+                    // Compile the sort expression (Simple language)
+                    let sort_def = camel_api::declarative::LanguageExpressionDef {
+                        language: "simple".to_string(),
+                        source: sort.clone(),
+                    };
+                    let sort_expr = super::step_resolution::compile_language_expression(
+                        self.languages,
+                        &sort_def,
+                    )?;
+
+                    let batch_policy =
+                        BatchPolicy::new_cyclic(correlation_expr, sort_expr, completion.clone());
+                    batch_policy as Arc<dyn ResequencePolicy>
+                }
+                camel_api::ResequenceMode::Stream {
+                    sequence,
+                    capacity,
+                    gap_timeout,
+                    on_gap,
+                    on_capacity_exceeded,
+                    dedup,
+                } => {
+                    // Compile the sequence expression (Simple language)
+                    let seq_def = camel_api::declarative::LanguageExpressionDef {
+                        language: "simple".to_string(),
+                        source: sequence.clone(),
+                    };
+                    let sequence_expr = super::step_resolution::compile_language_expression(
+                        self.languages,
+                        &seq_def,
+                    )?;
+
+                    let stream_policy = StreamPolicy::new_cyclic(
+                        sequence_expr,
+                        *capacity,
+                        *gap_timeout,
+                        *on_gap,
+                        *on_capacity_exceeded,
+                        *dedup,
+                    );
+                    stream_policy as Arc<dyn ResequencePolicy>
+                }
+            };
+
+            let reseq_config = camel_processor::resequencer::ResequencerConfig {
+                metrics: self.tracer_metrics.clone(),
+                route_id: Some(route_id.to_string()),
+                ..Default::default()
+            };
+            let resequencer_svc = ResequencerService::with_config(
+                policy.clone(),
+                post_continuation,
+                1024,
+                vec![],
+                reseq_config,
+            );
+            let resequencer_lifecycle: Arc<dyn StepLifecycle> = Arc::new(resequencer_svc.clone());
+
+            // Main pipeline: pre + resequencer (last step)
+            let mut all_steps = pre_compiled;
+            all_steps.push(CompiledStep::Process {
+                processor: BoxProcessor::new(resequencer_svc),
+                body_contract: None,
+                lifecycle: Some(resequencer_lifecycle),
+            });
+
+            return Ok((None, all_steps));
+        }
+
+        // ── No split — resolve normally ──
+        let resolved = self.resolve_steps(
+            steps,
+            producer_ctx,
+            self.registry,
+            Some(route_id),
+            staging_mode,
+        )?;
+        Ok((None, resolved))
+    }
+
     /// Shared implementation body for route compilation.
     /// The only difference between `compile_route_definition` and
     /// `compile_route_definition_with_generation` is the `FunctionStagingMode`.
+    ///
+    /// Returns a [`CompiledPipeline`] so callers (especially the hot-reload
+    /// Restart path) can thread lifecycle handles into
+    /// [`swap_pipeline_raw`](super::pipeline_runtime::swap_pipeline_raw).
     fn compile_route_impl(
         &self,
         def: RouteDefinition,
         staging_mode: &super::step_resolution::FunctionStagingMode,
-    ) -> Result<BoxProcessor, CamelError> {
+    ) -> Result<super::route_helpers::CompiledPipeline, CamelError> {
         let route_id = def.route_id().to_string();
 
         let producer_ctx = self.build_producer_context(&route_id)?;
 
-        let processors_with_contracts = self.resolve_steps(
+        let (aggregate_split, processors_with_contracts) = self.detect_and_validate_route_split(
             def.steps,
             &producer_ctx,
-            self.registry,
-            Some(&route_id),
+            &route_id,
             staging_mode,
         )?;
+
+        // Aggregate-split routes cannot be fully represented in a
+        // `CompiledPipeline` (the split info requires a `ManagedRoute` to
+        // store).  Reject them at compile time.
+        if aggregate_split.is_some() {
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' contains an aggregate split that is not supported via the compile-only path; use add_route instead",
+                route_id,
+            )));
+        }
+
+        let lifecycle = super::route_helpers::collect_lifecycle(&processors_with_contracts);
 
         let eh_config = def
             .error_handler
@@ -368,7 +593,10 @@ impl RouteCompilerExt<'_> {
             pipeline = BoxProcessor::new(uow_layer.layer(pipeline));
         }
 
-        Ok(pipeline)
+        Ok(super::route_helpers::CompiledPipeline {
+            processor: pipeline,
+            lifecycle,
+        })
     }
 
     /// Compile a route definition into a processor pipeline, without adding it
@@ -381,6 +609,7 @@ impl RouteCompilerExt<'_> {
             def,
             &super::step_resolution::FunctionStagingMode::DryCompile,
         )
+        .map(|c| c.processor)
     }
 
     /// Compile a route definition with a specific generation (for hot-reload).
@@ -392,6 +621,39 @@ impl RouteCompilerExt<'_> {
         self.compile_route_impl(
             def,
             &super::step_resolution::FunctionStagingMode::HotReload { generation },
+        )
+        .map(|c| c.processor)
+    }
+
+    /// Compile a route definition with a specific generation and return the
+    /// full [`CompiledPipeline`] (processor + lifecycle handles).  Used by
+    /// [`apply_swap`](crate::hot_reload::application::reload_actions::apply_swap)
+    /// so that the Restart path can thread lifecycle into
+    /// [`swap_pipeline_raw`](super::pipeline_runtime::swap_pipeline_raw).
+    pub(crate) fn compile_route_definition_pipeline(
+        &self,
+        def: RouteDefinition,
+        generation: u64,
+    ) -> Result<super::route_helpers::CompiledPipeline, CamelError> {
+        self.compile_route_impl(
+            def,
+            &super::step_resolution::FunctionStagingMode::HotReload { generation },
+        )
+    }
+
+    /// Compile a route definition without function generation and return the
+    /// full [`CompiledPipeline`] (processor + lifecycle handles).
+    ///
+    /// Oracle Fix 1: used by the stateless hot-reload path (`function_ctx
+    /// == None`) so that lifecycle-bearing routes (resequencer, aggregator)
+    /// have their handles preserved and properly drained on future stops.
+    pub(crate) fn compile_route_definition_dry_pipeline(
+        &self,
+        def: RouteDefinition,
+    ) -> Result<super::route_helpers::CompiledPipeline, CamelError> {
+        self.compile_route_impl(
+            def,
+            &super::step_resolution::FunctionStagingMode::DryCompile,
         )
     }
 }

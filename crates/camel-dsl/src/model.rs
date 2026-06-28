@@ -468,6 +468,32 @@ pub struct SortStepDef {
     pub reverse: bool,
 }
 
+/// Resequence EIP step definition (Phase 3).
+///
+/// Supports batch and stream modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResequenceStepDef {
+    pub mode: ResequenceModeDef,
+}
+
+/// Resequence mode selection — batch or stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResequenceModeDef {
+    Batch {
+        correlation: String,
+        sort: String,
+        completion: camel_api::resequencer::BatchCompletion,
+    },
+    Stream {
+        sequence: String,
+        capacity: usize,
+        gap_timeout: u64,
+        on_gap: camel_api::resequencer::GapPolicy,
+        on_capacity_exceeded: camel_api::resequencer::CapacityPolicy,
+        dedup: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnrichStepDef {
     pub uri: String,
@@ -525,6 +551,7 @@ pub enum DeclarativeStep {
     ClaimCheck(ClaimCheckStepDef),
     Sampling(SamplingStepDef),
     Sort(SortStepDef),
+    Resequence(ResequenceStepDef),
     DoTry {
         steps: Vec<DeclarativeStep>,
         catch: Vec<DoTryCatchClauseDef>,
@@ -576,6 +603,7 @@ impl DeclarativeStep {
             DeclarativeStep::ClaimCheck(_) => crate::contract::DeclarativeStepKind::ClaimCheck,
             DeclarativeStep::Sampling(_) => crate::contract::DeclarativeStepKind::Sampling,
             DeclarativeStep::Sort(_) => crate::contract::DeclarativeStepKind::Sort,
+            DeclarativeStep::Resequence(_) => crate::contract::DeclarativeStepKind::Resequence,
             DeclarativeStep::DoTry { .. } => crate::contract::DeclarativeStepKind::DoTry,
         }
     }

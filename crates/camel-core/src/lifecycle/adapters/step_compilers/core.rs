@@ -48,6 +48,11 @@ impl StepCompiler for CoreCompiler {
             // ── Stop ──
             BuilderStep::Stop => StepCompileResult::Matched(Ok(CompiledStep::Stop)),
 
+            // ── Resequence (N4: must be top-level only) ──
+            BuilderStep::Resequence { .. } => StepCompileResult::Matched(Err(
+                CamelError::RouteError("resequence must be a top-level step".into()),
+            )),
+
             // ── Delay ──
             BuilderStep::Delay { config } => {
                 let svc = camel_processor::delayer::DelayerService::new(config);
@@ -549,5 +554,70 @@ mod tests {
             matches!(compiled, CompiledStep::Segment { .. }),
             "Expected CompiledStep::Segment, got {compiled:?}"
         );
+    }
+
+    #[test]
+    fn nested_resequence_rejected_at_compile_children() {
+        use camel_api::CamelError;
+
+        // N4: any Resequence reaching the compiler registry (i.e., not intercepted
+        // at the top-level by the route controller) must be rejected.
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let step = BuilderStep::Resequence {
+            policy_config: camel_api::ResequencePolicyConfig::default(),
+        };
+
+        let result = reg.compile_step(step, 0, &dummy_context());
+        assert!(result.is_some(), "compiler should handle the step");
+        let err = result.unwrap().unwrap_err();
+        assert!(
+            matches!(err, CamelError::RouteError(_)),
+            "should be RouteError, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("top-level"),
+            "error should mention 'top-level', got: {err}"
+        );
+    }
+
+    /// Build a minimal `CompilationContext` for unit tests.
+    fn dummy_context() -> CompilationContext<'static> {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        use camel_bean::BeanRegistry;
+        use camel_component_api::{NoOpComponentContext, test_support::NoopRuntimeObservability};
+
+        use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+
+        // Leak on-stack data to satisfy 'static lifetime (test-only safe).
+        // SAFETY: these leaks are bounded — used once in a short-lived test.
+        let producer_ctx: &'static ProducerContext =
+            Box::leak(Box::new(ProducerContext::default()));
+        let staging: &'static FunctionStagingMode =
+            Box::leak(Box::new(FunctionStagingMode::DirectAdd));
+        let languages: &'static SharedLanguageRegistry =
+            Box::leak(Box::new(Arc::new(Mutex::new(HashMap::new()))));
+        let beans: &'static Arc<Mutex<BeanRegistry>> =
+            Box::leak(Box::new(Arc::new(Mutex::new(BeanRegistry::new()))));
+        let idempotent: &'static crate::IdempotentRegistry =
+            Box::leak(Box::new(crate::IdempotentRegistry::new()));
+        let claim_check: &'static crate::ClaimCheckRegistry =
+            Box::leak(Box::new(crate::ClaimCheckRegistry::new()));
+
+        CompilationContext {
+            producer_ctx,
+            rt: Arc::new(NoopRuntimeObservability),
+            languages,
+            beans,
+            function_invoker: None,
+            component_ctx: Arc::new(NoOpComponentContext),
+            route_id: None,
+            staging_mode: staging,
+            idempotent_repositories: idempotent,
+            claim_check_repositories: claim_check,
+        }
     }
 }

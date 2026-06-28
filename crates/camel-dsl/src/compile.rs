@@ -1092,6 +1092,38 @@ fn compile_declarative_step_with_threshold(
                 finally,
             })
         }
+        DeclarativeStep::Resequence(def) => {
+            use camel_api::resequencer::ResequenceMode;
+            let mode = match def.mode {
+                crate::model::ResequenceModeDef::Batch {
+                    correlation,
+                    sort,
+                    completion,
+                } => ResequenceMode::Batch {
+                    correlation,
+                    sort,
+                    completion,
+                },
+                crate::model::ResequenceModeDef::Stream {
+                    sequence,
+                    capacity,
+                    gap_timeout,
+                    on_gap,
+                    on_capacity_exceeded,
+                    dedup,
+                } => ResequenceMode::Stream {
+                    sequence,
+                    capacity,
+                    gap_timeout,
+                    on_gap,
+                    on_capacity_exceeded,
+                    dedup,
+                },
+            };
+            Ok(BuilderStep::Resequence {
+                policy_config: camel_api::ResequencePolicyConfig { mode },
+            })
+        }
     }
 }
 
@@ -1224,6 +1256,9 @@ fn compile_declarative_step_to_canonical(
         DeclarativeStep::Sort(_) => Err(CamelError::RouteError(
             "canonical v1 does not support step `sort`".into(),
         )),
+        DeclarativeStep::Resequence(_) => Err(CamelError::RouteError(
+            "canonical v1 does not support step `resequence`".into(),
+        )),
         other => {
             let step_name = declarative_step_name(&other);
             let detail = canonical_contract_rejection_reason(step_name)
@@ -1344,6 +1379,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::ClaimCheck(_) => "claim_check",
         DeclarativeStep::Sampling(_) => "sampling",
         DeclarativeStep::Sort(_) => "sort",
+        DeclarativeStep::Resequence(_) => "resequence",
         DeclarativeStep::DoTry { .. } => "do_try",
     }
 }
@@ -1692,7 +1728,8 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         | DeclarativeStep::PollEnrich(_)
         | DeclarativeStep::ClaimCheck(_)
         | DeclarativeStep::Sampling(_)
-        | DeclarativeStep::Sort(_) => {}
+        | DeclarativeStep::Sort(_)
+        | DeclarativeStep::Resequence(_) => {}
         DeclarativeStep::DoTry {
             steps,
             catch,

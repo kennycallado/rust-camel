@@ -41,6 +41,7 @@ pub mod platform;
 pub mod processor;
 pub mod producer;
 pub mod recipient_list;
+pub mod resequencer;
 pub mod route_controller;
 pub mod routing_slip;
 pub mod runtime;
@@ -114,6 +115,9 @@ pub use processor::{
     BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn, SyncBoxProcessor,
 };
 pub use producer::ProducerContext;
+pub use resequencer::{
+    BatchCompletion, CapacityPolicy, GapPolicy, ResequenceMode, ResequencePolicyConfig,
+};
 pub use route_controller::{RouteAction, RouteController, RouteStatus};
 pub use routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
 pub use runtime::{
@@ -133,7 +137,7 @@ pub use step_lifecycle::{StepLifecycle, StepShutdownReason};
 pub use supervision::SupervisionConfig;
 pub use throttler::{ThrottleStrategy, ThrottlerConfig};
 pub use unit_of_work::UnitOfWorkConfig;
-pub use value::{Headers, Value};
+pub use value::{Headers, Value, cmp_values};
 
 // Template types
 pub use template::{

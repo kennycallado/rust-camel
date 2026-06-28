@@ -39,9 +39,10 @@ pub enum DeclarativeStepKind {
     ClaimCheck,
     Sampling,
     Sort,
+    Resequence,
 }
 
-pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 34] = [
+pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 35] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -76,6 +77,7 @@ pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 34] = [
     DeclarativeStepKind::ClaimCheck,
     DeclarativeStepKind::Sampling,
     DeclarativeStepKind::Sort,
+    DeclarativeStepKind::Resequence,
 ];
 
 pub fn is_rust_only_kind(kind: DeclarativeStepKind) -> bool {
@@ -138,9 +140,9 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_kinds_has_34_entries() {
-        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 34);
-        assert_eq!(mandatory_declarative_step_kinds().len(), 34);
+    fn mandatory_kinds_has_35_entries() {
+        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 35);
+        assert_eq!(mandatory_declarative_step_kinds().len(), 35);
     }
 
     #[test]

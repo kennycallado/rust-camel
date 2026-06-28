@@ -26,13 +26,12 @@ pub use camel_processor::aggregator::SharedLanguageRegistry;
 
 use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
-use crate::lifecycle::adapters::route_compiler::compose_pipeline;
 use crate::lifecycle::adapters::route_compiler_ext::{RouteCompilerExt, build_eh_config_pipeline};
-pub(crate) use crate::lifecycle::adapters::route_helpers::PreparedRoute;
 use crate::lifecycle::adapters::route_helpers::{
-    AggregateSplitInfo, CrashNotification, ManagedRoute, find_top_level_aggregate_requiring_split,
+    AggregateSplitInfo, CrashNotification, ManagedRoute, assert_no_mixed_top_level_splits,
     handle_is_running, inferred_lifecycle_label, is_pending,
 };
+pub(crate) use crate::lifecycle::adapters::route_helpers::{CompiledPipeline, PreparedRoute};
 #[cfg(test)]
 pub(super) use crate::lifecycle::adapters::route_helpers::{
     emit_start_route_event, set_start_route_event_hook,
@@ -270,6 +269,7 @@ impl DefaultRouteController {
     }
 
     /// Resolve BuilderSteps into BoxProcessors.
+    #[allow(dead_code)] // used by tests and may be needed for future split paths
     pub(crate) fn resolve_steps(
         &self,
         steps: Vec<BuilderStep>,
@@ -374,50 +374,12 @@ impl DefaultRouteController {
 
         let producer_ctx = self.build_producer_context(&route_id)?;
 
-        let mut aggregate_split: Option<AggregateSplitInfo> = None;
-        let processors_with_contracts = match find_top_level_aggregate_requiring_split(&steps) {
-            Some((idx, agg_config)) => {
-                let mut pre_steps = steps;
-                let mut rest = pre_steps.split_off(idx);
-                let _agg_step = rest.remove(0);
-                let post_steps = rest;
+        // N2: reject mixed Aggregate + Resequence top-level splits
+        assert_no_mixed_top_level_splits(&steps)?;
 
-                let pre_pairs = self.resolve_steps(
-                    pre_steps,
-                    &producer_ctx,
-                    &self.registry,
-                    Some(&route_id),
-                    staging_mode,
-                )?;
-                let pre_pipeline =
-                    super::pipeline_runtime::new_shared_pipeline(compose_pipeline(pre_pairs));
-
-                let post_pairs = self.resolve_steps(
-                    post_steps,
-                    &producer_ctx,
-                    &self.registry,
-                    Some(&route_id),
-                    staging_mode,
-                )?;
-                let post_pipeline =
-                    super::pipeline_runtime::new_shared_pipeline(compose_pipeline(post_pairs));
-
-                aggregate_split = Some(AggregateSplitInfo {
-                    pre_pipeline,
-                    agg_config,
-                    post_pipeline,
-                });
-
-                vec![]
-            }
-            None => self.resolve_steps(
-                steps,
-                &producer_ctx,
-                &self.registry,
-                Some(&route_id),
-                staging_mode,
-            )?,
-        };
+        let (aggregate_split, processors_with_contracts) = self
+            .route_compiler_ext()
+            .detect_and_validate_route_split(steps, &producer_ctx, &route_id, staging_mode)?;
         let lifecycle = super::route_helpers::collect_lifecycle(&processors_with_contracts);
         let route_id_for_tracing = route_id.clone();
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
@@ -585,6 +547,31 @@ impl DefaultRouteController {
             .compile_route_definition_with_generation(def, generation)
     }
 
+    /// Compile a route definition into a [`CompiledPipeline`] (processor +
+    /// lifecycle handles). Used by the hot-reload Restart path so that
+    /// lifecycle handles are threaded through
+    /// [`swap_pipeline_raw`](Self::swap_pipeline_raw).
+    pub(crate) fn compile_route_definition_pipeline(
+        &self,
+        def: RouteDefinition,
+        generation: u64,
+    ) -> Result<CompiledPipeline, CamelError> {
+        self.route_compiler_ext()
+            .compile_route_definition_pipeline(def, generation)
+    }
+
+    /// Compile without function generation, returning full [`CompiledPipeline`].
+    ///
+    /// Oracle Fix 1: used by the stateless hot-reload path so that
+    /// lifecycle-bearing routes have their handles preserved.
+    pub(crate) fn compile_route_definition_dry_pipeline(
+        &self,
+        def: RouteDefinition,
+    ) -> Result<CompiledPipeline, CamelError> {
+        self.route_compiler_ext()
+            .compile_route_definition_dry_pipeline(def)
+    }
+
     /// Remove a route from the controller map.
     ///
     /// The route **must** be stopped before removal (status `Stopped` or `Failed`).
@@ -718,7 +705,7 @@ impl DefaultRouteController {
             );
         }
 
-        super::pipeline_runtime::swap_pipeline_raw(&managed.pipeline, new_pipeline);
+        super::pipeline_runtime::swap_pipeline_raw(&managed.pipeline, new_pipeline, vec![]);
         info!(route_id = %route_id, "Pipeline swapped atomically");
         Ok(())
     }
@@ -728,16 +715,21 @@ impl DefaultRouteController {
     /// Only for use after the route has been stopped (Restart path).
     /// Does NOT check for lifecycle handles or aggregate service — the caller
     /// is responsible for ensuring the route is safe to swap.
+    ///
+    /// Accepts `lifecycle` so that the new pipeline assembly records the
+    /// lifecycle handles from the compiled steps.  When the route is
+    /// subsequently stopped, these handles are drained.
     pub(crate) fn swap_pipeline_raw(
         &self,
         route_id: &str,
         new_pipeline: BoxProcessor,
+        lifecycle: Vec<Arc<dyn StepLifecycle>>,
     ) -> Result<(), CamelError> {
         let managed = self
             .routes
             .get(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
-        super::pipeline_runtime::swap_pipeline_raw(&managed.pipeline, new_pipeline);
+        super::pipeline_runtime::swap_pipeline_raw(&managed.pipeline, new_pipeline, lifecycle);
         info!(route_id = %route_id, "Pipeline swapped (raw — lifecycle bypass)");
         Ok(())
     }
@@ -753,6 +745,16 @@ impl DefaultRouteController {
     /// Returns `None` if the route doesn't exist.
     pub fn get_pipeline(&self, route_id: &str) -> Option<BoxProcessor> {
         self.routes.get_pipeline(route_id)
+    }
+
+    /// Check whether the running route has lifecycle-bearing steps.
+    ///
+    /// Returns `false` when the route is missing.
+    pub(crate) fn route_has_lifecycle(&self, route_id: &str) -> bool {
+        self.routes
+            .get(route_id)
+            .map(|managed| !managed.pipeline.load().lifecycle.is_empty())
+            .unwrap_or(false)
     }
 
     /// Internal stop implementation that can set custom status.

@@ -8,11 +8,13 @@
 
 use camel_api::Value;
 use camel_api::aggregator::AggregatorConfig;
+use camel_api::body::Body;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_file::FileComponent;
 use camel_component_http::HttpComponent;
 use camel_component_log::LogComponent;
+use camel_dsl;
 use camel_test::CamelTestContext;
 
 // ---------------------------------------------------------------------------
@@ -3992,4 +3994,97 @@ async fn phase_3_compiled_pipeline_runs_until_recompile() {
         panic!("expected Bytes body, got {:?}", result_ex.input.body);
     }
     h.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test (Scatter-Gather): DSL scatter_gather → Multicast aggregation
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scatter_gather_collect_all() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
+
+    let yaml = r#"
+routes:
+  - id: sg-test
+    from: timer:sg?period=50&repeatCount=1
+    steps:
+      - scatter_gather:
+          endpoints:
+            - mock:sg-a
+            - mock:sg-b
+            - mock:sg-c
+          aggregation: collect_all
+      - to: mock:sg-result
+"#;
+
+    let route = camel_dsl::yaml::parse_yaml(yaml)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    h.stop().await;
+
+    // Each mock endpoint received 1 exchange (fan-out)
+    let ep_a = h.mock().get_endpoint("sg-a").unwrap();
+    let ep_b = h.mock().get_endpoint("sg-b").unwrap();
+    let ep_c = h.mock().get_endpoint("sg-c").unwrap();
+    ep_a.assert_exchange_count(1).await;
+    ep_b.assert_exchange_count(1).await;
+    ep_c.assert_exchange_count(1).await;
+
+    // The result endpoint received the aggregated exchange (JSON array)
+    let ep_result = h.mock().get_endpoint("sg-result").unwrap();
+    ep_result.assert_exchange_count(1).await;
+    let result_ex = &ep_result.get_received_exchanges().await[0];
+
+    match &result_ex.input.body {
+        camel_api::Body::Json(v) => {
+            let arr = v.as_array().expect("CollectAll should produce JSON array");
+            assert_eq!(arr.len(), 3, "expected 3 collected bodies");
+        }
+        other => panic!("expected JSON body from CollectAll, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scatter_gather_last_wins() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
+
+    let yaml = r#"
+routes:
+  - id: sg-last-wins
+    from: timer:sg-lw?period=50&repeatCount=1
+    steps:
+      - scatter_gather:
+          endpoints:
+            - mock:sg-lw-a
+            - mock:sg-lw-b
+          aggregation: last_wins
+      - to: mock:sg-lw-result
+"#;
+
+    let route = camel_dsl::yaml::parse_yaml(yaml)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    h.stop().await;
+
+    let ep_result = h.mock().get_endpoint("sg-lw-result").unwrap();
+    ep_result.assert_exchange_count(1).await;
 }

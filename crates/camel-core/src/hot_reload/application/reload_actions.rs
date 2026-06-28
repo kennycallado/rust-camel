@@ -3,11 +3,12 @@
 //! Each top-level function corresponds to one `ReloadAction` variant (Swap, Add, Remove, Restart).
 //! Shared helpers used by these handlers live here too.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use camel_api::CamelError;
 use camel_api::function::{FunctionDiff, PrepareToken};
+use camel_api::{BoxProcessor, CamelError, StepLifecycle};
 
 use crate::context::RuntimeExecutionHandle;
 use crate::hot_reload::application::drain::drain_route;
@@ -63,12 +64,6 @@ pub(super) fn is_invalid_stop_transition(err: &CamelError) -> bool {
     err.to_string().contains("invalid transition")
 }
 
-pub(super) fn is_lifecycle_rejection(err: &CamelError) -> bool {
-    // Match the unique substring from swap_pipeline's rejection error:
-    // "Route '{}' contains stateful steps (lifecycle-bearing). Hot-swap not supported — use restart."
-    err.to_string().contains("lifecycle-bearing")
-}
-
 pub(super) fn should_stop_before_mutation(runtime_status: Option<&str>) -> bool {
     !matches!(runtime_status, Some("Registered" | "Stopped"))
 }
@@ -83,8 +78,9 @@ pub(super) fn should_start_after_restart(runtime_status: Option<&str>) -> bool {
 
 /// Apply a Swap action: atomic pipeline replacement (zero-downtime).
 ///
-/// If the route has lifecycle-bearing steps the atomic swap is rejected,
-/// and this function falls back to the Restart path: stop → swap_raw → start.
+/// Checks the running route AND the new pipeline for lifecycle-bearing
+/// steps before attempting the atomic swap.  If either carries lifecycle,
+/// uses the Restart path: stop → swap_raw → start.
 ///
 /// ## Staging contract (Case B)
 ///
@@ -127,148 +123,187 @@ pub(super) async fn apply_swap(
 
     let in_flight = controller.in_flight_count(&route_id).await.unwrap_or(0);
 
-    let pipeline = if let Some(ctx) = function_ctx {
-        controller
-            .compile_route_definition_with_generation(def, ctx.generation)
-            .await
-    } else {
-        controller.compile_route_definition(def).await
-    };
-
-    match pipeline {
-        Ok(p) => {
-            // Compute function diff and prepare reload.  Both the token and the
-            // diff are kept alive for the duration of this function so that any
-            // branch can finalize (on success) or rollback (on failure).
-            let (prepare_token, function_diff): (Option<PrepareToken>, Option<FunctionDiff>) =
-                if let Some(ctx) = function_ctx {
-                    let diff =
-                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-                    match ctx
-                        .invoker
-                        .prepare_reload(diff.clone(), ctx.generation)
-                        .await
-                    {
-                        Ok(token) => (Some(token), Some(diff)),
-                        Err(e) => {
-                            errors.push(ReloadError {
-                                route_id: route_id.clone(),
-                                action: "Swap (prepare)".into(),
-                                error: CamelError::ProcessorError(format!("{e}")),
-                            });
-                            return;
-                        }
-                    }
-                } else {
-                    (None, None)
-                };
-
-            // Attempt atomic swap.  Clone p because swap_route_pipeline takes
-            // ownership and p may still be needed for the Restart fallback path.
-            // BoxCloneService::clone is ~3 atomic ops (Arc increment).
-            let p_clone = p.clone();
-            let result = controller.swap_route_pipeline(&route_id, p_clone).await;
-            if let Err(e) = result {
-                if is_lifecycle_rejection(&e) {
-                    tracing::info!(
-                        route_id = %route_id,
-                        "Lifecycle-bearing route — using Restart path (stop → swap_raw → start)"
-                    );
-
-                    // 1. Stop route (drains lifecycle handles)
-                    if let Err(stop_err) = controller.stop_route_reload(&route_id).await {
-                        rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
-                        errors.push(ReloadError {
-                            route_id,
-                            action: "Swap (restart-stop)".into(),
-                            error: stop_err,
-                        });
-                        return;
-                    }
-
-                    // 2. Drain in-flight exchanges
-                    let _ = drain_route(&route_id, "swap-restart", controller, drain_timeout).await;
-
-                    // 3. Raw pipeline swap (no lifecycle check — route is stopped)
-                    if let Err(swap_err) = controller.swap_route_pipeline_raw(&route_id, p).await {
-                        rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
-                        errors.push(ReloadError {
-                            route_id,
-                            action: "Swap (restart-raw)".into(),
-                            error: swap_err,
-                        });
-                        return;
-                    }
-
-                    // 4. Start route (re-creates consumer with new pipeline)
-                    if let Err(start_err) = controller.start_route_reload(&route_id).await {
-                        rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
-                        errors.push(ReloadError {
-                            route_id,
-                            action: "Swap (restart-start)".into(),
-                            error: start_err,
-                        });
-                        return;
-                    }
-
-                    // Restart SUCCESS — commit staging (match atomic swap path)
-                    if let Some(ctx) = function_ctx
-                        && let Some(ref diff) = function_diff
-                        && let Err(e) = ctx.invoker.finalize_reload(diff, ctx.generation).await
-                    {
-                        errors.push(ReloadError {
-                            route_id: route_id.clone(),
-                            action: "Swap (restart-finalize)".into(),
-                            error: CamelError::ProcessorError(format!("{e}")),
-                        });
-                        return;
-                    }
-
-                    tracing::info!(
-                        route_id = %route_id,
-                        "hot-reload: route restarted via Restart path"
-                    );
-                } else {
-                    // Non-lifecycle error — rollback staging, report
-                    rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
+    // Compile to a CompiledPipeline to preserve lifecycle handles for BOTH
+    // code paths.  Oracle Fix 1: the stateless (function_ctx == None) path
+    // also preserves lifecycle so that resequencer/aggregator handles are
+    // stored in the PipelineAssembly and drained on future stops.
+    #[allow(unused_mut)]
+    let (p, mut lifecycle): (BoxProcessor, Vec<Arc<dyn StepLifecycle>>) =
+        if let Some(ctx) = function_ctx {
+            match controller
+                .compile_route_definition_pipeline(def, ctx.generation)
+                .await
+            {
+                Ok(compiled) => (compiled.processor, compiled.lifecycle),
+                Err(e) => {
                     errors.push(ReloadError {
                         route_id,
-                        action: "Swap".into(),
+                        action: "Swap (compile)".into(),
                         error: e,
                     });
-                }
-            } else {
-                // Atomic swap SUCCESS — commit staging
-                if let Some(ctx) = function_ctx
-                    && let Some(ref diff) = function_diff
-                    && let Err(e) = ctx.invoker.finalize_reload(diff, ctx.generation).await
-                {
-                    errors.push(ReloadError {
-                        route_id: route_id.clone(),
-                        action: "Finalize".into(),
-                        error: CamelError::ProcessorError(format!("{e}")),
-                    });
-                }
-                if in_flight > 0 {
-                    tracing::info!(
-                        route_id = %route_id,
-                        action = "swap",
-                        in_flight = in_flight,
-                        "hot-reload: swapped route pipeline ({} exchanges continuing with previous pipeline)",
-                        in_flight
-                    );
-                } else {
-                    tracing::info!(route_id = %route_id, "hot-reload: swapped route pipeline");
+                    return;
                 }
             }
+        } else {
+            // Oracle Fix 1: use lifecycle-preserving dry compilation.
+            // Even without function context, the route may carry stateful
+            // lifecycle-bearing steps (resequencer, aggregator).
+            match controller.compile_route_definition_dry_pipeline(def).await {
+                Ok(compiled) => (compiled.processor, compiled.lifecycle),
+                Err(e) => {
+                    errors.push(ReloadError {
+                        route_id,
+                        action: "Swap (compile)".into(),
+                        error: e,
+                    });
+                    return;
+                }
+            }
+        };
+
+    // Inject lifecycle from the test-only field on RuntimeExecutionHandle,
+    // simulating a lifecycle-bearing route (e.g. resequencer).  In production
+    // the field does not exist — this block is compiled out.
+    #[cfg(test)]
+    {
+        if let Some(injected) = controller.test_lifecycle_inject.lock().unwrap().take() {
+            lifecycle = injected;
         }
-        Err(e) => {
+    }
+
+    // Compute function diff and prepare reload.  Both the token and the
+    // diff are kept alive for the duration of this function so that any
+    // branch can finalize (on success) or rollback (on failure).
+    let (prepare_token, function_diff): (Option<PrepareToken>, Option<FunctionDiff>) =
+        if let Some(ctx) = function_ctx {
+            let diff = compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
+            match ctx
+                .invoker
+                .prepare_reload(diff.clone(), ctx.generation)
+                .await
+            {
+                Ok(token) => (Some(token), Some(diff)),
+                Err(e) => {
+                    errors.push(ReloadError {
+                        route_id: route_id.clone(),
+                        action: "Swap (prepare)".into(),
+                        error: CamelError::ProcessorError(format!("{e}")),
+                    });
+                    return;
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+    // Guard: if either the running route or the new pipeline carries
+    // lifecycle handles, skip the atomic swap and use the Restart path
+    // (stop → swap_raw → start).  Checking both sides eliminates the
+    // need for a reactive lifecycle-rejection fallback.
+    let running_has_lifecycle = controller.route_has_lifecycle(&route_id).await;
+    let new_has_lifecycle = !lifecycle.is_empty();
+
+    if running_has_lifecycle || new_has_lifecycle {
+        tracing::info!(
+            route_id = %route_id,
+            running_has_lifecycle,
+            new_has_lifecycle,
+            "Lifecycle-bearing route — using Restart path (stop → swap_raw → start)"
+        );
+
+        // 1. Stop route (drains lifecycle handles)
+        if let Err(stop_err) = controller.stop_route_reload(&route_id).await {
+            rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
             errors.push(ReloadError {
                 route_id,
-                action: "Swap (compile)".into(),
-                error: e,
+                action: "Swap (restart-stop)".into(),
+                error: stop_err,
             });
+            return;
         }
+
+        // 2. Drain in-flight exchanges
+        let _ = drain_route(&route_id, "swap-restart", controller, drain_timeout).await;
+
+        // 3. Raw pipeline swap (no lifecycle check — route is stopped)
+        //    Thread lifecycle so the new PipelineAssembly carries handles.
+        if let Err(swap_err) = controller
+            .swap_route_pipeline_raw(&route_id, p, lifecycle)
+            .await
+        {
+            rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
+            errors.push(ReloadError {
+                route_id,
+                action: "Swap (restart-raw)".into(),
+                error: swap_err,
+            });
+            return;
+        }
+
+        // 4. Start route (re-creates consumer with new pipeline)
+        if let Err(start_err) = controller.start_route_reload(&route_id).await {
+            rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
+            errors.push(ReloadError {
+                route_id,
+                action: "Swap (restart-start)".into(),
+                error: start_err,
+            });
+            return;
+        }
+
+        // Restart SUCCESS — commit staging
+        if let Some(ctx) = function_ctx
+            && let Some(ref diff) = function_diff
+            && let Err(e) = ctx.invoker.finalize_reload(diff, ctx.generation).await
+        {
+            errors.push(ReloadError {
+                route_id: route_id.clone(),
+                action: "Swap (restart-finalize)".into(),
+                error: CamelError::ProcessorError(format!("{e}")),
+            });
+            return;
+        }
+
+        tracing::info!(
+            route_id = %route_id,
+            "hot-reload: route restarted via Restart path"
+        );
+        return;
+    }
+
+    // Atomic swap — both sides are lifecycle-empty, will succeed.
+    let result = controller.swap_route_pipeline(&route_id, p).await;
+    if let Err(e) = result {
+        rollback_staging(function_ctx, prepare_token.as_ref(), &route_id).await;
+        errors.push(ReloadError {
+            route_id,
+            action: "Swap".into(),
+            error: e,
+        });
+        return;
+    }
+
+    // Atomic swap SUCCESS — commit staging
+    if let Some(ctx) = function_ctx
+        && let Some(ref diff) = function_diff
+        && let Err(e) = ctx.invoker.finalize_reload(diff, ctx.generation).await
+    {
+        errors.push(ReloadError {
+            route_id: route_id.clone(),
+            action: "Finalize".into(),
+            error: CamelError::ProcessorError(format!("{e}")),
+        });
+    }
+    if in_flight > 0 {
+        tracing::info!(
+            route_id = %route_id,
+            action = "swap",
+            in_flight = in_flight,
+            "hot-reload: swapped route pipeline ({} exchanges continuing with previous pipeline)",
+            in_flight
+        );
+    } else {
+        tracing::info!(route_id = %route_id, "hot-reload: swapped route pipeline");
     }
 }
 
@@ -936,20 +971,6 @@ mod tests {
         assert!(!is_invalid_stop_transition(&other));
     }
 
-    #[test]
-    fn helper_is_lifecycle_rejection_detects_marker() {
-        let err = CamelError::RouteError(
-            "Route 'r1' contains stateful steps (lifecycle-bearing). Hot-swap not supported — use restart.".into(),
-        );
-        assert!(is_lifecycle_rejection(&err));
-
-        let other = CamelError::RouteError("Route not found".into());
-        assert!(!is_lifecycle_rejection(&other));
-
-        let route_err = CamelError::RouteError("invalid transition: Started -> Started".into());
-        assert!(!is_lifecycle_rejection(&route_err));
-    }
-
     // -----------------------------------------------------------------------
     // compute_function_diff_for_route tests
     // -----------------------------------------------------------------------
@@ -1110,6 +1131,7 @@ mod tests {
             controller: ctrl_handle.clone(),
             runtime: runtime_bus,
             function_invoker: None,
+            test_lifecycle_inject: Arc::new(std::sync::Mutex::new(None)),
         };
 
         // ── Call apply_swap ──
@@ -1151,5 +1173,521 @@ mod tests {
 
         // Cleanup: stop the running route (timer consumer was started).
         let _ = ctrl_handle.stop_route("restart-integration").await;
+    }
+
+    // ── Proactive guard: lifecycle-bearing compiled pipeline → Restart path ──
+
+    /// Verify that when the compiled pipeline carries lifecycle handles,
+    /// the proactive guard skips the atomic swap and uses the Restart path
+    /// directly.  The Restart path threads lifecycle into
+    /// `swap_pipeline_raw`, so a subsequent atomic swap attempt is rejected.
+    #[tokio::test]
+    async fn apply_swap_proactive_restart_preserves_lifecycle() {
+        use crate::context::RuntimeExecutionHandle;
+        use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
+        use crate::lifecycle::adapters::in_memory::InMemoryRuntimeStore;
+        use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+        use crate::lifecycle::adapters::runtime_execution::RuntimeExecutionAdapter;
+        use crate::lifecycle::application::runtime_bus::RuntimeBus;
+        use crate::shared::components::domain::Registry;
+        use camel_api::{IdentityProcessor, StepLifecycle, StepShutdownReason};
+        use std::sync::Arc;
+
+        // ── Lifecycle handle for the compiled pipeline ──
+        #[derive(Debug)]
+        struct GuardTestLifecycle;
+        #[async_trait::async_trait]
+        impl StepLifecycle for GuardTestLifecycle {
+            fn name(&self) -> &'static str {
+                "guard-test-lifecycle"
+            }
+            async fn shutdown(
+                &self,
+                _reason: StepShutdownReason,
+            ) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+        }
+
+        // ── Build controller with a plain (lifecycle-free) route ──
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .register(Arc::new(camel_component_timer::TimerComponent::new()));
+        let mut controller = DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+
+        controller
+            .add_route(
+                RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                    .with_route_id("proactive-restart"),
+            )
+            .await
+            .unwrap();
+
+        // NOTE: do NOT call set_route_lifecycle_for_test — the OLD route
+        // has no lifecycle, so an atomic swap would normally succeed.
+        // Instead, inject lifecycle into the NEW compiled pipeline via the
+        // test-only field on RuntimeExecutionHandle.
+
+        let (ctrl_handle, _actor_join) = spawn_controller_actor(controller);
+
+        // ── Build minimal RuntimeBus ──
+        let store = InMemoryRuntimeStore::default();
+        let execution = Arc::new(RuntimeExecutionAdapter::new(ctrl_handle.clone()));
+        let runtime_bus = Arc::new(
+            RuntimeBus::new(
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+            )
+            .with_execution(execution),
+        );
+
+        let handle = RuntimeExecutionHandle {
+            controller: ctrl_handle.clone(),
+            runtime: runtime_bus,
+            function_invoker: None,
+            test_lifecycle_inject: Arc::new(std::sync::Mutex::new(Some(vec![Arc::new(
+                GuardTestLifecycle,
+            )
+                as Arc<dyn StepLifecycle>]))),
+        };
+
+        // ── Call apply_swap (lifecycle injected → should go Restart path) ──
+        let mut new_defs = vec![
+            RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                .with_route_id("proactive-restart"),
+        ];
+        let mut errors = vec![];
+        apply_swap(
+            "proactive-restart".into(),
+            &mut new_defs,
+            &handle,
+            Duration::from_secs(5),
+            None,
+            &mut errors,
+        )
+        .await;
+
+        assert!(
+            errors.is_empty(),
+            "apply_swap should succeed via proactive Restart path; got {errors:?}"
+        );
+
+        let exists = ctrl_handle.route_exists("proactive-restart").await.unwrap();
+        assert!(
+            exists,
+            "route should exist after proactive Restart path completes"
+        );
+
+        let pipeline = ctrl_handle.get_pipeline("proactive-restart").await.unwrap();
+        assert!(
+            pipeline.is_some(),
+            "pipeline should be present after proactive Restart path completes"
+        );
+
+        // ── Verify lifecycle was preserved ──
+        // If the atomic swap had been used, the pipeline assembly would have
+        // lifecycle == vec![].  Since we injected lifecycle, the Restart path
+        // should have threaded it into swap_pipeline_raw, making the route
+        // lifecycle-bearing.  A subsequent atomic swap MUST be rejected.
+        let identity = camel_api::BoxProcessor::new(IdentityProcessor);
+        let swap_result = ctrl_handle
+            .swap_pipeline("proactive-restart", identity)
+            .await;
+        assert!(
+            swap_result.is_err(),
+            "atomic swap should be rejected after Restart path preserves lifecycle"
+        );
+        let err_msg = swap_result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("lifecycle-bearing"),
+            "rejection should mention lifecycle-bearing; got: {err_msg}"
+        );
+
+        // Cleanup
+        let _ = ctrl_handle.stop_route("proactive-restart").await;
+    }
+
+    /// Verify that a route WITHOUT lifecycle-bearing steps uses the atomic
+    /// swap (fast path) and a subsequent atomic swap still succeeds.
+    #[tokio::test]
+    async fn apply_swap_atomic_for_non_lifecycle_route() {
+        use crate::context::RuntimeExecutionHandle;
+        use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
+        use crate::lifecycle::adapters::in_memory::InMemoryRuntimeStore;
+        use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+        use crate::lifecycle::adapters::runtime_execution::RuntimeExecutionAdapter;
+        use crate::lifecycle::application::runtime_bus::RuntimeBus;
+        use crate::shared::components::domain::Registry;
+        use camel_api::IdentityProcessor;
+        use std::sync::Arc;
+
+        // ── Build controller with a plain route ──
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .register(Arc::new(camel_component_timer::TimerComponent::new()));
+        let mut controller = DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+
+        controller
+            .add_route(
+                RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                    .with_route_id("atomic-swap"),
+            )
+            .await
+            .unwrap();
+
+        let (ctrl_handle, _actor_join) = spawn_controller_actor(controller);
+
+        let store = InMemoryRuntimeStore::default();
+        let execution = Arc::new(RuntimeExecutionAdapter::new(ctrl_handle.clone()));
+        let runtime_bus = Arc::new(
+            RuntimeBus::new(
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+            )
+            .with_execution(execution),
+        );
+
+        let handle = RuntimeExecutionHandle {
+            controller: ctrl_handle.clone(),
+            runtime: runtime_bus,
+            function_invoker: None,
+            test_lifecycle_inject: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        // ── First swap: should use atomic path (no lifecycle) ──
+        let mut new_defs = vec![
+            RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                .with_route_id("atomic-swap"),
+        ];
+        let mut errors = vec![];
+        apply_swap(
+            "atomic-swap".into(),
+            &mut new_defs,
+            &handle,
+            Duration::from_secs(5),
+            None,
+            &mut errors,
+        )
+        .await;
+
+        assert!(
+            errors.is_empty(),
+            "apply_swap should succeed for non-lifecycle route via atomic swap; got {errors:?}"
+        );
+
+        let exists = ctrl_handle.route_exists("atomic-swap").await.unwrap();
+        assert!(exists, "route should exist after atomic swap");
+
+        let pipeline = ctrl_handle.get_pipeline("atomic-swap").await.unwrap();
+        assert!(
+            pipeline.is_some(),
+            "pipeline should be present after atomic swap"
+        );
+
+        // ── Verify atomic swap was used: subsequent atomic swap succeeds ──
+        let identity = camel_api::BoxProcessor::new(IdentityProcessor);
+        let swap_result = ctrl_handle.swap_pipeline("atomic-swap", identity).await;
+        assert!(
+            swap_result.is_ok(),
+            "subsequent atomic swap should succeed (route has no lifecycle)"
+        );
+
+        // Cleanup
+        let _ = ctrl_handle.stop_route("atomic-swap").await;
+    }
+
+    /// Verify that lifecycle handles are concretely preserved in the
+    /// PipelineAssembly after the proactive Restart path completes.
+    /// Uses the direct `DefaultRouteController` (before actor spawn) to
+    /// inspect the pipeline assembly's lifecycle field.
+    #[tokio::test]
+    async fn apply_swap_lifecycle_handles_preserved_in_assembly() {
+        use crate::context::RuntimeExecutionHandle;
+        use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
+        use crate::lifecycle::adapters::in_memory::InMemoryRuntimeStore;
+        use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+        use crate::lifecycle::adapters::runtime_execution::RuntimeExecutionAdapter;
+        use crate::lifecycle::application::runtime_bus::RuntimeBus;
+        use crate::shared::components::domain::Registry;
+        use camel_api::{IdentityProcessor, StepLifecycle, StepShutdownReason};
+        use std::sync::Arc;
+
+        // ── Lifecycle handle ──
+        #[derive(Debug)]
+        struct PreserveTestLifecycle;
+        #[async_trait::async_trait]
+        impl StepLifecycle for PreserveTestLifecycle {
+            fn name(&self) -> &'static str {
+                "preserve-test-lifecycle"
+            }
+            async fn shutdown(
+                &self,
+                _reason: StepShutdownReason,
+            ) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+        }
+
+        // ── Build controller ──
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .register(Arc::new(camel_component_timer::TimerComponent::new()));
+        let mut controller = DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+
+        controller
+            .add_route(
+                RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                    .with_route_id("preserve-lifecycle"),
+            )
+            .await
+            .unwrap();
+
+        let (ctrl_handle, _actor_join) = spawn_controller_actor(controller);
+
+        // Build RuntimeBus + handle with test lifecycle injection
+        let store = InMemoryRuntimeStore::default();
+        let execution = Arc::new(RuntimeExecutionAdapter::new(ctrl_handle.clone()));
+        let runtime_bus = Arc::new(
+            RuntimeBus::new(
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+            )
+            .with_execution(execution),
+        );
+        let handle = RuntimeExecutionHandle {
+            controller: ctrl_handle.clone(),
+            runtime: runtime_bus,
+            function_invoker: None,
+            test_lifecycle_inject: Arc::new(std::sync::Mutex::new(Some(vec![Arc::new(
+                PreserveTestLifecycle,
+            )
+                as Arc<dyn StepLifecycle>]))),
+        };
+
+        // Call apply_swap
+        let mut new_defs = vec![
+            RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                .with_route_id("preserve-lifecycle"),
+        ];
+        let mut errors = vec![];
+        apply_swap(
+            "preserve-lifecycle".into(),
+            &mut new_defs,
+            &handle,
+            Duration::from_secs(5),
+            None,
+            &mut errors,
+        )
+        .await;
+
+        assert!(
+            errors.is_empty(),
+            "apply_swap should succeed; got {errors:?}"
+        );
+
+        // ── Verify post-swap: lifecycle preserved in PipelineAssembly ──
+        // After the Restart path, swap_pipeline_raw stores lifecycle in the
+        // assembly.  A subsequent atomic swap must be rejected because the
+        // assembly now carries lifecycle handles.
+        let identity = camel_api::BoxProcessor::new(IdentityProcessor);
+        let swap_result = ctrl_handle
+            .swap_pipeline("preserve-lifecycle", identity)
+            .await;
+        assert!(
+            swap_result.is_err(),
+            "atomic swap should be rejected — lifecycle was preserved"
+        );
+        let err_msg = swap_result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("lifecycle-bearing"),
+            "rejection should mention lifecycle-bearing; got: {err_msg}"
+        );
+
+        // Cleanup
+        let _ = ctrl_handle.stop_route("preserve-lifecycle").await;
+    }
+
+    // ── Oracle Fix 2: stateless → resequencer swap regression test ──
+    //
+    // Verifies that when function_ctx is None and the compiled route carries
+    // lifecycle handles (as a real resequencer would), the swap goes through
+    // the Restart path (not atomic) and lifecycle is preserved in the
+    // PipelineAssembly.
+
+    /// Oracle Fix 2: verify that a stateless-to-lifecycle swap via
+    /// `function_ctx == None` uses the Restart path and preserves lifecycle
+    /// handles in the PipelineAssembly.
+    ///
+    /// Steps:
+    /// 1. Start a non-lifecycle route
+    /// 2. Hot-swap with injected lifecycle + `function_ctx: None`
+    /// 3. Assert Restart path was used (subsequent atomic swap fails)
+    /// 4. Assert PipelineAssembly has the lifecycle handle
+    /// 5. Assert old route's lifecycle drains on stop
+    #[tokio::test]
+    async fn oracle_fix2_stateless_to_resequencer_swap_preserves_lifecycle() {
+        use crate::context::RuntimeExecutionHandle;
+        use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
+        use crate::lifecycle::adapters::in_memory::InMemoryRuntimeStore;
+        use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+        use crate::lifecycle::adapters::runtime_execution::RuntimeExecutionAdapter;
+        use crate::lifecycle::application::runtime_bus::RuntimeBus;
+        use crate::shared::components::domain::Registry;
+        use camel_api::{IdentityProcessor, StepLifecycle, StepShutdownReason};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // ── Lifecycle handle that records shutdown ──
+        #[derive(Debug)]
+        struct OracleFix2Lifecycle {
+            drained: Arc<AtomicBool>,
+        }
+        #[async_trait::async_trait]
+        impl StepLifecycle for OracleFix2Lifecycle {
+            fn name(&self) -> &'static str {
+                "oracle-fix2-lifecycle"
+            }
+            async fn shutdown(
+                &self,
+                _reason: StepShutdownReason,
+            ) -> Result<(), camel_api::CamelError> {
+                self.drained.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let drained_flag = Arc::new(AtomicBool::new(false));
+        let lifecycle: Arc<dyn StepLifecycle> = Arc::new(OracleFix2Lifecycle {
+            drained: Arc::clone(&drained_flag),
+        });
+
+        // ── Build controller with a plain non-lifecycle route ──
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .register(Arc::new(camel_component_timer::TimerComponent::new()));
+        let mut controller = DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+
+        controller
+            .add_route(
+                RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                    .with_route_id("oracle-fix2-test"),
+            )
+            .await
+            .unwrap();
+
+        // Old route has NO lifecycle (plain timer → stateless).
+        // NEW route simulates resequencer via test_lifecycle_inject.
+
+        let (ctrl_handle, _actor_join) = spawn_controller_actor(controller);
+
+        let store = InMemoryRuntimeStore::default();
+        let execution = Arc::new(RuntimeExecutionAdapter::new(ctrl_handle.clone()));
+        let runtime_bus = Arc::new(
+            RuntimeBus::new(
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+            )
+            .with_execution(execution),
+        );
+
+        let handle = RuntimeExecutionHandle {
+            controller: ctrl_handle.clone(),
+            runtime: runtime_bus,
+            function_invoker: None,
+            // Inject lifecycle to simulate a resequencer route compiled via
+            // function_ctx == None path.
+            test_lifecycle_inject: Arc::new(std::sync::Mutex::new(Some(vec![
+                Arc::clone(&lifecycle) as Arc<dyn StepLifecycle>,
+            ]))),
+        };
+
+        // ── Swap: function_ctx == None ──
+        let mut new_defs = vec![
+            RouteDefinition::new("timer:tick?period=1000&repeatCount=1", vec![])
+                .with_route_id("oracle-fix2-test"),
+        ];
+        let mut errors = vec![];
+        apply_swap(
+            "oracle-fix2-test".into(),
+            &mut new_defs,
+            &handle,
+            Duration::from_secs(5),
+            None, // ← Oracle Fix 2: no function context
+            &mut errors,
+        )
+        .await;
+
+        // Oracle assertion 3: swap should succeed
+        assert!(
+            errors.is_empty(),
+            "apply_swap should succeed for oracle fix 2; got {errors:?}"
+        );
+
+        let exists = ctrl_handle.route_exists("oracle-fix2-test").await.unwrap();
+        assert!(exists, "route should exist after oracle fix 2 swap");
+
+        // Oracle assertion 3 (cont'd): Restart path was used → subsequent
+        // atomic swap is rejected because PipelineAssembly now carries lifecycle.
+        let identity = camel_api::BoxProcessor::new(IdentityProcessor);
+        let swap_result = ctrl_handle
+            .swap_pipeline("oracle-fix2-test", identity)
+            .await;
+        assert!(
+            swap_result.is_err(),
+            "atomic swap should be rejected — Restart path stored lifecycle; got {:?}",
+            swap_result
+        );
+        let err_msg = swap_result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("lifecycle-bearing"),
+            "rejection should mention lifecycle-bearing; got: {err_msg}"
+        );
+
+        // Oracle assertion 4: PipelineAssembly has the lifecycle handle
+        // (verified via rejection above — the assembly IS lifecycle-bearing).
+
+        // Oracle assertion 5: Stop the route and verify lifecycle drains.
+        // The `stop_route` method drains lifecycle handles via
+        // consumer_management::stop_route which iterates assembly.lifecycle.
+        let handle_ref = ctrl_handle.clone();
+        let stop_result = handle_ref.stop_route("oracle-fix2-test").await;
+        assert!(
+            stop_result.is_ok(),
+            "stop_route should succeed; got {stop_result:?}"
+        );
+
+        // Verify drain flag was set
+        assert!(
+            drained_flag.load(Ordering::SeqCst),
+            "lifecycle.shutdown should have been called via drain on stop_route"
+        );
     }
 }

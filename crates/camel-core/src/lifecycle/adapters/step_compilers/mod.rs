@@ -269,6 +269,19 @@ pub(super) fn pack_lifecycles(
     }
 }
 
+/// Build the full registry with all compiler groups.
+pub(crate) fn build_registry() -> StepCompilerRegistry {
+    let mut reg = StepCompilerRegistry::new();
+    reg.register(Box::new(core::CoreCompiler));
+    reg.register(Box::new(endpoints::EndpointsCompiler));
+    reg.register(Box::new(transforms::TransformsCompiler));
+    reg.register(Box::new(routing::RoutingCompiler));
+    reg.register(Box::new(control_flow::ControlFlowCompiler));
+    reg.register(Box::new(splitting::SplittingCompiler));
+    reg.register(Box::new(error_handling::ErrorHandlingCompiler));
+    reg
+}
+
 #[cfg(test)]
 mod segment_tests {
     use super::*;
@@ -329,6 +342,7 @@ mod segment_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::arc_with_non_send_sync)]
     async fn outcome_segment_survives_arcswap_swap() {
         use arc_swap::ArcSwap;
         use camel_api::{Exchange, Message, OutcomePipeline, PipelineOutcome};
@@ -731,17 +745,4 @@ mod segment_tests {
             other => panic!("Expected CompiledStep::Segment, got {other:?}"),
         }
     }
-}
-
-/// Build the full registry with all compiler groups.
-pub(crate) fn build_registry() -> StepCompilerRegistry {
-    let mut reg = StepCompilerRegistry::new();
-    reg.register(Box::new(core::CoreCompiler));
-    reg.register(Box::new(endpoints::EndpointsCompiler));
-    reg.register(Box::new(transforms::TransformsCompiler));
-    reg.register(Box::new(routing::RoutingCompiler));
-    reg.register(Box::new(control_flow::ControlFlowCompiler));
-    reg.register(Box::new(splitting::SplittingCompiler));
-    reg.register(Box::new(error_handling::ErrorHandlingCompiler));
-    reg
 }

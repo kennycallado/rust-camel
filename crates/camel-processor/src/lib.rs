@@ -24,6 +24,7 @@ pub mod marshal;
 pub mod multicast;
 pub mod multicast_segment;
 pub mod recipient_list;
+pub mod resequencer;
 pub mod routing_slip;
 pub mod sampling;
 pub mod script_mutator;
@@ -92,3 +93,8 @@ pub use streaming_splitter::StreamingSplitterService;
 pub use throttler::{ThrottleSegment, ThrottlerService};
 pub use validate::ValidateService;
 pub use wire_tap::{WireTapConfig, WireTapLayer, WireTapService};
+
+// Resequencer
+pub use resequencer::batch::BatchPolicy;
+pub use resequencer::stream::StreamPolicy;
+pub use resequencer::{PassthroughPolicy, ResequencePolicy, ResequencerConfig, ResequencerService};
