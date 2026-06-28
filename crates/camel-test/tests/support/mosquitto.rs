@@ -29,7 +29,7 @@ pub async fn shared_mosquitto() -> &'static (ContainerAsync<GenericImage>, Strin
             );
             let image = GenericImage::new("eclipse-mosquitto", "2.0.20")
                 .with_exposed_port(ContainerPort::Tcp(MQTT_PORT))
-                .with_wait_for(WaitFor::message_on_stdout("mosquitto version"))
+                .with_wait_for(WaitFor::message_on_stderr("mosquitto version"))
                 .with_cmd(["sh", "-c", &cmd])
                 .with_startup_timeout(Duration::from_secs(60));
 

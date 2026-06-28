@@ -203,8 +203,7 @@ impl ResequencerService {
                 }
                 // input channel closed (EOF from shutdown) → exit naturally
             });
-            // allow-unwrap: actor handle slot is always None at construction time
-            *actor_h.lock().expect("actor_handle lock poisoned") = Some(handle);
+            *actor_h.lock().expect("actor_handle lock poisoned") = Some(handle); // allow-unwrap: handle slot is None at construction time
         }
 
         // ── Spawn post-driver task ──
@@ -242,8 +241,7 @@ impl ResequencerService {
                     }
                 }
             });
-            // allow-unwrap: driver handle slot is always None at construction time
-            *driver_h.lock().expect("driver_handle lock poisoned") = Some(handle);
+            *driver_h.lock().expect("driver_handle lock poisoned") = Some(handle); // allow-unwrap: handle slot is None at construction time
         }
 
         let metrics = config.metrics.clone();
