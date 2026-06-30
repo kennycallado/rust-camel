@@ -52,7 +52,10 @@ pub use circuit_breaker::{
 pub use claim_check::{ClaimCheckOp, ClaimCheckService, KeyExpression};
 pub use content_enricher::{EnrichService, PollEnrichService};
 pub use convert_body::ConvertBodyTo;
-pub use data_format::{JsonDataFormat, XmlDataFormat, ZipDataFormat, builtin_data_format};
+pub use data_format::{
+    CAMEL_CSV_HEADER_RECORD, CsvConfig, CsvDataFormat, JsonDataFormat, QuoteMode, RecordSeparator,
+    XmlDataFormat, ZipDataFormat, builtin_data_format,
+};
 pub use delayer::DelayerService;
 pub use do_try::{CatchClause, CatchMatcher, DoTryService};
 pub use do_try_segment::{CatchClauseSegment, DoTrySegment, FinallyClauseSegment};

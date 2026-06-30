@@ -15,6 +15,7 @@ categories.workspace = true
 camel-api.workspace = true
 camel-component-api.workspace = true
 camel-language-api.workspace = true
+csv.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 futures = { workspace = true }

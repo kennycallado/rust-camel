@@ -71,7 +71,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `src/lib.rs:40-42` | README claims deprecation for layer/service; code has no `#[deprecated]` yet. |
 | `EnrichService`, `PollEnrichService` | stable | `src/lib.rs:43` | Enrich / pollEnrich. |
 | `ConvertBodyTo` | stable | `src/lib.rs:44` | Body conversion. |
-| `JsonDataFormat`, `XmlDataFormat`, `ZipDataFormat`, `builtin_data_format` | stable | `src/lib.rs:45` | Built-in data formats. |
+| `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonDataFormat`, `XmlDataFormat`, `ZipDataFormat`, `builtin_data_format` | stable | `src/lib.rs:55` | Built-in data formats. CSV added per ADR-0030. |
 | `DelayerService` | stable | `src/lib.rs:46` | Delay EIP. |
 | `CatchClause`, `CatchMatcher`, `DoTryService` | stable | `src/lib.rs:47` | doTry block. |
 | `DynamicRouterService` | stable | `src/lib.rs:48` | Dynamic router. |
@@ -138,6 +138,9 @@ Exchange property (`"CamelStreamOffset"`) set on each fragment — monotonically
 
 **CamelStreamBatchSize**:
 Exchange property (`"CamelStreamBatchSize"`) set on each fragment — total number of fragments expected in this batch (not set for streaming splits where count is unknown).
+
+**CamelCsvHeaderRecord**:
+Exchange header key (`"CamelCsvHeaderRecord"`) populated by `CsvDataFormat::unmarshal_in_exchange` when `CsvConfig.capture_header_record=true`. Value: `Value::Array` of `Value::String` containing the CSV header keys. Independent of `use_maps` mode.
 
 **StreamSplitInput**:
 Groups the parent Exchange, the byte stream (`Pin<Box<dyn Stream<Item = Result<Bytes, CamelError>>>>`), and `StreamMetadata` into one argument for `StreamSplitCodec::split`.

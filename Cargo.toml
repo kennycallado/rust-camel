@@ -158,6 +158,7 @@ notify = { version = "8", features = ["macos_fsevent"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "redis"] }
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+csv = "1"
 proc-macro2 = "1.0"
 prometheus = "0.14"
 quick-xml = "0.40"

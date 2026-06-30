@@ -49,7 +49,7 @@ where
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let body = std::mem::replace(&mut exchange.input.body, Body::Empty);
         let format = self.format.clone();
-        match format.marshal(body) {
+        match format.marshal_in_exchange(&mut exchange, body) {
             Ok(new_body) => {
                 exchange.input.body = new_body;
                 let fut = self.inner.call(exchange);
@@ -76,7 +76,7 @@ where
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let body = std::mem::replace(&mut exchange.input.body, Body::Empty);
         let format = self.format.clone();
-        match format.unmarshal(body) {
+        match format.unmarshal_in_exchange(&mut exchange, body) {
             Ok(new_body) => {
                 exchange.input.body = new_body;
                 let fut = self.inner.call(exchange);
@@ -193,5 +193,83 @@ mod tests {
         let exchange = Exchange::new(Message::new(Body::Text("x".to_string())));
         let result = svc.oneshot(exchange).await;
         assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "unmarshal-fail"));
+    }
+
+    const MARSHAL_HOOK_KEY: &str = "TestMarshalHookCalled";
+
+    struct HeaderWritingMarshalFormat;
+
+    impl DataFormat for HeaderWritingMarshalFormat {
+        fn name(&self) -> &str {
+            "header-writer-marshal"
+        }
+        fn marshal(&self, body: Body) -> Result<Body, CamelError> {
+            Ok(body)
+        }
+        fn unmarshal(&self, body: Body) -> Result<Body, CamelError> {
+            Ok(body)
+        }
+
+        fn marshal_in_exchange(
+            &self,
+            exchange: &mut Exchange,
+            body: Body,
+        ) -> Result<Body, CamelError> {
+            exchange
+                .input
+                .headers
+                .insert(MARSHAL_HOOK_KEY.to_string(), serde_json::Value::Bool(true));
+            Ok(body)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_marshal_service_propagates_exchange_to_hook() {
+        let svc = MarshalService::new(IdentityProcessor, Arc::new(HeaderWritingMarshalFormat));
+        let ex = Exchange::new(Message::new(Body::Json(serde_json::json!({}))));
+        let result = svc.oneshot(ex).await.unwrap();
+        assert_eq!(
+            result.input.headers.get(MARSHAL_HOOK_KEY),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    const UNMARSHAL_HOOK_KEY: &str = "TestUnmarshalHookCalled";
+
+    struct HeaderWritingUnmarshalFormat;
+
+    impl DataFormat for HeaderWritingUnmarshalFormat {
+        fn name(&self) -> &str {
+            "header-writer-unmarshal"
+        }
+        fn marshal(&self, body: Body) -> Result<Body, CamelError> {
+            Ok(body)
+        }
+        fn unmarshal(&self, body: Body) -> Result<Body, CamelError> {
+            Ok(body)
+        }
+
+        fn unmarshal_in_exchange(
+            &self,
+            exchange: &mut Exchange,
+            body: Body,
+        ) -> Result<Body, CamelError> {
+            exchange.input.headers.insert(
+                UNMARSHAL_HOOK_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
+            Ok(body)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unmarshal_service_propagates_exchange_to_hook() {
+        let svc = UnmarshalService::new(IdentityProcessor, Arc::new(HeaderWritingUnmarshalFormat));
+        let ex = Exchange::new(Message::new(Body::Json(serde_json::json!({}))));
+        let result = svc.oneshot(ex).await.unwrap();
+        assert_eq!(
+            result.input.headers.get(UNMARSHAL_HOOK_KEY),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 }
