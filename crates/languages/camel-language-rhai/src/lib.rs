@@ -28,6 +28,14 @@
 //! - Oversized allocations — strings, arrays, maps each have size caps.
 //! - Pathological nesting — expression and function-expression depths are bounded.
 //!
+//! ## Timeout caveat
+//!
+//! `execution-timeout-ms` wraps `eval_with_scope` in `tokio::time::timeout` +
+//! `spawn_blocking`. When the timeout fires, the route future resolves to an
+//! error, but the blocking thread may continue executing until the script
+//! trips `max-operations` or finishes. This is the same partial-mitigation
+//! caveat shared with the Boa engine.
+//!
 //! # Sandboxing
 //!
 //! Rhai scripts **cannot access the host filesystem, network APIs, or Rhai
