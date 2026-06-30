@@ -4,28 +4,13 @@
 - Read CONTEXT-MAP.md for domain language and architecture decisions before any implementation task
 - If you have access to caveman skill, activate it
 - Never add to staging something that is in .gitignore
+- For structured feature workflow, Tab to `conductor`
 
 ## IMPORTANT
 
 - **ULTRATHINK** → read .opencode/instructions/ultrathink.md
 - Code review critical/important issues must be resolved before continuing
-
-## NEW FEATURE WORKFLOW
-
-Use superpowers + worktree from main in `./.worktrees/`. TDD where applicable.
-
-Three phases, each gated by an expert blessing (consult `@experts/e_gpt`, or `@experts/e_opus` for deep cross-crate architecture):
-
-1. **Brainstorm + spec** — `brainstorming` skill → spec in `docs/superpowers/specs/`. Consult the expert WITH `task_id` (accumulated context) for design doubts. Bless the spec WITHOUT `task_id` (fresh eyes).
-2. **Plan** — `writing-plans` skill → plan in `docs/superpowers/plans/`. Review by `@reviewers/r_glm`; bless by expert.
-3. **Implement** — paste `.opencode/prompts/implement.md` (defaults: `@workers/w_balanced` implement, `@reviewers/r_glm` review, `@experts/e_gpt` escalation). Skills loaded: `using-git-worktrees`, `test-driven-development`, `executing-plans` + `subagent-driven-development`.
-
-Rules:
-- IMPORTANT! Force subagents to read `AGENTS.md`.
-- CRITICAL! Spec + code review by `@reviewers/r_glm` after each task. Don't advance tasks with critical/important issues unresolved; resolve minor issues if relevant.
-- Escalate to experts (`@experts/e_gpt` default, `@experts/e_opus` for deep cross-crate arch) only when workers are stuck after 2 attempts OR for decision deadlocks.
 - Canonical workflow references use **stable aliases only** (`w_fast` / `w_balanced` / `w_heavy`, `r_glm` / `r_gpt`, `e_glm` / `e_gpt` / `e_opus`). Versioned worker files (`w_glm5.1`, `w_qwen3.7-pro`, …) are for experiments, never doc/prompt references.
-- If a subagent needs ULTRATHINK, instructions are in `.opencode/instructions/ultrathink.md`.
 
 ## QUALITY GATES
 
@@ -72,22 +57,6 @@ NEVER:
 Body length budget: 3-8 lines for normal commits. Major feature merges
 (e.g. new component) may use bullet list of technical changes, still no
 prose. If body exceeds ~15 lines, the commit is doing too much — split it.
-```
-
-## MERGE TO MAIN
-
-Paste `.opencode/prompts/merge-to-main.md` (replace `rc-XXXX` with the feature's bd issue id). Squash-merge to main via `finishing-a-development-branch`, option 1. The prompt is the single source of truth for the merge checklist (caveman-commit, docs/roadmap+status update, archived cleanup, publish-crates check, bd close).
-
-## VERSION BUMP / RELEASE
-
-```
-Confirm version with user (semver from root Cargo.toml).
-Update root Cargo.toml → regenerate Cargo.lock with cargo check.
-Update hardcoded versions: root README.md, bridges/jms/build.gradle.kts, isolated examples.
-Verify: cargo build.
-Commit following release pattern + body with changes since previous version.
-Create git tag vX.Y.Z.
-NO push, NO publish to crates.io.
 ```
 
 # context-mode — MANDATORY routing rules

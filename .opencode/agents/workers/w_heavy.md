@@ -2,7 +2,7 @@
 description: Stable alias — hard-reasoning implementation worker for complex tasks. Points to the current preferred heavy model.
 mode: subagent
 temperature: 0.1
-model: opencode-go/deepseek-v4-pro
+model: zhipuai-coding-plan/glm-5.2
 tools:
   write: true
   edit: true
