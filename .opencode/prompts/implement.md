@@ -4,8 +4,8 @@ Paste the block below as-is for the standard case. To use different agents, find
 
 ---
 
-Vamos a proceder con la implementación. Cargamos los skills `using-git-worktrees`, `test-driven-development`, `executing-plans` con `subagent-driven-development` usando `@workers/w_fast` para implementar y `@reviewers/r_glm` para spec+code review (si es posible en misma iteración). No pasamos de tarea si queda algún issue critical/important/minor sea o no bloqueante; solo obviamos minor absurdos.
+Proceeding with implementation. Load the skills `using-git-worktrees`, `test-driven-development`, `executing-plans` with `subagent-driven-development`, using `@workers/w_fast` to implement and `@reviewers/r_glm` for spec + code review (in the same iteration if possible). Do not advance past a task if any critical/important/minor issue remains, whether blocking or not; only disregard absurd minor issues.
 
-Si una tarea se complica: escala a `@experts/e_gpt` tanto para consulta como para implementación si procede. El experto también puede consultarse ante bloqueo por decisión.
+If a task gets complicated: escalate to `@experts/e_gpt` for both consultation and implementation as appropriate. The expert may also be consulted on decision deadlocks.
 
 **Workflow refs use stable aliases only** (`w_fast`/`w_balanced`/`w_heavy`, `r_glm`, `e_gpt`/`e_opus`). ULTRATHINK: `.opencode/instructions/ultrathink.md`.
