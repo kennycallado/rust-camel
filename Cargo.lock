@@ -2015,6 +2015,7 @@ dependencies = [
  "async-trait",
  "camel-language-api",
  "rhai",
+ "tempfile",
  "tokio",
  "tracing",
 ]

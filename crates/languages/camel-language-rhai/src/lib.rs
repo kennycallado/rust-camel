@@ -28,28 +28,57 @@
 //! - Oversized allocations — strings, arrays, maps each have size caps.
 //! - Pathological nesting — expression and function-expression depths are bounded.
 //!
-//! ## NOT covered (separate issue rc-d8f9 / RHL-001)
+//! # Sandboxing
 //!
-//! Rhai built-in packages can still reach the host OS: filesystem reads/writes,
-//! network calls, and module imports beyond `eval`/`import` (which ARE disabled).
-//! A script with route-author privileges can read `/etc/passwd` or make HTTP
-//! requests. This is the same trust boundary as `function:` (ADR-0005). Full
-//! FS/network sandboxing is tracked separately in bd issue `rc-d8f9`.
+//! Rhai scripts **cannot access the host filesystem, network APIs, or Rhai
+//! module loading**. This sandbox is **unconditional** — there is no config
+//! opt-out.
 //!
-//! ## Timeout caveat
+//! Two structural layers enforce this:
 //!
-//! `execution-timeout-ms` wraps `eval_with_scope` in `tokio::time::timeout` +
-//! `spawn_blocking`. When the timeout fires, the route future resolves to an
-//! error, but the blocking thread may continue executing until the script
-//! trips `max-operations` or finishes. This is the same partial-mitigation
-//! caveat shared with the Boa engine.
+//! 1. **Compile time** — the Rhai `no_module` cargo feature (see root
+//!    `Cargo.toml`) disables module loading across the entire crate graph.
+//! 2. **Runtime** — engines are built via `Engine::new_raw()` plus an
+//!    explicit `StandardPackage` registration. Unlike `Engine::new()`, this
+//!    does not install a `FileModuleResolver`.
+//!
+//! Additionally, `eval` and `import` are registered as disabled symbols as
+//! defense in depth (no-op safe if symbols are absent). If a future Rhai
+//! package were to re-introduce module loading or dynamic evaluation, these
+//! symbols would still be blocked to user scripts.
+//!
+//! What the sandbox is **not**:
+//!
+//! - It is not a CPU/memory cap. Those are separate resource limits; see
+//!   rc-bpx.
+//! - It does not block timing APIs (`sleep`, `timestamp`). Those remain part
+//!   of `StandardPackage`; CPU/time-based DoS is covered by rc-bpx resource
+//!   limits.
+//! - It is not a side-channel defense (cache timing, memory layout). Out of
+//!   scope.
+//!
+//! If your integration genuinely needs filesystem or network access from a
+//! route script, use the explicit Camel components (`file:`, `http:`) with
+//! their own runtime policies — do not attempt to bypass this sandbox.
+//!
+//! # Limitations
+//!
+//! - Resource limits (max operations, string/array/map sizes, expression
+//!   depths) are enforced as denial-of-service protection, not as a sandbox.
+//!   They are configurable — see [# Resource Limits](#resource-limits) above.
+//! - The `body` variable is always a string. Structured access to JSON/XML
+//!   bodies requires explicit parsing within the script using Rhai's built-in
+//!   map/array types.
 
 use async_trait::async_trait;
 use camel_language_api::{
     Body, Exchange, Expression, Language, LanguageError, MutatingExpression, Predicate,
     RhaiLimitsConfig, Value,
 };
-use rhai::{Engine, Scope};
+use rhai::{
+    Engine, Scope,
+    packages::{Package, StandardPackage},
+};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -109,8 +138,8 @@ fn resolve_rhai_limits(limits: &RhaiLimitsConfig) -> ResolvedRhaiLimits {
 /// ## Resource Limits
 ///
 /// Limits are configurable via `[languages.rhai.limits]` in `Camel.toml`; see the
-/// crate-level `# Resource Limits` and `# NOT covered` sections for the knobs,
-/// rust-camel runtime defaults, and the FS/network reach gap (rc-d8f9 / RHL-001).
+/// crate-level `# Resource Limits` section for knobs and defaults, and
+/// `# Sandboxing` for the unconditional filesystem and network closure.
 pub struct RhaiLanguage {
     limits: RhaiLimitsConfig,
 }
@@ -124,10 +153,28 @@ impl RhaiLanguage {
         Self { limits }
     }
 
-    /// Create a base engine with all resource limits configured.
+    /// Create a base engine with all resource limits configured and host-OS
+    /// reach structurally closed (no module resolver, no module-loading feature).
+    ///
+    /// Sandbox design (rc-d8f9):
+    /// - `Engine::new_raw()` builds an engine with no global packages and no
+    ///   module resolver — unlike `Engine::new()`, which installs
+    ///   `FileModuleResolver`.
+    /// - `StandardPackage` re-registers exactly the surface that `Engine::new()`
+    ///   shipped (arithmetic, string, array, blob, map, time, math, logic) —
+    ///   minus the resolver.
+    /// - The `no_module` cargo feature (root Cargo.toml) disables module
+    ///   loading at compile time across the whole crate graph.
+    /// - `disable_symbol("eval")` / `disable_symbol("import")` retained as
+    ///   defense in depth. They are no-op safe if the symbols are already
+    ///   absent.
+    ///
+    /// This is unconditional — there is no opt-out. See
+    /// `docs/superpowers/specs/2026-06-28-rc-d8f9-rhai-sandbox-design.md`.
     fn create_base_engine(limits: &RhaiLimitsConfig) -> Engine {
         let r = resolve_rhai_limits(limits);
-        let mut engine = Engine::new();
+        let mut engine = Engine::new_raw();
+        StandardPackage::new().register_into_engine(&mut engine);
         engine.set_max_expr_depths(
             r.max_expression_depth as usize,
             r.max_function_expression_depth as usize,
@@ -136,11 +183,7 @@ impl RhaiLanguage {
         engine.set_max_string_size(r.max_string_size);
         engine.set_max_array_size(r.max_array_size);
         engine.set_max_map_size(r.max_map_size);
-        // TODO(RHL-001): Full sandboxing is not yet applied. The engine currently
-        // allows file I/O, network access, and other host OS interactions via
-        // Rhai's built-in packages. To fully sandbox, register a custom `Module`
-        // that whitelists only safe operations, or call `engine.disable_symbol`
-        // for each dangerous symbol (e.g., `import`, `eval`, `File`, `http`).
+        // Defense in depth — no-op safe if symbols already absent under no_module.
         engine.disable_symbol("eval");
         engine.disable_symbol("import");
         engine
@@ -603,6 +646,8 @@ impl Default for RhaiLanguage {
 #[cfg(test)]
 mod tests {
     use camel_language_api::{Exchange, Language, Message, Value};
+    use std::fs;
+    use tempfile::NamedTempFile;
 
     use super::RhaiLanguage;
 
@@ -1020,5 +1065,82 @@ mod tests {
             ex.input.headers.get("out"),
             Some(&Value::String("value_processed".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn rhai_sandbox_blocks_import_with_canary() {
+        // Canary secret exported by a tmp .rhai file. Sandbox must block the
+        // import; the canary must not appear in any error message.
+        let canary = "RC_D8F9_CANARY_42";
+        let tmp = NamedTempFile::new().expect("create tmp file");
+        let path_str = tmp
+            .path()
+            .to_str()
+            .expect("tmp path is valid utf-8")
+            .to_string();
+        fs::write(tmp.path(), format!("export const secret = \"{canary}\";"))
+            .expect("write tmp .rhai");
+
+        let script = format!("import \"{path_str}\" as m; m::secret");
+
+        let lang = RhaiLanguage::new();
+        let ex = exchange_with_body("x");
+
+        // Sandbox must block: either at compile (ParseError) or eval (EvalError).
+        let err_msg = match lang.create_expression(&script) {
+            Err(parse_err) => format!("{parse_err}"),
+            Ok(expr) => match expr.evaluate(&ex).await {
+                Ok(_) => panic!("sandbox should block import — got Ok value"),
+                Err(eval_err) => format!("{eval_err}"),
+            },
+        };
+        assert!(
+            !err_msg.contains(canary),
+            "canary leaked into error message: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rhai_sandbox_blocks_eval_call() {
+        // `eval` is disabled via disable_symbol — must fail at compile or eval
+        // time. Dual-path shape matches T1: parse error and eval error are both
+        // acceptable rejections.
+        let lang = RhaiLanguage::new();
+        let ex = exchange_with_body("x");
+        let script = r#"eval("import \"x\" as m")"#;
+
+        let err_msg = match lang.create_expression(script) {
+            Err(parse_err) => format!("{parse_err}"),
+            Ok(expr) => match expr.evaluate(&ex).await {
+                Ok(v) => panic!("eval must be blocked — got Ok: {v:?}"),
+                Err(eval_err) => format!("{eval_err}"),
+            },
+        };
+        assert!(
+            err_msg.to_lowercase().contains("eval"),
+            "eval-related error expected, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rhai_sandbox_blocks_network_symbol() {
+        // Rhai 1.25.1 default has no `http` namespace; `http::get` must be
+        // rejected at compile or eval time. If a future Rhai version ships HTTP
+        // built-in, this test failing is the correct regression signal.
+        let lang = RhaiLanguage::new();
+        let ex = exchange_with_body("x");
+        let script = r#"http::get("http://127.0.0.1:9")"#;
+
+        let err_msg = match lang.create_expression(script) {
+            Err(parse_err) => format!("{parse_err}"),
+            Ok(expr) => match expr.evaluate(&ex).await {
+                Ok(v) => panic!("http::get must be rejected — got Ok: {v:?}"),
+                Err(eval_err) => format!("{eval_err}"),
+            },
+        };
+        // Assertion is intentionally loose: we don't care about the exact error
+        // text or variant. The test passes if any error happens (sandbox blocks)
+        // and fails if the script evaluates successfully.
+        let _ = err_msg; // string already validated by the match arms above
     }
 }

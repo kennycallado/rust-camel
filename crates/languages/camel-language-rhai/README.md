@@ -115,12 +115,9 @@ let limits = RhaiLimitsConfig {
 let lang = RhaiLanguage::with_limits(limits);
 ```
 
-> **Security boundary — what is NOT covered.** These limits mitigate CPU/memory DoS only.
-> Rhai's built-in packages can still reach the **filesystem and network** (read/write files,
-> HTTP calls, native module loading) beyond the disabled `eval`/`import` symbols. Full host-OS
-> reach sandboxing is tracked separately (bd `rc-d8f9` / RHL-001). Do not run untrusted scripts
-> until that work lands. See the crate-level rustdoc (`cargo doc -p camel-language-rhai`) for
-> the full threat model.
+> **Security boundary.** Rhai scripts **cannot access the filesystem, network APIs, or Rhai
+> module loading**. This sandbox is unconditional — there is no opt-out. See the crate-level
+> rustdoc (`cargo doc -p camel-language-rhai`) for the full threat model.
 
 ## License
 
