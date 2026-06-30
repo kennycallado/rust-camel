@@ -7,22 +7,25 @@
 
 ## IMPORTANT
 
-- **ORCHESTRATE** → read .opencode/instructions/orchestrate.md
 - **ULTRATHINK** → read .opencode/instructions/ultrathink.md
 - Code review critical/important issues must be resolved before continuing
 
 ## NEW FEATURE WORKFLOW
 
-```
-Use superpowers + worktree from main in ./.worktrees/
-activate ORCHESTRATE (.opencode/instructions/orchestrate.md) and TDD where possible.
-Delegate implementation to workers (w_gpt5.3-codex default, w_qwen3.6-pro or w_glm5.1 as alternatives).
-IMPORTANT! force subagentes to read AGENTS.md.
-CRITICAL! Spec + code review always after a task using reviewer `r_glm5.1`.
-Don't advance tasks with critical/important issues unresolved and resolve minor issues if relevant.
-Escalate to experts (e_gpt5.5, e_opus4.7) only when workers are stuck after 2 attempts.
-If a subagent needs ULTRATHINK instructions are in .opencode/instructions/ultrathink.md
-```
+Use superpowers + worktree from main in `./.worktrees/`. TDD where applicable.
+
+Three phases, each gated by an expert blessing (consult `@experts/e_gpt`, or `@experts/e_opus` for deep cross-crate architecture):
+
+1. **Brainstorm + spec** — `brainstorming` skill → spec in `docs/superpowers/specs/`. Consult the expert WITH `task_id` (accumulated context) for design doubts. Bless the spec WITHOUT `task_id` (fresh eyes).
+2. **Plan** — `writing-plans` skill → plan in `docs/superpowers/plans/`. Review by `@reviewers/r_glm`; bless by expert.
+3. **Implement** — paste `.opencode/prompts/implement.md` (defaults: `@workers/w_balanced` implement, `@reviewers/r_glm` review, `@experts/e_gpt` escalation). Skills loaded: `using-git-worktrees`, `test-driven-development`, `executing-plans` + `subagent-driven-development`.
+
+Rules:
+- IMPORTANT! Force subagents to read `AGENTS.md`.
+- CRITICAL! Spec + code review by `@reviewers/r_glm` after each task. Don't advance tasks with critical/important issues unresolved; resolve minor issues if relevant.
+- Escalate to experts (`@experts/e_gpt` default, `@experts/e_opus` for deep cross-crate arch) only when workers are stuck after 2 attempts OR for decision deadlocks.
+- Canonical workflow references use **stable aliases only** (`w_fast` / `w_balanced` / `w_heavy`, `r_glm` / `r_gpt`, `e_glm` / `e_gpt` / `e_opus`). Versioned worker files (`w_glm5.1`, `w_qwen3.7-pro`, …) are for experiments, never doc/prompt references.
+- If a subagent needs ULTRATHINK, instructions are in `.opencode/instructions/ultrathink.md`.
 
 ## QUALITY GATES
 
@@ -73,16 +76,7 @@ prose. If body exceeds ~15 lines, the commit is doing too much — split it.
 
 ## MERGE TO MAIN
 
-```
-Skill: finishing-a-development-branch, option 1 (squash merge into main).
-Single commit: title + body following existing commit pattern.
-Update implementation doc + postmortem if applicable.
-Clean up branch + worktree.
-Verify README/s are up to date.
-Update docs/roadmap.md and docs/status.md (don't track docs/ in git).
-After that you should clean docs/superpowers/ moving related files to docs/superpowers/archived
-Check ./scripts/publish-crates.sh and camel-cli features.
-```
+Paste `.opencode/prompts/merge-to-main.md` (replace `rc-XXXX` with the feature's bd issue id). Squash-merge to main via `finishing-a-development-branch`, option 1. The prompt is the single source of truth for the merge checklist (caveman-commit, docs/roadmap+status update, archived cleanup, publish-crates check, bd close).
 
 ## VERSION BUMP / RELEASE
 

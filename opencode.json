@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "./.opencode/instructions/behavior.md",
+    "./.opencode/instructions/ultrathink.md"
+  ],
+  "mcp": {
+    "context-mode": { "enabled": true },
+    "gh_grep": { "enabled": true }
+  }
+}
