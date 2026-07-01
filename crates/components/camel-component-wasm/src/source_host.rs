@@ -233,7 +233,7 @@ pub async fn run_http_listener(
                 return Response::builder()
                     .status(status)
                     .body(axum::body::Body::empty())
-                    .unwrap();
+                    .unwrap(); // allow-unwrap
             }
         };
 
@@ -252,13 +252,13 @@ pub async fn run_http_listener(
             return Response::builder()
                 .status(503)
                 .body(axum::body::Body::from("service unavailable"))
-                .unwrap();
+                .unwrap(); // allow-unwrap
         }
 
         Response::builder()
             .status(202)
             .body(axum::body::Body::from("accepted"))
-            .unwrap()
+            .unwrap() // allow-unwrap
     }
 
     let state = Arc::new(ListenerState { tx: request_tx });
