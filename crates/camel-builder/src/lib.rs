@@ -206,7 +206,7 @@ pub trait StepAccumulator: Sized {
 
     /// Marshal the message body using the specified data format.
     ///
-    /// Supported formats: `"json"`, `"xml"`. Returns `Err(CamelError::Config)` if
+    /// Supported formats: `"json"`, `"xml"`, `"csv"`, `"zip"`. Returns `Err(CamelError::Config)` if
     /// the format name is unknown.
     /// Converts a structured body (e.g., `Body::Json`) to a wire-format body (e.g., `Body::Text`).
     ///
@@ -226,7 +226,7 @@ pub trait StepAccumulator: Sized {
 
     /// Unmarshal the message body using the specified data format.
     ///
-    /// Supported formats: `"json"`, `"xml"`. Returns `Err(CamelError::Config)` if
+    /// Supported formats: `"json"`, `"xml"`, `"csv"`, `"zip"`. Returns `Err(CamelError::Config)` if
     /// the format name is unknown.
     /// Converts a wire-format body (e.g., `Body::Text`) to a structured body (e.g., `Body::Json`).
     ///
@@ -2944,7 +2944,7 @@ mod tests {
     fn test_builder_marshal_returns_err_for_unknown_format() {
         let result = RouteBuilder::from("timer:tick")
             .route_id("test-route")
-            .marshal("csv");
+            .marshal("protobuf");
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("marshal with unknown format should return Err"),
@@ -2955,7 +2955,7 @@ mod tests {
             "error should mention unknown format, got: {msg}"
         );
         assert!(
-            msg.contains("csv"),
+            msg.contains("protobuf"),
             "error should mention format name, got: {msg}"
         );
     }
@@ -2964,7 +2964,7 @@ mod tests {
     fn test_builder_unmarshal_returns_err_for_unknown_format() {
         let result = RouteBuilder::from("timer:tick")
             .route_id("test-route")
-            .unmarshal("csv");
+            .unmarshal("protobuf");
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("unmarshal with unknown format should return Err"),
@@ -2975,7 +2975,7 @@ mod tests {
             "error should mention unknown format, got: {msg}"
         );
         assert!(
-            msg.contains("csv"),
+            msg.contains("protobuf"),
             "error should mention format name, got: {msg}"
         );
     }
