@@ -1086,7 +1086,7 @@ mod tests {
             .to_str()
             .expect("tmp path is valid utf-8")
             .to_string();
-        fs::write(tmp.path(), format!("export const secret = \"{canary}\";"))
+        fs::write(tmp.path(), format!("export const secret = \"{canary}\";")) // allow-secret
             .expect("write tmp .rhai");
 
         let script = format!("import \"{path_str}\" as m; m::secret");
