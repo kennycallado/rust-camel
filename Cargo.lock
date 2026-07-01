@@ -1738,6 +1738,7 @@ name = "camel-component-wasm"
 version = "0.21.0"
 dependencies = [
  "async-trait",
+ "axum",
  "bytes",
  "camel-api",
  "camel-auth",
@@ -1748,11 +1749,13 @@ dependencies = [
  "camel-config",
  "camel-core",
  "futures",
+ "http-body-util",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tower",
  "tracing",

@@ -16,6 +16,7 @@ exclude = [
     "examples/http-static-basic",
     "examples/http-static-spa",
     "examples/security-wasm-policy/guest",
+    "examples/wasm-source-webhook",
 ]
 
 [workspace.metadata.crane]

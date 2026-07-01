@@ -30,6 +30,9 @@ pub mod runtime;
 pub mod security_policy;
 pub mod security_policy_bindings;
 pub mod serde_bridge;
+pub mod source_bindings;
+pub mod source_consumer;
+pub mod source_host;
 pub mod state_store;
 pub mod wasm_plugin_context;
 

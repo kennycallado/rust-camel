@@ -13,13 +13,6 @@ use tracing::{debug, warn};
 use camel_api::{CamelError, Exchange};
 use camel_core::Registry;
 
-#[cfg(test)]
-use camel_component_api::test_support::PanicRuntimeObservability;
-#[cfg(test)]
-fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-    std::sync::Arc::new(PanicRuntimeObservability)
-}
-
 fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
     CamelError::ProcessorError(format!("lock poisoned: {}", e))
 }

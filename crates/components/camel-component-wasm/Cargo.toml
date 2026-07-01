@@ -24,6 +24,8 @@ camel-bean.workspace = true
 camel-component-api.workspace = true
 camel-core.workspace = true
 async-trait.workspace = true
+axum.workspace = true
+http-body-util = "0.1"
 tokio.workspace = true
 tower.workspace = true
 thiserror.workspace = true
@@ -34,6 +36,7 @@ toml.workspace = true
 bytes.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }

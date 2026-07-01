@@ -1,0 +1,77 @@
+package camel:plugin;
+
+// TODO(WIT-001): This file is a canonical source; camel-all.wit duplicates its content.
+// TODO(WIT-006): WIT interface versioning strategy is not yet defined. When the
+// WIT tooling supports it, add `@since(version = X.Y.Z)` annotations to each
+// interface and world definition to enable compatibility checks.
+
+/// Host-provided capabilities for guest-driven sources.
+interface source-host {
+    use types.{wasm-exchange, wasm-error};
+
+    /// Host-owned HTTP listener handle. Created by the host when
+    /// the guest requests an http-listener capability in configure().
+    resource http-listener;
+
+    /// Incoming HTTP request delivered to the guest.
+    record http-request {
+        method: string,
+        path: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// Specification for an HTTP listener capability request.
+    record http-listener-spec {
+        bind: string,
+        path: option<string>,
+    }
+
+    /// What the guest requests from the host during configure().
+    variant capability-request {
+        http-listener(http-listener-spec),
+    }
+
+    /// The guest's concurrency model declaration.
+    variant concurrency-model {
+        sequential,
+        concurrent(u16),
+    }
+
+    /// Result of configure() — declares what the guest needs.
+    /// Host rejects if capabilities.len() > 1 or unsupported capability.
+    record source-plan {
+        capabilities: list<capability-request>,
+        concurrency: concurrency-model,
+    }
+
+    /// Outcome of submit-exchange.
+    variant submit-outcome {
+        accepted,
+        stopped,
+    }
+
+    /// Blocking accept — returns the next HTTP request, or none if cancelled.
+    accept-http: func(listener: borrow<http-listener>)
+        -> result<option<http-request>, wasm-error>;
+
+    /// Push an exchange into the pipeline. Blocks on backpressure.
+    /// Returns Stopped if the host is shutting down.
+    submit-exchange: func(exchange: wasm-exchange)
+        -> result<submit-outcome, wasm-error>;
+
+    /// Check if the host has cancelled the run loop.
+    is-cancelled: func() -> bool;
+}
+
+/// The guest source world.
+world source {
+    import source-host;
+    use types.{wasm-exchange, wasm-error};
+    use source-host.{source-plan, http-listener};
+
+    export configure: func(config: list<tuple<string, string>>)
+        -> result<source-plan, wasm-error>;
+
+    export run: func(listener: borrow<http-listener>) -> result<_, wasm-error>;
+}

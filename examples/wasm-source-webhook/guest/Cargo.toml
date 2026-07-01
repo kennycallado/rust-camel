@@ -1,0 +1,13 @@
+[package]
+name = "wasm-source-webhook-guest"
+description = "WASM source plugin example — webhook inbound via host-provided HTTP listener"
+version = "0.8.1"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.58"

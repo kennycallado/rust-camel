@@ -152,7 +152,8 @@ fn wasm_endpoint_creation_flow_uri_and_consumer_producer_behavior() {
         std::sync::Arc::new(camel_component_api::NoOpComponentContext);
     let consumer = endpoint.create_consumer(rt);
     assert!(
-        matches!(consumer, Err(CamelError::EndpointCreationFailed(msg)) if msg.contains("not supported in v1"))
+        consumer.is_ok(),
+        "create_consumer should succeed for source world"
     );
     let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
         std::sync::Arc::new(camel_component_api::NoOpComponentContext);

@@ -4,6 +4,9 @@ pub const PLUGIN_WIT: &str = include_str!("../wit/camel-plugin.wit");
 /// WIT source for the `bean` world (standalone file, same package as PLUGIN_WIT).
 pub const BEAN_WIT: &str = include_str!("../wit/camel-bean.wit");
 
+/// WIT source for the `source` world (standalone file, same package as PLUGIN_WIT).
+pub const SOURCE_WIT: &str = include_str!("../wit/camel-source.wit");
+
 /// Combined WIT package with both `plugin` and `bean` worlds in a single document.
 pub const FULL_WIT: &str = include_str!("../wit/camel-all.wit");
 

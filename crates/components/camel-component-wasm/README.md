@@ -319,6 +319,7 @@ After a `Timeout`, `Trap`, or `OutOfMemory`, the plugin runtime is automatically
 - **WasmProducer**: Tower Service wrapping WasmRuntime, lazy initialization, error handling
 - **WasmRuntime**: Wasmtime engine, linker, component instantiation
 - **WasmHostState**: Per-request state with registry, properties, call depth guard
+- **WasmSourceConsumer**: `Consumer` impl for the `source` world; bridges the guest's blocking run loop to the async pipeline via bounded channels (see [WASM Source Components](#wasm-source-components))
 
 ## Host Function Internals
 
@@ -528,6 +529,65 @@ ldap_url = "ldap://corp"
 The guest module's `init()` function receives the `[<name>.config]` pairs as sorted `(String, String)` arguments at instantiation time.
 
 > **Migration** — Previously the YAML form accepted a `config:` block per-route, which was silently dropped. As of ADR-0014 §4 closure (bd rc-0te), per-route `config` is rejected with a hard error. Move `config:` keys to `[security.policies.wasm.<name>.config]` in Camel.toml.
+
+## WASM Source Components
+
+A WASM **source** is a 3rd-party component that acts as an inbound source — a webhook receiver or HTTP listener. Unlike a processor (host-driven `process()` calls), the source guest **owns its consumption loop**: it declares what it needs up front, the host grants an `http-listener` resource, and the guest then drains requests and pushes exchanges into the pipeline.
+
+The host adapter is `WasmSourceConsumer`, which implements the `Consumer` trait and bridges the guest's synchronous `run()` loop to the async pipeline via capacity-1 tokio channels.
+
+### URI Format
+
+```
+wasm:<module>[?bind=<addr>&path=<path>&timeout=<secs>&max-memory=<bytes>]
+```
+
+In addition to the standard processor query parameters, sources accept:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `bind` | socket address | `0.0.0.0:8080` | Address the host-granted HTTP listener binds. Surfaced as a `source-config` key to the guest. |
+| `path` | string | (all paths) | URL path filter the listener accepts (e.g. `/webhook`). |
+
+`bind` and `path` are passed into the guest's `configure()` as `(key, value)` pairs; the guest reflects them back inside its `source-plan`. The TCP listener is bound synchronously during `start()` so a bind failure (port in use, permission denied) surfaces as a start error rather than a silent background warning.
+
+```
+wasm:wasm-source-webhook-guest.wasm?bind=0.0.0.0:8080&path=/webhook
+wasm:plugins/my-source.wasm?bind=127.0.0.1:9090&timeout=30
+```
+
+### Lifecycle: resource negotiation
+
+The `source` world uses a negotiate-then-run handshake:
+
+1. **`configure(config) -> source-plan`** — the host passes the URI query params (plus any registered config). The guest returns a `source-plan` declaring the capability it needs and its concurrency model.
+2. **Host grants the capability** — the plan must request exactly one `http-listener` capability. The host creates an `http-listener` resource handle and binds the TCP listener.
+3. **`run(listener) -> result`** — the host hands the listener to the guest, which owns a blocking loop calling the host imports below until cancelled or stopped.
+
+### Host capabilities (guest imports)
+
+| Function | Signature | Effect |
+|----------|-----------|--------|
+| `accept-http` | `(listener: borrow<http-listener>) -> result<option<http-request>, wasm-error>` | Blocking; returns the next inbound HTTP request, or `none` when cancelled (channel closed). |
+| `submit-exchange` | `(exchange: wasm-exchange) -> result<submit-outcome, wasm-error>` | Pushes an exchange into the pipeline. Blocks on backpressure; returns `stopped` if the host is shutting down. |
+| `is-cancelled` | `() -> bool` | True when the host has cancelled the run loop (e.g. route shutdown). |
+
+The `http-listener` resource itself is host-owned and has no guest-callable methods — it is merely the capability handle passed to `accept-http`.
+
+### Concurrency model
+
+`source-plan.concurrency` declares how the guest wants to be drained:
+
+- **`sequential`** — supported. The host drains the guest strictly one request at a time through capacity-1 channels.
+- **`concurrent(max)`** — **not implemented**. Rejected at `start()` with an explicit error rather than silently degraded, because degrading `concurrent(N)` to sequential would violate the guest's declared contract.
+
+### Limitations
+
+- **Sequential mode only** — `concurrent(N)` plans are rejected (see above).
+- **HTTP transport only** — the single capability granted is `http-listener`; there is no Kafka/queue/gRPC source yet.
+- **Synchronous bindings (WASI 0.2)** — the guest targets `wasm32-wasip2` and its host imports block on tokio channels, so the guest `run()` loop runs on a dedicated OS thread (`spawn_blocking`), off the async runtime.
+
+For a working end-to-end example, see [`examples/wasm-source-webhook/`](../../examples/wasm-source-webhook/).
 
 ## Documentation
 

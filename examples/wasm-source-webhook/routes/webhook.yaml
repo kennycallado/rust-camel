@@ -1,0 +1,4 @@
+- from: wasm:wasm-source-webhook-guest.wasm?timeout=30&max-memory=52428800&bind=0.0.0.0:8080&path=/webhook
+  route_id: webhook-source-route
+  steps:
+    - to: log:info

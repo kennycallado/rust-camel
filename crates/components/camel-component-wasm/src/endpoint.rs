@@ -43,9 +43,14 @@ impl Endpoint for WasmEndpoint {
         &self,
         _rt: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
-        Err(CamelError::EndpointCreationFailed(
-            "WASM consumer (from: wasm:...) is not supported in v1".to_string(),
-        ))
+        let guest_config = crate::source_consumer::parse_guest_config(&self.uri);
+        let consumer = crate::source_consumer::WasmSourceConsumer::new(
+            self.module_path.clone(),
+            self.config.clone(),
+            guest_config,
+            self.registry.clone(),
+        );
+        Ok(Box::new(consumer))
     }
 
     fn create_producer(
