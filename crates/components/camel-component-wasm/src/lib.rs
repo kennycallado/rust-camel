@@ -142,3 +142,5 @@ impl Component for WasmComponent {
         )))
     }
 }
+pub mod spike_api;
+pub mod spike_bindgen;

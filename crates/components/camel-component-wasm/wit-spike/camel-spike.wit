@@ -1,0 +1,42 @@
+package camel:spike;
+
+interface types {
+    variant wasm-error {
+        processor-error(string),
+        timeout,
+    }
+
+    record stream-body-handle {
+        %stream: stream<u8>,
+        terminal: future<result<_, wasm-error>>,
+        size-hint: option<u64>,
+        content-type: option<string>,
+    }
+
+    variant spike-body {
+        empty,
+        bytes(list<u8>),
+        %stream(stream-body-handle),
+    }
+
+    record spike-message {
+        body: spike-body,
+    }
+
+    record spike-exchange {
+        input: spike-message,
+    }
+}
+
+interface host {
+    use types.{wasm-error};
+    camel-call: async func(uri: string) -> result<string, wasm-error>;
+    get-property: func(key: string) -> option<string>;
+}
+
+world spike-world {
+    import host;
+    use types.{spike-exchange, wasm-error};
+    export process: async func(exchange: spike-exchange) -> result<spike-exchange, wasm-error>;
+    export init: func(config: list<tuple<string, string>>) -> result<_, wasm-error>;
+}
