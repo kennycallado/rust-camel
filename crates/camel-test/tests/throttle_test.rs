@@ -66,9 +66,14 @@ async fn stop_inside_throttle_halts_route_and_preserves_mutations() {
     h.stop().await;
 }
 
-/// Throttle Drop strategy must prevent exchange from reaching downstream steps.
-/// Route: direct:start -> throttle(rate=0, strategy=drop) -> to:mock:sink
-/// The exchange is dropped at the throttle; mock:sink receives nothing.
+/// Throttle Drop strategy must prevent an exchange from reaching downstream steps.
+/// Route: direct:start -> throttle(rate=1, strategy=drop) -> to:mock:sink
+/// The first exchange acquires the token and passes; the second is dropped at
+/// the throttle and must never reach mock:sink.
+///
+/// Note: D-M8 (v1 batch1 DoS caps) made `max_requests == 0` a construction
+/// error to avoid the `1.0/0.0 = inf` panic in the Delay path. So we use 1
+/// token, consume it, then verify the next exchange is dropped.
 #[tokio::test(flavor = "multi_thread")]
 async fn throttle_drop_stops_exchange_before_sink() {
     let direct = DirectComponent::new();
@@ -78,10 +83,10 @@ async fn throttle_drop_stops_exchange_before_sink() {
         .build()
         .await;
 
-    // throttle(0, 1s) with Drop: every exchange is immediately dropped.
+    // throttle(1, 1s) with Drop: first exchange acquires the token, second is dropped.
     let route = RouteBuilder::from("direct:throttle-drop")
         .route_id("test-throttle-drop")
-        .throttle(0, Duration::from_secs(1))
+        .throttle(1, Duration::from_secs(1))
         .strategy(ThrottleStrategy::Drop)
         .to("mock:sink")
         .end_throttle()
@@ -103,19 +108,25 @@ async fn throttle_drop_stops_exchange_before_sink() {
         endpoint.create_producer(test_rt(), &producer_ctx).unwrap()
     };
 
-    let ex = Exchange::new(Message::new("dropped"));
-    let result = producer.oneshot(ex).await;
+    // First exchange acquires the single token and reaches mock:sink.
+    let ex_pass = Exchange::new(Message::new("passes"));
+    let _ = producer.clone().oneshot(ex_pass).await.unwrap();
 
-    // The exchange is dropped — the route still returns Ok(Stopped) at Tower boundary.
+    // Second exchange: token exhausted -> Drop -> must not reach the sink.
+    let ex_drop = Exchange::new(Message::new("dropped"));
+    let result = producer.clone().oneshot(ex_drop).await;
+
+    // The dropped exchange returns Ok (Stop at the Tower boundary).
     assert!(result.is_ok(), "dropped exchange must return Ok");
 
-    // mock:sink must NOT receive the dropped exchange.
+    // mock:sink received exactly the one exchange that passed; the dropped
+    // one never arrived.
     if let Some(sink) = h.mock().get_endpoint("sink") {
         let received = sink.get_received_exchanges().await;
         assert_eq!(
             received.len(),
-            0,
-            "mock:sink should receive zero exchanges when throttle drops all"
+            1,
+            "mock:sink should receive exactly 1 exchange (the passing one); the dropped exchange must not arrive"
         );
     }
 
