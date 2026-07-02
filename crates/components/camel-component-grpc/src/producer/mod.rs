@@ -1253,6 +1253,11 @@ mod tests {
     /// correct ClientTlsConfig/scheme plumbing.
     #[tokio::test]
     async fn test_grpc_tls_true_with_tls_config_rewrites_to_https_and_wires_tls() {
+        // Install a rustls CryptoProvider: tonic's TLS path builds a rustls
+        // ClientConfig eagerly, which needs a process-default provider. The
+        // test binary doesn't install one (the main runtime does), so do it
+        // here. Idempotent — safe if another test installed it first.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         // Use a temp CA cert so the TLS path actually reads a cert.
         // An invalid / empty PEM is OK here: the producer should still
         // build (it does not handshake in this test); what we verify is
