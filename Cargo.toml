@@ -162,7 +162,7 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 csv = "1"
 proc-macro2 = "1.0"
 prometheus = "0.14"
-quick-xml = "0.40"
+quick-xml = "0.41"
 quote = "1.0"
 base64 = "0.22"
 pkcs1 = { version = "0.7", features = ["pem"] }
