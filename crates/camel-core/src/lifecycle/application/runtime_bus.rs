@@ -83,6 +83,15 @@ impl RuntimeBus {
         &self.repo
     }
 
+    /// H8 boot reconciliation: fail any route still in a transient state
+    /// (`Starting` / `Stopping`) from a previous run. Called from
+    /// `CamelContext::start()` before `auto_startup_route_ids()`.
+    pub async fn reconcile_transient_states(&self) -> Result<(), CamelError> {
+        self.ensure_journal_recovered().await?;
+        let deps = self.deps();
+        crate::lifecycle::application::commands::reconcile_transient_states(&deps).await
+    }
+
     pub(crate) async fn register_aggregate_only(&self, route_id: String) -> Result<(), CamelError> {
         self.ensure_journal_recovered().await?;
         let deps = self.deps();

@@ -1,5 +1,6 @@
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use camel_api::{AsyncHealthCheck, CheckResult, HealthReport, HealthStatus, ServiceHealth};
 use chrono::Utc;
@@ -35,7 +36,7 @@ impl HealthCheckRegistry {
     }
 
     pub fn register_for_route(&self, route_id: &str, check: Arc<dyn AsyncHealthCheck>) {
-        let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
+        let mut entries = self.entries.write();
         let route_health = entries
             .entry(route_id.to_string())
             .or_insert_with(|| RouteHealth {
@@ -57,26 +58,26 @@ impl HealthCheckRegistry {
     }
 
     pub fn mark_route_started(&self, route_id: &str) {
-        let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
+        let mut entries = self.entries.write();
         if let Some(route_health) = entries.get_mut(route_id) {
             route_health.active = true;
         }
     }
 
     pub fn mark_route_stopped(&self, route_id: &str) {
-        let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
+        let mut entries = self.entries.write();
         if let Some(route_health) = entries.get_mut(route_id) {
             route_health.active = false;
         }
     }
 
     pub fn unregister_for_route(&self, route_id: &str) {
-        let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
+        let mut entries = self.entries.write();
         entries.remove(route_id);
     }
 
     pub fn force_unhealthy_for_route(&self, route_id: &str, name: &str, reason: impl Into<String>) {
-        let mut entries = self.entries.write().expect("health registry lock poisoned"); // allow-unwrap
+        let mut entries = self.entries.write();
         let route_health = entries
             .entry(route_id.to_string())
             .or_insert_with(|| RouteHealth {
@@ -109,7 +110,7 @@ impl HealthCheckRegistry {
         }
 
         let checks: Vec<CheckTask> = {
-            let guard = self.entries.read().expect("health registry lock poisoned"); // allow-unwrap
+            let guard = self.entries.read();
             guard
                 .values()
                 .filter(|rh| rh.active)
@@ -626,5 +627,47 @@ mod tests {
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Healthy);
         assert!(report.services.is_empty());
+    }
+
+    // ---------------------------------------------------------
+    // Regression R4-H2: concurrent readers + writer must not
+    // poison / panic / leave the registry stuck NotReady.
+    // ---------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_readers_and_writer_never_poison() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let reg = Arc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..50 {
+                    reg.register_for_route("route-1", healthy_check(&format!("chk-{i}")));
+                    reg.unregister_for_route("route-1");
+                    reg.register_for_route("route-1", healthy_check(&format!("chk-{i}")));
+                }
+            }));
+        }
+        for _ in 0..8 {
+            let reg = Arc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..50 {
+                    let report = reg.check_all().await;
+                    let _ = report.status;
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        registry.register_for_route("route-final", healthy_check("final"));
+        registry.mark_route_started("route-final");
+        let report = registry.check_all().await;
+        assert_ne!(report.services.len(), 0);
     }
 }

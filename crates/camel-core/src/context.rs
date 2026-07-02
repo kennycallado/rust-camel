@@ -564,6 +564,13 @@ impl CamelContext {
             }
         }
 
+        // H8: boot reconciliation — fail routes stuck in transient state
+        // (Starting/Stopping) from a previous run before auto_startup runs.
+        self.runtime
+            .reconcile_transient_states()
+            .await
+            .map_err(|e| CamelError::RouteError(format!("boot reconciliation failed: {e}")))?;
+
         // Then start routes via runtime command bus (aggregate-first),
         // preserving route controller startup ordering metadata.
         let route_ids = self.route_controller.auto_startup_route_ids().await?;

@@ -67,6 +67,10 @@ pub(crate) fn spawn_consumer_task(
             }
 
             publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
+
+            // H9: clean up any resources the consumer created during the
+            // failed start before dropping it.
+            let _ = consumer.stop().await;
             return;
         }
 
@@ -171,6 +175,12 @@ pub(super) async fn stop_route_internal(
     let consumer_handle = managed.consumer_handle.take();
     let pipeline_handle = managed.pipeline_handle.take();
 
+    // D-M7: snapshot abort handles BEFORE moving JoinHandles into the
+    // timeout block. On timeout, abort() cancels the tasks instead of
+    // letting them detach (drop = detach in tokio).
+    let consumer_abort = consumer_handle.as_ref().map(|h| h.abort_handle());
+    let pipeline_abort = pipeline_handle.as_ref().map(|h| h.abort_handle());
+
     let managed = routes
         .get_mut(route_id)
         .expect("invariant: route must exist after prior existence check"); // allow-unwrap
@@ -193,7 +203,17 @@ pub(super) async fn stop_route_internal(
     .await;
 
     if timeout_result.is_err() {
-        warn!(route_id = %route_id, "Route shutdown timed out after {:.0?} — tasks may still be running", shutdown_timeout);
+        warn!(
+            route_id = %route_id,
+            "Route shutdown timed out after {:.0?} — aborting lingering tasks",
+            shutdown_timeout
+        );
+        if let Some(h) = consumer_abort {
+            h.abort();
+        }
+        if let Some(h) = pipeline_abort {
+            h.abort();
+        }
     }
 
     // Drain stateful pipeline steps in route order. Intake is cancelled and the
@@ -253,6 +273,7 @@ pub(super) async fn stop_route_internal(
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::lifecycle::adapters::pipeline_runtime::PipelineAssembly;
     use crate::lifecycle::adapters::route_runtime_state;
@@ -265,6 +286,26 @@ mod tests {
 
     struct FailingConsumer {
         message: &'static str,
+        stop_called: Option<Arc<AtomicBool>>,
+    }
+
+    impl FailingConsumer {
+        fn new(message: &'static str) -> Self {
+            Self {
+                message,
+                stop_called: None,
+            }
+        }
+        fn with_stop_tracking(message: &'static str) -> (Self, Arc<AtomicBool>) {
+            let flag = Arc::new(AtomicBool::new(false));
+            (
+                Self {
+                    message,
+                    stop_called: Some(Arc::clone(&flag)),
+                },
+                flag,
+            )
+        }
     }
 
     #[async_trait]
@@ -274,6 +315,9 @@ mod tests {
         }
 
         async fn stop(&mut self) -> Result<(), CamelError> {
+            if let Some(flag) = &self.stop_called {
+                flag.store(true, Ordering::SeqCst);
+            }
             Ok(())
         }
     }
@@ -373,9 +417,7 @@ mod tests {
 
         let handle = spawn_consumer_task(
             "route-resume".to_string(),
-            Box::new(FailingConsumer {
-                message: "resume start failed",
-            }),
+            Box::new(FailingConsumer::new("resume start failed")),
             ctx,
             Some(crash_tx),
             None,
@@ -390,6 +432,32 @@ mod tests {
             .expect("crash notification should be sent");
         assert_eq!(notification.route_id, "route-resume");
         assert!(notification.error.contains("resume start failed"));
+    }
+
+    #[tokio::test]
+    async fn start_error_calls_stop_no_leak() {
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx =
+            ConsumerContext::new(tx, CancellationToken::new(), "consumer-h9-test".to_string());
+        let (crash_tx, _crash_rx) = mpsc::channel(1);
+
+        let (consumer, stop_called) = FailingConsumer::with_stop_tracking("start failed");
+
+        let handle = spawn_consumer_task(
+            "route-h9".to_string(),
+            Box::new(consumer),
+            ctx,
+            Some(crash_tx),
+            None,
+            false,
+        );
+
+        handle.await.expect("consumer task should join");
+
+        assert!(
+            stop_called.load(Ordering::SeqCst),
+            "stop() must be called on start() error — H9 resource-leak fix"
+        );
     }
 
     // --- GRL-001: Deferred failure crash propagation ---
@@ -627,5 +695,92 @@ mod tests {
         // Clean up: drop senders so spawned tasks can complete.
         drop(consumer_tx);
         drop(pipeline_tx);
+    }
+
+    // ── D-M7: shutdown-timeout aborts tasks (no detach) ──
+
+    struct AbortFlag(Arc<AtomicBool>);
+    impl Drop for AbortFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_aborts_tasks_not_detach() {
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&abort_flag);
+
+        // Spawn a task that blocks forever, owning a Drop guard.
+        // On abort(), tokio drops the future -> Drop runs -> flag set.
+        // On detach (the bug), the future stays alive -> flag stays false.
+        let consumer_handle = tokio::spawn(async move {
+            let _guard = AbortFlag(flag_clone);
+            std::future::pending::<()>().await;
+        });
+
+        let mut routes = HashMap::new();
+        let route = managed_route_with_handles(Some(consumer_handle), None, None);
+        routes.insert("route-1".to_string(), route);
+
+        // Tiny timeout — the blocking task can't finish.
+        stop_route_internal(&mut routes, "route-1", Duration::from_millis(50))
+            .await
+            .expect("stop_route_internal should succeed");
+
+        // Bounded poll loop: avoids fixed-sleep flake risk under CI overload.
+        for _ in 0..100 {
+            if abort_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            abort_flag.load(Ordering::SeqCst),
+            "consumer task must be aborted (Drop ran) — if false, the task was detached (D-M7 bug)"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_aborts_both_consumer_and_pipeline() {
+        let consumer_flag = Arc::new(AtomicBool::new(false));
+        let pipeline_flag = Arc::new(AtomicBool::new(false));
+        let cf = Arc::clone(&consumer_flag);
+        let pf = Arc::clone(&pipeline_flag);
+
+        let consumer_handle = tokio::spawn(async move {
+            let _guard = AbortFlag(cf);
+            std::future::pending::<()>().await;
+        });
+        let pipeline_handle = tokio::spawn(async move {
+            let _guard = AbortFlag(pf);
+            std::future::pending::<()>().await;
+        });
+
+        let mut routes = HashMap::new();
+        let route = managed_route_with_handles(Some(consumer_handle), Some(pipeline_handle), None);
+        routes.insert("route-both".to_string(), route);
+
+        stop_route_internal(&mut routes, "route-both", Duration::from_millis(50))
+            .await
+            .expect("stop_route_internal should succeed");
+
+        // Bounded poll loop (avoids fixed-sleep flake risk)
+        for _ in 0..100 {
+            if consumer_flag.load(Ordering::SeqCst) && pipeline_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            consumer_flag.load(Ordering::SeqCst),
+            "consumer task must be aborted"
+        );
+        assert!(
+            pipeline_flag.load(Ordering::SeqCst),
+            "pipeline task must be aborted"
+        );
     }
 }

@@ -43,6 +43,7 @@ async-stream.workspace = true
 notify.workspace = true
 opentelemetry = { workspace = true }
 redb = { workspace = true }
+parking_lot = "0.12"
 
 [features]
 default = ["internal-adapters"]

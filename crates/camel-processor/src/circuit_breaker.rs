@@ -11,9 +11,19 @@ use camel_api::{BoxProcessor, CamelError, CircuitBreakerConfig, Exchange};
 // ── State ──────────────────────────────────────────────────────────────
 
 enum CircuitState {
-    Closed { consecutive_failures: u32 },
-    Open { opened_at: Instant },
-    HalfOpen,
+    Closed {
+        consecutive_failures: u32,
+    },
+    Open {
+        opened_at: Instant,
+    },
+    /// `probe_admitted == true` means a probe request is in flight; subsequent
+    /// concurrent callers must be rejected until the probe completes.
+    /// `probe_admitted == false` means no probe is in flight and the next
+    /// caller is admitted as the probe.
+    HalfOpen {
+        probe_admitted: bool,
+    },
 }
 
 // ── Layer ──────────────────────────────────────────────────────────────
@@ -86,9 +96,25 @@ where
             CircuitState::Open { opened_at } => {
                 if opened_at.elapsed() >= self.config.open_duration {
                     tracing::info!("Circuit breaker transitioning from Open to HalfOpen");
-                    *state = CircuitState::HalfOpen;
+                    *state = CircuitState::HalfOpen {
+                        probe_admitted: true,
+                    };
                     drop(state);
-                    self.inner.poll_ready(cx)
+                    // If the inner service returns Pending we MUST release the
+                    // probe claim so a re-poll can re-claim it; otherwise the
+                    // breaker wedges until the half-open probe completes.
+                    match self.inner.poll_ready(cx) {
+                        Poll::Ready(result) => Poll::Ready(result),
+                        Poll::Pending => {
+                            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                            if matches!(*st, CircuitState::HalfOpen { .. }) {
+                                *st = CircuitState::HalfOpen {
+                                    probe_admitted: false,
+                                };
+                            }
+                            Poll::Pending
+                        }
+                    }
                 } else if self.config.fallback.is_some() {
                     Poll::Ready(Ok(()))
                 } else {
@@ -97,9 +123,37 @@ where
                     )))
                 }
             }
-            CircuitState::HalfOpen => {
-                drop(state);
-                self.inner.poll_ready(cx)
+            CircuitState::HalfOpen { probe_admitted } => {
+                if probe_admitted {
+                    // A probe is already in flight — reject this concurrent
+                    // caller. Always Err (even with fallback): returning Ok
+                    // here would let a 2nd caller reach call() → inner,
+                    // bypassing the single-probe gate. The caller retries
+                    // when after_result resolves the probe state.
+                    drop(state);
+                    Poll::Ready(Err(CamelError::CircuitOpen(
+                        "circuit breaker is half-open (probe in flight)".into(),
+                    )))
+                } else {
+                    // Claim the probe slot and forward to inner. If inner
+                    // returns Pending, release the claim so re-poll works.
+                    *state = CircuitState::HalfOpen {
+                        probe_admitted: true,
+                    };
+                    drop(state);
+                    match self.inner.poll_ready(cx) {
+                        Poll::Ready(result) => Poll::Ready(result),
+                        Poll::Pending => {
+                            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                            if matches!(*st, CircuitState::HalfOpen { .. }) {
+                                *st = CircuitState::HalfOpen {
+                                    probe_admitted: false,
+                                };
+                            }
+                            Poll::Pending
+                        }
+                    }
+                }
             }
         }
     }
@@ -118,8 +172,13 @@ where
                 }
 
                 tracing::info!("Circuit breaker transitioning from Open to HalfOpen");
-                *st = CircuitState::HalfOpen;
+                *st = CircuitState::HalfOpen {
+                    probe_admitted: true,
+                };
             }
+            // D-M1: the single-probe gate lives in poll_ready — 2nd callers
+            // get Err there and never reach call(). The probe caller (whose
+            // poll_ready set probe_admitted: true) proceeds here to inner.
         }
 
         // Clone inner service (Tower pattern) and state handle.
@@ -130,7 +189,7 @@ where
         // Snapshot the current state before calling (briefly lock).
         let current_is_half_open = matches!(
             *state.lock().unwrap_or_else(|e| e.into_inner()),
-            CircuitState::HalfOpen
+            CircuitState::HalfOpen { .. }
         );
 
         Box::pin(async move {
@@ -217,7 +276,9 @@ impl CircuitBreakerGate {
             CircuitState::Open { opened_at } => {
                 if opened_at.elapsed() >= self.config.open_duration {
                     tracing::info!("Circuit breaker gate: Open → HalfOpen");
-                    *state = CircuitState::HalfOpen;
+                    *state = CircuitState::HalfOpen {
+                        probe_admitted: true,
+                    };
                     CircuitBreakerDecision::Allow
                 } else if let Some(ref fallback) = self.config.fallback {
                     CircuitBreakerDecision::Fallback(fallback.clone())
@@ -227,13 +288,28 @@ impl CircuitBreakerGate {
                     ))
                 }
             }
-            CircuitState::HalfOpen => CircuitBreakerDecision::Allow,
+            CircuitState::HalfOpen { probe_admitted } => {
+                if probe_admitted {
+                    if let Some(ref fallback) = self.config.fallback {
+                        CircuitBreakerDecision::Fallback(fallback.clone())
+                    } else {
+                        CircuitBreakerDecision::Reject(CamelError::CircuitOpen(
+                            "circuit breaker is half-open (probe in flight)".into(),
+                        ))
+                    }
+                } else {
+                    *state = CircuitState::HalfOpen {
+                        probe_admitted: true,
+                    };
+                    CircuitBreakerDecision::Allow
+                }
+            }
         }
     }
 
     pub fn after_result(&self, result: &Result<Exchange, CamelError>) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let current_is_half_open = matches!(*st, CircuitState::HalfOpen);
+        let current_is_half_open = matches!(*st, CircuitState::HalfOpen { .. });
         match result {
             Ok(_) => {
                 if current_is_half_open {
@@ -615,5 +691,70 @@ mod tests {
             matches!(gate.before_call(), CircuitBreakerDecision::Allow),
             "handled error should not trip CB"
         );
+    }
+
+    // ── D-M1: half-open admits a single probe ─────────────────────────────
+
+    /// Gate path: only the first caller in HalfOpen is admitted as the probe;
+    /// every subsequent caller is rejected.
+    #[test]
+    fn gate_half_open_admits_only_one_probe() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_millis(1),
+            success_threshold: 1,
+            fallback: None,
+        };
+        let gate = CircuitBreakerGate::new(config);
+        // Trip: one failure → Open
+        gate.after_result(&Err::<Exchange, CamelError>(CamelError::CircuitOpen(
+            "boom".into(),
+        )));
+        std::thread::sleep(Duration::from_millis(10)); // past open_duration
+        let d1 = gate.before_call();
+        assert!(
+            matches!(d1, CircuitBreakerDecision::Allow),
+            "first probe must be admitted"
+        );
+        let d2 = gate.before_call();
+        assert!(
+            matches!(d2, CircuitBreakerDecision::Reject(_)),
+            "2nd concurrent caller must be rejected"
+        );
+    }
+
+    /// Service path: only the first `poll_ready` in HalfOpen is admitted as the
+    /// probe; every subsequent `poll_ready` from a cloned service must be
+    /// rejected with `CircuitOpen`.
+    #[tokio::test]
+    async fn service_half_open_admits_only_one_probe() {
+        let config = CircuitBreakerConfig::new()
+            .failure_threshold(1)
+            .open_duration(Duration::from_millis(1));
+        let layer = CircuitBreakerLayer::new(config);
+        let mut svc1 = layer.layer(failing_processor());
+        let mut svc2 = svc1.clone();
+
+        // Trip to Open
+        let _ = svc1.ready().await.unwrap().call(make_exchange()).await;
+
+        // Wait past open_duration
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // svc1 poll_ready: admitted as probe → Ready(Ok(()))
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let p1 = std::pin::Pin::new(&mut svc1).poll_ready(&mut cx);
+        assert!(
+            matches!(p1, Poll::Ready(Ok(()))),
+            "first probe admitted, got {p1:?}"
+        );
+
+        // svc2 poll_ready: must be rejected
+        let p2 = std::pin::Pin::new(&mut svc2).poll_ready(&mut cx);
+        match p2 {
+            Poll::Ready(Err(CamelError::CircuitOpen(_))) => {} // expected
+            other => panic!("expected CircuitOpen error on 2nd probe, got {other:?}"),
+        }
     }
 }

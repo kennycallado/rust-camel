@@ -415,12 +415,31 @@ async fn handle_lifecycle_start(
         deps.repo
             .save_if_version(aggregate.clone(), expected_version)
             .await?;
-        let _ = upsert_projection_with_reconciliation(
+        deps.events.publish(&intent_events).await?;
+        match upsert_projection_with_reconciliation(
             &*deps.projections,
             project_from_aggregate(&aggregate),
         )
-        .await?;
-        deps.events.publish(&intent_events).await?;
+        .await
+        {
+            Ok(None) => {}
+            Ok(Some(primary_error)) => {
+                tracing::warn!(
+                    route_id = %route_id,
+                    projection_error = %primary_error,
+                    "projection upsert failed primary but reconciliation succeeded — read-side consistent"
+                );
+            }
+            Err(e) => {
+                // log-policy: system-broken
+                tracing::error!(
+                    route_id = %route_id,
+                    error = %e,
+                    "projection upsert + reconciliation both failed after persist"
+                );
+                return Err(e);
+            }
+        }
     }
 
     // Phase 2: execute runtime side effect
@@ -511,12 +530,31 @@ async fn handle_lifecycle_start(
             deps.repo
                 .save_if_version(aggregate.clone(), aggregate.version())
                 .await?;
-            let _ = upsert_projection_with_reconciliation(
+            deps.events.publish(&confirm_events).await?;
+            match upsert_projection_with_reconciliation(
                 &*deps.projections,
                 project_from_aggregate(&aggregate),
             )
-            .await?;
-            deps.events.publish(&confirm_events).await?;
+            .await
+            {
+                Ok(None) => {}
+                Ok(Some(primary_error)) => {
+                    tracing::warn!(
+                        route_id = %route_id,
+                        projection_error = %primary_error,
+                        "projection upsert failed primary but reconciliation succeeded after confirm-start — read-side consistent"
+                    );
+                }
+                Err(e) => {
+                    // log-policy: system-broken
+                    tracing::error!(
+                        route_id = %route_id,
+                        error = %e,
+                        "projection + reconciliation both failed after confirm-start"
+                    );
+                    return Err(e);
+                }
+            }
         }
     }
 
@@ -741,6 +779,72 @@ async fn remove_runtime_route_with_recovery(
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Boot reconciliation (H8): scan all persisted route projections and fail
+/// any route still in a transient state (`Starting` / `Stopping`). A route
+/// persisting in a transient state after process restart means the previous
+/// run crashed between Phase 1 (persisted intent) and Phase 2 (runtime
+/// side-effect) of the two-phase lifecycle. The runtime that owned the
+/// pending transition is gone, so the route would otherwise be stuck
+/// pending manual intervention and would also be rejected by
+/// `auto_startup` (Starting→Starting is invalid).
+///
+/// Called from `CamelContext::start()` before `auto_startup_route_ids()`.
+pub(crate) async fn reconcile_transient_states(deps: &CommandDeps) -> Result<(), CamelError> {
+    let statuses = deps.projections.list_statuses().await?;
+
+    for proj in statuses {
+        let is_transient = proj.status == "Starting" || proj.status == "Stopping";
+        if !is_transient {
+            continue;
+        }
+
+        let label = proj.status.clone();
+        tracing::warn!(
+            route_id = %proj.route_id,
+            state = %label,
+            "Boot reconciliation: route in transient state after restart — failing it"
+        );
+
+        let Some(mut aggregate) = deps.repo.load(&proj.route_id).await? else {
+            tracing::warn!(
+                route_id = %proj.route_id,
+                "Boot reconciliation: projection has no aggregate — skipping"
+            );
+            continue;
+        };
+
+        let fail_events =
+            aggregate.fail(format!("boot reconciliation: interrupted during {label}"));
+        let fail_proj = project_from_aggregate(&aggregate);
+
+        if let Some(uow) = &deps.uow {
+            uow.persist_upsert(aggregate, None, fail_proj, &fail_events)
+                .await?;
+        } else {
+            deps.repo.save(aggregate).await?;
+            if let Err(e) =
+                upsert_projection_with_reconciliation(&*deps.projections, fail_proj).await
+            {
+                // log-policy: system-broken
+                tracing::error!(
+                    route_id = %proj.route_id,
+                    error = %e,
+                    "boot reconciliation: projection upsert failed"
+                );
+            }
+            if let Err(e) = deps.events.publish(&fail_events).await {
+                // log-policy: system-broken
+                tracing::error!(
+                    route_id = %proj.route_id,
+                    error = %e,
+                    "boot reconciliation: event publish failed"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn project_from_aggregate(aggregate: &RouteRuntimeAggregate) -> RouteStatusProjection {
@@ -1632,6 +1736,82 @@ mod tests {
         assert!(err.to_string().contains("retry_remove_error"));
     }
 
+    /// Projection store that ALWAYS fails `upsert_status`. Used to test that
+    /// `upsert_projection_with_reconciliation` returning `Err` (both primary +
+    /// retry failed) is propagated, not swallowed.
+    #[derive(Clone)]
+    struct FailingProjectionStore;
+
+    #[async_trait]
+    impl ProjectionStorePort for FailingProjectionStore {
+        async fn upsert_status(&self, _status: RouteStatusProjection) -> Result<(), DomainError> {
+            Err(DomainError::InvalidState("projection failure".into()))
+        }
+
+        async fn get_status(
+            &self,
+            _route_id: &str,
+        ) -> Result<Option<RouteStatusProjection>, DomainError> {
+            Ok(None)
+        }
+
+        async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, DomainError> {
+            Ok(vec![])
+        }
+
+        async fn remove_status(&self, _route_id: &str) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn projection_error_on_start_phase1_is_not_swallowed() {
+        // Register route using a working projection store first
+        let working_repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let working_projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+        let working_deps = CommandDeps {
+            repo: working_repo.clone(),
+            projections: working_projections,
+            events: events.clone(),
+            uow: None,
+            execution: None,
+            health_registry: None,
+        };
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-proj-fail-p1");
+        handle_register_internal(&working_deps, def).await.unwrap();
+
+        // Now recreate deps with a failing projection store for the start command.
+        // Use the same repo (shared Arc) so the route aggregate is visible,
+        // but swap in the FailingProjectionStore that fails on the first upsert.
+        let fail_projections: Arc<dyn ProjectionStorePort> = Arc::new(FailingProjectionStore);
+        let fail_deps = CommandDeps {
+            repo: working_repo,
+            projections: fail_projections,
+            events,
+            uow: None,
+            execution: None,
+            health_registry: None,
+        };
+
+        // Start the route — projection error should propagate, not be swallowed
+        let err = execute_command(
+            &fail_deps,
+            RuntimeCommand::StartRoute {
+                route_id: "route-proj-fail-p1".to_string(),
+                command_id: "test".to_string(),
+                causation_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("projection failure"),
+            "expected projection failure, got: {err}"
+        );
+    }
+
     // --- Two-phase Start integration tests ---
 
     #[tokio::test]
@@ -1811,5 +1991,114 @@ mod tests {
         // Verify stored aggregate is in Failed state (compensation), NOT Registered
         let aggregate = deps.repo.load("route-reg-fail").await.unwrap().unwrap();
         assert!(matches!(aggregate.state(), RouteRuntimeState::Failed(_)));
+    }
+
+    // --- H8 boot reconciler tests ---
+
+    /// Helper: persist an aggregate in any state (with projection) to simulate
+    /// a crash-leftover persisted state.
+    async fn seed_route(
+        deps: &CommandDeps,
+        route_id: &str,
+        state: RouteRuntimeState,
+        version: u64,
+    ) {
+        let aggregate = RouteRuntimeAggregate::from_snapshot(route_id, state, version);
+        deps.repo.save(aggregate.clone()).await.unwrap();
+        deps.projections
+            .upsert_status(project_from_aggregate(&aggregate))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn boot_reconciler_fails_stale_starting_route() {
+        let deps = build_test_deps_no_execution();
+        seed_route(
+            &deps,
+            "route-stale-starting",
+            RouteRuntimeState::Starting,
+            1,
+        )
+        .await;
+
+        reconcile_transient_states(&deps).await.unwrap();
+
+        let reloaded = deps
+            .repo
+            .load("route-stale-starting")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(reloaded.state(), RouteRuntimeState::Failed(_)));
+        let proj = deps
+            .projections
+            .get_status("route-stale-starting")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proj.status, "Failed");
+    }
+
+    #[tokio::test]
+    async fn boot_reconciler_fails_stale_stopping_route() {
+        let deps = build_test_deps_no_execution();
+        seed_route(
+            &deps,
+            "route-stale-stopping",
+            RouteRuntimeState::Stopping,
+            1,
+        )
+        .await;
+
+        reconcile_transient_states(&deps).await.unwrap();
+
+        let reloaded = deps
+            .repo
+            .load("route-stale-stopping")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(reloaded.state(), RouteRuntimeState::Failed(_)));
+        let proj = deps
+            .projections
+            .get_status("route-stale-stopping")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proj.status, "Failed");
+    }
+
+    #[tokio::test]
+    async fn boot_reconciler_leaves_stable_states_untouched() {
+        let deps = build_test_deps_no_execution();
+
+        // Seed one route in each stable (non-transient) state.
+        let stable_routes: Vec<(&str, RouteRuntimeState, u64)> = vec![
+            ("route-stable-registered", RouteRuntimeState::Registered, 0),
+            ("route-stable-started", RouteRuntimeState::Started, 2),
+            ("route-stable-stopped", RouteRuntimeState::Stopped, 2),
+            ("route-stable-suspended", RouteRuntimeState::Suspended, 2),
+            (
+                "route-stable-failed",
+                RouteRuntimeState::Failed("preexisting".to_string()),
+                1,
+            ),
+        ];
+        for (id, state, version) in &stable_routes {
+            seed_route(&deps, id, state.clone(), *version).await;
+        }
+
+        reconcile_transient_states(&deps).await.unwrap();
+
+        for (id, expected_state, expected_version) in &stable_routes {
+            let reloaded = deps.repo.load(id).await.unwrap().unwrap();
+            assert_eq!(reloaded.state(), expected_state, "state changed for {id}");
+            assert_eq!(
+                reloaded.version(),
+                *expected_version,
+                "version changed for {id}"
+            );
+        }
     }
 }
