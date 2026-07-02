@@ -81,6 +81,9 @@ Runtime per-error matching rule compiled from a DSL `OnException`. Uses a predic
 `CamelError` to select which errors trigger this policy's retry/routing behaviour.
 _Avoid_: OnException (use OnException in DSL context; ExceptionPolicy in runtime context)
 
+**In-memory repository max_entries cap (evict-oldest)**:
+`MemoryIdempotentRepository` and `MemoryClaimCheckRepository` (in `camel-core`) accept a per-instance `max_entries` cap via `new_with_max_entries(name, cap)`. The default `new()` uses `DEFAULT_MAX_ENTRIES = 100_000`. When the cap is reached for a new key, the OLDEST entry is evicted on the write path (insertion-order via a per-instance atomic seq counter) before the new key is inserted; new-key writes are serialized by a per-instance write guard so the cap invariant holds under concurrent writers. Clock-free, no background task; O(1) amortized under the cap, one O(n) scan per insert-at-cap. Trade-off: an evicted idempotent key re-admits as new (bounded at-most-once ceiling — duplicates possible under a >cap unique-key flood; upgrade path is a persistent repository). Established Batch 1 (H10, H11).
+
 ## Compiled Step Variants
 
 **Process**:

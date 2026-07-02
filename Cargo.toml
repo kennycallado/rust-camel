@@ -98,7 +98,7 @@ camel-component-llm = { path = "crates/components/camel-component-llm", version 
 camel-component-surrealdb = { path = "crates/components/camel-component-surrealdb", version = "=0.21.0" }
 
 tokio = { version = "1", features = ["full"] }
-tonic = { version = "0.14" }
+tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 prost = { version = "0.14" }
 prost-reflect = { version = "0.16", features = ["serde"] }
 tonic-build = { version = "0.14" }

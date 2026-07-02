@@ -27,6 +27,10 @@ pub struct TlsConfig {
     pub client_key_path: Option<String>,
     #[serde(default)]
     pub insecure_skip_verify: bool,
+    /// Optional SNI / TLS server name. If `None`, the producer falls back to
+    /// the host portion of the endpoint address.
+    #[serde(default)]
+    pub server_name: Option<String>,
 }
 
 // ── Auth configuration (GRPC-007) ─────────────────────────────────────────
@@ -450,8 +454,19 @@ pub fn parse_grpc_uri(uri: &str) -> Result<(String, u16, String, String, GrpcCon
     if config.reflection {
         tracing::warn!("gRPC reflection is not supported in v1 — parameter ignored");
     }
-    if config.tls {
-        tracing::warn!("gRPC TLS is not supported in v1 — parameter ignored");
+    if config.tls && config.tls_config.is_none() {
+        // C1 Batch 1: fail-closed. The earlier behavior was `tracing::warn!`
+        // and silently fall through to h2c. Auth tokens would travel
+        // cleartext. The producer now refuses to build (the check at
+        // GrpcProducer::new will return EndpointCreationFailed before any
+        // channel is created). At config-parse time we surface the same
+        // error so `camel doctor` and YAML preflight catch it earlier.
+        return Err(CamelError::EndpointCreationFailed(
+            "gRPC tls=true requires tls_config; refusing plaintext h2c. \
+             Set tls=false (explicit plaintext) or supply a tls_config \
+             (C1 fail-closed). See ADR-0032 / ADR-0033."
+                .to_string(),
+        ));
     }
     Ok((host, port, service.to_string(), method.to_string(), config))
 }
@@ -667,11 +682,20 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains(".."));
     }
 
+    /// C1 Batch 1: `tls=true` via URI is rejected at parse time — a URI
+    /// cannot carry a tls_config (certificates), so `tls=true` from a URI
+    /// can never be satisfied and MUST fail-closed instead of silently
+    /// running h2c. Explicit plaintext (`tls=false` or omitted) still parses.
     #[test]
-    fn test_parse_grpc_uri_tls_bool_param() {
+    fn test_parse_grpc_uri_tls_true_without_config_rejected() {
         let uri = "grpc://localhost:50051/pkg.Svc/Method?tls=true";
-        let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
-        assert!(config.tls);
+        let result = parse_grpc_uri(uri);
+        assert!(
+            result.is_err(),
+            "tls=true via URI must fail-closed at parse"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("tls"), "error must mention tls: {msg}");
     }
 
     #[test]
@@ -859,6 +883,7 @@ mod tests {
             client_cert_path: None,
             client_key_path: None,
             insecure_skip_verify: false,
+            server_name: None,
         };
         let cloned = tls.clone();
         assert_eq!(tls.tls_enabled, cloned.tls_enabled);

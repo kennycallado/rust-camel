@@ -41,8 +41,22 @@ impl Service<Exchange> for LoopService {
         Box::pin(async move {
             match config.mode {
                 LoopMode::Count(n) => {
-                    exchange.set_property(CAMEL_LOOP_SIZE, Value::from(n as u64));
-                    for i in 0..n {
+                    // D-M9 Batch 1: clamp to MAX_LOOP_ITERATIONS. The audit
+                    // finding was that Count(n) had no cap (only While did);
+                    // a `count: u32::MAX` would exhaust CPU. The clamp is
+                    // applied uniformly to Count and While. The CAMEL_LOOP_SIZE
+                    // property is set to the *clamped* count so downstream
+                    // steps observe the effective iteration count.
+                    let n_clamped = n.min(MAX_LOOP_ITERATIONS);
+                    if n > MAX_LOOP_ITERATIONS {
+                        tracing::warn!(
+                            requested = n,
+                            clamped_to = MAX_LOOP_ITERATIONS,
+                            "LoopMode::Count exceeded MAX_LOOP_ITERATIONS; clamping"
+                        );
+                    }
+                    exchange.set_property(CAMEL_LOOP_SIZE, Value::from(n_clamped as u64));
+                    for i in 0..n_clamped {
                         exchange.set_property(CAMEL_LOOP_INDEX, Value::from(i as u64));
                         exchange = pipeline.ready().await?.call(exchange).await?;
                     }
@@ -112,9 +126,17 @@ impl camel_api::OutcomePipeline for LoopSegment {
         Box::pin(async move {
             match config.mode {
                 camel_api::loop_eip::LoopMode::Count(n) => {
+                    let n_clamped = n.min(MAX_LOOP_ITERATIONS);
+                    if n > MAX_LOOP_ITERATIONS {
+                        tracing::warn!(
+                            requested = n,
+                            clamped_to = MAX_LOOP_ITERATIONS,
+                            "LoopMode::Count exceeded MAX_LOOP_ITERATIONS; clamping"
+                        );
+                    }
                     let mut ex = exchange;
-                    ex.set_property(CAMEL_LOOP_SIZE, Value::from(n as u64));
-                    for i in 0..n {
+                    ex.set_property(CAMEL_LOOP_SIZE, Value::from(n_clamped as u64));
+                    for i in 0..n_clamped {
                         ex.set_property(CAMEL_LOOP_INDEX, Value::from(i as u64));
                         match body.run(ex).await {
                             PipelineOutcome::Completed(next) => {
@@ -313,6 +335,35 @@ mod tests {
         let result = service.ready().await.unwrap().call(exchange).await;
 
         assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "boom"));
+    }
+
+    // ── D-M9 Batch 1: LoopMode::Count(n) clamped to MAX_LOOP_ITERATIONS ──
+
+    /// D-M9: a `Count(u32::MAX as usize)` (or any value above
+    /// `MAX_LOOP_ITERATIONS`) is clamped to `MAX_LOOP_ITERATIONS` and
+    /// runs at most that many iterations. Without the clamp, a malicious
+    /// or typo'd `count: 4294967295` would exhaust CPU. The pre-existing
+    /// `Count(3)` test continues to pass — small values are unaffected.
+    #[tokio::test]
+    async fn test_loop_count_clamped_to_max_iterations() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let config = LoopConfig::new(LoopMode::Count(usize::MAX));
+        let mut service = LoopService::new(config, counter_pipeline(Arc::clone(&counter)));
+
+        let exchange = Exchange::new(Message::new("test"));
+        let result = service.ready().await.unwrap().call(exchange).await;
+
+        assert!(result.is_ok());
+        // Must run exactly MAX_LOOP_ITERATIONS, not u32::MAX iterations.
+        assert_eq!(counter.load(Ordering::SeqCst), MAX_LOOP_ITERATIONS);
+        // The CAMEL_LOOP_SIZE property is set to the *clamped* count.
+        assert_eq!(
+            result
+                .unwrap()
+                .property(CAMEL_LOOP_SIZE)
+                .and_then(|v| v.as_u64()),
+            Some(MAX_LOOP_ITERATIONS as u64)
+        );
     }
 
     #[tokio::test]

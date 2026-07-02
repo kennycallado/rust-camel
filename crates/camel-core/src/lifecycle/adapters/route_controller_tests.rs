@@ -2008,11 +2008,10 @@ async fn resequencer_hot_swap_drains_old_service() {
             // One message may arrive from the old drain (if any buffered)
             // That's fine — the drain DID flush through the OLD continuation.
             // Just verify no SECOND message arrives.
-            match tokio::time::timeout(std::time::Duration::from_millis(100), old_rx.recv()).await {
-                Ok(Some(m2)) => {
-                    panic!("old continuation received unexpected second exchange after drain: {m2}")
-                }
-                _ => {} // expected: channel closed or timeout after drain
+            if let Ok(Some(m2)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), old_rx.recv()).await
+            {
+                panic!("old continuation received unexpected second exchange after drain: {m2}")
             }
             drop(msg);
         }

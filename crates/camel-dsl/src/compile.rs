@@ -12,8 +12,10 @@ use camel_api::splitter::{
 };
 use camel_api::{
     CamelError, CanonicalConcurrencySpec, CanonicalFieldLoss, CanonicalLossReport,
-    CanonicalRouteSpec, CircuitBreakerConfig, DelayConfig, IdentityProcessor, LoadBalanceStrategy,
-    LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig, canonical_contract_rejection_reason,
+    CanonicalRouteSpec, CircuitBreakerConfig, DEFAULT_MAX_DELAY_MS, DelayConfig, IdentityProcessor,
+    LoadBalanceStrategy, LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig,
+    canonical_contract_rejection_reason,
+    loop_eip::MAX_LOOP_ITERATIONS,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
@@ -382,6 +384,7 @@ pub fn compile_canonical_step(
             config: DelayConfig {
                 delay_ms,
                 dynamic_header,
+                max_delay_ms: DEFAULT_MAX_DELAY_MS,
             },
         }),
         CanonicalStepSpec::Filter { predicate, steps } => Ok(BuilderStep::DeclarativeFilter {
@@ -1679,6 +1682,11 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         DeclarativeStep::Loop(def) => {
             if def.count.is_some_and(|c| c == 0) {
                 return Err(CamelError::Config("loop count must be > 0".to_string()));
+            }
+            if def.count.is_some_and(|c| c > MAX_LOOP_ITERATIONS) {
+                return Err(CamelError::Config(format!(
+                    "loop count must be <= MAX_LOOP_ITERATIONS ({MAX_LOOP_ITERATIONS})"
+                )));
             }
             if def.count.is_some_and(|c| c > 0) && def.while_predicate.is_some() {
                 return Err(CamelError::Config(
@@ -4180,6 +4188,24 @@ mod tests {
             matches!(step, BuilderStep::Stop),
             "DSL Stop must emit BuilderStep::Stop, got: {:?}",
             step
+        );
+    }
+
+    #[test]
+    fn loop_count_above_max_is_rejected_by_validate_step() {
+        use camel_api::loop_eip::MAX_LOOP_ITERATIONS;
+
+        let step = DeclarativeStep::Loop(LoopStepDef {
+            count: Some(MAX_LOOP_ITERATIONS + 1),
+            while_predicate: None,
+            steps: vec![],
+        });
+        let result = validate_step(&step);
+        let err = result.expect_err("count above MAX must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MAX_LOOP_ITERATIONS"),
+            "error must mention MAX_LOOP_ITERATIONS, got: {msg}"
         );
     }
 }

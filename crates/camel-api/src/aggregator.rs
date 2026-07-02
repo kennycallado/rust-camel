@@ -125,8 +125,13 @@ impl AggregatorConfig {
             completion: None,
             correlation: CorrelationStrategy::HeaderName(header_name),
             strategy: AggregationStrategy::CollectAll,
-            max_buckets: None,
-            bucket_ttl: None,
+            // R3-C1 Batch 1: bounded defaults — the correlation map MUST NOT
+            // grow without a cap. A flood of unique correlation keys is the
+            // remote-OOM vector; the default cap (10_000) is a sane production
+            // ceiling the operator may still override. The TTL (5 minutes) is
+            // the inline-retain + background-sweep eviction window.
+            max_buckets: Some(10_000),
+            bucket_ttl: Some(Duration::from_secs(300)),
             force_completion_on_stop: false,
             discard_on_timeout: false,
         }
@@ -221,8 +226,25 @@ impl AggregatorConfigBuilder {
     }
 
     pub fn try_build(self) -> Result<AggregatorConfig, CamelError> {
+        // R3-C1 Batch 1: a completion-bound is mandatory. A config with no
+        // completion bound lets a bucket live forever — combined with a
+        // unique-key flood, that is the remote-OOM vector. The canonical
+        // error string starts with "AggregatorMissingCompletionBound" so
+        // operators can grep for it.
+        //
+        // Type-contract note: spec §11 contracts a typed
+        // `ConfigValidationError::AggregatorMissingCompletionBound` variant
+        // (ADR-0033 validation-error family). That family does not exist yet;
+        // Batch 1 returns `CamelError::Config` with the canonical name embedded,
+        // to be promoted to the typed variant when the family lands (tracked in
+        // bd rc-r8fd). Behavior is fail-closed either way.
         let completion = self.completion.ok_or_else(|| {
-            CamelError::Config("completion condition required for AggregatorConfig".into())
+            CamelError::Config(
+                "AggregatorMissingCompletionBound: a completion condition \
+                 (complete_when_size, complete_when, complete_on_timeout, \
+                 or complete_on_size_or_timeout) is required"
+                    .into(),
+            )
         })?;
         Ok(AggregatorConfig {
             header_name: self.header_name,
@@ -427,5 +449,60 @@ mod tests {
     fn test_aggregator_try_build_missing_completion_returns_error() {
         let result = AggregatorConfig::correlate_by("key").try_build();
         assert!(result.is_err());
+    }
+
+    // ── R3-C1 Batch 1: DoS caps + completion-bound validation ────────
+
+    /// The builder default for `max_buckets` is `Some(10_000)`. The spec fixes
+    /// this as the bounded default; the operator may still override.
+    #[test]
+    fn test_default_max_buckets_is_10000() {
+        let cfg = AggregatorConfig::correlate_by("k")
+            .complete_when_size(1)
+            .build()
+            .unwrap();
+        assert_eq!(cfg.max_buckets, Some(10_000));
+    }
+
+    /// The builder default for `bucket_ttl` is `Some(Duration::from_secs(300))`.
+    /// Inline retain + background sweep both use this TTL.
+    #[test]
+    fn test_default_bucket_ttl_is_300s() {
+        let cfg = AggregatorConfig::correlate_by("k")
+            .complete_when_size(1)
+            .build()
+            .unwrap();
+        assert_eq!(cfg.bucket_ttl, Some(Duration::from_secs(300)));
+    }
+
+    /// Configs that override `max_buckets(0)` still build (the operator chose it).
+    /// The cap may be set to 1 by the operator; the bound itself is not validated.
+    /// The completion-bound check below is what Batch 1 enforces.
+    #[test]
+    fn test_explicit_max_buckets_zero_is_accepted_at_build() {
+        let cfg = AggregatorConfig::correlate_by("k")
+            .complete_when_size(1)
+            .max_buckets(0)
+            .build()
+            .unwrap();
+        assert_eq!(cfg.max_buckets, Some(0));
+    }
+
+    /// A config with no completion bound — neither size, nor timeout, nor predicate —
+    /// is rejected at `try_build` with `AggregatorMissingCompletionBound`. Spec §11
+    /// RESOLVED: at least one completion bound is mandatory.
+    #[test]
+    fn test_aggregator_rejects_no_completion_bound() {
+        // Builder has no `complete_*` call → try_build returns Err.
+        // Use match (not unwrap_err) because AggregatorConfig is not Debug.
+        let err = match AggregatorConfig::correlate_by("k").try_build() {
+            Err(e) => e,
+            Ok(_) => panic!("expected error, got Ok"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("completion"),
+            "expected error mentioning 'completion', got: {msg}"
+        );
     }
 }

@@ -54,10 +54,17 @@ impl Service<Exchange> for RecipientListService {
                 return Ok(exchange);
             }
 
+            // H13 Batch 1: cap the resolved-URI list BEFORE any endpoint
+            // resolution. A malicious expression yielding millions of URIs
+            // would otherwise allocate a Vec of millions of &str references
+            // and resolve each one (multicast) or call each one (sequential).
+            // The default cap is 1_000 (camel-api::recipient_list).
+            let cap = config.max_recipients;
             let uris: Vec<&str> = uris_raw
                 .split(&config.delimiter)
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
+                .take(cap)
                 .collect();
             if uris.is_empty() {
                 return Ok(exchange);
@@ -561,6 +568,63 @@ mod tests {
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
 
         assert_eq!(result.input.body.as_text(), Some("original"));
+    }
+
+    // ── H13 Batch 1: cap resolved-URI count ──────────────────────────
+
+    /// H13: an expression yielding millions of URIs is truncated to
+    /// `max_recipients` before endpoint resolution. The test uses a
+    /// cap of 4 to keep the test fast; the principle (cap the list) is
+    /// what Batch 1 enforces. The default cap is 1_000 in camel-api.
+    #[tokio::test]
+    async fn test_huge_recipient_list_is_capped() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = call_count.clone();
+
+        let resolver = Arc::new(move |uri: &str| {
+            if uri.starts_with("mock:") {
+                let count = count_clone.clone();
+                Some(BoxProcessor::from_fn(move |ex| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(ex) })
+                }))
+            } else {
+                None
+            }
+        });
+
+        // Build the untrusted payload: 1_000_000 URIs as one string.
+        let mut many = String::with_capacity(8 * 1_000_000);
+        for i in 0..1_000_000 {
+            if i > 0 {
+                many.push(',');
+            }
+            many.push_str(&format!("mock:k{i}"));
+        }
+
+        // Disposition-5 pattern: the untrusted data flows FROM the exchange
+        // (a header on the inbound message), NOT from a captured variable.
+        // The expression reads it off the passed `&Exchange` — this is what
+        // makes the cap an untrusted-data-validation control, not a local
+        // limit.
+        let config = RecipientListConfig::new(Arc::new(|ex: &Exchange| {
+            ex.input
+                .header("CamelRecipients")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        }))
+        .max_recipients(4);
+
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
+        let mut ex = Exchange::new(Message::new("test"));
+        ex.input.set_header("CamelRecipients", Value::String(many));
+        let result = svc.ready().await.unwrap().call(ex).await;
+        assert!(result.is_ok(), "capped execution should still succeed");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            4,
+            "must resolve at most max_recipients (4) endpoints"
+        );
     }
 
     #[tokio::test]

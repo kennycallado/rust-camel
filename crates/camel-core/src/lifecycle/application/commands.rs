@@ -948,6 +948,7 @@ fn canonical_step_to_builder_step(
             config: camel_api::DelayConfig {
                 delay_ms,
                 dynamic_header,
+                max_delay_ms: camel_api::DEFAULT_MAX_DELAY_MS,
             },
         }),
     }

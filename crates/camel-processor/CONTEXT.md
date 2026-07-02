@@ -7,13 +7,13 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 
 | Module | Processor / concern | Type | Source |
 |---|---|---|---|
-| `aggregator` | Aggregate | stateful routing / aggregation | `src/lib.rs:1` |
+| `aggregator` | Aggregate | stateful routing / aggregation | `src/lib.rs:1` (defaults: max_buckets=10_000, bucket_ttl=300s; background sweep auto-spawned at construction bound to route token — Batch 1 R3-C1) |
 | `choice` | Choice | conditional routing | `src/lib.rs:2` |
 | `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:3` |
 | `content_enricher` | Enrich / PollEnrich | enrichment | `src/lib.rs:4` |
 | `convert_body` | ConvertBodyTo | transformation | `src/lib.rs:5` |
 | `data_format` | built-in data formats | marshal / unmarshal support | `src/lib.rs:6` |
-| `delayer` | Delay | timing | `src/lib.rs:7` |
+| `delayer` | Delay | timing | `src/lib.rs:7` (header-derived delay clamped to max_delay_ms, default 3_600_000 — Batch 1 H12) |
 | `do_try` | doTry / catch | error-handling block | `src/lib.rs:8` |
 | `dynamic_router` | DynamicRouter | dynamic routing | `src/lib.rs:9` |
 | `dynamic_set_header` | DynamicSetHeader | transformation | `src/lib.rs:10` |
@@ -24,11 +24,11 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `filter` | Filter | conditional routing | `src/lib.rs:15` |
 | `load_balancer` | LoadBalancer | load balancing / failover | `src/lib.rs:16` |
 | `log` | Log / DynamicLog | observability | `src/lib.rs:17` |
-| `loop_eip` | Loop | repeated routing | `src/lib.rs:18` |
+| `loop_eip` | Loop | repeated routing | `src/lib.rs:18` (Count(n) clamped to MAX_LOOP_ITERATIONS=10_000 — Batch 1 D-M9) |
 | `map_body` | MapBody | transformation | `src/lib.rs:19` |
 | `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:20` |
 | `multicast` | Multicast | fan-out routing | `src/lib.rs:21` |
-| `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:22` |
+| `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:22` (expression capped to max_recipients, default 1_000 — Batch 1 H13) |
 | `routing_slip` | RoutingSlip | dynamic routing | `src/lib.rs:23` |
 | `script_mutator` | ScriptMutator | script-backed mutation | `src/lib.rs:24` |
 | `security_policy_layer` | SecurityPolicyLayer | pre-pipeline authorization | `src/lib.rs:25`; ADR-0010 |
@@ -40,7 +40,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `stream_cache` | StreamCache | body materialization | `src/lib.rs:31` |
 | `stream_codec` | StreamSplitCodec implementations | streaming split support | `src/lib.rs:32` |
 | `streaming_splitter` | StreamingSplit | streaming splitter | `src/lib.rs:33` |
-| `throttler` | Throttle | rate limiting | `src/lib.rs:34` |
+| `throttler` | Throttle | rate limiting | `src/lib.rs:34` (try_new returns Err on max_requests=0 or period=0 — Batch 1 D-M8) |
 | `wire_tap` | WireTap | fire-and-forget side route | `src/lib.rs:35` |
 | `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:36` |
 

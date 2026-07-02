@@ -1,9 +1,20 @@
 use std::time::Duration;
 
+/// Default cap for header-derived delays (1 hour). A header value larger than
+/// this is clamped down to it before the cast to `u64`. The H12 vulnerability
+/// was: a header `CamelDelayMs: 1e20` cast to `u64` saturates to `u64::MAX`,
+/// then `Duration::from_millis(u64::MAX)` + `Instant` overflows and panics.
+pub const DEFAULT_MAX_DELAY_MS: u64 = 3_600_000;
+
 #[derive(Debug, Clone)]
 pub struct DelayConfig {
     pub delay_ms: u64,
     pub dynamic_header: Option<String>,
+    /// Hard cap for header-derived delay values. A header value larger than
+    /// this is clamped to `max_delay_ms` before the cast. Defaults to
+    /// `DEFAULT_MAX_DELAY_MS` (1 hour). The processor MUST consult this cap
+    /// before constructing the `Duration` it sleeps on.
+    pub max_delay_ms: u64,
 }
 
 impl DelayConfig {
@@ -11,6 +22,7 @@ impl DelayConfig {
         Self {
             delay_ms,
             dynamic_header: None,
+            max_delay_ms: DEFAULT_MAX_DELAY_MS,
         }
     }
 
@@ -19,10 +31,19 @@ impl DelayConfig {
         self
     }
 
+    /// Override the cap on header-derived delays. Pass a value larger than
+    /// `DEFAULT_MAX_DELAY_MS` only when the operator has a real reason to
+    /// sleep longer; the value is a hard ceiling, not a soft target.
+    pub fn with_max_delay_ms(mut self, max_ms: u64) -> Self {
+        self.max_delay_ms = max_ms;
+        self
+    }
+
     pub fn from_duration(duration: Duration) -> Self {
         Self {
             delay_ms: duration.as_millis() as u64,
             dynamic_header: None,
+            max_delay_ms: DEFAULT_MAX_DELAY_MS,
         }
     }
 
@@ -30,6 +51,7 @@ impl DelayConfig {
         Self {
             delay_ms: duration.as_millis() as u64,
             dynamic_header: Some(header.into()),
+            max_delay_ms: DEFAULT_MAX_DELAY_MS,
         }
     }
 }
@@ -72,5 +94,23 @@ mod tests {
         let cloned = cfg.clone();
         assert_eq!(cloned.delay_ms, 100);
         assert_eq!(cloned.dynamic_header.as_deref(), Some("H"));
+    }
+
+    /// H12: `DelayConfig` carries a `max_delay_ms` field with a sensible
+    /// default. The default is 3_600_000 (1 hour) so a typo or a malicious
+    /// header value cannot pin a task to `u64::MAX` ms.
+    #[test]
+    fn test_delay_config_max_delay_ms_default() {
+        let cfg = DelayConfig::new(100);
+        assert_eq!(cfg.max_delay_ms, 3_600_000);
+    }
+
+    /// `with_max_delay_ms` overrides the default and is preserved by `clone`.
+    #[test]
+    fn test_delay_config_with_max_delay_ms() {
+        let cfg = DelayConfig::new(100).with_max_delay_ms(50);
+        assert_eq!(cfg.max_delay_ms, 50);
+        let cloned = cfg.clone();
+        assert_eq!(cloned.max_delay_ms, 50);
     }
 }

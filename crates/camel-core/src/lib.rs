@@ -75,6 +75,7 @@ pub(crate) use registry::{
     ClaimCheckRegistry, IdempotentRegistry, SharedClaimCheckRegistry, SharedIdempotentRegistry,
 };
 pub(crate) mod shared;
+pub mod startup_validation;
 pub mod step;
 pub mod template;
 

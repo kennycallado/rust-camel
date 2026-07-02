@@ -46,15 +46,24 @@ impl<T: ?Sized + Send + Sync + 'static> NamedRegistry<T> {
     ///
     /// Returns `Err(RegistryError::AlreadyRegistered)` if `name` is already
     /// taken. The existing value is preserved.
+    ///
+    /// D-M5 fix: the previous implementation did `map.insert(name, value)`
+    /// and then returned `Err` if `insert` reported the key existed. That
+    /// silently overwrote the existing value. Callers who checked the
+    /// `Err` and queried `get` would receive the *new* (rejected) value,
+    /// not the original. The fix is check-then-insert under the held
+    /// lock: if the key is present, return `Err` and do not touch the
+    /// map; otherwise insert.
     pub fn register(&self, name: impl Into<String>, value: Arc<T>) -> Result<(), RegistryError> {
         let name = name.into();
         let mut map = self
             .map
             .lock()
             .expect("registry mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
-        if map.insert(name.clone(), value).is_some() {
+        if map.contains_key(&name) {
             return Err(RegistryError::AlreadyRegistered(name));
         }
+        map.insert(name, value);
         Ok(())
     }
 
@@ -123,9 +132,11 @@ mod tests {
             matches!(&err, RegistryError::AlreadyRegistered(name) if name == "key1"),
             "expected AlreadyRegistered('key1'), got {err:?}"
         );
-        // Original value is preserved
-        // Value is overwritten (insert returns old value on error)
+        // D-M5 fix: check-then-insert. The existing value is preserved on
+        // Err. The pre-fix code did `map.insert` (overwriting) then
+        // returned Err, leaving the new value in place. Callers trusting
+        // the error kept the wrong repository silently.
         let val = registry.get("key1").unwrap();
-        assert_eq!(*val, *"second");
+        assert_eq!(*val, *"first");
     }
 }

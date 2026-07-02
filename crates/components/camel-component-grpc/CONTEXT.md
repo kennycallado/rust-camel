@@ -13,7 +13,7 @@ gRPC server-side Consumer; binds one HTTP/2 listener per `(host, port)`, dispatc
 _Avoid_: grpc server, grpc handler
 
 **GrpcProducer**:
-gRPC client Producer; sends Exchanges as gRPC calls. Holds an internal lazy pool of connections and reports endpoint health via `RuntimeObservability`.
+gRPC client Producer; sends Exchanges as gRPC calls. Holds an internal lazy pool of connections and reports endpoint health via `RuntimeObservability`. **Batch 1 (C1):** when `tls = true`, the producer hard-errors at construction unless a `TlsConfig` is supplied — no silent fallback to h2c plaintext, so auth tokens never travel cleartext. `tls = false` with a `TlsConfig` supplied also hard-errors (conflicting intent). The `ClientTlsConfig` is wired from `TlsConfig` (server_name, optional ca_cert, optional mTLS identity); the channel's endpoint URL is rewritten to `https://`. `parse_grpc_uri` rejects `?tls=true` at parse time (a URI cannot carry certificates; TLS-from-URI cert params are a filed follow-up). `insecure_skip_verify=true` hard-errors (verifier shim needs a follow-up batch); the default `false` is safe.
 _Avoid_: grpc client, grpc caller
 
 **GrpcStreamObserver**:

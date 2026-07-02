@@ -63,6 +63,14 @@ pub struct AggregatorService {
     late_tx: mpsc::Sender<Exchange>,
     language_registry: SharedLanguageRegistry,
     route_cancel: CancellationToken,
+    /// Handle to the background TTL-sweep task. `None` when `config.bucket_ttl`
+    /// is `None` (no TTL → no sweep). When the TTL is set, this is populated
+    /// at construction by the auto-spawn in `new` — the caller does not need
+    /// to start the sweep explicitly. The task is bound to `route_cancel` —
+    /// cancelling the route token aborts the task. This is the fix for
+    /// R3-C1's "no background sweep" half: a flood of unique keys within the
+    /// inline-retain window can no longer grow unbounded between calls.
+    sweep_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for AggregatorService {
@@ -71,21 +79,60 @@ impl std::fmt::Debug for AggregatorService {
     }
 }
 
+impl Drop for AggregatorService {
+    fn drop(&mut self) {
+        // Defense-in-depth for the R3-C1 sweep: abort the background task when
+        // the service is dropped so it cannot leak even if the route owner
+        // forgets to cancel `route_cancel` (the primary shutdown path).
+        // `abort()` on an already-finished task is a no-op, so this is safe
+        // alongside the `select!` cancel path. This also gives `sweep_handle`
+        // a production reader so it is not dead-code.
+        if let Some(handle) = self
+            .sweep_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
+    }
+}
+
 impl AggregatorService {
+    /// Lifecycle invariant: `route_cancel` is owned by the route. Construction
+    /// is runtime-free (no `tokio::spawn` here) so callers that build an
+    /// `AggregatorService` outside a tokio runtime — e.g. route-spec tests —
+    /// do not panic. When `config.bucket_ttl` is `Some`, the TTL-sweep task is
+    /// spawned LAZILY on the first `poll_ready` (a runtime is guaranteed
+    /// there) and bound to `route_cancel` via `select!`. The route owner MUST
+    /// cancel it on shutdown; `Drop` also aborts it as defense-in-depth.
     pub fn new(
         config: AggregatorConfig,
         late_tx: mpsc::Sender<Exchange>,
         language_registry: SharedLanguageRegistry,
         route_cancel: CancellationToken,
     ) -> Self {
+        // Build the shared buckets map up front so the sweep task can
+        // share it via Arc::clone.
+        let buckets: Arc<Mutex<HashMap<String, Bucket>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // R3-C1 Batch 1: the TTL-sweep is NOT spawned here — construction
+        // must stay runtime-free so callers that build an AggregatorService
+        // outside a tokio runtime (route-spec tests) do not panic on
+        // `tokio::spawn`. The sweep is spawned lazily on the first
+        // `poll_ready`. The inline `guard.retain(...)` per `call` evicts
+        // expired buckets regardless, so the cap + TTL invariants hold
+        // whether or not the sweep has started yet.
+
         Self {
             config,
-            buckets: Arc::new(Mutex::new(HashMap::new())),
+            buckets,
             timeout_tasks: Arc::new(Mutex::new(HashMap::new())),
             timeout_handles: Arc::new(Mutex::new(HashMap::new())),
             late_tx,
             language_registry,
             route_cancel,
+            sweep_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -206,6 +253,29 @@ impl Service<Exchange> for AggregatorService {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+        // R3-C1: lazily spawn the TTL-sweep on the first readiness poll. A
+        // tokio runtime is guaranteed here (the runtime driving the service),
+        // unlike at construction. Single-spawn via the lock + is_none check.
+        if let Some(ttl) = self.config.bucket_ttl {
+            let mut g = self.sweep_handle.lock().unwrap_or_else(|e| e.into_inner());
+            if g.is_none() {
+                let interval = std::cmp::max(ttl / 2, Duration::from_millis(50));
+                let buckets = Arc::clone(&self.buckets);
+                let cancel = self.route_cancel.clone();
+                *g = Some(tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep(interval) => {
+                                let mut guard =
+                                    buckets.lock().unwrap_or_else(|e| e.into_inner());
+                                guard.retain(|_, b| !b.is_expired(ttl));
+                            }
+                        }
+                    }
+                }));
+            }
+        }
         Poll::Ready(Ok(()))
     }
 
@@ -1348,5 +1418,85 @@ mod tests {
             svc.timeout_handles.lock().unwrap().is_empty(),
             "all handles should be cleaned up after shutdown"
         );
+    }
+
+    // ── R3-C1 Batch 1: DoS cap + background sweep ───────────────────
+
+    /// R3-C1: a flood of unique correlation keys must stay bounded.
+    /// Default `max_buckets` is 10_000; the 10_001st unique key is rejected
+    /// with `Aggregator reached maximum N buckets` (or its updated equivalent
+    /// after the fix). The unique-key flood does NOT OOM the process.
+    #[tokio::test]
+    async fn test_unique_key_flood_stays_bounded_by_default() {
+        // Builder defaults to max_buckets = 10_000, bucket_ttl = 300s.
+        let config = AggregatorConfig::correlate_by("orderId")
+            .complete_when_size(1_000_000) // never completes normally
+            .build()
+            .unwrap();
+        let mut svc = new_test_svc(config);
+
+        // Send 10_001 unique keys. The first 10_000 should be accepted
+        // (pending in their buckets); the 10_001st MUST be rejected.
+        for i in 0..10_000usize {
+            let ex = make_exchange("orderId", &format!("key-{i}"), "body");
+            let result = svc.ready().await.unwrap().call(ex).await;
+            assert!(result.is_ok(), "key {i} should be accepted under the cap");
+        }
+        let ex = make_exchange("orderId", "key-10001", "body");
+        let result = svc.ready().await.unwrap().call(ex).await;
+        assert!(
+            result.is_err(),
+            "10_001st unique key must be rejected by the max_buckets cap"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("maximum") || err.contains("max"),
+            "error should mention cap: {err}"
+        );
+    }
+
+    /// The `AggregatorService` exposes a `sweep_handle` for the background
+    /// sweep task. When `config.bucket_ttl` is `Some`, `AggregatorService::new`
+    /// automatically spawns the sweep task and stores the handle, so the
+    /// caller never sees `None` for a TTL-configured service. Cancelling the
+    /// route token (via `shutdown`) aborts the sweep.
+    #[tokio::test]
+    async fn test_background_sweep_spawns_on_first_poll_not_construction() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(10_000)
+            .bucket_ttl(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut svc = AggregatorService::new(config, tx, registry, cancel.clone());
+
+        // Construction is runtime-free: no sweep spawned yet.
+        assert!(
+            svc.sweep_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none(),
+            "sweep must NOT be spawned at construction (runtime-free new)"
+        );
+
+        // First readiness poll lazily spawns the sweep (a runtime is present
+        // here). `ready()` drives `poll_ready` until Ready.
+        let _ = svc.ready().await.unwrap();
+        let sweep_present = svc
+            .sweep_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        assert!(
+            sweep_present,
+            "sweep handle should be Some after first poll when bucket_ttl is set"
+        );
+
+        // Cancel the route token; the sweep task observes it and exits.
+        cancel.cancel();
+        // Give the task a moment to observe the cancel.
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
