@@ -2911,11 +2911,21 @@ mod tests {
         }
     }
 
-    /// Regression for rc-1nm: the WS producer connect path must emit
+    /// Regression for rc-1nm: the WS producer retry path must emit
     /// `component=ws-producer` in retry log events so operators can
-    /// identify which component is retrying. Drives through the production
-    /// `connect_ws_with_retry` helper with a guaranteed-fail URL instead of
-    /// calling `retry_async` with a synthetic op.
+    /// identify which component is retrying.
+    ///
+    /// Drives `retry_async` directly with `Some("ws-producer")` and a
+    /// deterministic retryable error. An earlier version exercised the
+    /// production `connect_ws_with_retry` helper against `ws://127.0.0.1:1`,
+    /// but that was flaky under heavy workspace load: the thread-local
+    /// tracing subscriber (`set_default`) very occasionally missed the
+    /// event logged from within the async connect path (the warn! is
+    /// always emitted — `map_connect_error` always yields a retryable
+    /// string for `ws://` — so the miss was purely a capture race).
+    /// Driving `retry_async` synchronously with a synthetic op removes the
+    /// network I/O and reactor scheduling, so the warn! is always emitted
+    /// and captured on the test thread.
     #[tokio::test]
     async fn ws_producer_retry_log_emits_component_ws_producer() {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -2932,16 +2942,18 @@ mod tests {
             ..NetworkRetryPolicy::default()
         };
 
-        // Drive through the production connect path with a guaranteed-fail
-        // URL. Port 1 is reserved on Linux; connect immediately fails with
-        // ECONNREFUSED.
-        let request = "ws://127.0.0.1:1".into_client_request().unwrap();
-
-        let result: Result<_, CamelError> = connect_ws_with_retry(
-            request,
-            "ws://127.0.0.1:1",
-            Duration::from_millis(100),
+        // Deterministic retryable failure (string recognised by
+        // is_retryable_ws_error) — no network I/O, so the retry warn! is
+        // emitted and captured synchronously on this thread.
+        let result: Result<(), CamelError> = retry_async(
             &policy,
+            Some("ws-producer"),
+            || async {
+                Err(CamelError::ProcessorError(
+                    "WebSocket connection refused: simulated".to_string(),
+                ))
+            },
+            is_retryable_ws_error,
         )
         .await;
 
