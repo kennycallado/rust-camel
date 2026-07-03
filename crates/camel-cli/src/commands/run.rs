@@ -432,6 +432,15 @@ pub async fn run(
         security_compile_context.clone(),
     ) {
         Ok(defs) => {
+            // ADR-0033: register fail-closed ConfigChecks derived from the
+            // discovered routes (e.g. SqlDynamicQueryCheck for every `sql:`
+            // endpoint). The checks run synchronously at the head of
+            // `CamelContext::start()` before any route consumer is started.
+            for check in
+                camel_core::startup_validation::scan_route_definitions_for_sql_checks(&defs)
+            {
+                ctx.add_startup_check(check);
+            }
             for def in defs {
                 let id = def.route_id().to_string();
                 if let Err(e) = ctx.add_route_definition(def).await {

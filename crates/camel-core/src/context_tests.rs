@@ -1264,3 +1264,62 @@ async fn camel_context_routes_real_observability() {
     assert_eq!(report.services[0].name, "probe");
     assert_eq!(report.services[0].message.as_deref(), Some("test reason"));
 }
+
+// ADR-0033: CamelContext::start() must run every registered ConfigCheck
+// before any route consumer starts. A misconfigured SqlDynamicQueryCheck
+// (useMessageBodyForSql=true with allowDynamicQuery=false) must cause
+// start() to fail closed with CamelError::Config and NOT start the
+// route consumer.
+#[tokio::test]
+async fn test_start_runs_registered_config_checks() {
+    use crate::startup_validation::SqlDynamicQueryCheck;
+
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    ctx.register_component(MockComponent);
+
+    // Register a startup check that is guaranteed to fail: the operator
+    // declared body-sourced SQL queries but did not opt into the dynamic
+    // query capability — runtime would silently produce empty queries.
+    ctx.add_startup_check(Box::new(SqlDynamicQueryCheck {
+        use_message_body_for_sql: true,
+        allow_dynamic_query: false,
+    }));
+
+    let result = ctx.start().await;
+    match result {
+        Err(CamelError::Config(msg)) => {
+            assert!(
+                msg.contains("sql-dynamic-query"),
+                "error must name the check that failed: {msg}"
+            );
+        }
+        Err(other) => panic!("expected CamelError::Config, got {other:?}"),
+        Ok(()) => panic!("start() must fail closed when a ConfigCheck fails"),
+    }
+
+    // The check list is drained on start(); a second start() call would
+    // not re-run checks. We do not call start() again here — the contract
+    // is that the runtime is single-use.
+}
+
+// ADR-0033: an empty startup-check list must let start() proceed normally
+// (i.e. validation is opt-in, not a hard requirement on every context).
+#[tokio::test]
+async fn test_start_with_no_registered_checks_proceeds() {
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    ctx.register_component(MockComponent);
+
+    // No checks registered. start() should not fail on validation.
+    // It may fail later (e.g. no routes to start) but the error must
+    // NOT be CamelError::Config from the validator path.
+    // We only assert that the validator is not the source of failure.
+    let result = ctx.start().await;
+    if let Err(CamelError::Config(msg)) = &result {
+        panic!(
+            "start() must not fail with CamelError::Config when no checks are registered, got: {msg}"
+        );
+    }
+    // Any other outcome (Ok, or Err from later phases) is acceptable for
+    // this test — the assertion above is the contract.
+    let _ = result;
+}

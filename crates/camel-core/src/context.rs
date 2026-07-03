@@ -26,6 +26,7 @@ use crate::lifecycle::domain::LanguageRegistryError;
 use crate::registry::RegistryError;
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::TracerConfig;
+use crate::startup_validation::{ConfigCheck, run_startup_validation};
 use crate::template::TemplateRegistry;
 
 static CONTEXT_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -58,6 +59,10 @@ pub struct CamelContext {
     template_registry: Arc<TemplateRegistry>,
     idempotent_repositories: crate::registry::SharedIdempotentRegistry,
     claim_check_repositories: crate::registry::SharedClaimCheckRegistry,
+    /// Fail-closed startup validation registry (ADR-0033). Checks are drained
+    /// and executed synchronously at the head of [`start()`](Self::start) before
+    /// any route consumer is started.
+    startup_checks: Vec<Box<dyn ConfigCheck>>,
 }
 
 /// Parts bag used by [`CamelContextBuilder::build`] to construct a [`CamelContext`]
@@ -80,6 +85,7 @@ pub(crate) struct FromParts {
     pub(crate) template_registry: Arc<TemplateRegistry>,
     pub(crate) idempotent_repositories: crate::registry::SharedIdempotentRegistry,
     pub(crate) claim_check_repositories: crate::registry::SharedClaimCheckRegistry,
+    pub(crate) startup_checks: Vec<Box<dyn ConfigCheck>>,
 }
 
 impl CamelContext {
@@ -102,6 +108,7 @@ impl CamelContext {
             template_registry: parts.template_registry,
             idempotent_repositories: parts.idempotent_repositories,
             claim_check_repositories: parts.claim_check_repositories,
+            startup_checks: parts.startup_checks,
         }
     }
 }
@@ -402,6 +409,18 @@ impl CamelContext {
             .register(Arc::new(component));
     }
 
+    /// Register a startup `ConfigCheck` to be evaluated at the head of
+    /// [`start()`](Self::start). Established by ADR-0033.
+    ///
+    /// Checks are drained and executed synchronously before any route consumer
+    /// is started. If any check returns `Err`, `start()` fails closed with
+    /// `CamelError::Config(_)` and no route is started. The check list is
+    /// consumed (moved) during `start()` so this method may be called multiple
+    /// times to register an arbitrary number of checks.
+    pub fn add_startup_check(&mut self, check: Box<dyn ConfigCheck>) {
+        self.startup_checks.push(check);
+    }
+
     /// Register a language with this context, keyed by name.
     ///
     /// Returns `Err(LanguageRegistryError::AlreadyRegistered)` if a language
@@ -562,6 +581,17 @@ impl CamelContext {
                 }
                 return Err(e);
             }
+        }
+
+        // ADR-0033: fail-closed startup validation. Drain the registered
+        // ConfigCheck list and run every check synchronously. If any check
+        // returns Err, refuse to start the runtime — no route consumer is
+        // started, no reconciliation runs. Drains the registry so a second
+        // call to start() (currently not supported) would not re-run checks.
+        let checks = std::mem::take(&mut self.startup_checks);
+        if let Err(e) = run_startup_validation(checks) {
+            warn!("Startup validation failed: {e}");
+            return Err(e);
         }
 
         // H8: boot reconciliation — fail routes stuck in transient state

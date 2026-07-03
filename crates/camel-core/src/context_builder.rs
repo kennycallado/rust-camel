@@ -23,6 +23,7 @@ use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::lifecycle::ports::RuntimeExecutionPort;
 use crate::registry::{ClaimCheckRegistry, IdempotentRegistry};
 use crate::shared::components::domain::Registry;
+use crate::startup_validation::ConfigCheck;
 use crate::template::TemplateRegistry;
 
 type ExecutionFactory =
@@ -316,6 +317,7 @@ impl CamelContextBuilder {
             template_registry,
             idempotent_repositories,
             claim_check_repositories,
+            startup_checks: Vec::<Box<dyn ConfigCheck>>::new(),
         }))
     }
 }
