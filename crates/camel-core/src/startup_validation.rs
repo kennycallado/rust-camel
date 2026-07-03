@@ -6,7 +6,7 @@
 //! `docs/adr/0033-…`.
 
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
-use camel_api::CamelError;
+use camel_api::{CamelError, ConfigValidationError};
 use camel_endpoint::uri::parse_bool_param;
 
 /// A single startup-time configuration check.
@@ -85,10 +85,8 @@ impl ConfigCheck for SqlDynamicQueryCheck {
     }
     fn run(&self) -> Result<(), CamelError> {
         if self.use_message_body_for_sql && !self.allow_dynamic_query {
-            return Err(CamelError::Config(
-                "SQL endpoint has use_message_body_for_sql=true but allow_dynamic_query=false \
-                 — set allow_dynamic_query=true to permit body-sourced queries"
-                    .into(),
+            return Err(CamelError::from(
+                ConfigValidationError::SqlDynamicQueryWithoutAllowDynamic,
             ));
         }
         Ok(())
@@ -279,6 +277,30 @@ mod tests {
             }
             other => panic!("expected CamelError::Config, got {other:?}"),
         }
+    }
+
+    /// H7: the inner `SqlDynamicQueryCheck::run()` returns the typed
+    /// `ConfigValidationError::SqlDynamicQueryWithoutAllowDynamic` so
+    /// operators can match on the variant directly. The outer
+    /// `run_startup_validation` wraps it into a `Config(String)` joined
+    /// report (asserted above); this test guards the typed inner path
+    /// so the promotion to typed errors (rc-r8fd) doesn't regress.
+    #[test]
+    fn sql_dynamic_query_check_run_returns_typed_error() {
+        let check = SqlDynamicQueryCheck {
+            use_message_body_for_sql: true,
+            allow_dynamic_query: false,
+        };
+        let result = check.run();
+        assert!(
+            matches!(
+                result,
+                Err(CamelError::ConfigValidation(
+                    ConfigValidationError::SqlDynamicQueryWithoutAllowDynamic,
+                ))
+            ),
+            "expected ConfigValidation(SqlDynamicQueryWithoutAllowDynamic), got: {result:?}"
+        );
     }
 
     /// H7: explicit opt-in satisfies the check — startup proceeds.

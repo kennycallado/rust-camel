@@ -71,7 +71,7 @@ pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use delayer::{DEFAULT_MAX_DELAY_MS, DelayConfig};
 pub use dynamic_router::{DynamicRouterConfig, RouterExpression};
 pub use endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, EndpointResolver};
-pub use error::CamelError;
+pub use error::{CamelError, ConfigValidationError};
 pub use error_handler::{
     BoundaryKind, ErrorHandlerConfig, ExceptionDisposition, ExceptionPolicy,
     ExceptionPolicyBuilder, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER,

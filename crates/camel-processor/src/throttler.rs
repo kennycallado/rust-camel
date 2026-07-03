@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use tower::Service;
 
 use camel_api::CAMEL_STOP;
-use camel_api::{BoxProcessor, CamelError, Exchange, ThrottleStrategy, ThrottlerConfig, Value};
+use camel_api::{
+    BoxProcessor, CamelError, ConfigValidationError, Exchange, ThrottleStrategy, ThrottlerConfig,
+    Value,
+};
 
 pub struct RateLimiter {
     tokens: f64,
@@ -81,8 +84,8 @@ impl ThrottlerService {
             ));
         }
         if config.max_requests == 0 {
-            return Err(CamelError::Config(
-                "ThrottlerConfig.max_requests must be > 0".to_string(),
+            return Err(CamelError::from(
+                ConfigValidationError::ThrottlerMaxRequestsZero,
             ));
         }
         let limiter = RateLimiter::new(config.max_requests, config.period);
@@ -185,8 +188,8 @@ impl ThrottleSegment {
             ));
         }
         if config.max_requests == 0 {
-            return Err(CamelError::Config(
-                "ThrottlerConfig.max_requests must be > 0".to_string(),
+            return Err(CamelError::from(
+                ConfigValidationError::ThrottlerMaxRequestsZero,
             ));
         }
         Ok(Self {
@@ -374,8 +377,8 @@ mod tests {
     /// D-M8 (reproduced): `ThrottlerService::new` with `max_requests=0`
     /// used to panic via `time_until_next_token → 1.0/0.0 = inf →
     /// Duration::from_secs_f64(inf) panic`. The fix returns `Err`
-    /// (CamelError::Config) instead. Caller can match the error and
-    /// refuse to start the route.
+    /// (CamelError::ConfigValidation(ThrottlerMaxRequestsZero)) instead.
+    /// Caller can match the error and refuse to start the route.
     #[test]
     fn test_throttler_zero_max_requests_returns_err() {
         // We need a constructor that returns Result. The current API is
@@ -392,10 +395,14 @@ mod tests {
         match result {
             Ok(Ok(_)) => panic!("zero max_requests must be Err, not Ok"),
             Ok(Err(e)) => {
-                let msg = e.to_string();
                 assert!(
-                    msg.contains("max_requests") && msg.contains("> 0"),
-                    "error must mention max_requests > 0: {msg}"
+                    matches!(
+                        e,
+                        CamelError::ConfigValidation(
+                            camel_api::ConfigValidationError::ThrottlerMaxRequestsZero,
+                        )
+                    ),
+                    "expected ConfigValidation(ThrottlerMaxRequestsZero), got: {e}"
                 );
             }
             Err(_) => panic!("zero max_requests must return Err, not panic"),

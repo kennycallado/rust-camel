@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::CamelError;
+use crate::error::{CamelError, ConfigValidationError};
 use crate::exchange::Exchange;
 
 /// Aggregation function — left-fold binary: (accumulated, next) -> merged.
@@ -228,23 +228,11 @@ impl AggregatorConfigBuilder {
     pub fn try_build(self) -> Result<AggregatorConfig, CamelError> {
         // R3-C1 Batch 1: a completion-bound is mandatory. A config with no
         // completion bound lets a bucket live forever — combined with a
-        // unique-key flood, that is the remote-OOM vector. The canonical
-        // error string starts with "AggregatorMissingCompletionBound" so
-        // operators can grep for it.
-        //
-        // Type-contract note: spec §11 contracts a typed
-        // `ConfigValidationError::AggregatorMissingCompletionBound` variant
-        // (ADR-0033 validation-error family). That family does not exist yet;
-        // Batch 1 returns `CamelError::Config` with the canonical name embedded,
-        // to be promoted to the typed variant when the family lands (tracked in
-        // bd rc-r8fd). Behavior is fail-closed either way.
+        // unique-key flood, that is the remote-OOM vector. Typed
+        // ConfigValidationError (ADR-0033) — operators can match on the
+        // `AggregatorMissingCompletionBound` variant.
         let completion = self.completion.ok_or_else(|| {
-            CamelError::Config(
-                "AggregatorMissingCompletionBound: a completion condition \
-                 (complete_when_size, complete_when, complete_on_timeout, \
-                 or complete_on_size_or_timeout) is required"
-                    .into(),
-            )
+            CamelError::from(ConfigValidationError::AggregatorMissingCompletionBound)
         })?;
         Ok(AggregatorConfig {
             header_name: self.header_name,
@@ -499,10 +487,14 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected error, got Ok"),
         };
-        let msg = err.to_string();
         assert!(
-            msg.contains("completion"),
-            "expected error mentioning 'completion', got: {msg}"
+            matches!(
+                err,
+                CamelError::ConfigValidation(
+                    ConfigValidationError::AggregatorMissingCompletionBound
+                )
+            ),
+            "expected ConfigValidation(AggregatorMissingCompletionBound), got: {err}"
         );
     }
 }

@@ -4,7 +4,7 @@
 //! which sub-pipeline executes. All recursively compile child steps.
 
 use camel_api::{
-    CamelError,
+    CamelError, ConfigValidationError,
     loop_eip::{LoopConfig, LoopMode},
 };
 
@@ -60,13 +60,13 @@ impl StepCompiler for ControlFlowCompiler {
                         LoopMode::While(predicate)
                     }
                     (Some(_), Some(_)) => {
-                        return StepCompileResult::Matched(Err(CamelError::RouteError(
-                            "loop: cannot specify both 'count' and 'while'".into(),
+                        return StepCompileResult::Matched(Err(CamelError::from(
+                            ConfigValidationError::LoopConflictingCountAndWhile,
                         )));
                     }
                     (None, None) => {
-                        return StepCompileResult::Matched(Err(CamelError::RouteError(
-                            "loop: must specify either 'count' or 'while'".into(),
+                        return StepCompileResult::Matched(Err(CamelError::from(
+                            ConfigValidationError::LoopMissingCountOrWhile,
                         )));
                     }
                 };

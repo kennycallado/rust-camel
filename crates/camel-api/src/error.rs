@@ -1,6 +1,32 @@
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Typed security-validation error for fail-closed config/startup checks (ADR-0033).
+///
+/// Each variant corresponds to a specific Batch 1+ security validation that refuses
+/// to start with a misconfigured or dangerous default. Operators can `match` on
+/// these variants for programmatic error handling.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ConfigValidationError {
+    #[error(
+        "aggregator config requires at least one completion bound (size, timeout, predicate, or interval)"
+    )]
+    AggregatorMissingCompletionBound,
+
+    #[error("throttler max_requests must be > 0")]
+    ThrottlerMaxRequestsZero,
+
+    #[error("loop step must specify either 'count' or 'while', not both")]
+    LoopConflictingCountAndWhile,
+
+    #[error("loop step must specify either 'count' or 'while'")]
+    LoopMissingCountOrWhile,
+
+    #[error("SQL use_message_body_for_sql requires allow_dynamic_query=true")]
+    SqlDynamicQueryWithoutAllowDynamic,
+}
+
 /// Core error type for the Camel framework.
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
@@ -58,6 +84,12 @@ pub enum CamelError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// Typed security-validation error (ADR-0033). Promotes Batch 1+ config/startup
+    /// failure modes from stringly-typed `Config(_)` to a matchable enum so
+    /// operators can discriminate programmatically.
+    #[error("Configuration validation error: {0}")]
+    ConfigValidation(ConfigValidationError),
+
     #[error("Body stream has already been consumed")]
     AlreadyConsumed,
 
@@ -86,7 +118,7 @@ impl CamelError {
             Self::RouteError(_) => "route",
             Self::CircuitOpen(_) => "circuit_open",
             Self::HttpOperationFailed { .. } => "http",
-            Self::Config(_) => "config",
+            Self::Config(_) | Self::ConfigValidation(_) => "config",
             Self::DeadLetterChannelFailed(_) => "dead_letter",
             Self::ConsumerStopping => "consumer_stop",
             Self::StreamLimitExceeded(_) => "stream",
@@ -122,6 +154,7 @@ impl CamelError {
             Self::HttpOperationFailed { .. } => "HttpOperationFailed",
             Self::ConsumerStopping => "ConsumerStopping",
             Self::Config(_) => "Config",
+            Self::ConfigValidation(_) => "ConfigValidation",
             Self::AlreadyConsumed => "AlreadyConsumed",
             Self::StreamLimitExceeded(_) => "StreamLimitExceeded",
             Self::Unauthenticated(_) => "Unauthenticated",
@@ -140,6 +173,12 @@ impl From<std::io::Error> for CamelError {
 impl From<crate::template::TemplateError> for CamelError {
     fn from(err: crate::template::TemplateError) -> Self {
         CamelError::Config(err.to_string())
+    }
+}
+
+impl From<ConfigValidationError> for CamelError {
+    fn from(e: ConfigValidationError) -> Self {
+        CamelError::ConfigValidation(e)
     }
 }
 
@@ -172,6 +211,7 @@ mod tests {
             },
             CamelError::ConsumerStopping,
             CamelError::Config("x".to_string()),
+            CamelError::ConfigValidation(ConfigValidationError::ThrottlerMaxRequestsZero),
             CamelError::AlreadyConsumed,
             CamelError::StreamLimitExceeded(42),
             CamelError::Unauthenticated("token expired".to_string()),
@@ -258,6 +298,11 @@ mod tests {
             "http"
         );
         assert_eq!(CamelError::Config("x".to_string()).classify(), "config");
+        assert_eq!(
+            CamelError::ConfigValidation(ConfigValidationError::ThrottlerMaxRequestsZero)
+                .classify(),
+            "config"
+        );
         assert_eq!(CamelError::AlreadyConsumed.classify(), "type_conversion");
         assert_eq!(CamelError::StreamLimitExceeded(42).classify(), "stream");
         assert_eq!(
@@ -309,7 +354,7 @@ mod tests {
 
 #[cfg(test)]
 mod variant_name_tests {
-    use super::CamelError;
+    use super::{CamelError, ConfigValidationError};
     use std::sync::Arc;
 
     /// Representative value for each enum variant. This test fails to compile
@@ -359,6 +404,10 @@ mod variant_name_tests {
                 "HttpOperationFailed",
             ),
             (CamelError::Config("x".into()), "Config"),
+            (
+                CamelError::ConfigValidation(ConfigValidationError::ThrottlerMaxRequestsZero),
+                "ConfigValidation",
+            ),
             (CamelError::AlreadyConsumed, "AlreadyConsumed"),
             (CamelError::StreamLimitExceeded(42), "StreamLimitExceeded"),
             (CamelError::Unauthenticated("x".into()), "Unauthenticated"),

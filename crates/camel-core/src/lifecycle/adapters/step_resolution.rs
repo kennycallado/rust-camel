@@ -421,8 +421,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            both.to_string()
-                .contains("cannot specify both 'count' and 'while'")
+            matches!(
+                both,
+                CamelError::ConfigValidation(
+                    camel_api::ConfigValidationError::LoopConflictingCountAndWhile,
+                )
+            ),
+            "expected ConfigValidation(LoopConflictingCountAndWhile), got: {both}"
         );
 
         let neither = resolve_steps(
@@ -445,9 +450,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            neither
-                .to_string()
-                .contains("must specify either 'count' or 'while'")
+            matches!(
+                neither,
+                CamelError::ConfigValidation(
+                    camel_api::ConfigValidationError::LoopMissingCountOrWhile,
+                )
+            ),
+            "expected ConfigValidation(LoopMissingCountOrWhile), got: {neither}"
         );
     }
 
