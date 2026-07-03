@@ -53,5 +53,9 @@ pub(crate) enum DelegateState {
     Active {
         run_token: CancellationToken,
         handle: JoinHandle<Result<(), CamelError>>,
+        /// Handle to the epoch-stamping bridge task. Joined by `stop_delegate`
+        /// within `drain_timeout`. Aborted on timeout to prevent detached
+        /// tasks from sending stale exchanges.
+        bridge_handle: Option<JoinHandle<()>>,
     },
 }

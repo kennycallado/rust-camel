@@ -2061,6 +2061,7 @@ dependencies = [
  "camel-component-api",
  "camel-language-api",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",

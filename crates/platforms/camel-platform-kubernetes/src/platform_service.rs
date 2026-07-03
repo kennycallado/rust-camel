@@ -1,7 +1,8 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,7 +18,7 @@ use k8s_openapi::jiff::Timestamp as JiffTimestamp;
 pub fn ensure_rustls_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
-use kube::api::{DeleteParams, PostParams, Preconditions};
+use kube::api::PostParams;
 use kube::{Api, Client};
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -81,6 +82,7 @@ impl Default for KubernetesPlatformConfig {
 struct CachedLock {
     event_tx: watch::Sender<Option<LeadershipEvent>>,
     is_leader: Arc<AtomicBool>,
+    leader_epoch: Arc<AtomicU64>,
     cancel: CancellationToken,
     ref_count: AtomicUsize,
     terminated: AtomicBool,
@@ -88,10 +90,15 @@ struct CachedLock {
 }
 
 impl CachedLock {
-    fn new(event_tx: watch::Sender<Option<LeadershipEvent>>, is_leader: Arc<AtomicBool>) -> Self {
+    fn new(
+        event_tx: watch::Sender<Option<LeadershipEvent>>,
+        is_leader: Arc<AtomicBool>,
+        leader_epoch: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             event_tx,
             is_leader,
+            leader_epoch,
             cancel: CancellationToken::new(),
             ref_count: AtomicUsize::new(0),
             terminated: AtomicBool::new(false),
@@ -154,6 +161,7 @@ impl KubernetesLeadershipService {
         LeadershipHandle::new(
             cached_lock.event_tx.subscribe(),
             Arc::clone(&cached_lock.is_leader),
+            Arc::clone(&cached_lock.leader_epoch),
             handle_cancel,
             term_rx,
         )
@@ -176,7 +184,12 @@ impl LeadershipService for KubernetesLeadershipService {
 
         let (event_tx, _event_rx) = watch::channel(None);
         let is_leader = Arc::new(AtomicBool::new(false));
-        let cached_lock = Arc::new(CachedLock::new(event_tx, Arc::clone(&is_leader)));
+        let leader_epoch = Arc::new(AtomicU64::new(0));
+        let cached_lock = Arc::new(CachedLock::new(
+            event_tx,
+            Arc::clone(&is_leader),
+            Arc::clone(&leader_epoch),
+        ));
 
         {
             let mut locks = self
@@ -199,6 +212,7 @@ impl LeadershipService for KubernetesLeadershipService {
         let namespace = resolve_lease_namespace(&config, &self.identity);
         let cancel_task = cached_lock.cancel.clone();
         let is_leader_task = Arc::clone(&cached_lock.is_leader);
+        let leader_epoch_task = Arc::clone(&cached_lock.leader_epoch);
         let event_tx_task = cached_lock.event_tx.clone();
         let cached_lock_task = Arc::clone(&cached_lock);
         let locks_map = Arc::clone(&self.locks);
@@ -215,9 +229,11 @@ impl LeadershipService for KubernetesLeadershipService {
                     break;
                 }
 
-                let leader_now =
+                let cycle_start = std::time::Instant::now();
+
+                let (leader_now, confirmed_term) =
                     match reconcile_lease(&leases, &lease_name, &config, &holder_identity).await {
-                        Ok(value) => value,
+                        Ok((value, term)) => (value, term),
                         Err(err) => {
                             warn!(
                                 lease_name = %lease_name,
@@ -226,26 +242,51 @@ impl LeadershipService for KubernetesLeadershipService {
                                 error = %err,
                                 "leader election cycle failed"
                             );
-                            false
+                            (false, None)
                         }
                     };
 
                 if leader_now != currently_leader {
                     currently_leader = leader_now;
                     is_leader_task.store(leader_now, Ordering::Release);
+
+                    if leader_now {
+                        // Store the server-confirmed leader-term as the fencing epoch.
+                        // The term is a server-authoritative annotation counter on the
+                        // Lease object, incremented on each takeover via optimistic
+                        // concurrency — globally monotonic across pods. See ADR-0035.
+                        // Fallback to 1 if server stripped the annotation (defensive).
+                        let term = confirmed_term.unwrap_or(1);
+                        leader_epoch_task.store(term, Ordering::Release);
+                        tracing::debug!(
+                            lease_name = %lease_name,
+                            leader_epoch = term,
+                            "leader epoch set from lease annotation"
+                        );
+                    }
+
                     let event = if leader_now {
                         LeadershipEvent::StartedLeading
                     } else {
                         LeadershipEvent::StoppedLeading
                     };
                     let _ = event_tx_task.send(Some(event));
+                } else if leader_now {
+                    // Renewal (still leader) — server should return the same term.
+                    // Update defensively if it ever differs.
+                    if let Some(term) = confirmed_term {
+                        let current = leader_epoch_task.load(Ordering::Acquire);
+                        if term != current {
+                            leader_epoch_task.store(term, Ordering::Release);
+                        }
+                    }
                 }
 
-                let sleep_for = if currently_leader {
-                    config.renew_deadline
-                } else {
-                    jittered_duration(config.retry_period, config.jitter_factor)
-                };
+                // Deadline-scheduled sleep: when leading, subtract cycle
+                // elapsed time from renew_deadline. If the cycle took longer
+                // than renew_deadline, sleep is 0 and the next cycle starts
+                // immediately, detecting lease expiry and stepping down.
+                let sleep_for = next_cycle_sleep(currently_leader, cycle_start.elapsed(), &config);
 
                 tokio::select! {
                     _ = cancel_task.cancelled() => {
@@ -305,6 +346,26 @@ fn jittered_duration(base: Duration, jitter_factor: f64) -> Duration {
     }
     let jitter = capped_ms * jitter_factor * (rand::random::<f64>() * 2.0 - 1.0);
     Duration::from_millis((capped_ms + jitter).max(0.0) as u64)
+}
+
+/// Compute the sleep duration before the next renew cycle.
+///
+/// When leading: `renew_deadline.saturating_sub(cycle_elapsed)` — if the
+/// reconcile cycle took longer than `renew_deadline`, the next cycle
+/// starts immediately (sleep = 0), detecting lease expiry and stepping
+/// down without waiting for a fresh slot.
+///
+/// When not leading: jittered `retry_period` (avoids thundering herd).
+fn next_cycle_sleep(
+    is_leader: bool,
+    cycle_elapsed: Duration,
+    config: &KubernetesPlatformConfig,
+) -> Duration {
+    if is_leader {
+        config.renew_deadline.saturating_sub(cycle_elapsed)
+    } else {
+        jittered_duration(config.retry_period, config.jitter_factor)
+    }
 }
 
 pub struct KubernetesPlatformService {
@@ -446,14 +507,18 @@ async fn reconcile_lease(
     lease_name: &str,
     config: &KubernetesPlatformConfig,
     holder_identity: &str,
-) -> Result<bool, kube::Error> {
+) -> Result<(bool, Option<u64>), kube::Error> {
     let now = JiffTimestamp::now();
 
     let maybe_lease = leases.get_opt(lease_name).await?;
     let Some(mut lease) = maybe_lease else {
+        // First-time create — initialize leader-term to 1.
+        let mut annotations = BTreeMap::new();
+        annotations.insert(LEADER_TERM_ANNOTATION.to_string(), "1".to_string());
         let lease = Lease {
             metadata: ObjectMeta {
                 name: Some(lease_name.to_string()),
+                annotations: Some(annotations),
                 ..ObjectMeta::default()
             },
             spec: Some(LeaseSpec {
@@ -465,14 +530,15 @@ async fn reconcile_lease(
             }),
         };
         match leases.create(&PostParams::default(), &lease).await {
-            Ok(_) => {}
+            Ok(created) => {
+                return Ok((true, extract_leader_term(&created)));
+            }
             Err(err) if is_optimistic_conflict(&err) => {
                 // Another contender created the lease first. This cycle loses leadership and retries.
-                return Ok(false);
+                return Ok((false, None));
             }
             Err(err) => return Err(err),
         }
-        return Ok(true);
     };
 
     let spec = lease.spec.clone().unwrap_or_default();
@@ -480,6 +546,13 @@ async fn reconcile_lease(
     let is_ours = holder == Some(holder_identity);
 
     if is_ours {
+        // Ensure annotation exists (for leases created before this feature).
+        // Missing annotation on renew → initialize to 1 so epoch is never 0.
+        if extract_leader_term(&lease).is_none() {
+            let annotations = lease.metadata.annotations.get_or_insert_with(BTreeMap::new);
+            annotations.insert(LEADER_TERM_ANNOTATION.to_string(), "1".to_string());
+        }
+        // Renew — preserve the existing leader-term annotation unchanged.
         lease.spec = Some(LeaseSpec {
             holder_identity: Some(holder_identity.to_string()),
             lease_duration_seconds: Some(config.lease_duration.as_secs() as i32),
@@ -491,17 +564,42 @@ async fn reconcile_lease(
             .replace(lease_name, &PostParams::default(), &lease)
             .await
         {
-            Ok(_) => {}
+            Ok(replaced) => return Ok((true, extract_leader_term(&replaced))),
             Err(err) if is_optimistic_conflict(&err) => {
                 // Replace carries resourceVersion from the fetched lease; 409 means stale generation.
-                return Ok(false);
+                return Ok((false, None));
             }
             Err(err) => return Err(err),
         }
-        return Ok(true);
     }
 
     if lease_is_expired(&spec, now) {
+        // Takeover — increment the leader-term from the current annotation.
+        // A missing or malformed annotation is treated as 0 (so the new term is 1).
+        let current_term = match extract_leader_term(&lease) {
+            Some(term) => term,
+            None => {
+                let raw = lease
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get(LEADER_TERM_ANNOTATION));
+                if raw.is_some() {
+                    warn!(
+                        lease_name = %lease_name,
+                        annotation = ?raw,
+                        "malformed camel.io/leader-term annotation, resetting to 1"
+                    );
+                }
+                0
+            }
+        };
+        let new_term = current_term + 1;
+
+        // Ensure annotations map exists, then write the incremented term.
+        let annotations = lease.metadata.annotations.get_or_insert_with(BTreeMap::new);
+        annotations.insert(LEADER_TERM_ANNOTATION.to_string(), new_term.to_string());
+
         lease.spec = Some(LeaseSpec {
             holder_identity: Some(holder_identity.to_string()),
             lease_duration_seconds: Some(config.lease_duration.as_secs() as i32),
@@ -513,17 +611,33 @@ async fn reconcile_lease(
             .replace(lease_name, &PostParams::default(), &lease)
             .await
         {
-            Ok(_) => {}
+            Ok(replaced) => return Ok((true, extract_leader_term(&replaced))),
             Err(err) if is_optimistic_conflict(&err) => {
                 // Lease changed between read and replace; treat as lost race and retry next cycle.
-                return Ok(false);
+                return Ok((false, None));
             }
             Err(err) => return Err(err),
         }
-        return Ok(true);
     }
 
-    Ok(false)
+    Ok((false, None))
+}
+
+/// Server-authoritative annotation counter on the Lease — incremented on each
+/// takeover via optimistic concurrency. Globally monotonic across pods. See
+/// ADR-0035 for full design.
+const LEADER_TERM_ANNOTATION: &str = "camel.io/leader-term";
+
+/// Read the leader-term annotation from a Lease. Returns `None` if the
+/// annotation is missing, not a valid `u64`, or zero (epoch 0 = no leader).
+fn extract_leader_term(lease: &Lease) -> Option<u64> {
+    lease
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|anns| anns.get(LEADER_TERM_ANNOTATION))
+        .and_then(|v| v.parse().ok())
+        .filter(|&term| term > 0)
 }
 
 fn lease_is_expired(spec: &LeaseSpec, now: JiffTimestamp) -> bool {
@@ -542,41 +656,37 @@ async fn release_lease(
     lease_name: &str,
     holder_identity: &str,
 ) -> Result<(), kube::Error> {
-    let Some(lease) = leases.get_opt(lease_name).await? else {
+    let Some(mut lease) = leases.get_opt(lease_name).await? else {
         return Ok(());
     };
 
-    let Some(delete_params) = delete_params_for_owned_lease(&lease, holder_identity) else {
-        return Ok(());
-    };
+    let spec = lease.spec.clone().unwrap_or_default();
 
-    match leases.delete(lease_name, &delete_params).await {
+    // Only release if we still hold this lease.
+    if spec.holder_identity.as_deref() != Some(holder_identity) {
+        return Ok(());
+    }
+
+    // Expire the lease by setting renewTime to the unix epoch.
+    // We do NOT delete the lease — this preserves the camel.io/leader-term
+    // annotation so the next acquirer increments from the last value
+    // (global monotonicity, ADR-0035).
+    let expired_time =
+        MicroTime(JiffTimestamp::from_second(0).unwrap_or_else(|_| JiffTimestamp::now()));
+    lease.spec = Some(LeaseSpec {
+        holder_identity: Some(holder_identity.to_string()),
+        renew_time: Some(expired_time),
+        ..spec
+    });
+
+    match leases
+        .replace(lease_name, &PostParams::default(), &lease)
+        .await
+    {
         Ok(_) => Ok(()),
         Err(err) if is_optimistic_conflict(&err) || is_not_found(&err) => Ok(()),
         Err(err) => Err(err),
     }
-}
-
-fn delete_params_for_owned_lease(lease: &Lease, holder_identity: &str) -> Option<DeleteParams> {
-    let spec = lease.spec.as_ref()?;
-    let holder = spec.holder_identity.as_deref()?;
-    if holder != holder_identity {
-        return None;
-    }
-
-    let uid = lease.metadata.uid.clone();
-    let resource_version = lease.metadata.resource_version.clone();
-    if uid.is_none() && resource_version.is_none() {
-        return None;
-    }
-
-    Some(DeleteParams {
-        preconditions: Some(Preconditions {
-            uid,
-            resource_version,
-        }),
-        ..DeleteParams::default()
-    })
 }
 
 fn is_optimistic_conflict(err: &kube::Error) -> bool {
@@ -647,59 +757,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_params_are_built_only_for_owned_lease_with_server_metadata() {
-        let lease = Lease {
-            metadata: ObjectMeta {
-                uid: Some("uid-1".to_string()),
-                resource_version: Some("rv-1".to_string()),
-                ..ObjectMeta::default()
-            },
-            spec: Some(LeaseSpec {
-                holder_identity: Some("pod-a".to_string()),
-                ..LeaseSpec::default()
-            }),
-        };
-
-        let delete = delete_params_for_owned_lease(&lease, "pod-a");
-        let pre = delete
-            .unwrap()
-            .preconditions
-            .expect("preconditions should be set");
-        assert_eq!(pre.uid.as_deref(), Some("uid-1"));
-        assert_eq!(pre.resource_version.as_deref(), Some("rv-1"));
-    }
-
-    #[test]
-    fn delete_params_are_not_built_for_foreign_holder() {
-        let lease = Lease {
-            metadata: ObjectMeta {
-                uid: Some("uid-1".to_string()),
-                resource_version: Some("rv-1".to_string()),
-                ..ObjectMeta::default()
-            },
-            spec: Some(LeaseSpec {
-                holder_identity: Some("pod-b".to_string()),
-                ..LeaseSpec::default()
-            }),
-        };
-
-        assert!(delete_params_for_owned_lease(&lease, "pod-a").is_none());
-    }
-
-    #[test]
-    fn delete_params_are_not_built_without_precondition_metadata() {
-        let lease = Lease {
-            metadata: ObjectMeta::default(),
-            spec: Some(LeaseSpec {
-                holder_identity: Some("pod-a".to_string()),
-                ..LeaseSpec::default()
-            }),
-        };
-
-        assert!(delete_params_for_owned_lease(&lease, "pod-a").is_none());
-    }
-
-    #[test]
     fn conflict_classification_is_explicit_for_409_api_errors() {
         let err = kube::Error::Api(Box::new(Status {
             status: Some(StatusSummary::Failure),
@@ -755,5 +812,37 @@ mod tests {
     fn jittered_duration_with_zero_factor_is_stable() {
         let base = Duration::from_millis(750);
         assert_eq!(jittered_duration(base, 0.0), base);
+    }
+
+    #[test]
+    fn next_cycle_sleep_subtracts_elapsed_when_leading() {
+        // Default config: renew_deadline = 10s, retry_period = 2s, jitter = 0.2
+        let config = KubernetesPlatformConfig::default();
+        let sleep = next_cycle_sleep(true, Duration::from_secs(3), &config);
+        assert_eq!(sleep, Duration::from_secs(7)); // 10s - 3s
+    }
+
+    #[test]
+    fn next_cycle_sleep_zero_when_elapsed_exceeds_deadline() {
+        let config = KubernetesPlatformConfig::default();
+        // elapsed exactly == renew_deadline
+        let sleep = next_cycle_sleep(true, config.renew_deadline, &config);
+        assert_eq!(sleep, Duration::ZERO);
+        // elapsed > renew_deadline
+        let sleep = next_cycle_sleep(
+            true,
+            config.renew_deadline + Duration::from_millis(100),
+            &config,
+        );
+        assert_eq!(sleep, Duration::ZERO);
+    }
+
+    #[test]
+    fn next_cycle_sleep_uses_retry_period_when_not_leading() {
+        // Default config: retry_period = 2s, jitter_factor = 0.2 → [1.6s, 2.4s]
+        let config = KubernetesPlatformConfig::default();
+        let sleep = next_cycle_sleep(false, Duration::from_secs(5), &config);
+        assert!(sleep >= Duration::from_millis(1600));
+        assert!(sleep <= Duration::from_millis(2400));
     }
 }

@@ -1,4 +1,5 @@
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -155,6 +156,7 @@ impl LeadershipService for DropSensitiveLeadershipService {
         Ok(LeadershipHandle::new(
             rx,
             Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicU64::new(1)),
             cancel,
             term_rx,
         ))
@@ -205,6 +207,7 @@ impl LeadershipService for FakeLeadershipService {
         Ok(LeadershipHandle::new(
             rx,
             Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicU64::new(1)),
             cancel,
             term_rx,
         ))

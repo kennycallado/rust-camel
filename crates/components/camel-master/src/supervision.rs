@@ -45,6 +45,7 @@ impl Consumer for MasterConsumer {
         let stop_token = CancellationToken::new();
         let stop_token_loop = stop_token.clone();
         let leadership_handle = handle;
+        let leader_epoch = leadership_handle.leader_epoch_arc();
 
         let task = tokio::spawn(async move {
             let mut state = DelegateState::Inactive;
@@ -63,6 +64,7 @@ impl Consumer for MasterConsumer {
                 metrics: &metrics,
                 platform_service: &platform_service,
                 runtime: Arc::clone(&runtime),
+                leader_epoch: Arc::clone(&leader_epoch),
             };
 
             let initial_event = { events.borrow().clone() };

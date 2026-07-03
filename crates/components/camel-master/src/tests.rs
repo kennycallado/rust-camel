@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use camel_api::{
     BoxProcessorExt, Exchange, LeadershipEvent, LeadershipHandle, LeadershipService, Message,
@@ -349,6 +349,7 @@ impl LeadershipService for FakeLeadershipService {
         Ok(LeadershipHandle::new(
             rx,
             Arc::clone(&self.is_leader),
+            Arc::new(AtomicU64::new(1)),
             cancel,
             term_rx,
         ))

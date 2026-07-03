@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -55,6 +55,11 @@ pub struct LeadershipHandle {
     pub events: watch::Receiver<Option<LeadershipEvent>>,
     /// Atomic readable shortcut for current leadership state.
     is_leader: Arc<AtomicBool>,
+    /// Monotonic fencing token — incremented on each new leader acquisition.
+    /// `0` means leadership has not been acquired yet. Downstream sinks SHOULD
+    /// stamp this on every emitted Exchange and reject envelopes whose epoch
+    /// is older than the current leader's epoch (split-brain safety).
+    leader_epoch: Arc<AtomicU64>,
     /// Internal — used by `step_down()` to cancel the elector loop.
     cancel: CancellationToken,
     /// Await full loop termination after `step_down()`.
@@ -67,12 +72,14 @@ impl LeadershipHandle {
     pub fn new(
         events: watch::Receiver<Option<LeadershipEvent>>,
         is_leader: Arc<AtomicBool>,
+        leader_epoch: Arc<AtomicU64>,
         cancel: CancellationToken,
         terminated: tokio::sync::oneshot::Receiver<()>,
     ) -> Self {
         Self {
             events,
             is_leader,
+            leader_epoch,
             cancel,
             terminated: Some(terminated),
         }
@@ -80,6 +87,18 @@ impl LeadershipHandle {
 
     pub fn is_leader(&self) -> bool {
         self.is_leader.load(Ordering::Acquire)
+    }
+
+    /// Current leader epoch (monotonic fencing token).
+    /// `0` = no leadership acquired yet. A return of `0` MUST be treated as
+    /// "no valid token" by downstream sinks.
+    pub fn leader_epoch(&self) -> u64 {
+        self.leader_epoch.load(Ordering::Acquire)
+    }
+
+    /// Clone the inner epoch counter (for sharing with bridge tasks).
+    pub fn leader_epoch_arc(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.leader_epoch)
     }
 
     /// Signal step-down AND await full teardown with a 10-second timeout:
@@ -160,6 +179,10 @@ impl LeadershipService for NoopLeadershipService {
         let cancel_for_task = cancel.clone();
         let is_leader = Arc::new(AtomicBool::new(true));
         let is_leader_for_task = Arc::clone(&is_leader);
+        // Noop models a single-node deployment: epoch is a constant `1` and
+        // never changes. This is correct fencing because there is no split-brain
+        // risk — see ADR-0035.
+        let leader_epoch = Arc::new(AtomicU64::new(1));
         let lock_name = lock_name.to_string();
 
         tokio::spawn(async move {
@@ -170,7 +193,13 @@ impl LeadershipService for NoopLeadershipService {
             let _ = term_tx.send(());
         });
 
-        Ok(LeadershipHandle::new(rx, is_leader, cancel, term_rx))
+        Ok(LeadershipHandle::new(
+            rx,
+            is_leader,
+            leader_epoch,
+            cancel,
+            term_rx,
+        ))
     }
 }
 
