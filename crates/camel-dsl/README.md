@@ -22,6 +22,11 @@
 
 - **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax with optional defaults `${env:VAR_NAME:-default}`
 - **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, recipient_list, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip, do_try
+- **REST DSL** — declarative `rest:` blocks in YAML/JSON that lower to HTTP
+  consumer routes with automatic JSON binding, path templates (`/users/{id}`),
+  and optional request schema validation.
+- **OpenAPI code-first generation** — generate OpenAPI 3.0.3 documents from
+  `rest:` AST blocks via `camel openapi generate <file>`.
 
 ## Supported YAML Steps
 
@@ -120,6 +125,70 @@ steps:
       name: "myProcessor"
       method: "handle"
 ```
+
+## REST DSL
+
+The `rest:` top-level block defines REST APIs declaratively. It lowers to
+`http:` consumer routes with JSON binding, path template matching, and
+optional schema validation.
+
+```yaml
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api/users
+    operations:
+      get:
+        operation_id: listUsers
+        to: direct:listUsers
+      post:
+        operation_id: createUser
+        consumes: application/json
+        produces: application/json
+        success_status: 201
+        to: direct:createUser
+        request_schema:
+          type: object
+          properties:
+            name: { type: string }
+          required: [name]
+      delete:
+        path: /{id}
+        operation_id: deleteUser
+        success_status: 204
+        to: direct:deleteUser
+```
+
+Key features:
+- **Path templates**: `/api/users/{id}` — path params extracted and injected
+  as `CamelHttpPath_<name>` headers.
+- **Schema validation**: when `request_schema` is present, the request body
+  is validated after unmarshaling. Failures return `ValidationError → 400`.
+- **Default status**: `success_status` sets the initial `CamelHttpResponseCode`
+  (200 for GET/PUT, 201 for POST, 204 for DELETE by default).
+- **Operations per verb**: each HTTP verb (`get`, `post`, `put`, `delete`,
+  `patch`) maps to one operation per `rest:` block.
+
+### OpenAPI generation
+
+Generate an OpenAPI 3.0.3 document from `rest:` blocks:
+
+```rust
+use camel_dsl::openapi::generate_openapi;
+use camel_dsl::yaml::extract_rest_blocks;
+
+let blocks = extract_rest_blocks(&yaml_string)?;
+let result = generate_openapi(&blocks, "My API", "1.0.0");
+println!("{}", serde_json::to_string_pretty(&result.document)?);
+```
+
+Or via CLI:
+
+```bash
+camel openapi generate routes.yaml --title "My API"
+```
+
+Missing schemas produce weak stubs (`type: object`) with generation warnings.
 
 ## Installation
 Add to your `Cargo.toml`:

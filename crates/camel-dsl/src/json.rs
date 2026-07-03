@@ -33,11 +33,17 @@ pub fn parse_json_to_declarative(
 fn parse_json_to_declarative_inner(
     json: &str,
 ) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
-    let routes: RouteDslRoutes = serde_json::from_str(json)
+    let mut dsl: RouteDslRoutes = serde_json::from_str(json)
         .map_err(|e| CamelError::RouteError(format!("JSON parse error: {e}")))?;
 
-    routes
-        .routes
+    // Expand REST blocks (review I2): the JSON authoring path previously
+    // dropped `rest:` silently. JSON is a full-DSL authoring format
+    // (ADR-0026), so it lowers `rest:` exactly like the YAML path — via the
+    // shared helper that also runs cross-block validation.
+    crate::rest::expand_rest_into(&mut dsl.routes, &dsl.rest)?;
+    crate::rest::check_duplicate_route_ids(&dsl.routes)?;
+
+    dsl.routes
         .into_iter()
         .map(route_dsl_to_declarative_route)
         .collect()
@@ -592,6 +598,63 @@ mod tests {
         assert!(
             err.contains("JSON DSL error: JSON parse error:"),
             "expected double prefix for parse errors, got: {err}"
+        );
+    }
+
+    /// Review I2: the JSON authoring path must lower `rest:` blocks, not
+    /// silently drop them. JSON is a full-DSL authoring format (ADR-0026),
+    /// so a `rest:` block expands exactly like the YAML path.
+    #[test]
+    fn json_rest_block_expands_into_routes() {
+        let json = r#"{
+            "rest": [
+                {
+                    "host": "0.0.0.0",
+                    "port": 8080,
+                    "path": "/users",
+                    "operations": {
+                        "get": { "path": "/{id}", "operation_id": "getUser", "to": "bean:svc" },
+                        "post": { "path": "/", "operation_id": "createUser", "to": "bean:create" }
+                    }
+                }
+            ]
+        }"#;
+        let routes = parse_json_to_declarative(json).unwrap();
+        // Two operations → two lowered routes.
+        assert_eq!(routes.len(), 2);
+        let ids: Vec<&str> = routes.iter().map(|r| r.route_id.as_str()).collect();
+        assert!(ids.contains(&"getUser"));
+        assert!(ids.contains(&"createUser"));
+        // Each route's from-URI carries the templated path + httpMethod.
+        let get_route = routes.iter().find(|r| r.route_id == "getUser").unwrap();
+        assert!(get_route.from.contains("/users/{id}"));
+        assert!(get_route.from.contains("httpMethod=GET"));
+    }
+
+    /// Review I2 + C3: the JSON path runs the same cross-block validation
+    /// as YAML — duplicate (method, path) tuples must be rejected.
+    #[test]
+    fn json_rest_rejects_duplicate_method_path() {
+        let json = r#"{
+            "rest": [
+                {
+                    "path": "/users",
+                    "operations": {
+                        "get": { "path": "/{id}", "operation_id": "a", "to": "bean:x" }
+                    }
+                },
+                {
+                    "path": "/users",
+                    "operations": {
+                        "get": { "path": "/{id}", "operation_id": "b", "to": "bean:y" }
+                    }
+                }
+            ]
+        }"#;
+        let result = parse_json_to_declarative(json);
+        assert!(
+            result.is_err(),
+            "JSON rest must reject duplicate (method, path)"
         );
     }
 }

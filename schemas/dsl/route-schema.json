@@ -2391,7 +2391,12 @@
       "type": "object"
     },
     "UnmarshalStep": {
+      "additionalProperties": false,
       "properties": {
+        "schema": {
+          "default": null,
+          "description": "Optional JSON Schema. When present, the compiled UnmarshalService is\nwrapped with a `JsonSchemaValidateService` that returns\n`CamelError::ValidationError` (→ 400 Bad Request) on a mismatch.\nOnly effective when the format parses to `Body::Json` (currently `json`\nis the only format that produces JSON in v1)."
+        },
         "unmarshal": {
           "type": "string"
         }

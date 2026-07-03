@@ -91,6 +91,11 @@ camel run
 This scaffolds a project with a `Camel.toml`, `routes/hello.yaml`, and runs it.
 See [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for all CLI commands.
 
+```bash
+# Generate OpenAPI document from REST route files
+camel openapi generate routes.yaml --title "My API"
+```
+
 ## Docker
 
 Pre-built images are available on [GHCR](https://github.com/kennycallado/rust-camel/pkgs/container/rust-camel) and [Docker Hub](https://hub.docker.com/r/kennycallado/rust-camel).
@@ -158,6 +163,61 @@ async fn main() -> Result<(), CamelError> {
 cargo run
 ```
 
+## REST DSL & OpenAPI
+
+Define REST APIs declaratively in YAML with automatic JSON binding, path
+templates, schema validation, and OpenAPI document generation.
+
+```yaml
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api/users
+    operations:
+      get:
+        operation_id: listUsers
+        to: direct:listUsers
+        produces: application/json
+      post:
+        operation_id: createUser
+        consumes: application/json
+        produces: application/json
+        success_status: 201
+        to: direct:createUser
+        request_schema:
+          type: object
+          properties:
+            name:
+              type: string
+            email:
+              type: string
+          required: [name, email]
+      get:
+        path: /{id}
+        operation_id: getUser
+        to: direct:getUser
+      delete:
+        path: /{id}
+        operation_id: deleteUser
+        to: direct:deleteUser
+        success_status: 204
+```
+
+The `rest:` block lowers to `http:` consumer routes with:
+- `unmarshal(json)` for body verbs (POST/PUT/PATCH)
+- JSON schema validation when `request_schema` is present (→ 400 on failure)
+- `marshal(json)` + `Content-Type: application/json` on the response path
+- Default status codes (200/201/204) via `CamelHttpResponseCode` header
+
+Generate an OpenAPI 3.0.3 document from REST routes:
+
+```bash
+camel openapi generate routes.yaml --title "Users API" --version "1.0.0"
+```
+
+See [`examples/rest-crud/`](examples/rest-crud/README.md) for a complete
+runnable example with in-memory CRUD storage and static file co-hosting.
+
 ## Crate Map
 
 | Crate                       | Description                                                                                                                                                                                                                                                  |
@@ -206,6 +266,7 @@ cargo run
 | `camel-language-xpath`      | XPath 1.0 language for XML body queries: `/books/book[1]/title`. Requires `lang-xpath` feature.                                                                                                                                                              |
 | `camel-prometheus`          | Prometheus metrics exporter with /metrics endpoint                                                                                                                                                                                                           |
 | `camel-otel`                | OpenTelemetry tracing and metrics exporter                                                                                                                                                                                                                   |
+| [`examples/rest-crud`]       | REST DSL + OpenAPI example — CRUD API with schema validation, static co-hosting                                                                                                                                                                               |
 
 ## Building & Testing
 

@@ -23,8 +23,13 @@ impl DataFormat for JsonDataFormat {
             Body::Stream(_) => Err(CamelError::TypeConversionFailed(
                 "cannot marshal Body::Stream — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
             )),
-            Body::Empty | Body::Xml(_) => Err(CamelError::TypeConversionFailed(
-                "JsonDataFormat::marshal only supports Body::Json, Body::Text, and Body::Bytes"
+            // Empty body: no-op. A REST handler that produces no body (e.g. a
+            // 204 DELETE) must not 500 at marshal — leave the body empty so the
+            // reply finaliser ships an empty response (spec §8.1).
+            Body::Empty => Ok(Body::Empty),
+            Body::Xml(_) => Err(CamelError::TypeConversionFailed(
+                "JsonDataFormat::marshal only supports Body::Json, Body::Text, Body::Bytes, \
+                 and Body::Empty"
                     .to_string(),
             )),
             Body::Bytes(b) => {
@@ -65,8 +70,13 @@ impl DataFormat for JsonDataFormat {
                 "cannot unmarshal Body::Stream directly — use UnmarshalService which auto-materializes"
                     .to_string(),
             )),
-            Body::Empty | Body::Xml(_) => Err(CamelError::TypeConversionFailed(
-                "JsonDataFormat::unmarshal only supports Body::Json, Body::Text, and Body::Bytes"
+            // Empty body: no-op. A body-less request (e.g. POST with no body)
+            // must skip unmarshal rather than 500 — spec §8.1: "if the body is
+            // empty, skip unmarshal".
+            Body::Empty => Ok(Body::Empty),
+            Body::Xml(_) => Err(CamelError::TypeConversionFailed(
+                "JsonDataFormat::unmarshal only supports Body::Json, Body::Text, Body::Bytes, \
+                 and Body::Empty"
                     .to_string(),
             )),
         }
@@ -117,9 +127,23 @@ mod tests {
 
     #[test]
     fn test_unmarshal_unsupported_variant() {
-        let body = Body::Empty;
+        let body = Body::Xml("<root/>".to_string());
         let result = JsonDataFormat.unmarshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn test_unmarshal_empty_is_noop() {
+        // spec §8.1: an empty request body skips unmarshal instead of erroring.
+        let result = JsonDataFormat.unmarshal(Body::Empty).unwrap();
+        assert!(matches!(result, Body::Empty));
+    }
+
+    #[test]
+    fn test_marshal_empty_is_noop() {
+        // spec §8.1: an empty response body marshals to empty (e.g. 204 DELETE).
+        let result = JsonDataFormat.marshal(Body::Empty).unwrap();
+        assert!(matches!(result, Body::Empty));
     }
 
     #[test]

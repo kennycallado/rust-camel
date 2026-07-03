@@ -11,7 +11,7 @@ use camel_api::splitter::{
     split_body_lines,
 };
 use camel_api::{
-    CamelError, CanonicalConcurrencySpec, CanonicalFieldLoss, CanonicalLossReport,
+    BoxProcessor, CamelError, CanonicalConcurrencySpec, CanonicalFieldLoss, CanonicalLossReport,
     CanonicalRouteSpec, CircuitBreakerConfig, DEFAULT_MAX_DELAY_MS, DelayConfig, IdentityProcessor,
     LoadBalanceStrategy, LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig,
     canonical_contract_rejection_reason,
@@ -28,8 +28,8 @@ use camel_core::route::{
     RouteDefinition, compose_pipeline,
 };
 use camel_processor::{
-    ConvertBodyTo, LogLevel, MarshalService, StreamCacheService, UnmarshalService,
-    builtin_data_format,
+    ConvertBodyTo, JsonSchemaValidateService, LogLevel, MarshalService, StreamCacheService,
+    UnmarshalService, builtin_data_format,
 };
 
 use crate::model::{
@@ -960,7 +960,23 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::Bean(BeanStepDef { name, method }) => {
             Ok(BuilderStep::Bean { name, method })
         }
-        DeclarativeStep::Marshal(DataFormatDef { format }) => {
+        DeclarativeStep::Marshal(DataFormatDef {
+            format: _,
+            schema: Some(_),
+        }) => {
+            // `schema` is meaningful only for Unmarshal — Marshal serialises a
+            // body to the wire format, it never validates input. Reject
+            // construct-then-discard silently; tell the author where the field
+            // belongs.
+            Err(CamelError::RouteError(
+                "marshal step does not support 'schema' — use 'unmarshal' for request validation"
+                    .to_string(),
+            ))
+        }
+        DeclarativeStep::Marshal(DataFormatDef {
+            format,
+            schema: None,
+        }) => {
             let df = if format.strip_prefix("protobuf:").is_some() {
                 #[cfg(feature = "protobuf")]
                 {
@@ -985,7 +1001,7 @@ fn compile_declarative_step_with_threshold(
                 MarshalService::new(camel_api::IdentityProcessor, df),
             )))
         }
-        DeclarativeStep::Unmarshal(DataFormatDef { format }) => {
+        DeclarativeStep::Unmarshal(DataFormatDef { format, schema }) => {
             let df = if format.strip_prefix("protobuf:").is_some() {
                 #[cfg(feature = "protobuf")]
                 {
@@ -1006,12 +1022,26 @@ fn compile_declarative_step_with_threshold(
                     ))
                 })?
             };
-            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-                StreamCacheService::new(
-                    UnmarshalService::new(camel_api::IdentityProcessor, df),
+            // When a JSON Schema is attached (REST DSL `request_schema`),
+            // wrap the unmarshal service with a JsonSchemaValidateService so
+            // mismatches surface as CamelError::ValidationError → 400 Bad
+            // Request. The chain is:
+            //   StreamCacheService(UnmarshalService(
+            //     JsonSchemaValidateService(IdentityProcessor, schema), df))
+            // — unmarshal runs first (raw text → Body::Json), then validate.
+            let inner: BoxProcessor = if let Some(schema) = schema {
+                let validator = JsonSchemaValidateService::new(IdentityProcessor, &schema)?;
+                BoxProcessor::new(StreamCacheService::new(
+                    UnmarshalService::new(validator, df),
                     camel_api::stream_cache::StreamCacheConfig::new(stream_cache_threshold),
-                ),
-            )))
+                ))
+            } else {
+                BoxProcessor::new(StreamCacheService::new(
+                    UnmarshalService::new(IdentityProcessor, df),
+                    camel_api::stream_cache::StreamCacheConfig::new(stream_cache_threshold),
+                ))
+            };
+            Ok(BuilderStep::Processor(inner))
         }
         DeclarativeStep::Delay(DelayStepDef {
             delay_ms,
@@ -2268,6 +2298,7 @@ mod tests {
     fn compile_marshal_json_to_processor() {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "json".to_string(),
+            schema: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_ok());
@@ -2278,6 +2309,7 @@ mod tests {
     fn compile_unmarshal_xml_to_processor() {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: "xml".to_string(),
+            schema: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_ok());
@@ -2288,6 +2320,7 @@ mod tests {
     fn compile_marshal_unknown_format_returns_error() {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "avro".to_string(),
+            schema: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
@@ -2297,6 +2330,7 @@ mod tests {
     fn compile_unmarshal_unknown_format_returns_error() {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: "protobuf".to_string(),
+            schema: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
@@ -2312,6 +2346,7 @@ mod tests {
     fn compile_marshal_protobuf_to_processor() {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: format!("protobuf:{}#helloworld.HelloRequest", proto_fixture_path()),
+            schema: None,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -2326,6 +2361,7 @@ mod tests {
     fn compile_unmarshal_protobuf_to_processor() {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: format!("protobuf:{}#helloworld.HelloReply", proto_fixture_path()),
+            schema: None,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -2340,15 +2376,58 @@ mod tests {
     fn compile_marshal_protobuf_bad_format() {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "protobuf:missing.proto#nonexistent".to_string(),
+            schema: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
     }
 
     #[test]
+    fn compile_marshal_with_schema_is_rejected() {
+        // Review finding I4: DataFormatDef.schema is meaningful only for
+        // Unmarshal. Marshal is a serialisation step — it has nothing to
+        // validate, so a `Some(_)` schema would be silently discarded. We
+        // reject the construct outright with a clear message pointing the
+        // author to the right step.
+        let step = DeclarativeStep::Marshal(DataFormatDef {
+            format: "json".to_string(),
+            schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["name"]
+            })),
+        });
+        let err = compile_declarative_step(step)
+            .expect_err("Marshal with schema must be rejected at compile time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("marshal step does not support 'schema'"),
+            "error should mention schema is unsupported on marshal, got: {msg}"
+        );
+        assert!(
+            msg.contains("unmarshal"),
+            "error should point the author to unmarshal, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_marshal_without_schema_still_succeeds() {
+        // Regression guard: the rejection arm must not catch the None case.
+        let step = DeclarativeStep::Marshal(DataFormatDef {
+            format: "json".to_string(),
+            schema: None,
+        });
+        let result = compile_declarative_step(step);
+        assert!(
+            result.is_ok(),
+            "marshal with no schema should compile, got: {result:?}"
+        );
+    }
+
+    #[test]
     fn declarative_step_name_marshal() {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "json".to_string(),
+            schema: None,
         });
         assert_eq!(declarative_step_name(&step), "marshal");
     }
@@ -2357,6 +2436,7 @@ mod tests {
     fn declarative_step_name_unmarshal() {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: "xml".to_string(),
+            schema: None,
         });
         assert_eq!(declarative_step_name(&step), "unmarshal");
     }

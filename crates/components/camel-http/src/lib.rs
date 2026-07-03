@@ -3,6 +3,7 @@ pub mod bundle;
 pub mod config;
 pub mod health;
 pub mod registry;
+pub(crate) mod rest_match;
 pub mod static_config;
 pub mod static_dispatch;
 pub mod static_endpoint;
@@ -430,6 +431,13 @@ pub struct HttpServerConfig {
     pub max_response_body: usize,
     /// Maximum number of in-flight requests handled concurrently by this server.
     pub max_inflight_requests: usize,
+    /// HTTP method this consumer handles (e.g. `"GET"`). When `Some`,
+    /// the consumer registers as a method-aware REST endpoint and the
+    /// path is treated as a template (e.g. `/users/{id}` is matched
+    /// against any `/users/<value>`). When `None`, the consumer
+    /// registers in the legacy path-only `api_routes` registry.
+    /// Extracted from the `httpMethod=` URI param at config build time.
+    pub method: Option<String>,
 }
 
 impl UriConfig for HttpServerConfig {
@@ -506,6 +514,13 @@ impl UriConfig for HttpServerConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1024);
 
+        // Uppercase-normalize so a hand-written `httpMethod=get` matches the
+        // uppercase method the dispatcher compares against (axum's
+        // `req.method().to_string()` yields "GET"). Without this, a
+        // lower-case `httpMethod` would never match and silently 404.
+        // Review I5.
+        let method = parts.params.get("httpMethod").map(|m| m.to_uppercase());
+
         Ok(Self {
             host,
             port,
@@ -513,6 +528,7 @@ impl UriConfig for HttpServerConfig {
             max_request_body,
             max_response_body,
             max_inflight_requests,
+            method,
         })
     }
 }
@@ -554,6 +570,12 @@ pub struct RequestEnvelope {
     pub query: String,
     pub headers: http::HeaderMap,
     pub body: StreamBody,
+    /// Path parameters extracted from a REST template match, e.g.
+    /// `id=42` for a request to `/users/42` matched against
+    /// `/users/{id}`. Empty for non-REST requests or for literal
+    /// template matches. The consumer turns these into
+    /// `CamelHttpPath_<param>` headers on the Exchange (expert guidance E2).
+    pub path_params: std::collections::HashMap<String, String>,
     pub reply_tx: tokio::sync::oneshot::Sender<HttpReply>,
 }
 
@@ -783,15 +805,59 @@ async fn monitor_axum_task(
 
 async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl IntoResponse {
     let path = req.uri().path().to_owned();
+    let method = req.method().to_string();
 
-    // 1. API match — lookup by path, only consume body if matched
+    // Dispatch precedence (spec §7.2 / ADR-0009):
+    //   1. Exact API path match (legacy `http:` routes without httpMethod)
+    //   2. Templated API path match (REST, method-aware, by specificity)
+    //   3. Static mount longest-prefix
+    //   4. SPA fallback
+    //
+    // Legacy exact runs first: it is a cheap HashMap get, and the two
+    // registries are mutually exclusive per route — a legacy route carries
+    // no `httpMethod` and lives only in `api_routes`, while a REST-lowered
+    // route carries `httpMethod` and lives only in `rest_endpoints`. So an
+    // exact hit can never shadow a REST route that should have matched,
+    // and running exact-first honours the documented precedence (the prior
+    // REST-first order let a templated `GET /api/{resource}` steal a
+    // request meant for an exact `GET /api/users`). Intra-REST method
+    // disambiguation is handled inside `match_endpoint`, not by this
+    // ordering. Review C2.
     let api_sender = {
         let inner = state.registry.inner.read().await;
         inner.api_routes.get(&path).cloned()
     }; // lock released BEFORE any IO
 
-    if let Some(sender) = api_sender {
-        let method = req.method().to_string();
+    let (rest_sender, path_params) = if api_sender.is_some() {
+        // Exact legacy match won — skip the templated scan entirely.
+        (None, Default::default())
+    } else {
+        let inner = state.registry.inner.read().await;
+        match rest_match::match_endpoint(&method, &path, &inner.rest_endpoints) {
+            rest_match::MatchOutcome::Found(m) => (Some(m.payload), m.path_params),
+            rest_match::MatchOutcome::Ambiguous => {
+                // Ambiguous registration should have been rejected at
+                // lowering time (rest.rs). Reaching here means two
+                // equal-specificity templates matched one request —
+                // surface a loud error rather than a silent 404. Review C3.
+                // log-policy: handler-owned
+                tracing::warn!(
+                    method = %method,
+                    path = %path,
+                    "ambiguous REST template match — returning 500"
+                );
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(AxumBody::from("Internal Server Error"))
+                    .expect("infallible"); // allow-unwrap
+            }
+            rest_match::MatchOutcome::NotFound => (None, Default::default()),
+        }
+    }; // lock released BEFORE any IO
+
+    let sender = api_sender.or(rest_sender);
+
+    if let Some(sender) = sender {
         let query = req.uri().query().unwrap_or("").to_string();
         let headers = req.headers().clone();
 
@@ -846,6 +912,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
             query,
             headers,
             body: stream_body,
+            path_params,
             reply_tx,
         };
 
@@ -961,9 +1028,22 @@ impl Consumer for HttpConsumer {
 
         // Create channel for this path and register it
         let (env_tx, mut env_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(64);
-        registry
-            .register_api_route(self.config.path.clone(), env_tx)
-            .await;
+        // When the from-URI carries `httpMethod=...` (REST-lowered
+        // route), register the consumer as a method-aware REST endpoint
+        // so the dispatcher can route by (method, path template).
+        // Otherwise fall back to the legacy path-only api_routes
+        // registry. The two registries never overlap for the same
+        // route: each consumer registers in exactly one of them.
+        if let Some(method) = self.config.method.clone() {
+            let segments = rest_match::parse_path_template(&self.config.path);
+            registry
+                .register_rest_endpoint(method, segments, env_tx)
+                .await;
+        } else {
+            registry
+                .register_api_route(self.config.path.clone(), env_tx)
+                .await;
+        }
 
         let path = self.config.path.clone();
         let registry_for_cleanup = registry.clone();
@@ -986,6 +1066,19 @@ impl Consumer for HttpConsumer {
                         serde_json::Value::String(envelope.path.clone()));
                     msg.set_header("CamelHttpQuery",
                         serde_json::Value::String(envelope.query.clone()));
+
+                    // Set path-parameter headers from REST template
+                    // match. Expert guidance E2: the consumer is
+                    // responsible for translating the dispatcher's
+                    // matched params into `CamelHttpPath_<param>`
+                    // headers on the Exchange, matching the convention
+                    // used by Camel HTTP for templated routes.
+                    for (param_name, param_value) in &envelope.path_params {
+                        msg.set_header(
+                            format!("CamelHttpPath_{param_name}"),
+                            serde_json::Value::String(param_value.clone()),
+                        );
+                    }
 
                     // Forward HTTP headers with Title-Case names (hyper lowercases them)
                     for (k, v) in &envelope.headers {
@@ -1182,30 +1275,8 @@ impl Consumer for HttpConsumer {
                                     body: reply_body,
                                 }
                             }
-                            Err(CamelError::Unauthenticated(msg)) => {
-                                tracing::warn!(error = %msg, path = %path_clone, "Authentication failed");
-                                HttpReply {
-                                    status: 401,
-                                    headers: vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
-                                    body: HttpReplyBody::Bytes(bytes::Bytes::from("Unauthorized")),
-                                }
-                            }
-                            Err(CamelError::Unauthorized(msg)) => {
-                                tracing::warn!(error = %msg, path = %path_clone, "Authorization failed");
-                                HttpReply {
-                                    status: 403,
-                                    headers: vec![],
-                                    body: HttpReplyBody::Bytes(bytes::Bytes::from("Forbidden")),
-                                }
-                            }
                             Err(e) => {
-                                // log-policy: handler-owned
-                                tracing::warn!(error = %e, path = %path_clone, "Pipeline error processing HTTP request");
-                                HttpReply {
-                                    status: 500,
-                                    headers: vec![],
-                                    body: HttpReplyBody::Bytes(bytes::Bytes::from("Internal Server Error")),
-                                }
+                                pipeline_error_to_reply(e, &path_clone)
                             }
                         };
 
@@ -1216,8 +1287,17 @@ impl Consumer for HttpConsumer {
             }
         }
 
-        // Deregister this path
-        registry_for_cleanup.unregister_api_route(&path).await;
+        // Deregister this consumer. Mirror the registration choice:
+        // REST-registered consumers remove their (method, path) endpoint
+        // WITHOUT touching sibling verbs on the same template (review C1);
+        // legacy consumers clean up api_routes.
+        if let Some(method) = &self.config.method {
+            registry_for_cleanup
+                .unregister_rest_endpoint(method, &path)
+                .await;
+        } else {
+            registry_for_cleanup.unregister_api_route(&path).await;
+        }
 
         Ok(())
     }
@@ -1880,6 +1960,69 @@ impl Service<Exchange> for HttpProducer {
 #[cfg(test)]
 pub(crate) static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Map a pipeline error to an HTTP reply.
+///
+/// Extracted from the inline `match` in `dispatch_handler` for unit
+/// testability (rc-1dk4). `TypeConversionFailed` (e.g. malformed JSON
+/// body) maps to `400 Bad Request` with a structured JSON error body;
+/// `Unauthenticated`/`Unauthorized` keep their existing `401`/`403`
+/// mappings; all other errors map to `500 Internal Server Error`.
+fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
+    match e {
+        CamelError::Unauthenticated(msg) => {
+            tracing::warn!(error = %msg, path = %path, "Authentication failed");
+            HttpReply {
+                status: 401,
+                headers: vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
+                body: HttpReplyBody::Bytes(bytes::Bytes::from("Unauthorized")),
+            }
+        }
+        CamelError::Unauthorized(msg) => {
+            tracing::warn!(error = %msg, path = %path, "Authorization failed");
+            HttpReply {
+                status: 403,
+                headers: vec![],
+                body: HttpReplyBody::Bytes(bytes::Bytes::from("Forbidden")),
+            }
+        }
+        CamelError::TypeConversionFailed(msg) => {
+            tracing::warn!(error = %msg, path = %path, "Type conversion failed (bad request)");
+            let body = serde_json::to_string(&serde_json::json!({
+                "error": "bad_request",
+                "message": msg,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
+            HttpReply {
+                status: 400,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+            }
+        }
+        CamelError::ValidationError(msg) => {
+            tracing::warn!(error = %msg, path = %path, "Schema validation failed (bad request)");
+            let body = serde_json::to_string(&serde_json::json!({
+                "error": "validation_error",
+                "message": msg,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
+            HttpReply {
+                status: 400,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+            }
+        }
+        e => {
+            // log-policy: handler-owned
+            tracing::warn!(error = %e, path = %path, "Pipeline error processing HTTP request");
+            HttpReply {
+                status: 500,
+                headers: vec![],
+                body: HttpReplyBody::Bytes(bytes::Bytes::from("Internal Server Error")),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use camel_component_api::test_support::{NoopRuntimeObservability, PanicRuntimeObservability};
@@ -1894,6 +2037,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::rest_match::PathSegment;
     use camel_component_api::{Message, NoOpComponentContext};
     use std::sync::Arc;
     use std::time::Duration;
@@ -3135,6 +3279,7 @@ mod tests {
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
+            method: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3188,6 +3333,7 @@ mod tests {
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1,
+            method: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3265,6 +3411,7 @@ mod tests {
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 16,
             max_inflight_requests: 1024,
+            method: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3313,6 +3460,7 @@ mod tests {
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 16,
             max_inflight_requests: 1024,
+            method: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3362,6 +3510,7 @@ mod tests {
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 16,
             max_inflight_requests: 1024,
+            method: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3414,6 +3563,7 @@ mod tests {
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 16,
             max_inflight_requests: 1024,
+            method: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3461,6 +3611,11 @@ mod tests {
     #[tokio::test]
     async fn test_integration_single_consumer_round_trip() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        // Spawns an HTTP consumer on the global ServerRegistry
+        // (HttpConsumer::start → get_or_spawn). Serialize against the other
+        // registry tests so parallel runs do not race on shared global state.
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
 
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3591,6 +3746,8 @@ mod tests {
     async fn test_integration_unregistered_path_returns_404() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3649,6 +3806,7 @@ mod tests {
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
+            method: None,
         };
         let consumer = HttpConsumer::new(config, test_rt());
         assert_eq!(
@@ -4321,6 +4479,7 @@ mod tests {
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
+            method: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -4981,5 +5140,516 @@ mod tests {
         assert!(result.is_ok(), "Stop with empty body arrives as Ok");
         // Body is default (empty); no CamelHttpResponseCode header was set.
         // The HTTP reply finaliser (tested at E2E) maps this to status=200 + empty body.
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5: Method-aware REST dispatch tests
+    // -----------------------------------------------------------------------
+
+    /// Spins up an axum server on a free port with a fresh registry.
+    /// Returns the port plus the registry so the caller can register
+    /// REST endpoints directly.
+    async fn spawn_test_server() -> (u16, HttpRouteRegistry) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let registry = HttpRouteRegistry::new();
+        tokio::spawn(run_axum_server(
+            listener,
+            registry.clone(),
+            2 * 1024 * 1024,
+            10 * 1024 * 1024,
+            Arc::new(tokio::sync::Semaphore::new(1024)),
+            test_rt(),
+            "test-route".into(),
+        ));
+        // Give the server a moment to start accepting.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (port, registry)
+    }
+
+    /// Helper for REST integration tests: spawns a responder task that
+    /// reads from `rx`, writes a fixed `(status, body)` back via the
+    /// envelope's reply channel, and returns once the test request is
+    /// satisfied.
+    fn spawn_responder(
+        mut rx: tokio::sync::mpsc::Receiver<RequestEnvelope>,
+        status: u16,
+        body: String,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Some(envelope) = rx.recv().await {
+                let _ = envelope.reply_tx.send(HttpReply {
+                    status,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+                });
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn method_aware_dispatch_same_path_different_verbs() {
+        let (port, registry) = spawn_test_server().await;
+
+        // Register two REST endpoints on the same path with different
+        // methods. This is the core scenario REST DSL needs to support:
+        // GET /users (list) and POST /users (create) must not overwrite
+        // each other.
+        let (get_tx, get_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_rest_endpoint(
+                "GET".into(),
+                vec![PathSegment::Literal("users".into())],
+                get_tx,
+            )
+            .await;
+
+        let (post_tx, post_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_rest_endpoint(
+                "POST".into(),
+                vec![PathSegment::Literal("users".into())],
+                post_tx,
+            )
+            .await;
+
+        let get_handle = spawn_responder(get_rx, 200, "list".into());
+        let post_handle = spawn_responder(post_rx, 201, "create".into());
+
+        let client = reqwest::Client::new();
+
+        // GET /users → list route
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/users"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "list");
+
+        // POST /users → create route
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/users"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "create");
+
+        let _ = tokio::join!(get_handle, post_handle);
+    }
+
+    #[tokio::test]
+    async fn method_aware_dispatch_templated_path_extracts_params() {
+        let (port, registry) = spawn_test_server().await;
+
+        // Register GET /users/{id} as a templated endpoint. The
+        // dispatcher should match `/users/42` against the template and
+        // attach `id=42` to the envelope's path_params.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_rest_endpoint(
+                "GET".into(),
+                vec![
+                    PathSegment::Literal("users".into()),
+                    PathSegment::Param("id".into()),
+                ],
+                tx,
+            )
+            .await;
+
+        // Spawn a responder that echoes the captured id back in the body
+        // so the test can verify the param was set.
+        let handle = tokio::spawn(async move {
+            if let Some(envelope) = rx.recv().await {
+                let id = envelope.path_params.get("id").cloned().unwrap_or_default();
+                let _ = envelope.reply_tx.send(HttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from(format!("id={id}"))),
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/users/42"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "id=42");
+
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn method_aware_dispatch_unmatched_method_falls_through() {
+        // If no REST endpoint matches the method, dispatch must fall
+        // through to the legacy api_routes lookup or static mounts. With
+        // nothing else registered, the request gets 404 from static
+        // dispatch.
+        let (port, _registry) = spawn_test_server().await;
+
+        // Register only GET /users; a DELETE /users request has no match.
+        let (get_tx, get_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        _registry
+            .register_rest_endpoint(
+                "GET".into(),
+                vec![PathSegment::Literal("users".into())],
+                get_tx,
+            )
+            .await;
+
+        // Drain the GET channel in the background so the consumer side
+        // doesn't block (we don't expect any envelopes here).
+        let drain = tokio::spawn(async move {
+            let mut get_rx = get_rx;
+            while get_rx.recv().await.is_some() {}
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .delete(format!("http://127.0.0.1:{port}/users"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+
+        drop(drain);
+    }
+
+    #[tokio::test]
+    async fn regression_legacy_exact_api_route_still_works() {
+        // A `http:` route registered without an `httpMethod=` URI param
+        // lands in the legacy api_routes registry. The dispatcher must
+        // still find it via exact path lookup. This guards against
+        // regressions introduced by the new REST-aware dispatch.
+        let (port, registry) = spawn_test_server().await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry.register_api_route("/legacy/path".into(), tx).await;
+
+        let handle = tokio::spawn(async move {
+            if let Some(envelope) = rx.recv().await {
+                let _ = envelope.reply_tx.send(HttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from("legacy ok")),
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/legacy/path"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "legacy ok");
+
+        let _ = handle.await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn regression_static_mount_still_works() {
+        // Verify that static file serving still works after the
+        // dispatch refactor. We register a temp-dir mount and request
+        // a file from it; the static dispatcher should serve it.
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+
+        let temp_dir = std::env::temp_dir().join(format!("http_regress_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("regress.txt"), "static works").unwrap();
+        let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+        let registry = make_test_registry();
+        let serve_dir = ServeDir::new(&canonical_dir)
+            .precompressed_gzip()
+            .precompressed_br()
+            .append_index_html_on_directories(true);
+        let mount = StaticMount {
+            mount_path: "/".to_string(),
+            mode: MountMode::Static,
+            dir: canonical_dir.clone(),
+            cache_control: "public, max-age=3600".to_string(),
+            error_pages: std::collections::HashMap::new(),
+            serve_dir,
+        };
+        registry.register_static_mount(mount).await.unwrap();
+
+        let state = make_test_state(registry);
+        let req = Request::builder()
+            .uri("/regress.txt")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/regress.txt").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"static works");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Review I4: dispatch-layer regression coverage for C1/C2/C3 + the
+    // templated from-URI round-trip. These exercise the real axum dispatch
+    // path (register → HTTP request → reply) so a regression in any of the
+    // three critical fixes surfaces as a test failure rather than a silent
+    // production 404/500.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn deregister_one_method_keeps_sibling_verbs() {
+        // Review C1: stopping the GET /users consumer must NOT tear down the
+        // live POST /users endpoint. Register both, deregister GET only,
+        // then verify POST still dispatches.
+        let (port, registry) = spawn_test_server().await;
+
+        let (get_tx, get_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_rest_endpoint(
+                "GET".into(),
+                vec![PathSegment::Literal("users".into())],
+                get_tx,
+            )
+            .await;
+
+        let (post_tx, post_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_rest_endpoint(
+                "POST".into(),
+                vec![PathSegment::Literal("users".into())],
+                post_tx,
+            )
+            .await;
+
+        // Drain GET in the background (no requests expected after deregister).
+        let drain = tokio::spawn(async move {
+            let mut get_rx = get_rx;
+            while get_rx.recv().await.is_some() {}
+        });
+
+        // Deregister ONLY the GET endpoint — the C1 bug used to drop POST too.
+        registry.unregister_rest_endpoint("GET", "/users").await;
+        drop(drain);
+
+        let post_handle = spawn_responder(post_rx, 201, "create".into());
+
+        let client = reqwest::Client::new();
+        // POST /users must still reach its consumer after GET was removed.
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/users"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201);
+        assert_eq!(resp.text().await.unwrap(), "create");
+
+        let _ = post_handle.await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_exact_legacy_beats_rest_template() {
+        // Review C2: an exact legacy API route (`GET /api/users`, no
+        // httpMethod) must win over a templated REST route
+        // (`GET /api/{resource}`) for the request `/api/users`, per spec
+        // §7.2 / ADR-0009 precedence (exact → templated → static → SPA).
+        let (port, registry) = spawn_test_server().await;
+
+        // Exact legacy route.
+        let (exact_tx, exact_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_api_route("/api/users".into(), exact_tx)
+            .await;
+        let exact_handle = spawn_responder(exact_rx, 200, "exact".into());
+
+        // Templated REST route that would ALSO match /api/users.
+        let (tpl_tx, tpl_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_rest_endpoint(
+                "GET".into(),
+                vec![
+                    PathSegment::Literal("api".into()),
+                    PathSegment::Param("resource".into()),
+                ],
+                tpl_tx,
+            )
+            .await;
+        // The templated handler must NOT receive the /api/users request. If
+        // it does, it replies "template-leak" so a future assertion could
+        // catch it. We do NOT await this task: the exact-match branch wins
+        // and the templated channel never receives, so awaiting would block
+        // until the test runtime tears down.
+        let _tpl_drain = tokio::spawn(async move {
+            let mut tpl_rx = tpl_rx;
+            if let Some(env) = tpl_rx.recv().await {
+                let _ = env.reply_tx.send(HttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from("template-leak")),
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/api/users"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        // Exact-match handler answered — not the templated one.
+        assert_eq!(resp.text().await.unwrap(), "exact");
+
+        let _ = exact_handle.await;
+    }
+
+    #[tokio::test]
+    async fn ambiguous_rest_templates_return_500_not_silent_404() {
+        // Review C3: two equal-specificity templates that both match one
+        // request are an ambiguous registration. At runtime this must
+        // surface as a loud 500 (with a warn! log), NOT a silent fall-through
+        // to 404. Compile-time rejection is covered in camel-dsl rest tests.
+        let (port, registry) = spawn_test_server().await;
+
+        let (a_tx, _a_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_rest_endpoint(
+                "GET".into(),
+                vec![
+                    PathSegment::Literal("users".into()),
+                    PathSegment::Param("id".into()),
+                ],
+                a_tx,
+            )
+            .await;
+
+        let (b_tx, _b_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry
+            .register_rest_endpoint(
+                "GET".into(),
+                vec![
+                    PathSegment::Literal("users".into()),
+                    PathSegment::Param("name".into()),
+                ],
+                b_tx,
+            )
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/users/42"))
+            .send()
+            .await
+            .unwrap();
+        // Ambiguous → 500 (previously a silent 404).
+        assert_eq!(resp.status().as_u16(), 500);
+    }
+
+    #[test]
+    fn from_uri_round_trips_templated_path_with_http_method() {
+        // Review I4: a REST-lowered from-URI like
+        // `http://0.0.0.0:8080/users/{id}?httpMethod=GET` must round-trip
+        // through HttpServerConfig::from_uri, preserving the templated path
+        // and the (uppercased) method. This is the binding the DSL lowering
+        // emits and the consumer reads; it was previously unasserted.
+        use crate::UriConfig;
+        let cfg =
+            HttpServerConfig::from_uri("http://0.0.0.0:8080/users/{id}?httpMethod=GET").unwrap();
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.port, 8080);
+        assert_eq!(cfg.path, "/users/{id}");
+        assert_eq!(cfg.method.as_deref(), Some("GET"));
+
+        // Lower-case httpMethod is uppercased (review I5).
+        let cfg_lc =
+            HttpServerConfig::from_uri("http://0.0.0.0:8080/orders?httpMethod=post").unwrap();
+        assert_eq!(cfg_lc.method.as_deref(), Some("POST"));
+        assert_eq!(cfg_lc.path, "/orders");
+    }
+
+    // -----------------------------------------------------------------------
+    // rc-1dk4: TypeConversionFailed → 400 Bad Request
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn type_conversion_failed_maps_to_400() {
+        let reply = pipeline_error_to_reply(
+            CamelError::TypeConversionFailed("invalid JSON at line 1".to_string()),
+            "/api/users",
+        );
+        assert_eq!(reply.status, 400);
+        // Content-Type must be application/json
+        let ct = reply
+            .headers
+            .iter()
+            .find(|(k, _)| k == "Content-Type")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ct, Some("application/json"));
+        // Body must contain structured error JSON
+        let body = match &reply.body {
+            HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("expected bytes body"),
+        };
+        assert!(body.contains("\"error\""));
+        assert!(body.contains("bad_request"));
+        assert!(body.contains("invalid JSON at line 1"));
+    }
+
+    #[test]
+    fn other_error_still_maps_to_500() {
+        let reply =
+            pipeline_error_to_reply(CamelError::RouteError("boom".to_string()), "/api/users");
+        assert_eq!(reply.status, 500);
+    }
+
+    #[test]
+    fn unauthenticated_maps_to_401() {
+        let reply = pipeline_error_to_reply(
+            CamelError::Unauthenticated("no token".to_string()),
+            "/api/users",
+        );
+        assert_eq!(reply.status, 401);
+    }
+
+    #[test]
+    fn unauthorized_maps_to_403() {
+        let reply = pipeline_error_to_reply(
+            CamelError::Unauthorized("forbidden".to_string()),
+            "/api/users",
+        );
+        assert_eq!(reply.status, 403);
+    }
+
+    #[test]
+    fn validation_error_maps_to_400() {
+        let reply = pipeline_error_to_reply(
+            CamelError::ValidationError("body does not match schema".to_string()),
+            "/api/users",
+        );
+        assert_eq!(reply.status, 400);
+        let ct = reply
+            .headers
+            .iter()
+            .find(|(k, _)| k == "Content-Type")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ct, Some("application/json"));
+        let body = match &reply.body {
+            HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            _ => panic!("expected bytes body"),
+        };
+        assert!(body.contains("\"error\""));
+        assert!(body.contains("validation_error"));
+        assert!(body.contains("body does not match schema"));
     }
 }

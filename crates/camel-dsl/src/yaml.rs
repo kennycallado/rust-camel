@@ -40,8 +40,8 @@ pub use crate::route_ast::{
     IdempotentConsumerStep, LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData,
     LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PollEnrichStep,
     PredicateBlock, RecipientListData, RecipientListStep, ResequenceBatchYaml, ResequenceData,
-    ResequenceStep, ResequenceStreamYaml, RouteDslRoute, RouteDslRoutes, RouteDslStep,
-    RoutingSlipData, RoutingSlipStep, SamplingBody, SamplingConfig, SamplingStep,
+    ResequenceStep, ResequenceStreamYaml, RouteDslRest, RouteDslRoute, RouteDslRoutes,
+    RouteDslStep, RoutingSlipData, RoutingSlipStep, SamplingBody, SamplingConfig, SamplingStep,
     ScatterGatherData, ScatterGatherStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData,
     SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, SortBody,
     SortStep, SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep,
@@ -96,18 +96,49 @@ pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, Ca
 }
 
 fn parse_yaml_to_declarative_inner(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
-    let routes: RouteDslRoutes = serde_yml::from_str(yaml).map_err(|e| {
+    let mut dsl: RouteDslRoutes = serde_yml::from_str(yaml).map_err(|e| {
         // log-policy: system-broken
         error!(error = %e, "yaml parse failed");
         CamelError::RouteError(format!("YAML parse error: {e}"))
     })?;
-    debug!(route_count = %routes.routes.len(), "yaml routes parsed successfully");
+    debug!(route_count = %dsl.routes.len(), rest_count = %dsl.rest.len(), "yaml routes parsed successfully");
 
-    routes
-        .routes
+    // Expand REST blocks into RouteDslRoute entries. Shared with the JSON
+    // parser (review I2) — the helper performs cross-block validation
+    // (duplicate method+path tuples, ambiguous templates per spec §6.3/§7.2).
+    let prior_count = dsl.routes.len();
+    crate::rest::expand_rest_into(&mut dsl.routes, &dsl.rest)?;
+    if prior_count != dsl.routes.len() {
+        debug!(
+            routes_before = prior_count,
+            rest_blocks = dsl.rest.len(),
+            routes_after = dsl.routes.len(),
+            "rest blocks expanded into route entries"
+        );
+    }
+
+    // Check for duplicate route IDs across all routes (including REST-expanded).
+    crate::rest::check_duplicate_route_ids(&dsl.routes)?;
+
+    dsl.routes
         .into_iter()
         .map(route_dsl_to_declarative_route)
         .collect()
+}
+
+/// Extract `rest:` blocks from YAML **without** lowering them to `http:` routes.
+///
+/// Used by the OpenAPI generator (Phase 3) which needs the original AST,
+/// not the lowered route definitions. **Input is unvalidated** — callers
+/// should run `lower_all_rest_to_routes` to validate before generation
+/// (catches duplicate operation IDs, ambiguous templates, etc.).
+pub fn extract_rest_blocks(yaml: &str) -> Result<Vec<RouteDslRest>, CamelError> {
+    let dsl: RouteDslRoutes = serde_yml::from_str(yaml).map_err(|e| {
+        // log-policy: system-broken
+        error!(error = %e, "yaml parse failed");
+        CamelError::RouteError(format!("YAML parse error: {e}"))
+    })?;
+    Ok(dsl.rest)
 }
 
 pub fn parse_yaml(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
@@ -915,9 +946,12 @@ pub(crate) fn route_step_to_declarative_step(
                     "marshal: format must not be empty".into(),
                 ));
             }
-            Ok(DeclarativeStep::Marshal(DataFormatDef { format: marshal }))
+            Ok(DeclarativeStep::Marshal(DataFormatDef {
+                format: marshal,
+                schema: None,
+            }))
         }
-        RouteDslStep::Unmarshal(UnmarshalStep { unmarshal }) => {
+        RouteDslStep::Unmarshal(UnmarshalStep { unmarshal, schema }) => {
             if unmarshal.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "unmarshal: format must not be empty".into(),
@@ -925,6 +959,7 @@ pub(crate) fn route_step_to_declarative_step(
             }
             Ok(DeclarativeStep::Unmarshal(DataFormatDef {
                 format: unmarshal,
+                schema,
             }))
         }
         RouteDslStep::Bean(BeanStep {
@@ -2680,7 +2715,7 @@ routes:
         let routes = parse_yaml_to_declarative(yaml).unwrap();
         let steps = &routes[0].steps;
         assert!(
-            matches!(&steps[0], DeclarativeStep::Marshal(DataFormatDef { format }) if format == "json")
+            matches!(&steps[0], DeclarativeStep::Marshal(DataFormatDef { format, .. }) if format == "json")
         );
     }
 
@@ -2696,7 +2731,7 @@ routes:
         let routes = parse_yaml_to_declarative(yaml).unwrap();
         let steps = &routes[0].steps;
         assert!(
-            matches!(&steps[0], DeclarativeStep::Unmarshal(DataFormatDef { format }) if format == "xml")
+            matches!(&steps[0], DeclarativeStep::Unmarshal(DataFormatDef { format, .. }) if format == "xml")
         );
     }
 
@@ -4123,5 +4158,204 @@ routes:
                 .to_string()
                 .contains("unknown aggregation strategy")
         );
+    }
+
+    // ── REST expansion tests (Phase 1 Task 3) ──
+
+    #[test]
+    fn rest_block_expands_to_routes_in_parse_yaml_to_declarative() {
+        let yaml = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /users
+    operations:
+      get:
+        path: /{id}
+        operation_id: getUser
+        to: bean:userService
+      post:
+        operation_id: createUser
+        to: bean:createUser
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 2);
+
+        // First route: GET /users/{id}
+        assert_eq!(routes[0].route_id, "getUser");
+        assert!(routes[0].from.contains("httpMethod=GET"));
+        assert!(routes[0].from.contains("0.0.0.0:8080"));
+        assert!(routes[0].from.contains("/users/{id}"));
+
+        // Second route: POST /users
+        assert_eq!(routes[1].route_id, "createUser");
+        assert!(routes[1].from.contains("httpMethod=POST"));
+        assert!(routes[1].from.contains("0.0.0.0:8080"));
+    }
+
+    #[test]
+    fn rest_block_expands_to_routes_in_parse_yaml() {
+        let yaml = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api
+    operations:
+      get:
+        path: /items
+        operation_id: listItems
+        to: bean:listHandler
+"#;
+        let defs = parse_yaml(yaml).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].route_id(), "listItems");
+        assert!(defs[0].from_uri().contains("httpMethod=GET"));
+    }
+
+    #[test]
+    fn rest_and_routes_together_expands_both() {
+        let yaml = r#"
+routes:
+  - id: normal-route
+    from: direct:start
+    steps:
+      - to: log:info
+rest:
+  - path: /api
+    operations:
+      get:
+        operation_id: getApi
+        to: bean:handler
+      post:
+        operation_id: postApi
+        to: bean:creator
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        // 1 normal route + 2 REST-expanded routes = 3 total
+        assert_eq!(routes.len(), 3);
+
+        // First is the normal route (preserves order from YAML)
+        assert_eq!(routes[0].route_id, "normal-route");
+        assert_eq!(routes[0].from, "direct:start");
+
+        // Then REST-expanded routes
+        assert_eq!(routes[1].route_id, "getApi");
+        assert_eq!(routes[2].route_id, "postApi");
+    }
+
+    #[test]
+    fn rest_duplicate_operation_id_is_rejected() {
+        let yaml = r#"
+rest:
+  - path: /users
+    operations:
+      get:
+        path: /{id}
+        operation_id: duplicateOp
+        to: bean:svc
+  - path: /orders
+    operations:
+      get:
+        path: /{id}
+        operation_id: duplicateOp
+        to: bean:other
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate route id"),
+            "expected duplicate route id error, got: {err}"
+        );
+        assert!(
+            err.contains("duplicateOp"),
+            "expected error to mention the duplicate id, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rest_route_id_conflict_with_normal_route_is_rejected() {
+        let yaml = r#"
+routes:
+  - id: conflictRoute
+    from: direct:start
+rest:
+  - path: /api
+    operations:
+      get:
+        operation_id: conflictRoute
+        to: bean:handler
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate route id"),
+            "expected duplicate route id error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rest_with_multiple_verbs_all_expanded() {
+        let yaml = r#"
+rest:
+  - path: /items
+    operations:
+      get:
+        to: bean:list
+      post:
+        operation_id: createItem
+        to: bean:create
+      put:
+        operation_id: updateItem
+        to: bean:update
+      delete:
+        operation_id: deleteItem
+        to: bean:delete
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 4);
+        // BTreeMap iterates alphabetically by verb: delete, get, post, put
+        assert!(routes[0].from.contains("httpMethod=DELETE"));
+        assert!(routes[1].from.contains("httpMethod=GET"));
+        assert!(routes[2].from.contains("httpMethod=POST"));
+        assert!(routes[3].from.contains("httpMethod=PUT"));
+    }
+
+    #[test]
+    fn extract_rest_blocks_returns_ast_without_lowering() {
+        let yaml = r#"
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api/users
+    operations:
+      get:
+        operation_id: listUsers
+        to: direct:listUsers
+routes:
+  - id: dummy
+    from: timer:tick
+    steps:
+      - to: log:info
+"#;
+        let blocks = extract_rest_blocks(yaml).expect("YAML should parse");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, "/api/users");
+        assert_eq!(blocks[0].operations.len(), 1);
+        assert!(blocks[0].operations.contains_key("get"));
+    }
+
+    #[test]
+    fn extract_rest_blocks_empty_when_no_rest() {
+        let yaml = r#"
+routes:
+  - id: dummy
+    from: timer:tick
+    steps:
+      - to: log:info
+"#;
+        let blocks = extract_rest_blocks(yaml).expect("YAML should parse");
+        assert!(blocks.is_empty());
     }
 }

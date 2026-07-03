@@ -63,6 +63,12 @@ enum Commands {
         #[command(subcommand)]
         action: commands::plugin::PluginAction,
     },
+
+    /// Generate OpenAPI document from REST route files
+    Openapi {
+        #[command(subcommand)]
+        action: commands::openapi::OpenapiAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -118,6 +124,9 @@ async fn main() {
         }
         Commands::Plugin { action } => {
             commands::plugin::run_plugin(action);
+        }
+        Commands::Openapi { action } => {
+            commands::openapi::run(action);
         }
     }
 }

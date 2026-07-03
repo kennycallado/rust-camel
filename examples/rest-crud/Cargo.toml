@@ -1,0 +1,21 @@
+[package]
+name = "rest-crud"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-builder.workspace = true
+camel-core.workspace = true
+camel-dsl.workspace = true
+camel-component-http.workspace = true
+camel-component-direct.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap = { workspace = true }
+
+[lints]
+workspace = true

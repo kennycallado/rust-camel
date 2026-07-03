@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct RouteDslRoutes {
     /// Optional JSON Schema URL (ignored by the parser; consumed by SDKs/editors).
     #[serde(default, skip_serializing, rename = "$schema")]
@@ -18,10 +18,12 @@ pub struct RouteDslRoutes {
     pub templates: Vec<RouteDslTemplate>,
     #[serde(default)]
     pub templated_routes: Vec<RouteDslTemplatedRoute>,
+    #[serde(default)]
+    pub rest: Vec<RouteDslRest>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct RouteDslRoute {
     pub id: String,
     pub from: String,
@@ -48,7 +50,7 @@ pub struct RouteDslRoute {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct RouteDslSecurityPolicy {
     #[serde(default)]
     pub roles: Option<Vec<String>>,
@@ -67,7 +69,7 @@ pub struct RouteDslSecurityPolicy {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct RouteDslPermissionPolicy {
     pub policy: String,
     #[serde(default)]
@@ -105,7 +107,7 @@ pub struct RouteDslPermissionContext {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct RouteDslErrorHandler {
     #[serde(default)]
     pub dead_letter_channel: Option<String>,
@@ -118,7 +120,7 @@ pub struct RouteDslErrorHandler {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct RouteDslOnException {
     #[serde(default)]
     pub kind: Option<String>,
@@ -135,7 +137,7 @@ pub struct RouteDslOnException {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct RouteDslRedeliveryPolicy {
     pub max_attempts: u32,
     #[serde(default = "default_initial_delay_ms")]
@@ -151,7 +153,7 @@ pub struct RouteDslRedeliveryPolicy {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct RouteDslCircuitBreaker {
     #[serde(default = "default_failure_threshold")]
     pub failure_threshold: u32,
@@ -192,13 +194,13 @@ fn default_open_duration_ms() -> u64 {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct DelayStep {
     pub delay: DelayBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum DelayBody {
@@ -207,7 +209,7 @@ pub enum DelayBody {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DelayFullConfig {
     pub delay_ms: u64,
@@ -216,14 +218,14 @@ pub struct DelayFullConfig {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct LoopStep {
     #[serde(rename = "loop")]
     pub loop_data: LoopData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum LoopData {
@@ -234,7 +236,7 @@ pub enum LoopData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct LoopFullConfig {
     /// Fixed iteration count. Mutually exclusive with `while`.
@@ -248,7 +250,7 @@ pub struct LoopFullConfig {
 
 /// Expression-only predicate for loop while condition.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct LoopWhileExpr {
     #[serde(default)]
@@ -266,7 +268,7 @@ pub struct LoopWhileExpr {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum RouteDslStep {
@@ -310,14 +312,14 @@ pub enum RouteDslStep {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionStep {
     pub function: FunctionData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionData {
     pub runtime: String,
@@ -327,25 +329,25 @@ pub struct FunctionData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ToStep {
     pub to: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct SetHeaderStep {
     pub set_header: SetHeaderData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct SetPropertyStep {
     pub set_property: SetPropertyData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SetHeaderData {
     pub key: String,
@@ -366,7 +368,7 @@ pub struct SetHeaderData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SetPropertyData {
     pub name: String,
@@ -387,20 +389,20 @@ pub struct SetPropertyData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct SetBodyStep {
     pub set_body: SetBodyData,
 }
 
 /// `transform:` step — alias for `set_body:`, reuses all SetBodyData types.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct TransformStep {
     pub transform: SetBodyData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum SetBodyData {
@@ -413,7 +415,7 @@ pub enum SetBodyData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SetBodyConfig {
     #[serde(default)]
@@ -433,7 +435,7 @@ pub struct SetBodyConfig {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum LogBody {
@@ -442,7 +444,7 @@ pub enum LogBody {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
     /// The log message. Can be a plain string literal or a nested expression object.
@@ -454,7 +456,7 @@ pub struct LogConfig {
 /// The `message` field inside a `log: { message: ... }` config block.
 /// Either a bare string literal or a value-source expression (simple, rhai, language+source).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum LogMessageData {
@@ -463,7 +465,7 @@ pub enum LogMessageData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct LogMessageExpr {
     #[serde(default)]
@@ -483,19 +485,19 @@ pub struct LogMessageExpr {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct LogStep {
     pub log: LogBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct FilterStep {
     pub filter: PredicateBlock,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct PredicateBlock {
     #[serde(default)]
@@ -515,13 +517,13 @@ pub struct PredicateBlock {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ChoiceStep {
     pub choice: ChoiceData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ChoiceData {
     #[serde(default)]
@@ -531,13 +533,13 @@ pub struct ChoiceData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct DoTryStep {
     pub do_try: DoTryData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DoTryData {
     pub steps: Vec<RouteDslStep>,
@@ -548,7 +550,7 @@ pub struct DoTryData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CatchClauseData {
     pub exception: Option<Vec<String>>,
@@ -560,7 +562,7 @@ pub struct CatchClauseData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct FinallyData {
     pub on_when: Option<String>,
@@ -572,13 +574,13 @@ fn default_handled_disposition() -> camel_api::error_handler::ExceptionDispositi
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct SplitStep {
     pub split: SplitData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SplitData {
     #[serde(default)]
@@ -645,13 +647,13 @@ fn default_split_aggregation() -> String {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct AggregateStep {
     pub aggregate: AggregateData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateData {
     pub header: String,
@@ -680,19 +682,19 @@ fn default_aggregate_strategy() -> String {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct WireTapStep {
     pub wire_tap: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct MulticastStep {
     pub multicast: MulticastData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MulticastData {
     #[serde(default)]
@@ -714,7 +716,7 @@ fn default_multicast_aggregation() -> String {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ScatterGatherStep {
     pub scatter_gather: ScatterGatherData,
 }
@@ -724,7 +726,7 @@ pub struct ScatterGatherStep {
 /// (spec §5 "correlation key" wording corrected: stateless form
 /// has none; stateful aggregation is the separate Aggregator EIP).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ScatterGatherData {
     #[serde(default)]
@@ -734,19 +736,19 @@ pub struct ScatterGatherData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct StopStep {
     pub stop: bool,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct StreamCacheStep {
     pub stream_cache: StreamCacheBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum StreamCacheBody {
@@ -755,7 +757,7 @@ pub enum StreamCacheBody {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct StreamCacheConfig {
     #[serde(default)]
@@ -763,44 +765,52 @@ pub struct StreamCacheConfig {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ScriptStep {
     pub script: ScriptData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ConvertBodyToStep {
     pub convert_body_to: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct MarshalStep {
     pub marshal: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct UnmarshalStep {
     pub unmarshal: String,
+    /// Optional JSON Schema. When present, the compiled UnmarshalService is
+    /// wrapped with a `JsonSchemaValidateService` that returns
+    /// `CamelError::ValidationError` (→ 400 Bad Request) on a mismatch.
+    /// Only effective when the format parses to `Body::Json` (currently `json`
+    /// is the only format that produces JSON in v1).
+    #[serde(default)]
+    pub schema: Option<serde_json::Value>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ValidateStep {
     pub validate: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimCheckStep {
     pub claim_check: ClaimCheckBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimCheckBody {
     /// Name of the registered ClaimCheckRepository (e.g. "memory").
@@ -816,13 +826,13 @@ pub struct ClaimCheckBody {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct SamplingStep {
     pub sampling: SamplingBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum SamplingBody {
@@ -833,21 +843,21 @@ pub enum SamplingBody {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SamplingConfig {
     pub period: usize,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SortStep {
     pub sort: SortBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SortBody {
     /// Expression that extracts a sort key from each body element (e.g. simple: "${body.field}").
@@ -861,13 +871,13 @@ pub struct SortBody {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct IdempotentConsumerStep {
     pub idempotent_consumer: IdempotentConsumerBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct IdempotentConsumerBody {
     /// Name of the registered IdempotentRepository (e.g. `"memory"`).
@@ -886,21 +896,21 @@ pub struct IdempotentConsumerBody {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct EnrichStep {
     pub enrich: EnrichBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct PollEnrichStep {
     pub poll_enrich: EnrichBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum EnrichBody {
@@ -911,7 +921,7 @@ pub enum EnrichBody {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct EnrichConfig {
     pub uri: String,
@@ -922,7 +932,7 @@ pub struct EnrichConfig {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptData {
     pub language: String,
@@ -930,14 +940,14 @@ pub struct ScriptData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ThrottleStep {
     pub throttle: ThrottleData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ThrottleData {
     pub max_requests: usize,
@@ -954,14 +964,14 @@ fn default_throttle_period_secs() -> u64 {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct LoadBalanceStep {
     pub load_balance: LoadBalanceData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct LoadBalanceData {
     #[serde(default = "default_lb_strategy")]
@@ -981,7 +991,7 @@ fn default_lb_strategy() -> String {
 // ---------------------------------------------------------------------------
 
 /// A reusable route template declared in YAML/JSON.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct RouteDslTemplate {
     pub id: String,
     #[serde(default)]
@@ -992,7 +1002,7 @@ pub struct RouteDslTemplate {
 
 /// A single parameter that a route template accepts.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct RouteDslTemplateParameter {
     /// The parameter name (used inside `{{name}}` placeholders).
     pub name: String,
@@ -1006,7 +1016,7 @@ pub struct RouteDslTemplateParameter {
 
 /// A request to instantiate a template with concrete parameter values.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct RouteDslTemplatedRoute {
     pub route_template_ref: String,
     /// Optional explicit route id for the resulting instance.
@@ -1015,6 +1025,105 @@ pub struct RouteDslTemplatedRoute {
     /// Concrete parameter values keyed by parameter name.
     #[serde(default)]
     pub parameters: BTreeMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// REST DSL types (Phase 1)
+// ---------------------------------------------------------------------------
+
+/// A top-level REST block (`rest:` in YAML/JSON).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RouteDslRest {
+    /// Listen host address.
+    #[serde(default = "default_rest_host")]
+    pub host: String,
+    /// Listen port.
+    #[serde(default = "default_rest_port")]
+    pub port: u16,
+    /// Base path for all operations in this block (e.g. `/api/users`).
+    #[serde(default)]
+    pub path: String,
+    /// Operations keyed by HTTP verb (`get`, `post`, `put`, `delete`, etc.).
+    #[serde(default)]
+    pub operations: BTreeMap<String, RouteDslRestOperation>,
+}
+
+/// A single REST operation (identified by HTTP verb key in the `operations` map).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RouteDslRestOperation {
+    /// Sub-path relative to the parent RouteDslRest path.
+    #[serde(default = "default_operation_path")]
+    pub path: String,
+    /// Optional unique identifier for this operation.
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    /// Endpoint URI to route matching requests to (e.g. `bean:userService`).
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Child sub-pipeline steps.
+    #[serde(default)]
+    pub steps: Vec<RouteDslStep>,
+    /// Default content-type consumed by this operation.
+    #[serde(default = "default_consumes")]
+    pub consumes: String,
+    /// Default content-type produced by this operation.
+    #[serde(default = "default_produces")]
+    pub produces: String,
+    /// Expected success HTTP status code (e.g. 200, 201).
+    #[serde(default)]
+    pub success_status: Option<u16>,
+    /// Optional request body schema.
+    #[serde(default)]
+    pub request_schema: Option<serde_json::Value>,
+    /// Response definition.
+    #[serde(default)]
+    pub response: Option<RouteDslRestResponse>,
+    /// Optional description of this operation.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Additional operation parameters.
+    #[serde(default)]
+    pub parameters: BTreeMap<String, serde_json::Value>,
+}
+
+/// Response definition for a REST operation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RouteDslRestResponse {
+    /// Optional response description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Response body schema.
+    #[serde(default)]
+    pub schema: Option<serde_json::Value>,
+    /// Response headers map.
+    #[serde(default)]
+    pub headers: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_rest_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_rest_port() -> u16 {
+    8080
+}
+
+fn default_operation_path() -> String {
+    "/".to_string()
+}
+
+fn default_consumes() -> String {
+    "application/json".to_string()
+}
+
+fn default_produces() -> String {
+    "application/json".to_string()
 }
 
 #[cfg(test)]
@@ -1039,6 +1148,11 @@ mod tests {
         assert_eq!(default_uri_delimiter(), ",");
         assert_eq!(default_cache_size(), 1000);
         assert_eq!(default_max_iterations(), 1000);
+        assert_eq!(default_rest_host(), "0.0.0.0");
+        assert_eq!(default_rest_port(), 8080);
+        assert_eq!(default_operation_path(), "/");
+        assert_eq!(default_consumes(), "application/json");
+        assert_eq!(default_produces(), "application/json");
     }
 
     #[test]
@@ -1392,17 +1506,236 @@ templated_routes:
         assert!(tr.route_id.is_none());
         assert!(tr.parameters.is_empty());
     }
+
+    // ── REST DSL tests (Phase 1) ──
+
+    #[test]
+    fn parse_rest_block_basic() {
+        let yaml = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /users
+    operations:
+      get:
+        path: /{id}
+        operation_id: getUser
+        to: bean:userService
+        produces: application/json
+      post:
+        operation_id: createUser
+        consumes: application/json
+        produces: application/json
+        success_status: 201
+        to: bean:createUser
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(parsed.rest.len(), 1);
+        let rest = &parsed.rest[0];
+        assert_eq!(rest.host, "0.0.0.0");
+        assert_eq!(rest.port, 8080);
+        assert_eq!(rest.path, "/users");
+        assert_eq!(rest.operations.len(), 2);
+
+        let get_op = rest.operations.get("get").unwrap();
+        assert_eq!(get_op.path, "/{id}");
+        assert_eq!(get_op.operation_id.as_deref(), Some("getUser"));
+        assert_eq!(get_op.to.as_deref(), Some("bean:userService"));
+        assert_eq!(get_op.produces, "application/json");
+
+        let post_op = rest.operations.get("post").unwrap();
+        assert_eq!(post_op.operation_id.as_deref(), Some("createUser"));
+        assert_eq!(post_op.consumes, "application/json");
+        assert_eq!(post_op.produces, "application/json");
+        assert_eq!(post_op.success_status, Some(201));
+        assert_eq!(post_op.to.as_deref(), Some("bean:createUser"));
+    }
+
+    #[test]
+    fn parse_rest_defaults() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      get:
+        to: direct:handler
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let rest = &parsed.rest[0];
+        assert_eq!(rest.host, "0.0.0.0");
+        assert_eq!(rest.port, 8080);
+        assert_eq!(rest.path, "/api");
+        let op = rest.operations.get("get").unwrap();
+        assert_eq!(op.path, "/");
+        assert_eq!(op.consumes, "application/json");
+        assert_eq!(op.produces, "application/json");
+        assert!(op.success_status.is_none());
+        assert!(op.response.is_none());
+        assert!(op.steps.is_empty());
+    }
+
+    #[test]
+    fn parse_rest_empty() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        assert!(parsed.rest.is_empty());
+    }
+
+    #[test]
+    fn parse_rest_multiple_blocks() {
+        let yaml = r#"
+rest:
+  - path: /users
+    operations:
+      get:
+        to: direct:handleUsers
+  - path: /orders
+    operations:
+      get:
+        to: direct:handleOrders
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(parsed.rest.len(), 2);
+        assert_eq!(parsed.rest[0].path, "/users");
+        assert_eq!(parsed.rest[1].path, "/orders");
+    }
+
+    #[test]
+    fn parse_rest_backward_compat_no_rest() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - to: log:info
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(parsed.routes.len(), 1);
+        assert!(parsed.rest.is_empty());
+    }
+
+    #[test]
+    fn parse_rest_and_routes_together() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - to: log:info
+rest:
+  - host: localhost
+    port: 3000
+    path: /api
+    operations:
+      get:
+        to: direct:apiHandler
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(parsed.routes.len(), 1);
+        assert_eq!(parsed.rest.len(), 1);
+        assert_eq!(parsed.rest[0].host, "localhost");
+        assert_eq!(parsed.rest[0].port, 3000);
+        assert_eq!(parsed.rest[0].path, "/api");
+        assert!(parsed.rest[0].operations.contains_key("get"));
+    }
+
+    #[test]
+    fn parse_rest_with_response() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      get:
+        path: /items
+        to: direct:listItems
+        response:
+          description: A list of items
+          schema:
+            type: array
+            items:
+              type: string
+          headers:
+            X-Total-Count:
+              type: integer
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let rest = &parsed.rest[0];
+        let op = rest.operations.get("get").unwrap();
+        let resp = op.response.as_ref().unwrap();
+        assert_eq!(resp.description.as_deref(), Some("A list of items"));
+        assert!(resp.schema.is_some());
+        assert!(resp.headers.contains_key("X-Total-Count"));
+    }
+
+    #[test]
+    fn parse_rest_with_request_schema_and_parameters() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      post:
+        path: /create
+        to: direct:create
+        request_schema:
+          type: object
+          properties:
+            name:
+              type: string
+        parameters:
+          limit:
+            type: integer
+          offset:
+            type: integer
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let op = parsed.rest[0].operations.get("post").unwrap();
+        assert!(op.request_schema.is_some());
+        assert!(op.parameters.contains_key("limit"));
+        assert!(op.parameters.contains_key("offset"));
+    }
+
+    #[test]
+    fn parse_rest_multiple_verbs_in_one_block() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      get:
+        path: /items
+        to: direct:getItems
+      post:
+        path: /items
+        to: direct:createItem
+      put:
+        path: /items/{id}
+        to: direct:updateItem
+      delete:
+        path: /items/{id}
+        to: direct:deleteItem
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let ops = &parsed.rest[0].operations;
+        assert_eq!(ops.len(), 4);
+        assert!(ops.contains_key("get"));
+        assert!(ops.contains_key("post"));
+        assert!(ops.contains_key("put"));
+        assert!(ops.contains_key("delete"));
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicRouterStep {
     pub dynamic_router: DynamicRouterData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicRouterData {
     #[serde(default)]
@@ -1436,14 +1769,14 @@ fn default_max_iterations() -> usize {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingSlipStep {
     pub routing_slip: RoutingSlipData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingSlipData {
     #[serde(default)]
@@ -1463,14 +1796,14 @@ pub struct RoutingSlipData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RecipientListStep {
     pub recipient_list: RecipientListData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RecipientListData {
     #[serde(default)]
@@ -1494,14 +1827,14 @@ pub struct RecipientListData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct BeanStep {
     pub bean: BeanStepData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct BeanStepData {
     pub name: String,
@@ -1511,13 +1844,13 @@ pub struct BeanStepData {
 // ── Resequence step (Phase 3) ──
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ResequenceStep {
     pub resequence: ResequenceData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ResequenceData {
     #[serde(default)]
@@ -1527,7 +1860,7 @@ pub struct ResequenceData {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ResequenceBatchYaml {
     pub correlation: String,
@@ -1536,7 +1869,7 @@ pub struct ResequenceBatchYaml {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ResequenceCompletionYaml {
     #[serde(default)]
@@ -1551,7 +1884,7 @@ pub struct ResequenceCompletionYaml {
 // not yet implemented (Task 3). Scaffolding will be added when Stream is ready.
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ResequenceStreamYaml {
     pub sequence: String,
@@ -1577,7 +1910,7 @@ fn default_gap_timeout() -> u64 {
 
 /// Stream resequencer gap policy (YAML representation).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamGapPolicyYaml {
     #[default]
@@ -1587,7 +1920,7 @@ pub enum StreamGapPolicyYaml {
 
 /// Stream resequencer capacity policy (YAML representation).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamCapacityPolicyYaml {
     #[default]

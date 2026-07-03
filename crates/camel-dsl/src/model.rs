@@ -386,9 +386,13 @@ pub enum BodyTypeDef {
     Empty,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DataFormatDef {
     pub format: String,
+    /// Optional JSON Schema for request-body validation (REST DSL
+    /// `request_schema`). When present, the compiled UnmarshalService is
+    /// wrapped with a `JsonSchemaValidateService`.
+    pub schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,8 +687,10 @@ mod tests {
     fn data_format_def() {
         let def = DataFormatDef {
             format: "protobuf".into(),
+            schema: None,
         };
         assert_eq!(def.format, "protobuf");
+        assert!(def.schema.is_none());
     }
 
     #[test]

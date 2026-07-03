@@ -105,6 +105,8 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 
 - **PipelineOutcome** — Enum (`Completed(Exchange) | Stopped(Exchange) | Failed(CamelError)`) produced by `run_steps` (the pipeline executor). Lives ONE LAYER ABOVE Tower — `BoxProcessor::Response` and every `Service<Exchange>::Response` stays `Result<Exchange, CamelError>`. The pipeline's `Service<Exchange>` impl translates `PipelineOutcome` to `Result` via `into_tower_result()` (Completed/Stopped both → Ok). Stop EIP is successful control flow, not an error. Established by ADR-0024. (camel-api + camel-core + camel-processor)
 - **ConsumerStopping** — `CamelError` variant for producer `poll_ready` shutdown signals. Distinct from Stop EIP — it indicates the producer's semaphore/channel is closing and the call cannot proceed. Used by JMS/OpenSearch producers. Established by ADR-0024. (camel-api + camel-component-jms + camel-component-opensearch)
+- **REST DSL**: Declarative `rest:` YAML/JSON blocks that lower to `http:` consumer routes with JSON binding, path templates, and optional schema validation. Spec: `docs/superpowers/specs/2026-07-01-rest-dsl-openapi-binding-design.md`.
+- **OpenAPI code-first generation**: `rest:` AST → OpenAPI 3.0.3 document via `camel openapi generate <file>` or `camel_dsl::openapi::generate_openapi()`.
 
 ## Documentation Authority & Refresh
 

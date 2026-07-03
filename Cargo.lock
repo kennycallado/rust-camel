@@ -1908,6 +1908,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tower",
  "tracing",
  "ts-rs",
 ]
@@ -2132,6 +2134,7 @@ dependencies = [
  "criterion",
  "csv",
  "futures",
+ "jsonschema",
  "rand 0.10.1",
  "regex",
  "serde_json",
@@ -8196,6 +8199,24 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+]
+
+[[package]]
+name = "rest-crud"
+version = "0.22.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-http",
+ "camel-core",
+ "camel-dsl",
+ "dashmap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

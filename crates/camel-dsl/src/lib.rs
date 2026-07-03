@@ -11,8 +11,10 @@ pub mod env_interpolation;
 mod input_format;
 pub mod json;
 pub mod model;
+pub mod openapi;
 #[cfg(test)]
 mod parity_tests;
+pub mod rest;
 pub mod route_ast;
 pub mod template;
 pub mod yaml;
@@ -40,6 +42,7 @@ pub use model::{
     SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ToStepDef,
     ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
+pub use openapi::generate_openapi;
 pub use yaml::{
     RouteDslRoute, RouteDslRoutes, RouteDslStep, load_from_file, parse_yaml,
     parse_yaml_to_canonical, parse_yaml_to_declarative, parse_yaml_with_threshold,
