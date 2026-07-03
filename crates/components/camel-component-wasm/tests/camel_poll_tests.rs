@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 use camel_component_file::FileComponent;
 use camel_component_wasm::bindings::camel::plugin::host::Host;
+use camel_component_wasm::capabilities::WasmCapabilities;
 use camel_component_wasm::runtime::WasmHostState;
 use camel_core::Registry;
 use wasmtime::component::ResourceTable;
@@ -16,7 +17,15 @@ fn test_tokio_handle() -> tokio::runtime::Handle {
         .clone()
 }
 
-fn make_state_with_registry(registry: Registry, call_depth: u32) -> WasmHostState {
+/// Build a host state with the given registry and capabilities granted for
+/// the schemes under test. Tests in this file exercise the `camel_poll` host
+/// function with a registered component; they need the scheme allowlist to
+/// permit the call to proceed past the capability gate.
+fn make_state_with_registry_and_caps(
+    registry: Registry,
+    call_depth: u32,
+    capabilities: WasmCapabilities,
+) -> WasmHostState {
     WasmHostState {
         table: ResourceTable::new(),
         wasi: WasiCtxBuilder::new().inherit_stderr().build(),
@@ -26,6 +35,7 @@ fn make_state_with_registry(registry: Registry, call_depth: u32) -> WasmHostStat
         limits: wasmtime::StoreLimits::default(),
         state_store: camel_component_wasm::StateStore::new(),
         tokio_handle: test_tokio_handle(),
+        capabilities,
     }
 }
 
@@ -44,7 +54,9 @@ fn camel_poll_with_file_component_returns_file_content() {
         .register(Arc::new(FileComponent::default()) as Arc<dyn camel_component_api::Component>);
 
     let uri = format!("file:{dir}?fileName=input.txt&noop=true");
-    let mut state = make_state_with_registry(registry, 0);
+    // Grant the `file` scheme so the capability gate admits the poll call.
+    let mut state =
+        make_state_with_registry_and_caps(registry, 0, WasmCapabilities::from_scheme_list("file"));
 
     let result = Host::camel_poll(&mut state, uri, 1000);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -54,7 +66,13 @@ fn camel_poll_with_file_component_returns_file_content() {
 #[test]
 fn camel_poll_with_unknown_scheme_returns_error() {
     let registry = Registry::new();
-    let mut state = make_state_with_registry(registry, 0);
+    // Grant `nosuch` so the capability gate passes; the test then exercises
+    // the "scheme registered in registry?" branch.
+    let mut state = make_state_with_registry_and_caps(
+        registry,
+        0,
+        WasmCapabilities::from_scheme_list("nosuch"),
+    );
 
     let result = Host::camel_poll(&mut state, "nosuch://foo".to_string(), 100);
     assert!(result.is_err(), "expected Err for unknown scheme");
@@ -70,7 +88,10 @@ fn camel_poll_with_unknown_scheme_returns_error() {
 #[test]
 fn camel_poll_recursion_guard_blocks_nested_calls() {
     let registry = Registry::new();
-    let mut state = make_state_with_registry(registry, 1); // call_depth already > 0
+    // Grant `file` so the capability gate passes; the test then exercises
+    // the recursion guard branch (call_depth already > 0).
+    let mut state =
+        make_state_with_registry_and_caps(registry, 1, WasmCapabilities::from_scheme_list("file"));
 
     let result = Host::camel_poll(&mut state, "file:anything".to_string(), 100);
     assert!(result.is_err(), "expected Err for recursive call");
@@ -86,7 +107,12 @@ fn camel_poll_recursion_guard_blocks_nested_calls() {
 #[test]
 fn camel_poll_with_empty_uri_scheme_returns_error() {
     let registry = Registry::new();
-    let mut state = make_state_with_registry(registry, 0);
+    // Grant the empty scheme so the capability gate passes; the test then
+    // exercises the "scheme extracted from URI is empty" branch. Empty
+    // strings are filtered by `from_scheme_list`, so we insert directly.
+    let mut caps = WasmCapabilities::default();
+    caps.call_schemes.insert(String::new());
+    let mut state = make_state_with_registry_and_caps(registry, 0, caps);
 
     let result = Host::camel_poll(&mut state, String::new(), 100);
     assert!(result.is_err(), "expected Err for URI with no scheme");
@@ -105,7 +131,10 @@ fn camel_poll_with_non_pollable_scheme_returns_error() {
 
     let mut registry = Registry::new();
     registry.register(Arc::new(LogComponent::new()) as Arc<dyn camel_component_api::Component>);
-    let mut state = make_state_with_registry(registry, 0);
+    // Grant `log` so the capability gate admits the call — the test then
+    // exercises the "scheme is pollable?" branch.
+    let mut state =
+        make_state_with_registry_and_caps(registry, 0, WasmCapabilities::from_scheme_list("log"));
 
     let result = Host::camel_poll(&mut state, "log:test".to_string(), 100);
     assert!(result.is_err(), "expected Err for non-pollable component");

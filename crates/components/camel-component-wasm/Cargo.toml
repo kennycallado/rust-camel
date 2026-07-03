@@ -13,8 +13,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-# TODO(WASM-007): optional WASM capabilities
-epoch-interruption = []
 
 [dependencies]
 camel-api.workspace = true

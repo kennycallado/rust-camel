@@ -267,34 +267,55 @@ fn inspect_error_to_spawn_failed(image: &str, e: bollard::errors::Error) -> Prov
     ProviderError::SpawnFailed(format!("failed to inspect image '{image}': {e}"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Build the container creation request with security hardening.
+fn build_container_config(
+    image: &str,
+    host_port: u16,
+    instance_id: &str,
+    handle_id: &str,
+) -> bollard::models::ContainerCreateBody {
+    let labels = std::collections::HashMap::from([
+        ("camel.function.runner".to_string(), "true".to_string()),
+        ("camel.function.context".to_string(), handle_id.to_string()),
+        (
+            "camel.function.instance".to_string(),
+            instance_id.to_string(),
+        ),
+    ]);
 
-    #[test]
-    fn inspect_non_404_becomes_spawn_failed() {
-        let err = bollard::errors::Error::DockerResponseServerError {
-            status_code: 500,
-            message: "internal server error".into(),
-        };
-        let result = inspect_error_to_spawn_failed("my-image:latest", err);
-        assert!(
-            matches!(result, ProviderError::SpawnFailed(ref msg) if msg.contains("my-image:latest")),
-            "expected SpawnFailed with image name, got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn inspect_permission_denied_becomes_spawn_failed() {
-        let err = bollard::errors::Error::DockerResponseServerError {
-            status_code: 403,
-            message: "permission denied".into(),
-        };
-        let result = inspect_error_to_spawn_failed("private/image:1.0", err);
-        assert!(matches!(
-            result,
-            ProviderError::SpawnFailed(ref msg) if msg.contains("private/image:1.0")
-        ));
+    bollard::models::ContainerCreateBody {
+        image: Some(image.to_string()),
+        env: Some(vec![
+            "PORT=8080".to_string(),
+            "DENO_NO_PROMPT=1".to_string(),
+            "DENO_DIR=/tmp/deno".to_string(),
+        ]),
+        labels: Some(labels),
+        exposed_ports: Some(vec!["8080/tcp".to_string()]),
+        host_config: Some(bollard::models::HostConfig {
+            port_bindings: Some(std::collections::HashMap::from([(
+                "8080/tcp".to_string(),
+                Some(vec![bollard::models::PortBinding {
+                    host_ip: Some("127.0.0.1".to_string()),
+                    host_port: Some(host_port.to_string()),
+                }]),
+            )])),
+            init: Some(true),
+            auto_remove: Some(false),
+            cap_drop: Some(vec!["ALL".to_string()]),
+            security_opt: Some(vec!["no-new-privileges".to_string()]),
+            readonly_rootfs: Some(true),
+            memory: Some(256 * 1024 * 1024),
+            nano_cpus: Some(1_000_000_000),
+            pids_limit: Some(100),
+            tmpfs: Some(std::collections::HashMap::from([(
+                "/tmp".to_string(),
+                String::new(),
+            )])),
+            dns_search: Some(vec![".".to_string()]),
+            ..Default::default()
+        }),
+        ..Default::default()
     }
 }
 
@@ -399,37 +420,7 @@ impl FunctionProvider for ContainerProvider {
 
         self.pull_image_if_needed().await?;
 
-        let labels = std::collections::HashMap::from([
-            ("camel.function.runner".to_string(), "true".to_string()),
-            ("camel.function.context".to_string(), handle_id.clone()),
-            (
-                "camel.function.instance".to_string(),
-                self.instance_id.clone(),
-            ),
-        ]);
-
-        let config = bollard::models::ContainerCreateBody {
-            image: Some(self.image.clone()),
-            env: Some(vec![
-                "PORT=8080".to_string(),
-                "DENO_NO_PROMPT=1".to_string(),
-            ]),
-            labels: Some(labels),
-            exposed_ports: Some(vec!["8080/tcp".to_string()]),
-            host_config: Some(bollard::models::HostConfig {
-                port_bindings: Some(std::collections::HashMap::from([(
-                    "8080/tcp".to_string(),
-                    Some(vec![bollard::models::PortBinding {
-                        host_ip: Some("127.0.0.1".to_string()),
-                        host_port: Some(host_port.to_string()),
-                    }]),
-                )])),
-                init: Some(true),
-                auto_remove: Some(false),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let config = build_container_config(&self.image, host_port, &self.instance_id, &handle_id);
 
         let create_opts = bollard::query_parameters::CreateContainerOptions {
             name: Some(handle_id.clone()),
@@ -603,5 +594,92 @@ impl Drop for ContainerProvider {
                 tracing::warn!(target: "camel_function::container", "container cleanup skipped: no tokio runtime");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_non_404_becomes_spawn_failed() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "internal server error".into(),
+        };
+        let result = inspect_error_to_spawn_failed("my-image:latest", err);
+        assert!(
+            matches!(result, ProviderError::SpawnFailed(ref msg) if msg.contains("my-image:latest")),
+            "expected SpawnFailed with image name, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn inspect_permission_denied_becomes_spawn_failed() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 403,
+            message: "permission denied".into(),
+        };
+        let result = inspect_error_to_spawn_failed("private/image:1.0", err);
+        assert!(matches!(
+            result,
+            ProviderError::SpawnFailed(ref msg) if msg.contains("private/image:1.0")
+        ));
+    }
+
+    #[test]
+    fn container_config_has_security_hardening() {
+        let config =
+            build_container_config("denoland/deno:2.1.4", 8080, "test-instance", "test-handle");
+
+        let hc = config.host_config.expect("host_config must be set");
+
+        let cap_drop = hc.cap_drop.expect("cap_drop must be set");
+        assert!(
+            cap_drop.contains(&"ALL".to_string()),
+            "cap_drop must include ALL"
+        );
+
+        let security_opt = hc.security_opt.expect("security_opt must be set");
+        assert!(
+            security_opt.contains(&"no-new-privileges".to_string()),
+            "security_opt must include no-new-privileges"
+        );
+
+        assert_eq!(
+            hc.readonly_rootfs,
+            Some(true),
+            "readonly_rootfs must be true"
+        );
+
+        let mem = hc.memory.expect("memory limit must be set");
+        assert!(
+            mem > 0 && mem <= 512 * 1024 * 1024,
+            "memory must be a sane limit (got {mem})"
+        );
+
+        let cpus = hc.nano_cpus.expect("nano_cpus must be set");
+        assert!(cpus > 0, "nano_cpus must be positive");
+
+        let pids = hc.pids_limit.expect("pids_limit must be set");
+        assert!(
+            pids > 0 && pids <= 500,
+            "pids_limit must be a sane value (got {pids})"
+        );
+
+        let tmpfs = hc.tmpfs.expect("tmpfs must be set");
+        assert!(tmpfs.contains_key("/tmp"), "tmpfs must mount /tmp");
+
+        let dns_search = hc.dns_search.expect("dns_search must be set");
+        assert!(
+            dns_search.contains(&".".to_string()),
+            "dns_search must suppress defaults"
+        );
+
+        let env = config.env.expect("env must be set");
+        assert!(
+            env.iter().any(|e| e.contains("DENO_DIR=/tmp")),
+            "env must set DENO_DIR=/tmp for readonly rootfs"
+        );
     }
 }

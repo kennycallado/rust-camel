@@ -46,6 +46,16 @@ pub struct WasmLimitsConfig {
     /// are not concurrent-safe across reentrant calls today).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_calls: Option<usize>,
+
+    /// Maximum .wasm file size in bytes. None = use runtime default (10 MB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wasm_size: Option<u64>,
+
+    /// Comma-separated URI schemes the guest may call via camel_call/camel_poll.
+    /// None or empty = deny all (fail-closed). Example: "log,direct,file".
+    /// Ignored for AuthorizationPolicy/SecurityPolicy worlds (always denied).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_call_schemes: Option<String>,
 }
 
 #[cfg(test)]
@@ -58,6 +68,8 @@ mod tests {
         assert_eq!(cfg.timeout_secs, None);
         assert_eq!(cfg.max_memory, None);
         assert_eq!(cfg.max_concurrent_calls, None);
+        assert_eq!(cfg.max_wasm_size, None);
+        assert_eq!(cfg.allow_call_schemes, None);
     }
 
     #[test]
@@ -66,11 +78,15 @@ mod tests {
             timeout-secs = 600
             max-memory = 4294967296i64
             max-concurrent-calls = 2
+            max-wasm-size = 20971520i64
+            allow-call-schemes = "log,direct"
         };
         let cfg: WasmLimitsConfig = toml.try_into().expect("deserialize");
         assert_eq!(cfg.timeout_secs, Some(600));
         assert_eq!(cfg.max_memory, Some(4_294_967_296));
         assert_eq!(cfg.max_concurrent_calls, Some(2));
+        assert_eq!(cfg.max_wasm_size, Some(20_971_520));
+        assert_eq!(cfg.allow_call_schemes.as_deref(), Some("log,direct"));
     }
 
     #[test]
@@ -82,6 +98,18 @@ mod tests {
         assert_eq!(cfg.timeout_secs, Some(120));
         assert_eq!(cfg.max_memory, None);
         assert_eq!(cfg.max_concurrent_calls, None);
+        assert_eq!(cfg.max_wasm_size, None);
+        assert_eq!(cfg.allow_call_schemes, None);
+    }
+
+    #[test]
+    fn deserialises_allow_call_schemes() {
+        let toml = toml::toml! {
+            timeout-secs = 10
+            allow-call-schemes = "log,direct"
+        };
+        let cfg: WasmLimitsConfig = toml.try_into().expect("deserialize");
+        assert_eq!(cfg.allow_call_schemes.as_deref(), Some("log,direct"));
     }
 
     #[test]
@@ -100,6 +128,7 @@ mod tests {
             timeout_secs: Some(45),
             max_memory: Some(64 * 1024 * 1024),
             max_concurrent_calls: None,
+            ..WasmLimitsConfig::default()
         };
         let serialized = toml::to_string(&original).expect("serialize");
         let back: WasmLimitsConfig = toml::from_str(&serialized).expect("deserialize");
@@ -112,10 +141,13 @@ mod tests {
             timeout_secs: Some(30),
             max_memory: None,
             max_concurrent_calls: None,
+            ..WasmLimitsConfig::default()
         };
         let s = toml::to_string(&cfg).expect("serialize");
         assert!(s.contains("timeout-secs"));
         assert!(!s.contains("max-memory"));
         assert!(!s.contains("max-concurrent-calls"));
+        assert!(!s.contains("max-wasm-size"));
+        assert!(!s.contains("allow-call-schemes"));
     }
 }

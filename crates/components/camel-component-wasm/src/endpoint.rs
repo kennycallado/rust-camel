@@ -79,6 +79,7 @@ mod tests {
             timeout_secs: 10,
             max_memory_bytes: 1024 * 1024,
             max_concurrent_calls: 4,
+            ..WasmConfig::default()
         };
         let endpoint = WasmEndpoint::new(
             "wasm:test.wasm?timeout=10&max-memory=1048576".to_string(),

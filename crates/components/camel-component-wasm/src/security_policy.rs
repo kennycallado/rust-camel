@@ -140,6 +140,7 @@ mod tests {
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
             0,
+            crate::capabilities::WasmCapabilities::default(),
         );
         assert!(host_state.properties.is_empty());
     }

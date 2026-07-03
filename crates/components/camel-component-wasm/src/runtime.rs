@@ -22,6 +22,7 @@ pub struct WasmHostState {
     pub limits: wasmtime::StoreLimits,
     pub state_store: crate::state_store::StateStore,
     pub tokio_handle: tokio::runtime::Handle,
+    pub capabilities: crate::capabilities::WasmCapabilities,
 }
 
 impl wasmtime_wasi::WasiView for WasmHostState {
@@ -52,14 +53,26 @@ impl WasmRuntime {
 
         let mut config = Config::new();
         config.wasm_component_model(true);
-        #[cfg(feature = "epoch-interruption")]
         config.epoch_interruption(true);
 
         let engine =
             Engine::new(&config).map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
+        // Existence check first (preserve ModuleNotFound error variant)
+        if !module_path.exists() {
+            return Err(WasmError::ModuleNotFound(format!(
+                "Failed to load WASM module {}: not found",
+                module_path.display()
+            )));
+        }
+
+        // Size cap: reject oversized modules before compilation (R4-H3)
+        crate::config::validate_wasm_size(&module_path, wasm_config.max_wasm_size_bytes)
+            .map_err(WasmError::CompilationFailed)?;
+
         let component = Component::from_file(&engine, &module_path).map_err(|e| {
-            WasmError::ModuleNotFound(format!(
+            // File exists and size is OK — compilation error is genuine
+            WasmError::CompilationFailed(format!(
                 "Failed to load WASM module {}: {}",
                 module_path.display(),
                 e
@@ -98,6 +111,7 @@ impl WasmRuntime {
         state_store: crate::state_store::StateStore,
         tokio_handle: tokio::runtime::Handle,
         max_memory_bytes: u64,
+        capabilities: crate::capabilities::WasmCapabilities,
     ) -> WasmHostState {
         let limits = if max_memory_bytes == 0 {
             wasmtime::StoreLimits::default()
@@ -115,6 +129,7 @@ impl WasmRuntime {
             limits,
             state_store,
             tokio_handle,
+            capabilities,
         }
     }
 
@@ -139,6 +154,9 @@ impl WasmRuntime {
             state_store,
             tokio_handle,
             self.config.max_memory_bytes,
+            crate::capabilities::WasmCapabilities::from_scheme_list(
+                &self.config.allow_call_schemes,
+            ),
         );
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| &mut state.limits);
@@ -177,6 +195,9 @@ impl WasmRuntime {
             state_store,
             tokio_handle,
             self.config.max_memory_bytes,
+            crate::capabilities::WasmCapabilities::from_scheme_list(
+                &self.config.allow_call_schemes,
+            ),
         );
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| &mut state.limits);
@@ -235,6 +256,7 @@ mod tests {
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),
             tokio_handle: test_tokio_handle(),
+            capabilities: crate::capabilities::WasmCapabilities::default(),
         };
         assert!(state.properties.is_empty());
         assert_eq!(state.call_depth, 0);
@@ -251,6 +273,7 @@ mod tests {
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
             0,
+            crate::capabilities::WasmCapabilities::default(),
         );
         let _ = host_state; // smoke test: constructor tolerates 0
     }
@@ -289,6 +312,7 @@ mod tests {
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
             64 * 1024, // 64 KiB cap
+            crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
         store.limiter(|state| &mut state.limits);
@@ -335,6 +359,7 @@ mod tests {
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
             128 * 1024,
+            crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
         store.limiter(|state| &mut state.limits);
@@ -362,6 +387,7 @@ mod tests {
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
             0,
+            crate::capabilities::WasmCapabilities::default(),
         );
         let _limits: &wasmtime::StoreLimits = &state.limits;
     }
@@ -379,6 +405,7 @@ mod tests {
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
             0,
+            crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
         store.set_epoch_deadline(500);
@@ -401,6 +428,7 @@ mod tests {
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
             1024, // 1 KiB cap; threaded through create_host_state
+            crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
         store.limiter(|state| &mut state.limits);
@@ -447,6 +475,7 @@ mod tests {
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
             0, // no memory cap — this test is about timeout, not memory
+            crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
         // Very short deadline: 1 epoch tick. With a 10ms tick interval, this

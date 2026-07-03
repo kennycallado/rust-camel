@@ -37,6 +37,7 @@ const CONFIGURE_EPOCH_DEADLINE: u64 = u64::MAX;
 pub struct WasmSourceConsumer {
     module_path: PathBuf,
     guest_config: Vec<(String, String)>,
+    config: WasmConfig,
     #[allow(dead_code)]
     registry: Arc<std::sync::Mutex<camel_core::Registry>>,
     cancel_token: CancellationToken,
@@ -49,13 +50,14 @@ pub struct WasmSourceConsumer {
 impl WasmSourceConsumer {
     pub fn new(
         module_path: PathBuf,
-        _config: WasmConfig,
+        config: WasmConfig,
         guest_config: Vec<(String, String)>,
         registry: Arc<std::sync::Mutex<camel_core::Registry>>,
     ) -> Self {
         Self {
             module_path,
             guest_config,
+            config,
             registry,
             cancel_token: CancellationToken::new(),
             engine: None,
@@ -78,7 +80,11 @@ impl Consumer for WasmSourceConsumer {
                 .map_err(|e| CamelError::ProcessorError(format!("wasmtime engine: {e}")))?,
         );
 
-        // 2. Load component
+        // 2. Size cap: reject oversized modules before compilation (R4-H3)
+        crate::config::validate_wasm_size(&self.module_path, self.config.max_wasm_size_bytes)
+            .map_err(CamelError::ProcessorError)?;
+
+        // 3. Load component
         let component = Component::from_file(&engine, &self.module_path)
             .map_err(|e| CamelError::ProcessorError(format!("component load: {e}")))?;
 

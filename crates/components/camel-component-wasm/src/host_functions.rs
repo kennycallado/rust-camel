@@ -8,6 +8,17 @@ use crate::runtime::WasmHostState;
 
 impl Host for WasmHostState {
     fn camel_call(&mut self, uri: String, payload: String) -> Result<String, WasmError> {
+        // Capability gate (H4): check scheme against per-world allowlist.
+        // Runs before call_depth increment so a denied scheme also avoids
+        // any side effect on the depth counter.
+        let scheme = uri.split(':').next().unwrap_or("").to_string();
+        if !self.capabilities.can_call(&scheme) {
+            return Err(WasmError::ProcessorError(format!(
+                "camel_call denied: scheme '{}' not in capability allowlist",
+                scheme
+            )));
+        }
+
         if self.call_depth > 0 {
             return Err(WasmError::ProcessorError(
                 "recursive wasm calls not supported".to_string(),
@@ -82,6 +93,15 @@ impl Host for WasmHostState {
     }
 
     fn camel_poll(&mut self, uri: String, timeout_ms: u32) -> Result<String, WasmError> {
+        // Capability gate (H4): check scheme against per-world allowlist.
+        let scheme = uri.split(':').next().unwrap_or("").to_string();
+        if !self.capabilities.can_call(&scheme) {
+            return Err(WasmError::ProcessorError(format!(
+                "camel_poll denied: scheme '{}' not in capability allowlist",
+                scheme
+            )));
+        }
+
         if self.call_depth > 0 {
             return Err(WasmError::ProcessorError(
                 "recursive wasm calls not supported".to_string(),
@@ -167,10 +187,22 @@ impl Host for WasmHostState {
     }
 
     fn host_store(&mut self, key: String, value: String) -> Result<(), WasmError> {
+        // Capability gate (H5): policy worlds have host_kv = false.
+        if !self.capabilities.host_kv {
+            return Err(WasmError::ProcessorError(
+                "host_store denied: host_kv capability not granted".to_string(),
+            ));
+        }
         self.state_store.store(&key, &value).map_err(WasmError::Io)
     }
 
     fn host_load(&mut self, key: String) -> Result<Option<String>, WasmError> {
+        // Capability gate (H5): policy worlds have host_kv = false.
+        if !self.capabilities.host_kv {
+            return Err(WasmError::ProcessorError(
+                "host_load denied: host_kv capability not granted".to_string(),
+            ));
+        }
         self.state_store.load(&key).map_err(WasmError::Io)
     }
 }
@@ -243,11 +275,17 @@ macro_rules! impl_host_for_binding {
             ) -> Result<(), crate::$bindings_mod::camel::plugin::types::WasmError> {
                 let host = self as &mut dyn Host;
                 host.host_store(key, value).map_err(|e| match e {
+                    WasmError::ProcessorError(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::ProcessorError(s)
+                    }
+                    WasmError::TypeConversion(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::TypeConversion(s)
+                    }
                     WasmError::Io(s) => {
                         crate::$bindings_mod::camel::plugin::types::WasmError::Io(s)
                     }
-                    other => {
-                        crate::$bindings_mod::camel::plugin::types::WasmError::Io(other.to_string())
+                    WasmError::Timeout => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Timeout
                     }
                 })
             }
@@ -258,11 +296,17 @@ macro_rules! impl_host_for_binding {
             ) -> Result<Option<String>, crate::$bindings_mod::camel::plugin::types::WasmError> {
                 let host = self as &mut dyn Host;
                 host.host_load(key).map_err(|e| match e {
+                    WasmError::ProcessorError(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::ProcessorError(s)
+                    }
+                    WasmError::TypeConversion(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::TypeConversion(s)
+                    }
                     WasmError::Io(s) => {
                         crate::$bindings_mod::camel::plugin::types::WasmError::Io(s)
                     }
-                    other => {
-                        crate::$bindings_mod::camel::plugin::types::WasmError::Io(other.to_string())
+                    WasmError::Timeout => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Timeout
                     }
                 })
             }
@@ -314,6 +358,7 @@ mod tests {
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),
             tokio_handle: test_tokio_handle(),
+            capabilities: crate::capabilities::WasmCapabilities::default(),
         }
     }
 
@@ -373,5 +418,89 @@ mod tests {
             result.is_err(),
             "should return error for empty scheme, not panic"
         );
+    }
+
+    // Capability gating (H4 / H5)
+    // -----------------------------------------------------------------------
+    // Default capabilities are fail-closed: empty scheme allowlist, host_kv
+    // disabled. Tests below verify that the gates fire BEFORE any side effect
+    // (registry lookup, state store mutation) so a denied call cannot leak
+    // information or persist data.
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_camel_call_denied_without_capability() {
+        let mut state = make_state(0);
+        // Default capabilities: empty allowlist
+        let result = Host::camel_call(&mut state, "log:info".to_string(), "{}".to_string());
+        let err = result.unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("denied"),
+            "expected 'denied' in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_camel_poll_denied_without_capability() {
+        let mut state = make_state(0);
+        let result = Host::camel_poll(&mut state, "file:foo".to_string(), 100);
+        let err = result.unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("denied"),
+            "expected 'denied' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_host_store_denied_without_capability() {
+        let mut state = make_state(0);
+        let result = Host::host_store(&mut state, "key".to_string(), "val".to_string());
+        let err = result.unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("host_kv"),
+            "expected 'host_kv' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_host_load_denied_without_capability() {
+        let mut state = make_state(0);
+        let result = Host::host_load(&mut state, "key".to_string());
+        let err = result.unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("host_kv"),
+            "expected 'host_kv' in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_camel_call_allowed_with_capability_passes_scheme_check() {
+        // Granting the scheme means the gate no longer denies — but with an
+        // empty registry, the next stage returns "component not found". This
+        // proves the gate runs BEFORE the registry lookup.
+        let mut state = make_state(0);
+        state.capabilities = crate::capabilities::WasmCapabilities::from_scheme_list("noscheme");
+        let result = Host::camel_call(&mut state, "noscheme:foo".to_string(), "{}".to_string());
+        let err = result.unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("component not found"),
+            "expected 'component not found' (gate cleared), got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_denied_capabilities_block_host_kv_via_field() {
+        // H5: policy worlds (denied caps) must have host_kv disabled — the
+        // gate is a single field check, not a per-key check.
+        let mut state = make_state(0);
+        state.capabilities = crate::capabilities::WasmCapabilities::denied();
+        assert!(!state.capabilities.host_kv);
+        // host_store and host_load both go through the same gate
+        assert!(Host::host_store(&mut state, "k".to_string(), "v".to_string()).is_err());
+        assert!(Host::host_load(&mut state, "k".to_string()).is_err());
     }
 }

@@ -20,6 +20,7 @@ pub struct WasmPluginContext {
     pub config: WasmConfig,
     pub registry: Arc<std::sync::Mutex<Registry>>,
     pub state_store: crate::state_store::StateStore,
+    pub capabilities: crate::capabilities::WasmCapabilities,
     #[allow(dead_code)]
     pub epoch_ticker: crate::epoch::EpochTicker,
 }
@@ -31,6 +32,7 @@ impl WasmPluginContext {
         registry: Arc<std::sync::Mutex<Registry>>,
         setup_linker: impl FnOnce(&mut Linker<WasmHostState>) -> Result<(), WasmError>,
         module_label: &str,
+        capabilities: crate::capabilities::WasmCapabilities,
     ) -> Result<Self, WasmError> {
         let module_path = module_path.as_ref().to_path_buf();
 
@@ -41,19 +43,25 @@ impl WasmPluginContext {
         let engine =
             Engine::new(&config).map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
+        // Existence check first (preserve ModuleNotFound error variant)
+        if !module_path.exists() {
+            return Err(WasmError::ModuleNotFound(format!(
+                "WASM {module_label} not found: {}",
+                module_path.display()
+            )));
+        }
+
+        // Size cap: reject oversized modules before compilation (R4-H3)
+        crate::config::validate_wasm_size(&module_path, wasm_config.max_wasm_size_bytes)
+            .map_err(WasmError::CompilationFailed)?;
+
         let component = Component::from_file(&engine, &module_path).map_err(|e| {
-            if !module_path.exists() {
-                WasmError::ModuleNotFound(format!(
-                    "WASM {module_label} not found: {}",
-                    module_path.display()
-                ))
-            } else {
-                WasmError::CompilationFailed(format!(
-                    "Failed to compile WASM {module_label} {}: {}",
-                    module_path.display(),
-                    e
-                ))
-            }
+            // File exists and size is OK — compilation error is genuine
+            WasmError::CompilationFailed(format!(
+                "Failed to compile WASM {module_label} {}: {}",
+                module_path.display(),
+                e
+            ))
         })?;
 
         let mut linker: Linker<WasmHostState> = Linker::new(&engine);
@@ -76,6 +84,7 @@ impl WasmPluginContext {
             config: wasm_config,
             registry,
             state_store,
+            capabilities,
             epoch_ticker,
         })
     }
@@ -95,6 +104,7 @@ impl WasmPluginContext {
                     .map_err(|e| WasmError::CompilationFailed(e.to_string()))
             },
             "authorization policy",
+            crate::capabilities::WasmCapabilities::denied(),
         )
         .await?;
 
@@ -105,6 +115,7 @@ impl WasmPluginContext {
                 ctx.state_store.clone(),
                 tokio::runtime::Handle::current(),
                 ctx.config.max_memory_bytes,
+                ctx.capabilities.clone(),
             );
             let mut store = Store::new(&ctx.engine, host_state);
             store.limiter(|state| &mut state.limits);
@@ -143,6 +154,9 @@ impl WasmPluginContext {
         registry: Arc<std::sync::Mutex<Registry>>,
         bean_config: HashMap<String, String>,
     ) -> Result<(Self, Vec<String>), WasmError> {
+        let caps = crate::capabilities::WasmCapabilities::from_scheme_list(
+            &wasm_config.allow_call_schemes,
+        );
         let ctx = Self::build(
             module_path,
             wasm_config,
@@ -152,6 +166,7 @@ impl WasmPluginContext {
                     .map_err(|e| WasmError::CompilationFailed(e.to_string()))
             },
             "bean",
+            caps,
         )
         .await?;
 
@@ -162,6 +177,7 @@ impl WasmPluginContext {
                 ctx.state_store.clone(),
                 tokio::runtime::Handle::current(),
                 ctx.config.max_memory_bytes,
+                ctx.capabilities.clone(),
             );
             let mut store = Store::new(&ctx.engine, host_state);
             store.limiter(|state| &mut state.limits);
@@ -206,6 +222,7 @@ impl WasmPluginContext {
             self.state_store.clone(),
             tokio::runtime::Handle::current(),
             self.config.max_memory_bytes,
+            self.capabilities.clone(),
         );
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| &mut state.limits);

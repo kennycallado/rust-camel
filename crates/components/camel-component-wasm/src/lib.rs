@@ -19,6 +19,7 @@ pub mod bean;
 pub mod bean_bindings;
 pub mod bindings;
 pub mod bundle;
+pub mod capabilities;
 pub mod config;
 pub mod endpoint;
 pub mod epoch;

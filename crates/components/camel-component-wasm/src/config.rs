@@ -20,6 +20,9 @@ const DEFAULT_MAX_MEMORY_BYTES: u64 = 50 * 1024 * 1024;
 /// Default maximum concurrent `call_process` executions per producer.
 const DEFAULT_MAX_CONCURRENT_CALLS: usize = 4;
 
+/// Default maximum .wasm file size in bytes (10 MB).
+const DEFAULT_MAX_WASM_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Epoch tick interval in milliseconds (same as Surrealism).
 const EPOCH_INTERVAL_MILLIS: u64 = 10;
 
@@ -38,6 +41,16 @@ pub struct WasmConfig {
 
     /// Maximum concurrent `call_process` executions per producer.
     pub max_concurrent_calls: usize,
+
+    /// Maximum .wasm file size in bytes. Files exceeding this are rejected
+    /// before compilation to prevent DoS via pathologically large modules.
+    /// Default: 10 MB.
+    pub max_wasm_size_bytes: u64,
+
+    /// Comma-separated URI schemes the guest may call via camel_call/camel_poll.
+    /// Empty string = deny all (fail-closed). Example: "log,direct,file".
+    /// Ignored for AuthorizationPolicy/SecurityPolicy worlds (always denied).
+    pub allow_call_schemes: String,
 }
 
 impl Default for WasmConfig {
@@ -46,6 +59,8 @@ impl Default for WasmConfig {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
             max_concurrent_calls: DEFAULT_MAX_CONCURRENT_CALLS,
+            max_wasm_size_bytes: DEFAULT_MAX_WASM_SIZE_BYTES,
+            allow_call_schemes: String::new(),
         }
     }
 }
@@ -63,6 +78,8 @@ impl WasmConfig {
             max_concurrent_calls: limits
                 .max_concurrent_calls
                 .unwrap_or(DEFAULT_MAX_CONCURRENT_CALLS),
+            max_wasm_size_bytes: limits.max_wasm_size.unwrap_or(DEFAULT_MAX_WASM_SIZE_BYTES),
+            allow_call_schemes: limits.allow_call_schemes.clone().unwrap_or_default(),
         }
     }
 
@@ -104,6 +121,16 @@ impl WasmConfig {
                             {
                                 config.max_concurrent_calls = max;
                             }
+                        }
+                        "max-wasm-size" => {
+                            if let Ok(bytes) = value.parse::<u64>()
+                                && bytes > 0
+                            {
+                                config.max_wasm_size_bytes = bytes;
+                            }
+                        }
+                        "allow-call" => {
+                            config.allow_call_schemes = value.to_string();
                         }
                         _ => {} // ignore unknown params
                     }
@@ -157,6 +184,23 @@ impl WasmConfig {
             WasmError::GuestPanic(e.to_string())
         }
     }
+}
+
+pub fn validate_wasm_size(path: &std::path::Path, max_bytes: u64) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("cannot stat wasm module {}: {}", path.display(), e))?;
+    let size = metadata.len();
+    if size > max_bytes {
+        return Err(format!(
+            "wasm module {} is {} bytes ({} KiB), exceeds cap of {} bytes ({} KiB)",
+            path.display(),
+            size,
+            size / 1024,
+            max_bytes,
+            max_bytes / 1024,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -241,6 +285,7 @@ mod tests {
             timeout_secs: 30,
             max_memory_bytes: 0,
             max_concurrent_calls: 4,
+            ..WasmConfig::default()
         };
         assert_eq!(config.epoch_deadline(), 3000); // 30s * 100 ticks/s
     }
@@ -251,6 +296,7 @@ mod tests {
             timeout_secs: 5,
             max_memory_bytes: 0,
             max_concurrent_calls: 4,
+            ..WasmConfig::default()
         };
         assert_eq!(config.epoch_deadline(), 500);
     }
@@ -267,6 +313,7 @@ mod tests {
             timeout_secs: Some(90),
             max_memory: Some(128 * 1024 * 1024),
             max_concurrent_calls: Some(2),
+            ..camel_config::WasmLimitsConfig::default()
         };
 
         let config = WasmConfig::from_limits(&limits);
@@ -293,6 +340,7 @@ mod tests {
             timeout_secs: Some(15),
             max_memory: None,
             max_concurrent_calls: Some(1),
+            ..camel_config::WasmLimitsConfig::default()
         };
 
         let config = WasmConfig::from_limits(&limits);
@@ -300,5 +348,40 @@ mod tests {
         assert_eq!(config.timeout_secs, 15);
         assert_eq!(config.max_memory_bytes, DEFAULT_MAX_MEMORY_BYTES);
         assert_eq!(config.max_concurrent_calls, 1);
+    }
+
+    #[test]
+    fn test_validate_wasm_size_rejects_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.wasm");
+        std::fs::write(&path, vec![0u8; 100]).unwrap();
+        let err = validate_wasm_size(&path, 50).unwrap_err();
+        assert!(err.contains("exceeds cap"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_wasm_size_allows_within_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.wasm");
+        std::fs::write(&path, vec![0u8; 100]).unwrap();
+        validate_wasm_size(&path, 200).expect("100 bytes within 200 cap");
+    }
+
+    #[test]
+    fn test_default_max_wasm_size_bytes() {
+        let config = WasmConfig::default();
+        assert_eq!(config.max_wasm_size_bytes, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_from_uri_max_wasm_size() {
+        let (_path, config) = WasmConfig::from_uri("p.wasm?max-wasm-size=1048576");
+        assert_eq!(config.max_wasm_size_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn test_validate_wasm_size_errors_on_missing_file() {
+        let err = validate_wasm_size(std::path::Path::new("/nonexistent.wasm"), 1000).unwrap_err();
+        assert!(err.contains("cannot stat"));
     }
 }

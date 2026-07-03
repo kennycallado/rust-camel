@@ -135,7 +135,7 @@ async fn wasm_producer_returns_component_not_found_for_invalid_module_file() {
     let exchange = Exchange::new(Message::new("hello"));
     let result = producer.clone().oneshot(exchange).await;
     assert!(
-        matches!(result, Err(CamelError::ComponentNotFound(msg)) if msg.contains("Failed to load WASM module"))
+        matches!(result, Err(CamelError::Config(msg)) if msg.contains("wasm compilation failed"))
     );
 }
 

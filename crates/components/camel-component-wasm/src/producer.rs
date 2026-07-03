@@ -246,6 +246,7 @@ mod tests {
             timeout_secs: 5,
             max_memory_bytes: 1024,
             max_concurrent_calls: 4,
+            ..WasmConfig::default()
         };
         let producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
@@ -306,6 +307,7 @@ mod tests {
             timeout_secs: 5,
             max_memory_bytes: 1024,
             max_concurrent_calls: 1,
+            ..WasmConfig::default()
         };
         let mut producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
