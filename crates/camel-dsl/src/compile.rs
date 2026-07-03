@@ -70,10 +70,15 @@ fn compile_security_policy(
         crate::model::DeclarativeSecurityPolicy::Roles {
             roles,
             all_required,
+            trust_upstream_principal,
         } => {
             let auth = require_authenticator(ctx, "roles")?;
-            let policy =
-                camel_auth::RolePolicy::new(roles, all_required, std::sync::Arc::clone(&auth));
+            let policy = camel_auth::RolePolicy::new(
+                roles,
+                all_required,
+                trust_upstream_principal,
+                std::sync::Arc::clone(&auth),
+            );
             Ok((
                 camel_api::security_policy::SecurityPolicyConfig::new(policy),
                 Some(auth),
@@ -82,10 +87,15 @@ fn compile_security_policy(
         crate::model::DeclarativeSecurityPolicy::Scopes {
             scopes,
             all_required,
+            trust_upstream_principal,
         } => {
             let auth = require_authenticator(ctx, "scopes")?;
-            let policy =
-                camel_auth::ScopePolicy::new(scopes, all_required, std::sync::Arc::clone(&auth));
+            let policy = camel_auth::ScopePolicy::new(
+                scopes,
+                all_required,
+                trust_upstream_principal,
+                std::sync::Arc::clone(&auth),
+            );
             Ok((
                 camel_api::security_policy::SecurityPolicyConfig::new(policy),
                 Some(auth),
@@ -3736,6 +3746,7 @@ mod tests {
         let def = DeclarativeSecurityPolicy::Roles {
             roles: vec!["admin".into()],
             all_required: true,
+            trust_upstream_principal: false,
         };
         let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
         assert!(returned_auth.is_some());
@@ -3748,6 +3759,7 @@ mod tests {
         let def = DeclarativeSecurityPolicy::Scopes {
             scopes: vec!["read".into()],
             all_required: false,
+            trust_upstream_principal: false,
         };
         let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
         assert!(returned_auth.is_some());
@@ -3759,6 +3771,7 @@ mod tests {
         let def = DeclarativeSecurityPolicy::Roles {
             roles: vec!["admin".into()],
             all_required: true,
+            trust_upstream_principal: false,
         };
         let result = compile_security_policy(def, &ctx);
         assert!(result.is_err());
@@ -3940,6 +3953,7 @@ mod tests {
             security_policy: Some(DeclarativeSecurityPolicy::Roles {
                 roles: vec!["admin".into()],
                 all_required: true,
+                trust_upstream_principal: false,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {
@@ -3964,6 +3978,7 @@ mod tests {
             security_policy: Some(DeclarativeSecurityPolicy::Roles {
                 roles: vec!["admin".into()],
                 all_required: true,
+                trust_upstream_principal: false,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {

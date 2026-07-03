@@ -163,7 +163,7 @@ mod tests {
     }
 
     fn mock_http() -> reqwest::Client {
-        reqwest::Client::new()
+        crate::hardened_http_client().expect("hardened client must build") // allow-unwrap
     }
 
     fn mock_provider() -> Arc<dyn TokenProvider> {

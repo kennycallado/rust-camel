@@ -25,6 +25,7 @@ indexmap.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 base64.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }

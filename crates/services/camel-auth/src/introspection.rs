@@ -108,7 +108,7 @@ impl CachingTokenIntrospector {
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
             .build()
-            .unwrap_or_default();
+            .expect("hardened HTTP client builder config is valid"); // allow-unwrap
         Self::with_client(endpoint, client_id, client_secret, options, http)
     }
 

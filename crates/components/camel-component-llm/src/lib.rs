@@ -33,9 +33,32 @@ pub use provider::{
 };
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 use provider_factory::ProviderMap;
+
+/// Build a hardened `reqwest::Client` for outbound LLM HTTP traffic.
+///
+/// Hardening (H15):
+/// - **No redirects** — a 302/303 to an attacker-controlled host would
+///   bypass scheme/IP validation. Both OpenAI and Ollama APIs are
+///   non-redirecting; a redirect response is a signal of misconfiguration
+///   or attack.
+/// - **Connect timeout 10s** — bound TCP handshake.
+/// - **Request timeout 30s** — bound total request lifetime. (Per-request
+///   deadlines set via siumai's `timeout` builder take precedence for
+///   streaming activity; this is the hard ceiling.)
+pub fn hardened_http_client() -> Result<reqwest::Client, CamelError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| {
+            CamelError::EndpointCreationFailed(format!("llm HTTP client build failed: {e}"))
+        })
+}
 
 pub struct LlmComponent {
     providers: Arc<ProviderMap>,

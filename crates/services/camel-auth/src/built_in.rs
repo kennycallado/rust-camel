@@ -14,11 +14,18 @@ pub const PRINCIPAL_KEY: &str = "camel.auth.principal";
 /// If the header is present, validates it via the supplied [`TokenAuthenticator`] and stores
 /// the resulting [`Principal`] in `PRINCIPAL_KEY` for downstream processors.
 ///
-/// If no `Authorization` header is present, falls back to an already-populated
-/// principal in the exchange (e.g. set by an upstream authentication filter).
+/// If no `Authorization` header is present, the behavior depends on
+/// `trust_upstream_principal`:
+/// - `true`: falls back to an already-populated principal in the exchange
+///   (e.g. set by an upstream authentication filter). **Spoofable** unless
+///   the route topology guarantees property integrity.
+/// - `false` (default): returns `Unauthenticated` — fail-closed. Use this
+///   unless the deployment explicitly trusts an upstream producer to
+///   authenticate and stamp the principal property.
 async fn authenticate(
     exchange: &mut Exchange,
     authenticator: &dyn TokenAuthenticator,
+    trust_upstream_principal: bool,
 ) -> Result<Principal, CamelError> {
     // Clone the token string so the borrow on exchange.input ends before the mut borrow for set_property.
     let token = exchange
@@ -37,8 +44,13 @@ async fn authenticate(
         return Ok(principal);
     }
 
-    // Fall back: principal already populated by an upstream auth filter
-    extract_principal_from_exchange(exchange)
+    if trust_upstream_principal {
+        extract_principal_from_exchange(exchange)
+    } else {
+        Err(CamelError::Unauthenticated(
+            "no Bearer token and trust_upstream_principal is false".into(),
+        ))
+    }
 }
 
 /// Extract a `Principal` from exchange properties, returning `Unauthenticated` if absent.
@@ -58,6 +70,10 @@ fn extract_principal_from_exchange(exchange: &Exchange) -> Result<Principal, Cam
 pub struct RolePolicy {
     required_roles: Vec<String>,
     all_required: bool,
+    /// When `true`, fall back to the `camel.auth.principal` exchange property
+    /// if no Bearer token is present. Default `false` (fail-closed) — see
+    /// H1 in `docs/superpowers/specs/v1-sec-stabilization-spec.md`.
+    trust_upstream_principal: bool,
     authenticator: Arc<dyn TokenAuthenticator>,
 }
 
@@ -65,11 +81,13 @@ impl RolePolicy {
     pub fn new(
         required_roles: Vec<String>,
         all_required: bool,
+        trust_upstream_principal: bool,
         authenticator: Arc<dyn TokenAuthenticator>,
     ) -> Self {
         Self {
             required_roles,
             all_required,
+            trust_upstream_principal,
             authenticator,
         }
     }
@@ -78,7 +96,12 @@ impl RolePolicy {
 #[async_trait]
 impl SecurityPolicy for RolePolicy {
     async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError> {
-        let principal = authenticate(exchange, &*self.authenticator).await?;
+        let principal = authenticate(
+            exchange,
+            &*self.authenticator,
+            self.trust_upstream_principal,
+        )
+        .await?;
 
         let missing: Vec<String> = self
             .required_roles
@@ -115,6 +138,10 @@ impl SecurityPolicy for RolePolicy {
 pub struct ScopePolicy {
     required_scopes: Vec<String>,
     all_required: bool,
+    /// When `true`, fall back to the `camel.auth.principal` exchange property
+    /// if no Bearer token is present. Default `false` (fail-closed) — see
+    /// H1 in `docs/superpowers/specs/v1-sec-stabilization-spec.md`.
+    trust_upstream_principal: bool,
     authenticator: Arc<dyn TokenAuthenticator>,
 }
 
@@ -122,11 +149,13 @@ impl ScopePolicy {
     pub fn new(
         required_scopes: Vec<String>,
         all_required: bool,
+        trust_upstream_principal: bool,
         authenticator: Arc<dyn TokenAuthenticator>,
     ) -> Self {
         Self {
             required_scopes,
             all_required,
+            trust_upstream_principal,
             authenticator,
         }
     }
@@ -135,7 +164,12 @@ impl ScopePolicy {
 #[async_trait]
 impl SecurityPolicy for ScopePolicy {
     async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError> {
-        let principal = authenticate(exchange, &*self.authenticator).await?;
+        let principal = authenticate(
+            exchange,
+            &*self.authenticator,
+            self.trust_upstream_principal,
+        )
+        .await?;
 
         let missing: Vec<String> = self
             .required_scopes
@@ -226,6 +260,7 @@ mod tests {
         let policy = RolePolicy::new(
             vec!["admin".into()],
             true,
+            false,
             mock_validator(principal.clone()),
         );
         let mut ex = exchange_with_bearer(principal);
@@ -239,6 +274,7 @@ mod tests {
         let policy = RolePolicy::new(
             vec!["admin".into()],
             true,
+            false,
             mock_validator(principal.clone()),
         );
         let mut ex = exchange_with_bearer(principal);
@@ -252,6 +288,7 @@ mod tests {
         let policy = RolePolicy::new(
             vec!["admin".into(), "user".into()],
             false,
+            false,
             mock_validator(principal.clone()),
         );
         let mut ex = exchange_with_bearer(principal);
@@ -262,7 +299,12 @@ mod tests {
     #[tokio::test]
     async fn scope_policy_grants() {
         let principal = test_principal(vec![], vec!["read"]);
-        let policy = ScopePolicy::new(vec!["read".into()], true, mock_validator(principal.clone()));
+        let policy = ScopePolicy::new(
+            vec!["read".into()],
+            true,
+            false,
+            mock_validator(principal.clone()),
+        );
         let mut ex = exchange_with_bearer(principal);
         let decision = policy.evaluate(&mut ex).await.unwrap();
         assert!(matches!(decision, AuthorizationDecision::Granted { .. }));
@@ -278,23 +320,55 @@ mod tests {
                 panic!("should not be called")
             }
         }
-        let policy = RolePolicy::new(vec!["admin".into()], true, Arc::new(FailValidator));
+        let policy = RolePolicy::new(vec!["admin".into()], true, false, Arc::new(FailValidator));
         let mut ex = Exchange::new(Message::default());
         let result = policy.evaluate(&mut ex).await;
         assert!(matches!(result, Err(CamelError::Unauthenticated(_))));
     }
 
     #[tokio::test]
-    async fn fallback_to_exchange_principal_when_no_bearer_header() {
-        // No Bearer header, but principal pre-populated (upstream filter scenario)
+    async fn principal_fallback_denied_by_default() {
+        // No Bearer header, but principal pre-populated (upstream filter scenario).
+        // Without `trust_upstream_principal` opt-in, MUST be denied.
         let principal = test_principal(vec!["admin"], vec![]);
         let policy = RolePolicy::new(
             vec!["admin".into()],
             true,
+            false, // trust_upstream_principal
+            mock_validator(principal.clone()),
+        );
+        let mut ex = exchange_with_principal(principal); // no Authorization header
+        let result = policy.evaluate(&mut ex).await;
+        assert!(matches!(result, Err(CamelError::Unauthenticated(_))));
+    }
+
+    #[tokio::test]
+    async fn principal_fallback_allowed_with_opt_in() {
+        // Same setup but `trust_upstream_principal=true` allows upstream-set principal.
+        let principal = test_principal(vec!["admin"], vec![]);
+        let policy = RolePolicy::new(
+            vec!["admin".into()],
+            true,
+            true, // trust_upstream_principal
             mock_validator(principal.clone()),
         );
         let mut ex = exchange_with_principal(principal); // no Authorization header
         let decision = policy.evaluate(&mut ex).await.unwrap();
         assert!(matches!(decision, AuthorizationDecision::Granted { .. }));
+    }
+
+    #[tokio::test]
+    async fn scope_policy_fallback_denied_by_default() {
+        // No Bearer header, principal pre-populated — Scopes policy also gates.
+        let principal = test_principal(vec![], vec!["read"]);
+        let policy = ScopePolicy::new(
+            vec!["read".into()],
+            true,
+            false, // trust_upstream_principal
+            mock_validator(principal.clone()),
+        );
+        let mut ex = exchange_with_principal(principal);
+        let result = policy.evaluate(&mut ex).await;
+        assert!(matches!(result, Err(CamelError::Unauthenticated(_))));
     }
 }

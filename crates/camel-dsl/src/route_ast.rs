@@ -58,6 +58,13 @@ pub struct RouteDslSecurityPolicy {
     pub scopes: Option<Vec<String>>,
     #[serde(default)]
     pub all_required: Option<bool>,
+    /// When `true`, the policy accepts an already-populated
+    /// `camel.auth.principal` exchange property when no Bearer token is
+    /// present. Default `false` (fail-closed) — the principal must come
+    /// from token validation. See H1 in
+    /// `docs/superpowers/specs/v1-sec-stabilization-spec.md`.
+    #[serde(default)]
+    pub trust_upstream_principal: Option<bool>,
     #[serde(default)]
     pub r#ref: Option<String>,
     #[serde(default)]

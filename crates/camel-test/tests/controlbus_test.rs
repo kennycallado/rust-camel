@@ -153,10 +153,11 @@ async fn controlbus_starts_route() {
         .unwrap();
 
     // Create a trigger route that starts the lazy route via ControlBus
-    // The timer fires once after 50ms, then sends to controlbus to start the lazy route
+    // The timer fires once after 50ms, then sends to controlbus to start the lazy route.
+    // authorizedRoutes declares the explicit allowlist (R4-H1).
     let trigger_route = RouteBuilder::from("timer:trigger?period=50&repeatCount=1")
         .route_id("trigger-route")
-        .to("controlbus:route?routeId=lazy-route&action=start")
+        .to("controlbus:route?routeId=lazy-route&action=start&authorizedRoutes=lazy-route")
         .to("mock:trigger-done")
         .build()
         .unwrap();
@@ -295,10 +296,11 @@ async fn controlbus_stops_route() {
         .build()
         .unwrap();
 
-    // Create a trigger route that stops the auto route after a delay
+    // Create a trigger route that stops the auto route after a delay.
+    // authorizedRoutes declares the explicit allowlist (R4-H1).
     let trigger_route = RouteBuilder::from("timer:stop-trigger?period=50&repeatCount=1")
         .route_id("stop-trigger-route")
-        .to("controlbus:route?routeId=auto-route&action=stop")
+        .to("controlbus:route?routeId=auto-route&action=stop&authorizedRoutes=auto-route")
         .to("mock:stop-done")
         .build()
         .unwrap();

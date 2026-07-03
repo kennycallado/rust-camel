@@ -71,8 +71,15 @@ impl ClientCredentialsProvider {
         client_secret: String,
         scope: Option<String>,
         audience: Option<Vec<String>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AuthError> {
+        // H15: harden the HTTP client — no redirects, bounded timeouts.
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| AuthError::ConfigError(format!("failed to build HTTP client: {e}")))?;
+        Ok(Self {
             token_endpoint,
             client_id,
             client_secret,
@@ -80,8 +87,8 @@ impl ClientCredentialsProvider {
             audience,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
-            http: reqwest::Client::new(),
-        }
+            http,
+        })
     }
 
     /// Test-only constructor that accepts a pre-built HTTP client.
@@ -220,7 +227,8 @@ mod tests {
             "test-secret".into(),
             None,
             None,
-        );
+        )
+        .unwrap();
         let token = provider.get_token().await.unwrap();
         assert_eq!(token, "abc123");
     }
@@ -240,7 +248,8 @@ mod tests {
             "s".into(),
             None,
             None,
-        );
+        )
+        .unwrap();
         let t1 = provider.get_token().await.unwrap();
         let t2 = provider.get_token().await.unwrap();
         assert_eq!(t1, "cached");
@@ -266,7 +275,8 @@ mod tests {
             "s".into(),
             None,
             None,
-        );
+        )
+        .unwrap();
         let t1 = provider.get_token().await.unwrap();
         assert_eq!(t1, "first");
         tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -288,7 +298,8 @@ mod tests {
             "s".into(),
             None,
             None,
-        );
+        )
+        .unwrap();
         let err = provider.get_token().await.unwrap_err();
         assert!(matches!(err, AuthError::ProviderUnavailable(_)));
     }
@@ -310,7 +321,8 @@ mod tests {
             "s".into(),
             None,
             None,
-        );
+        )
+        .unwrap();
         let err = provider.get_token().await.unwrap_err();
         assert!(matches!(err, AuthError::ProviderUnavailable(_)));
     }
@@ -334,7 +346,8 @@ mod tests {
             "s".into(),
             None,
             Some(vec!["https://api.example.com".into()]),
-        );
+        )
+        .unwrap();
         let token = provider.get_token().await.unwrap();
         assert_eq!(token, "aud-token");
     }
@@ -352,13 +365,16 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = Arc::new(ClientCredentialsProvider::new(
-            format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
-            "c".into(),
-            "s".into(),
-            None,
-            None,
-        ));
+        let provider = Arc::new(
+            ClientCredentialsProvider::new(
+                format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
+                "c".into(),
+                "s".into(),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
 
         let mut handles = vec![];
         for _ in 0..5 {

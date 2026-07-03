@@ -57,11 +57,16 @@ impl KeycloakUmaEvaluator {
             client_secret,
             None,
             None,
-        );
+        )?;
+        // H15: use the hardened HTTP client (no redirects, bounded timeouts)
+        // instead of an unconfigured `reqwest::Client::new()`.
+        let http = crate::hardened_http_client().map_err(|e| {
+            AuthError::ConfigError(format!("failed to build hardened UMA HTTP client: {e}"))
+        })?;
         Ok(Self {
             realm_url,
             client_id,
-            http: reqwest::Client::new(),
+            http,
             token_provider: Arc::new(token_provider),
         })
     }
@@ -238,7 +243,7 @@ mod tests {
             "test-realm",
             "test-client",
             "test-secret",
-            reqwest::Client::new(),
+            crate::hardened_http_client().unwrap(), // allow-unwrap
         );
         assert_eq!(evaluator.client_id, "test-client");
         assert_eq!(
@@ -254,7 +259,7 @@ mod tests {
             "myrealm",
             "myclient",
             "secret",
-            reqwest::Client::new(),
+            crate::hardened_http_client().unwrap(), // allow-unwrap
         );
         assert_eq!(
             evaluator.permission_endpoint(),
@@ -269,7 +274,7 @@ mod tests {
             "myrealm",
             "myclient",
             "secret",
-            reqwest::Client::new(),
+            crate::hardened_http_client().unwrap(), // allow-unwrap
         );
         assert_eq!(evaluator.realm_url, "https://kc.example.com/realms/myrealm");
     }
@@ -281,7 +286,7 @@ mod tests {
             "myrealm",
             "myclient",
             "super-secret-value",
-            reqwest::Client::new(),
+            crate::hardened_http_client().unwrap(), // allow-unwrap
         );
         let debug_str = format!("{evaluator:?}");
         assert!(!debug_str.contains("super-secret-value"));

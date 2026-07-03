@@ -27,6 +27,7 @@ dashmap = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
 async-stream = { workspace = true }
+reqwest = { workspace = true }
 
 # Provider adapters (optional) — ONLY files that import siumai
 siumai = { version = "=0.11.0-beta.9", default-features = false, optional = true }

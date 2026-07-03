@@ -48,6 +48,8 @@ pub struct GrpcProducer {
     resp_descriptor: MessageDescriptor,
     mode: GrpcMode,
     deadline_ms: Option<u64>,
+    default_deadline_ms: u64,
+    connect_timeout_ms: u64,
     retry: camel_component_api::NetworkRetryPolicy,
     semaphore: Arc<Semaphore>,
     pending_permit: Option<OwnedSemaphorePermit>,
@@ -76,6 +78,8 @@ impl Clone for GrpcProducer {
             resp_descriptor: self.resp_descriptor.clone(),
             mode: self.mode,
             deadline_ms: self.deadline_ms,
+            default_deadline_ms: self.default_deadline_ms,
+            connect_timeout_ms: self.connect_timeout_ms,
             retry: self.retry.clone(),
             semaphore: Arc::clone(&self.semaphore),
             // Each clone starts with a fresh permit state.
@@ -106,6 +110,17 @@ impl GrpcProducer {
     /// Returns the SNI / TLS server name configured for this producer.
     pub fn server_name(&self) -> Option<&str> {
         self.server_name.as_deref()
+    }
+
+    /// Resolve the effective deadline: explicit per-call deadline takes
+    /// precedence, then the default; `default_deadline_ms == 0` means
+    /// operator opt-out (no deadline).
+    fn effective_deadline(&self) -> Option<u64> {
+        self.deadline_ms.or(if self.default_deadline_ms == 0 {
+            None
+        } else {
+            Some(self.default_deadline_ms)
+        })
     }
 }
 
@@ -288,7 +303,9 @@ impl GrpcProducer {
             }
             endpoint
         };
-        let channel = endpoint.connect_lazy();
+        let channel = endpoint
+            .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+            .connect_lazy();
 
         // Build the stored endpoint_url: rewrite scheme to https when TLS is on.
         let endpoint_url = if tls_enabled {
@@ -367,6 +384,8 @@ impl GrpcProducer {
             resp_descriptor,
             mode,
             deadline_ms,
+            default_deadline_ms: config.default_deadline_ms,
+            connect_timeout_ms: config.connect_timeout_ms,
             retry: config.retry.clone(),
             semaphore: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY)),
             pending_permit: None,
@@ -419,7 +438,7 @@ impl GrpcProducer {
         let path = self.path.clone();
         let req_df = self.req_descriptor.clone();
         let resp_desc = self.resp_descriptor.clone();
-        let deadline_ms = self.deadline_ms;
+        let effective_deadline_ms = self.effective_deadline();
         let retry = self.retry.clone();
         let auth = self.auth.clone();
         let config_metadata = self.config_metadata.clone();
@@ -446,7 +465,7 @@ impl GrpcProducer {
                 }
                 debug!("applied config metadata to gRPC unary request");
             }
-            if let Some(ms) = deadline_ms {
+            if let Some(ms) = effective_deadline_ms {
                 request.set_timeout(Duration::from_millis(ms));
             }
 
@@ -456,7 +475,7 @@ impl GrpcProducer {
             let response = retry_rpc(channel, &retry, "unary", |mut grpc| {
                 let mut req = Request::new(body.clone());
                 *req.metadata_mut() = metadata_map.clone();
-                if let Some(ms) = deadline_ms {
+                if let Some(ms) = effective_deadline_ms {
                     req.set_timeout(Duration::from_millis(ms));
                 }
                 let p = path.clone();
@@ -480,7 +499,7 @@ impl GrpcProducer {
         let path = self.path.clone();
         let req_df = self.req_descriptor.clone();
         let resp_desc = self.resp_descriptor.clone();
-        let deadline_ms = self.deadline_ms;
+        let effective_deadline_ms = self.effective_deadline();
         let retry = self.retry.clone();
         let auth = self.auth.clone();
         let config_metadata = self.config_metadata.clone();
@@ -507,7 +526,7 @@ impl GrpcProducer {
                 }
                 debug!("applied config metadata to gRPC server streaming request");
             }
-            if let Some(ms) = deadline_ms {
+            if let Some(ms) = effective_deadline_ms {
                 request.set_timeout(Duration::from_millis(ms));
             }
 
@@ -517,7 +536,7 @@ impl GrpcProducer {
             let response = retry_rpc(channel, &retry, "server_streaming", |mut grpc| {
                 let mut req = Request::new(body.clone());
                 *req.metadata_mut() = metadata_map.clone();
-                if let Some(ms) = deadline_ms {
+                if let Some(ms) = effective_deadline_ms {
                     req.set_timeout(Duration::from_millis(ms));
                 }
                 let p = path.clone();
@@ -548,7 +567,7 @@ impl GrpcProducer {
         let path = self.path.clone();
         let req_df = self.req_descriptor.clone();
         let resp_desc = self.resp_descriptor.clone();
-        let deadline_ms = self.deadline_ms;
+        let effective_deadline_ms = self.effective_deadline();
         let retry = self.retry.clone();
         let auth = self.auth.clone();
         let config_metadata = self.config_metadata.clone();
@@ -586,7 +605,7 @@ impl GrpcProducer {
                 }
                 debug!("applied config metadata to gRPC client streaming request");
             }
-            if let Some(ms) = deadline_ms {
+            if let Some(ms) = effective_deadline_ms {
                 request_template.set_timeout(Duration::from_millis(ms));
             }
 
@@ -595,7 +614,7 @@ impl GrpcProducer {
             let response = retry_rpc(channel, &retry, "client_streaming", |mut grpc| {
                 let mut request = Request::new(futures::stream::iter(encoded.clone()));
                 *request.metadata_mut() = metadata_map.clone();
-                if let Some(ms) = deadline_ms {
+                if let Some(ms) = effective_deadline_ms {
                     request.set_timeout(Duration::from_millis(ms));
                 }
                 let p = path.clone();
@@ -619,7 +638,7 @@ impl GrpcProducer {
         let path = self.path.clone();
         let req_df = self.req_descriptor.clone();
         let resp_desc = self.resp_descriptor.clone();
-        let deadline_ms = self.deadline_ms;
+        let effective_deadline_ms = self.effective_deadline();
         let retry = self.retry.clone();
         let auth = self.auth.clone();
         let config_metadata = self.config_metadata.clone();
@@ -657,7 +676,7 @@ impl GrpcProducer {
                 }
                 debug!("applied config metadata to gRPC bidi streaming request");
             }
-            if let Some(ms) = deadline_ms {
+            if let Some(ms) = effective_deadline_ms {
                 request_template.set_timeout(Duration::from_millis(ms));
             }
 
@@ -666,7 +685,7 @@ impl GrpcProducer {
             let response = retry_rpc(channel, &retry, "bidi", |mut grpc| {
                 let mut request = Request::new(futures::stream::iter(encoded.clone()));
                 *request.metadata_mut() = metadata_map.clone();
-                if let Some(ms) = deadline_ms {
+                if let Some(ms) = effective_deadline_ms {
                     request.set_timeout(Duration::from_millis(ms));
                 }
                 let p = path.clone();
@@ -776,6 +795,8 @@ mod tests {
             max_receive_message_length: 4 * 1024 * 1024,
             deadline_ms: None,
             metadata: None,
+            connect_timeout_ms: 10_000,
+            default_deadline_ms: 30_000,
             tls_config: None,
             auth: crate::config::AuthConfig::None,
             interceptors: crate::config::InterceptorConfig::default(),

@@ -30,13 +30,16 @@ async fn test_e2e_client_credentials_injects_bearer() {
         .mount(&api_server)
         .await;
 
-    let provider = Arc::new(ClientCredentialsProvider::new(
-        format!("{}/protocol/openid-connect/token", token_server.uri()),
-        "test-client".into(),
-        "test-secret".into(),
-        None,
-        None,
-    ));
+    let provider = Arc::new(
+        ClientCredentialsProvider::new(
+            format!("{}/protocol/openid-connect/token", token_server.uri()),
+            "test-client".into(),
+            "test-secret".into(),
+            None,
+            None,
+        )
+        .unwrap(),
+    );
 
     let target_url = api_server.uri();
     let processor = BoxProcessor::from_fn(move |ex| {
@@ -87,13 +90,16 @@ async fn test_e2e_cached_token_reused() {
         .mount(&api_server)
         .await;
 
-    let provider = Arc::new(ClientCredentialsProvider::new(
-        format!("{}/protocol/openid-connect/token", token_server.uri()),
-        "c".into(),
-        "s".into(),
-        None,
-        None,
-    ));
+    let provider = Arc::new(
+        ClientCredentialsProvider::new(
+            format!("{}/protocol/openid-connect/token", token_server.uri()),
+            "c".into(),
+            "s".into(),
+            None,
+            None,
+        )
+        .unwrap(),
+    );
 
     let shared_provider = Arc::clone(&provider);
 

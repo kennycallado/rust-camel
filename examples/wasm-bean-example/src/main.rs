@@ -28,6 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeout_secs: None,
         max_memory: None,
         max_concurrent_calls: None,
+        max_wasm_size: None,
+        allow_call_schemes: None,
     };
     let wasm_config = camel_component_wasm::WasmConfig::from_limits(&limits);
     let wasm_bean = WasmBean::new(&wasm_path, wasm_config, registry_arc, bean_config).await?;

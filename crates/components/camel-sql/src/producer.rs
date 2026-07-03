@@ -70,22 +70,28 @@ impl SqlProducer {
     }
 
     /// Resolves the query source based on priority:
-    /// 1. Header `CamelSql.Query`
-    /// 2. Body (if `use_message_body_for_sql` is true)
+    /// 1. Header `CamelSql.Query` (only if `allow_dynamic_query=true`)
+    /// 2. Body (only if `allow_dynamic_query=true` AND `use_message_body_for_sql=true`)
     /// 3. Config query
+    ///
+    /// H7: header/body are untrusted exchange data (ADR-0032). Sourcing the
+    /// query from them is full SQLi (incl. DDL). Both routes require the
+    /// explicit `allow_dynamic_query=true` opt-in.
     pub(crate) fn resolve_query_source(exchange: &Exchange, config: &SqlEndpointConfig) -> String {
-        // Priority 1: Header
-        if let Some(query_value) = exchange.input.header(headers::QUERY)
-            && let Some(query_str) = query_value.as_str()
-        {
-            return query_str.to_string();
-        }
+        if config.allow_dynamic_query {
+            // Priority 1: Header
+            if let Some(query_value) = exchange.input.header(headers::QUERY)
+                && let Some(query_str) = query_value.as_str()
+            {
+                return query_str.to_string();
+            }
 
-        // Priority 2: Body (if use_message_body_for_sql)
-        if config.use_message_body_for_sql
-            && let Some(body_text) = exchange.input.body.as_text()
-        {
-            return body_text.to_string();
+            // Priority 2: Body (requires BOTH flags)
+            if config.use_message_body_for_sql
+                && let Some(body_text) = exchange.input.body.as_text()
+            {
+                return body_text.to_string();
+            }
         }
 
         // Priority 3: Config query
@@ -664,7 +670,8 @@ mod tests {
 
     #[test]
     fn resolve_query_from_header() {
-        let config = config();
+        let mut config = config();
+        config.allow_dynamic_query = true;
         let mut msg = Message::default();
         msg.set_header(headers::QUERY, serde_json::json!("select 2"));
         let ex = Exchange::new(msg);
@@ -676,6 +683,7 @@ mod tests {
     fn resolve_query_from_body() {
         let mut config = config();
         config.use_message_body_for_sql = true;
+        config.allow_dynamic_query = true;
         let msg = Message::new(Body::Text("select 3".to_string()));
         let ex = Exchange::new(msg);
         let q = SqlProducer::resolve_query_source(&ex, &config);
@@ -686,6 +694,7 @@ mod tests {
     fn resolve_query_header_priority_over_body() {
         let mut config = config();
         config.use_message_body_for_sql = true;
+        config.allow_dynamic_query = true;
         let mut msg = Message::new(Body::Text("select from body".to_string()));
         msg.set_header(headers::QUERY, serde_json::json!("select from header"));
         let ex = Exchange::new(msg);
@@ -697,10 +706,45 @@ mod tests {
     fn resolve_query_body_priority_over_config() {
         let mut config = config();
         config.use_message_body_for_sql = true;
+        config.allow_dynamic_query = true;
         let msg = Message::new(Body::Text("select from body".to_string()));
         let ex = Exchange::new(msg);
         let q = SqlProducer::resolve_query_source(&ex, &config);
         assert_eq!(q, "select from body");
+    }
+
+    // H7: dynamic queries from exchange data must be denied by default.
+    // The CamelSql.Query header and body are untrusted (ADR-0032). Reading
+    // them as a SQL source is a SQLi vector including DDL. Default is closed.
+    #[test]
+    fn dynamic_query_denied_by_default() {
+        let mut msg = Message::default();
+        msg.set_header(headers::QUERY, "DROP TABLE users; --");
+        let ex = Exchange::new(msg);
+
+        let mut config = config();
+        config.query = "SELECT 1".to_string();
+        // allow_dynamic_query defaults to false → header ignored
+
+        let q = SqlProducer::resolve_query_source(&ex, &config);
+        // Must return the config query, NOT the header
+        assert_eq!(q, "SELECT 1");
+    }
+
+    // H7: with explicit opt-in (allow_dynamic_query=true), header takes priority.
+    #[test]
+    fn dynamic_query_allowed_with_opt_in() {
+        let mut msg = Message::default();
+        msg.set_header(headers::QUERY, "SELECT 1 FROM users WHERE id = :#id");
+        let ex = Exchange::new(msg);
+
+        let mut config = config();
+        config.query = "SELECT 1".to_string();
+        config.allow_dynamic_query = true;
+
+        let q = SqlProducer::resolve_query_source(&ex, &config);
+        // With opt-in, header takes priority
+        assert_eq!(q, "SELECT 1 FROM users WHERE id = :#id");
     }
 
     #[test]

@@ -177,6 +177,26 @@ impl CsvDataFormat {
         }
     }
 
+    /// Prefix cells starting with CSV formula-injection characters
+    /// (`=`, `+`, `-`, `@`, `\t`, `\r`) with a single quote to
+    /// neutralize them (OWASP CSV Injection prevention).
+    fn neutralize_formula_injection(s: &str) -> String {
+        if s.starts_with('=')
+            || s.starts_with('+')
+            || s.starts_with('-')
+            || s.starts_with('@')
+            || s.starts_with('\t')
+            || s.starts_with('\r')
+        {
+            let mut out = String::with_capacity(s.len() + 1);
+            out.push('\'');
+            out.push_str(s);
+            out
+        } else {
+            s.to_string()
+        }
+    }
+
     fn write_err(e: csv::Error) -> CamelError {
         CamelError::TypeConversionFailed(format!("CSV write error: {e}"))
     }
@@ -351,7 +371,11 @@ impl DataFormat for CsvDataFormat {
                 serde_json::Value::Array(arr) => {
                     if arr.is_empty() {
                         if let (true, Some(h)) = (self.config.has_headers, &self.config.headers) {
-                            wtr.write_record(h.iter().map(String::as_str))
+                            let neutralized: Vec<String> = h
+                                .iter()
+                                .map(|s| Self::neutralize_formula_injection(s))
+                                .collect();
+                            wtr.write_record(neutralized.iter().map(String::as_str))
                                 .map_err(Self::write_err)?;
                         }
                     } else {
@@ -363,7 +387,11 @@ impl DataFormat for CsvDataFormat {
                                     .clone()
                                     .unwrap_or_else(|| first_obj.keys().cloned().collect());
                                 if self.config.has_headers {
-                                    wtr.write_record(header_keys.iter().map(String::as_str))
+                                    let neutralized: Vec<String> = header_keys
+                                        .iter()
+                                        .map(|s| Self::neutralize_formula_injection(s))
+                                        .collect();
+                                    wtr.write_record(neutralized.iter().map(String::as_str))
                                         .map_err(Self::write_err)?;
                                 }
                                 for row in arr {
@@ -371,8 +399,11 @@ impl DataFormat for CsvDataFormat {
                                         let record: Vec<String> = header_keys
                                             .iter()
                                             .map(|k| {
-                                                Self::field_to_string(
-                                                    obj.get(k).unwrap_or(&serde_json::Value::Null),
+                                                Self::neutralize_formula_injection(
+                                                    &Self::field_to_string(
+                                                        obj.get(k)
+                                                            .unwrap_or(&serde_json::Value::Null),
+                                                    ),
                                                 )
                                             })
                                             .collect();
@@ -389,8 +420,14 @@ impl DataFormat for CsvDataFormat {
                             _ => {
                                 for row in arr {
                                     if let Some(items) = row.as_array() {
-                                        let record: Vec<String> =
-                                            items.iter().map(Self::field_to_string).collect();
+                                        let record: Vec<String> = items
+                                            .iter()
+                                            .map(|v| {
+                                                Self::neutralize_formula_injection(
+                                                    &Self::field_to_string(v),
+                                                )
+                                            })
+                                            .collect();
                                         wtr.write_record(record.iter().map(String::as_str))
                                             .map_err(Self::write_err)?;
                                     } else {
@@ -411,13 +448,19 @@ impl DataFormat for CsvDataFormat {
                         .clone()
                         .unwrap_or_else(|| obj.keys().cloned().collect());
                     if self.config.has_headers {
-                        wtr.write_record(header_keys.iter().map(String::as_str))
+                        let neutralized: Vec<String> = header_keys
+                            .iter()
+                            .map(|s| Self::neutralize_formula_injection(s))
+                            .collect();
+                        wtr.write_record(neutralized.iter().map(String::as_str))
                             .map_err(Self::write_err)?;
                     }
                     let record: Vec<String> = header_keys
                         .iter()
                         .map(|k| {
-                            Self::field_to_string(obj.get(k).unwrap_or(&serde_json::Value::Null))
+                            Self::neutralize_formula_injection(&Self::field_to_string(
+                                obj.get(k).unwrap_or(&serde_json::Value::Null),
+                            ))
                         })
                         .collect();
                     wtr.write_record(record.iter().map(String::as_str))
@@ -901,7 +944,7 @@ mod tests {
         let mut ex = Exchange::default();
         let _ = df.unmarshal_in_exchange(&mut ex, body).unwrap();
 
-        assert!(ex.input.headers.get(CAMEL_CSV_HEADER_RECORD).is_none());
+        assert!(!ex.input.headers.contains_key(CAMEL_CSV_HEADER_RECORD));
     }
 
     #[test]
@@ -927,5 +970,44 @@ mod tests {
         ]));
         let result = df.marshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn marshal_neutralizes_formula_injection_cells() {
+        let df = CsvDataFormat::default();
+        let body = Body::Json(json!([
+            { "name": "=SUM(1,1)", "note": "+danger", "val": "-1", "at": "@foo", "tab": "\t=cmd", "cr": "\r=cmd" }
+        ]));
+        let result = df.marshal(body).unwrap();
+        match result {
+            Body::Text(s) => {
+                // Headers should also be neutralized
+                assert!(
+                    s.contains("'=SUM(1,1)"),
+                    "cell starting with = should be neutralized: {s:?}"
+                );
+                assert!(
+                    s.contains("'+danger"),
+                    "cell starting with + should be neutralized: {s:?}"
+                );
+                assert!(
+                    s.contains("'-1"),
+                    "cell starting with - should be neutralized: {s:?}"
+                );
+                assert!(
+                    s.contains("'@foo"),
+                    "cell starting with @ should be neutralized: {s:?}"
+                );
+                assert!(
+                    s.contains("'\t=cmd"),
+                    "cell starting with tab should be neutralized: {s:?}"
+                );
+                assert!(
+                    s.contains("'\r=cmd"),
+                    "cell starting with CR should be neutralized: {s:?}"
+                );
+            }
+            _ => panic!("expected Body::Text"),
+        }
     }
 }

@@ -63,10 +63,12 @@ pub enum DeclarativeSecurityPolicy {
     Roles {
         roles: Vec<String>,
         all_required: bool,
+        trust_upstream_principal: bool,
     },
     Scopes {
         scopes: Vec<String>,
         all_required: bool,
+        trust_upstream_principal: bool,
     },
     Ref {
         name: String,

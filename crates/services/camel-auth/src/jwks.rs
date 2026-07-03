@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
@@ -119,7 +118,13 @@ impl RemoteJwksProvider {
 ///
 /// Rules:
 /// - Scheme must be `https`
-/// - Host must not be a loopback or RFC-1918 private address
+/// - Host must not be a loopback, private, link-local, CGN, benchmark,
+///   reserved, or otherwise SSRF-blocked address (delegated to the
+///   canonical [`camel_api::is_ssrf_blocked_ip`] helper).
+/// - A small set of well-known loopback hostnames (`localhost`,
+///   `localhost.localdomain`, `0.0.0.0`) is rejected even though they
+///   don't parse as IP literals — DNS for those names conventionally
+///   resolves to a blocked address on every sane system.
 pub fn validate_https_public_uri(uri: &str, label: &str) -> Result<(), AuthError> {
     let parsed = uri
         .parse::<reqwest::Url>()
@@ -132,10 +137,10 @@ pub fn validate_https_public_uri(uri: &str, label: &str) -> Result<(), AuthError
         )));
     }
 
-    if parsed.host_str().is_some_and(is_private_or_loopback_host) {
+    let host = parsed.host_str().unwrap_or("");
+    if is_private_or_loopback_host(host) {
         return Err(AuthError::ConfigError(format!(
-            "{label} host '{}' is a private or loopback address (SSRF guard)",
-            parsed.host_str().unwrap_or("")
+            "{label} host '{host}' is a private or loopback address (SSRF guard)"
         )));
     }
 
@@ -144,7 +149,10 @@ pub fn validate_https_public_uri(uri: &str, label: &str) -> Result<(), AuthError
 
 /// Returns `true` if the host string resolves to a loopback or private IP.
 fn is_private_or_loopback_host(host: &str) -> bool {
-    // Named loopback / unspecified
+    use std::net::IpAddr;
+
+    // Named loopback / unspecified — these don't parse as IP literals,
+    // so we hard-reject the conventional names up front.
     if matches!(host, "localhost" | "localhost.localdomain" | "0.0.0.0") {
         return true;
     }
@@ -155,23 +163,12 @@ fn is_private_or_loopback_host(host: &str) -> bool {
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host);
     if let Ok(ip) = ip_str.parse::<IpAddr>() {
-        return ip.is_loopback() || is_private_ip(ip);
+        // Delegate to the canonical SSRF block-list so this rule set
+        // stays in lockstep with every other outbound HTTP client
+        // (LLM, Keycloak, …) instead of drifting.
+        return camel_api::is_ssrf_blocked_ip(&ip);
     }
     false
-}
-
-fn is_private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            // RFC 1918 private ranges, link-local (169.254/16 — cloud metadata),
-            // loopback (127/8), and unspecified (0.0.0.0).
-            v4.is_private() || v4.is_link_local() || v4.is_loopback() || v4.is_unspecified()
-        }
-        IpAddr::V6(v6) => {
-            // Loopback (::1), unique-local (fc00::/7), and unspecified (::).
-            v6.is_loopback() || v6.is_unique_local() || v6.is_unspecified()
-        }
-    }
 }
 
 #[async_trait]

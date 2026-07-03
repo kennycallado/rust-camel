@@ -65,6 +65,7 @@ impl LeadershipService for SimulatedLeadershipService {
         Ok(LeadershipHandle::new(
             rx,
             Arc::clone(&self.is_leader),
+            Arc::new(std::sync::atomic::AtomicU64::new(1)),
             cancel,
             term_rx,
         ))

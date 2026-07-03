@@ -16,12 +16,16 @@
 //!
 //! # URI Format
 //!
-//! `controlbus:route?routeId=my-route&action=start`
+//! `controlbus:route?routeId=my-route&action=start&authorizedRoutes=my-route,other-route`
 //!
 //! # Parameters
 //!
-//! - `routeId`: The ID of the route to operate on (optional, can come from exchange header)
+//! - `routeId`: The ID of the route to operate on. **Required** — declared statically in the
+//!   URI. The `CamelRouteId` exchange header override is denied (exchange data is untrusted;
+//!   see ADR-0032 and ADR-0034).
 //! - `action`: The action to perform: `start`, `stop`, `suspend`, `resume`, `restart`, `status`
+//! - `authorizedRoutes`: Comma-separated allowlist of route IDs this endpoint may target.
+//!   **Required** — when absent the endpoint fails closed (every command rejected).
 //!
 //! # Example
 //!
@@ -123,10 +127,20 @@ impl Component for ControlBusComponent {
             ));
         }
 
+        // Parse authorizedRoutes (R4-H1: capability authz allowlist).
+        // The CamelRouteId header override is denied — target routeId must
+        // be declared statically in the URI. Without authorizedRoutes the
+        // endpoint fails closed (no route may be controlled).
+        let authorized_routes: Option<Vec<String>> = parts
+            .params
+            .get("authorizedRoutes")
+            .map(|s| s.split(',').map(|r| r.trim().to_string()).collect());
+
         Ok(Box::new(ControlBusEndpoint {
             uri: uri.to_string(),
             route_id,
             action,
+            authorized_routes,
         }))
     }
 }
@@ -156,6 +170,8 @@ struct ControlBusEndpoint {
     uri: String,
     route_id: Option<String>,
     action: Option<RouteAction>,
+    /// Allowlist of route IDs this endpoint may target. `None` ⇒ fail-closed.
+    authorized_routes: Option<Vec<String>>,
 }
 
 impl Endpoint for ControlBusEndpoint {
@@ -188,10 +204,15 @@ impl Endpoint for ControlBusEndpoint {
             )
         })?;
 
+        // Capture the calling route ID for self-restart detection (R4-H1).
+        let calling_route_id = ctx.route_id().map(|s| s.to_string());
+
         Ok(BoxProcessor::new(ControlBusProducer {
             route_id: self.route_id.clone(),
             action,
             runtime,
+            authorized_routes: self.authorized_routes.clone(),
+            calling_route_id,
         }))
     }
 }
@@ -203,12 +224,16 @@ impl Endpoint for ControlBusEndpoint {
 /// Producer that executes control bus actions on routes.
 #[derive(Clone)]
 struct ControlBusProducer {
-    /// Route ID from URI params (may be None, in which case header is used).
+    /// Route ID from URI params only. Header override is denied (R4-H1).
     route_id: Option<String>,
     /// Action to perform on the route.
     action: RouteAction,
     /// Runtime command/query handle.
     runtime: Arc<dyn RuntimeHandle>,
+    /// Allowlist of route IDs that may be targeted. `None` ⇒ fail-closed.
+    authorized_routes: Option<Vec<String>>,
+    /// ID of the route that owns this producer (for self-restart deny).
+    calling_route_id: Option<String>,
 }
 
 impl Service<Exchange> for ControlBusProducer {
@@ -221,26 +246,29 @@ impl Service<Exchange> for ControlBusProducer {
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
-        // Get route_id: prefer field, fallback to header "CamelRouteId"
-        let route_id = self.route_id.clone().or_else(|| {
-            exchange
-                .input
-                .header("CamelRouteId")
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-        });
-
-        // If no route_id → error
-        let route_id = match route_id {
+        // R4-H1: routeId MUST come from the URI only. The CamelRouteId
+        // exchange header is untrusted data (ADR-0032) and may not override
+        // the statically-declared target.
+        let route_id = match self.route_id.clone() {
             Some(id) => id,
             None => {
-                return Box::pin(async {
-                    Err(CamelError::ProcessorError(
-                        "controlbus: routeId required (set via URI param or CamelRouteId header)"
+                return Box::pin(async move {
+                    Err(CamelError::Unauthorized(
+                        "controlbus: routeId must be declared in URI (header override denied)"
                             .into(),
                     ))
                 });
             }
         };
+
+        // Capability authz gate. Fail-closed if no allowlist; deny self-restart.
+        if let Err(e) = Self::authorize(
+            &route_id,
+            &self.authorized_routes,
+            self.calling_route_id.as_deref(),
+        ) {
+            return Box::pin(async move { Err(e) });
+        }
 
         let action = self.action.clone();
         let runtime = self.runtime.clone();
@@ -266,6 +294,42 @@ impl Service<Exchange> for ControlBusProducer {
                 }
             }
         })
+    }
+}
+
+impl ControlBusProducer {
+    /// Capability authz check. Three gates, all must pass:
+    /// 1. `authorized_routes` is configured (fail-closed by default).
+    /// 2. `route_id` is in the allowlist.
+    /// 3. `route_id` is not the calling route (self-restart denied).
+    fn authorize(
+        route_id: &str,
+        authorized_routes: &Option<Vec<String>>,
+        calling_route_id: Option<&str>,
+    ) -> Result<(), CamelError> {
+        match authorized_routes {
+            Some(list) if list.iter().any(|r| r == route_id) => {}
+            Some(_) => {
+                return Err(CamelError::Unauthorized(format!(
+                    "controlbus: route '{route_id}' not in authorizedRoutes"
+                )));
+            }
+            None => {
+                return Err(CamelError::Unauthorized(
+                    "controlbus: authorizedRoutes not configured — fail-closed".into(),
+                ));
+            }
+        }
+
+        if let Some(caller) = calling_route_id
+            && caller == route_id
+        {
+            return Err(CamelError::Unauthorized(
+                "controlbus: cannot control own route (self-restart denied)".into(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -533,7 +597,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=my-route&action=start",
+                "controlbus:route?routeId=my-route&action=start&authorizedRoutes=my-route",
                 &NoOpComponentContext,
             )
             .unwrap();
@@ -550,7 +614,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=my-route&action=stop",
+                "controlbus:route?routeId=my-route&action=stop&authorizedRoutes=my-route",
                 &NoOpComponentContext,
             )
             .unwrap();
@@ -569,7 +633,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=my-route&action=restart",
+                "controlbus:route?routeId=my-route&action=restart&authorizedRoutes=my-route",
                 &NoOpComponentContext,
             )
             .unwrap();
@@ -589,7 +653,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=my-route&action=status",
+                "controlbus:route?routeId=my-route&action=status&authorizedRoutes=my-route",
                 &NoOpComponentContext,
             )
             .unwrap();
@@ -610,7 +674,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=my-route&action=status",
+                "controlbus:route?routeId=my-route&action=status&authorizedRoutes=my-route",
                 &NoOpComponentContext,
             )
             .unwrap();
@@ -630,7 +694,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=runtime-route&action=status",
+                "controlbus:route?routeId=runtime-route&action=status&authorizedRoutes=runtime-route",
                 &NoOpComponentContext,
             )
             .unwrap();
@@ -650,7 +714,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=my-route&action=status",
+                "controlbus:route?routeId=my-route&action=status&authorizedRoutes=my-route",
                 &NoOpComponentContext,
             )
             .unwrap();
@@ -665,43 +729,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_producer_uses_header_route_id() {
-        let ctx = test_producer_ctx_with_route("from-header", RouteStatus::Started);
-        let comp = ControlBusComponent::new();
-        // No routeId in URI
-        let endpoint = comp
-            .create_endpoint("controlbus:route?action=status", &NoOpComponentContext)
-            .unwrap();
-        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
-
-        let mut exchange = Exchange::new(Message::default());
-        exchange.input.set_header(
-            "CamelRouteId",
-            serde_json::Value::String("from-header".to_string()),
-        );
-
-        let result = producer.oneshot(exchange).await.unwrap();
-        assert!(matches!(result.input.body, Body::Text(_)));
-        if let Body::Text(status) = &result.input.body {
-            assert_eq!(status, "Started");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_producer_uri_route_id_overrides_header() {
+    async fn test_producer_denies_camel_route_id_header_override() {
+        // R4-H1: the CamelRouteId exchange header is untrusted. Even when
+        // a routeId is declared in the URI, the header must NOT be
+        // consulted as a source of truth. The URI value is the only one
+        // that counts for dispatch.
         let ctx = test_producer_ctx_with_route("from-uri", RouteStatus::Started);
-        // Use ctx which has "from-uri" route
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=from-uri&action=status",
+                "controlbus:route?routeId=from-uri&action=status&authorizedRoutes=from-uri",
                 &NoOpComponentContext,
             )
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
-        // Header has different route ID, but URI param should take precedence
+        // Adversary-controlled header would target a different route if
+        // the override were honored. URI is the source of truth.
         exchange.input.set_header(
             "CamelRouteId",
             serde_json::Value::String("from-header".to_string()),
@@ -709,8 +754,40 @@ mod tests {
 
         let result = producer.oneshot(exchange).await.unwrap();
         if let Body::Text(status) = &result.input.body {
-            assert_eq!(status, "Started", "Should use URI routeId, not header");
+            assert_eq!(status, "Started", "URI routeId is source of truth");
+        } else {
+            panic!("expected Body::Text, got: {:?}", result.input.body);
         }
+    }
+
+    #[tokio::test]
+    async fn test_producer_denies_header_only_route_id() {
+        // R4-H1: when routeId is missing from the URI, the header MUST
+        // NOT be consulted. The endpoint must be denied.
+        let ctx = test_producer_ctx_with_route("from-header", RouteStatus::Started);
+        let comp = ControlBusComponent::new();
+        let endpoint = comp
+            .create_endpoint(
+                "controlbus:route?action=status&authorizedRoutes=from-header",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelRouteId",
+            serde_json::Value::String("from-header".to_string()),
+        );
+
+        let err = producer
+            .oneshot(exchange)
+            .await
+            .expect_err("header must not satisfy routeId requirement");
+        assert!(
+            matches!(err, CamelError::Unauthorized(_)),
+            "expected Unauthorized, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -718,7 +795,10 @@ mod tests {
         let ctx = test_producer_ctx();
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?action=status", &NoOpComponentContext)
+            .create_endpoint(
+                "controlbus:route?action=status&authorizedRoutes=foo",
+                &NoOpComponentContext,
+            )
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -727,8 +807,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("routeId required"),
-            "Error should mention routeId: {}",
+            err.contains("routeId must be declared in URI"),
+            "Error should explain header override denied: {}",
             err
         );
     }
@@ -739,7 +819,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         let endpoint = comp
             .create_endpoint(
-                "controlbus:route?routeId=nonexistent&action=status",
+                "controlbus:route?routeId=nonexistent&action=status&authorizedRoutes=nonexistent",
                 &NoOpComponentContext,
             )
             .unwrap();
@@ -803,5 +883,119 @@ mod tests {
         let comp = ControlBusComponent::new();
         let result = comp.create_endpoint("controlbus:unknown?action=start", &NoOpComponentContext);
         assert!(result.is_err(), "Should error for unknown command");
+    }
+
+    // -----------------------------------------------------------------------
+    // R4-H1: ControlBus capability authz
+    //
+    // The `controlbus:` endpoint MUST declare the authorized target routes
+    // explicitly via the `authorizedRoutes` URI param. Without it, all
+    // commands fail-closed. The `CamelRouteId` header override is denied
+    // (target MUST be declared statically in URI). Self-restart
+    // (routeId == calling route) is also rejected.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_authz_unauthorized_when_no_authorized_routes_param() {
+        // authorizedRoutes not set → fail-closed
+        let ctx = test_producer_ctx_with_route("target-route", RouteStatus::Started);
+        let comp = ControlBusComponent::new();
+        let endpoint = comp
+            .create_endpoint(
+                "controlbus:route?routeId=target-route&action=status",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await;
+        let err = result.expect_err("must be denied when authorizedRoutes missing");
+        assert!(
+            matches!(err, CamelError::Unauthorized(_)),
+            "expected Unauthorized, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("authorizedRoutes not configured"),
+            "error should mention fail-closed default: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authz_unauthorized_when_route_id_not_in_allowlist() {
+        // authorizedRoutes=route-a, but target is route-b → denied
+        let ctx = test_producer_ctx_with_route("route-b", RouteStatus::Started);
+        let comp = ControlBusComponent::new();
+        let endpoint = comp
+            .create_endpoint(
+                "controlbus:route?routeId=route-b&action=status&authorizedRoutes=route-a",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await;
+        let err = result.expect_err("must be denied when target not in allowlist");
+        assert!(
+            matches!(err, CamelError::Unauthorized(_)),
+            "expected Unauthorized, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("not in authorizedRoutes"),
+            "error should mention allowlist miss: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authz_authorized_when_route_id_in_allowlist() {
+        // authorizedRoutes=target-route, routeId=target-route, caller=other
+        let ctx = test_producer_ctx_with_route("target-route", RouteStatus::Started);
+        let comp = ControlBusComponent::new();
+        let endpoint = comp
+            .create_endpoint(
+                "controlbus:route?routeId=target-route&action=status&authorizedRoutes=target-route",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.expect("must succeed");
+        if let Body::Text(status) = &result.input.body {
+            assert_eq!(status, "Started");
+        } else {
+            panic!("expected Body::Text(Started), got: {:?}", result.input.body);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authz_self_restart_rejected() {
+        // target=calling route → self-restart denied
+        let runtime_status = "Started".to_string();
+        let runtime = Arc::new(MockRuntime::new().with_status("self-route", &runtime_status));
+        let ctx = ProducerContext::new()
+            .with_runtime(runtime)
+            .with_route_id("self-route");
+        let comp = ControlBusComponent::new();
+        let endpoint = comp
+            .create_endpoint(
+                "controlbus:route?routeId=self-route&action=restart&authorizedRoutes=self-route",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await;
+        let err = result.expect_err("self-restart must be denied");
+        assert!(
+            matches!(err, CamelError::Unauthorized(_)),
+            "expected Unauthorized, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("self-restart"),
+            "error should mention self-restart: {err}"
+        );
     }
 }

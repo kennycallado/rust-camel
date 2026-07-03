@@ -313,6 +313,15 @@ async fn build_client_from_config(
     config: &SiumaiConfig,
     configured_timeout: Duration,
 ) -> Result<(Arc<dyn ChatCapability>, Arc<dyn EmbeddingCapability>), LlmError> {
+    // H15: inject our hardened reqwest::Client (no redirects, 10s connect,
+    // 30s request). Siumai honors `BuilderBase::http_client` over its own
+    // client construction (see `siumai_core::builder::BuilderBase::http_client`).
+    let hardened = crate::hardened_http_client()
+        .map_err(|e| LlmError::InvalidRequest(format!("llm hardened client: {e}")))?;
+    let base = BuilderBase {
+        http_client: Some(hardened),
+        ..BuilderBase::default()
+    };
     match config {
         #[cfg(any(feature = "openai", feature = "all-providers"))]
         SiumaiConfig::OpenAi {
@@ -320,9 +329,7 @@ async fn build_client_from_config(
             base_url,
             model,
         } => {
-            let mut builder = siumai_provider_openai::providers::openai::OpenAiBuilder::new(
-                BuilderBase::default(),
-            );
+            let mut builder = siumai_provider_openai::providers::openai::OpenAiBuilder::new(base);
             builder = builder.api_key(api_key).model(model);
             if let Some(url) = base_url {
                 builder = builder.base_url(url);
@@ -338,9 +345,7 @@ async fn build_client_from_config(
         }
         #[cfg(any(feature = "ollama", feature = "all-providers"))]
         SiumaiConfig::Ollama { base_url, model } => {
-            let mut builder = siumai_provider_ollama::providers::ollama::OllamaBuilder::new(
-                BuilderBase::default(),
-            );
+            let mut builder = siumai_provider_ollama::providers::ollama::OllamaBuilder::new(base);
             builder = builder.base_url(base_url).model(model);
             let client = builder
                 .build()

@@ -1,9 +1,9 @@
-//! ADR-0033 startup-validation phase (skeleton).
+//! ADR-0033 startup-validation phase.
 //!
-//! Batch 1 ships the *skeleton* — the public type/trait surface and a stub
-//! `run_startup_validation()` that returns `Ok(())`. Later batches (Batch 5+)
-//! register `ConfigCheck` impls for Require-Explicit-Choice members and wire
-//! `CamelContext::start()` to call the phase. See ADR-0033 in `docs/adr/0033-…`.
+//! `ConfigCheck` impls are registered for Require-Explicit-Choice security
+//! defaults. The fail-closed `run_startup_validation()` walks the registry
+//! and returns `Err(CamelError::Config)` if any check fails. See ADR-0033 in
+//! `docs/adr/0033-…`.
 
 use camel_api::CamelError;
 
@@ -13,7 +13,7 @@ use camel_api::CamelError;
 /// established by ADR-0033. The check owns a name (for error reporting), a human
 /// description, and a synchronous `run` that returns `Ok(())` if the check passes
 /// or `Err(CamelError::Config)` if the check fails and the operator config is
-/// invalid. Batch 1 ships the trait; later batches register impls.
+/// invalid.
 pub trait ConfigCheck: Send + Sync {
     /// Stable identifier for this check (e.g. `"grpc-tls"`, `"sql-dynamic-query"`).
     /// Used in error messages and `camel doctor` output.
@@ -46,26 +46,61 @@ impl StartupValidationReport {
 
 /// Entry point for the startup-validation phase.
 ///
-/// **Batch 1 (skeleton):** returns `Ok(StartupValidationReport::default())`.
-/// No `ConfigCheck` impls are registered yet — the registry is empty by design.
+/// Walks the supplied `ConfigCheck` registry, collects failures, and fails closed
+/// when any check returns `Err`. Established by ADR-0033.
+pub fn run_startup_validation(
+    checks: Vec<Box<dyn ConfigCheck>>,
+) -> Result<StartupValidationReport, CamelError> {
+    let mut report = StartupValidationReport::default();
+    for check in &checks {
+        if let Err(e) = check.run() {
+            report.failures.push(format!("{}: {}", check.name(), e));
+        }
+    }
+    if !report.is_ok() {
+        return Err(CamelError::Config(report.failures.join("; ")));
+    }
+    Ok(report)
+}
+
+/// ConfigCheck: SQL dynamic-query intent must match capability (H7).
 ///
-/// **Later batches:** register `ConfigCheck` impls (gRPC TLS, SQL `allow_dynamic_query`,
-/// aggregator completion bound, …) and convert this function to a registry walk
-/// that fails closed on the first error.
-pub fn run_startup_validation() -> Result<StartupValidationReport, CamelError> {
-    Ok(StartupValidationReport::default())
+/// If `use_message_body_for_sql=true` but `allow_dynamic_query=false`,
+/// the operator intent (use body as query) is blocked by the capability
+/// gate — this is a misconfiguration that would silently produce empty
+/// queries. Fail closed at startup instead.
+pub struct SqlDynamicQueryCheck {
+    pub use_message_body_for_sql: bool,
+    pub allow_dynamic_query: bool,
+}
+
+impl ConfigCheck for SqlDynamicQueryCheck {
+    fn name(&self) -> &'static str {
+        "sql-dynamic-query"
+    }
+    fn description(&self) -> &'static str {
+        "SQL use_message_body_for_sql requires allow_dynamic_query=true"
+    }
+    fn run(&self) -> Result<(), CamelError> {
+        if self.use_message_body_for_sql && !self.allow_dynamic_query {
+            return Err(CamelError::Config(
+                "SQL endpoint has use_message_body_for_sql=true but allow_dynamic_query=false \
+                 — set allow_dynamic_query=true to permit body-sourced queries"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Smoke test: the skeleton compiles, exports its public surface, and the
-    /// entry point returns `Ok` with an empty failure list. Later batches will
-    /// replace this with a registry walk; the test will then grow.
+    /// Smoke test: the empty registry returns `Ok` with an empty failure list.
     #[test]
-    fn skeleton_run_returns_empty_ok_report() {
-        let report = run_startup_validation().expect("skeleton must return Ok");
+    fn empty_registry_returns_empty_ok_report() {
+        let report = run_startup_validation(vec![]).expect("empty registry must return Ok");
         assert!(report.is_ok());
         assert!(report.failures.is_empty());
     }
@@ -91,5 +126,49 @@ mod tests {
         let check: Box<dyn ConfigCheck> = Box::new(AlwaysOk);
         assert_eq!(check.name(), "always-ok");
         assert!(check.run().is_ok());
+    }
+
+    /// H7: SQL endpoint with `use_message_body_for_sql=true` and
+    /// `allow_dynamic_query=false` is a misconfiguration that would silently
+    /// produce empty queries — fail closed at startup.
+    #[test]
+    fn sql_dynamic_query_check_refuses_startup() {
+        let check = SqlDynamicQueryCheck {
+            use_message_body_for_sql: true,
+            allow_dynamic_query: false,
+        };
+        let result = run_startup_validation(vec![Box::new(check)]);
+        match result {
+            Err(CamelError::Config(msg)) => {
+                assert!(msg.contains("sql-dynamic-query"));
+                assert!(msg.contains("allow_dynamic_query"));
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    /// H7: explicit opt-in satisfies the check — startup proceeds.
+    #[test]
+    fn sql_dynamic_query_check_passes_with_opt_in() {
+        let check = SqlDynamicQueryCheck {
+            use_message_body_for_sql: true,
+            allow_dynamic_query: true,
+        };
+        let report =
+            run_startup_validation(vec![Box::new(check)]).expect("opt-in must satisfy the check");
+        assert!(report.is_ok());
+    }
+
+    /// H7: when `use_message_body_for_sql=false`, the dynamic-query gate
+    /// is irrelevant and the check passes regardless of the opt-in flag.
+    #[test]
+    fn sql_dynamic_query_check_passes_without_body_sql() {
+        let check = SqlDynamicQueryCheck {
+            use_message_body_for_sql: false,
+            allow_dynamic_query: false,
+        };
+        let report = run_startup_validation(vec![Box::new(check)])
+            .expect("no body-sourced queries → no fail-closed condition");
+        assert!(report.is_ok());
     }
 }

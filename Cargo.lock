@@ -1515,6 +1515,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "url",
  "wiremock",
 ]
 
@@ -1533,6 +1534,7 @@ dependencies = [
  "camel-core",
  "dashmap",
  "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "siumai",

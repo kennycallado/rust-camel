@@ -18,7 +18,6 @@ pub use static_endpoint::{HttpStaticComponent, HttpStaticConsumer, HttpStaticEnd
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
@@ -30,6 +29,7 @@ use tower::Service;
 use tracing::debug;
 
 use axum::body::BodyDataStream;
+use camel_api::is_ssrf_blocked_ip;
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
@@ -1577,32 +1577,6 @@ fn validate_url_for_ssrf(url: &str, config: &HttpEndpointConfig) -> Result<(), C
     Ok(())
 }
 
-fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ipv4) => {
-            ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local() || ipv4.octets()[0] == 0
-        }
-        IpAddr::V6(ipv6) => {
-            let seg0 = ipv6.segments()[0];
-            ipv6.is_loopback()
-                // fc00::/7 (ULA)
-                || (seg0 & 0xfe00) == 0xfc00
-                // fe80::/10 (link-local)
-                || (seg0 & 0xffc0) == 0xfe80
-                // ::ffff:0:0/96 (IPv4-mapped): only block if the mapped IPv4 is private
-                || ipv6
-                    .to_ipv4_mapped()
-                    .map(|v4| {
-                        v4.is_private()
-                            || v4.is_loopback()
-                            || v4.is_link_local()
-                            || v4.octets()[0] == 0
-                    })
-                    .unwrap_or(false)
-        }
-    }
-}
-
 async fn validate_resolved_host_for_ssrf(
     url: &str,
     config: &HttpEndpointConfig,
@@ -1626,7 +1600,7 @@ async fn validate_resolved_host_for_ssrf(
 
     for addr in resolved {
         let ip = addr.ip();
-        if is_private_ip(&ip) {
+        if is_ssrf_blocked_ip(&ip) {
             return Err(CamelError::ProcessorError(format!(
                 "Target resolved to private IP: {}",
                 ip
@@ -4374,25 +4348,27 @@ mod tests {
 
     #[test]
     fn test_is_private_ip_ranges() {
-        assert!(is_private_ip(&"10.0.0.1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"172.16.1.10".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"192.168.1.1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"127.0.0.1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"169.254.1.1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"0.1.2.3".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"10.0.0.1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"172.16.1.10".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"192.168.1.1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"127.0.0.1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"169.254.1.1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"0.1.2.3".parse().unwrap())); // allow-unwrap
 
-        assert!(is_private_ip(&"::1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"fc00::1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"fd12::1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"fe80::1".parse().unwrap())); // allow-unwrap
-        // ::ffff:0:0/96 (IPv4-mapped): only private if the mapped IPv4 is private
-        assert!(is_private_ip(&"::ffff:10.0.0.1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"::ffff:192.168.1.1".parse().unwrap())); // allow-unwrap
-        assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"::1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"fc00::1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"fd12::1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"fe80::1".parse().unwrap())); // allow-unwrap
+        // ::ffff:0:0/96 (IPv4-mapped): only blocked if the mapped IPv4 is blocked
+        assert!(is_ssrf_blocked_ip(&"::ffff:10.0.0.1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"::ffff:192.168.1.1".parse().unwrap())); // allow-unwrap
+        assert!(is_ssrf_blocked_ip(&"::ffff:127.0.0.1".parse().unwrap())); // allow-unwrap
 
-        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap())); // allow-unwrap
-        assert!(!is_private_ip(&"::ffff:8.8.8.8".parse().unwrap())); // allow-unwrap — public IPv4-mapped
-        assert!(!is_private_ip(&"2001:4860:4860::8888".parse().unwrap())); // allow-unwrap
+        assert!(!is_ssrf_blocked_ip(&"8.8.8.8".parse().unwrap())); // allow-unwrap
+        assert!(!is_ssrf_blocked_ip(&"::ffff:8.8.8.8".parse().unwrap())); // allow-unwrap — public IPv4-mapped
+        assert!(!is_ssrf_blocked_ip(
+            &"2001:4860:4860::8888".parse().unwrap()
+        )); // allow-unwrap
     }
 
     #[tokio::test]

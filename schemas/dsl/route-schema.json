@@ -1570,6 +1570,14 @@
             "null"
           ]
         },
+        "trust_upstream_principal": {
+          "default": null,
+          "description": "When `true`, the policy accepts an already-populated\n`camel.auth.principal` exchange property when no Bearer token is\npresent. Default `false` (fail-closed) — the principal must come\nfrom token validation. See H1 in\n`docs/superpowers/specs/v1-sec-stabilization-spec.md`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "wasm": {
           "default": null,
           "type": [

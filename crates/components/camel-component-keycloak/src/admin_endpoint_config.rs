@@ -51,7 +51,7 @@ mod tests {
             operation: AdminOperation::GetUser,
             user_id: None,
             token_provider: Arc::new(MockTokenProvider),
-            http: reqwest::Client::new(),
+            http: crate::hardened_http_client().unwrap(),
         };
         let debug_str = format!("{config:?}");
         assert!(debug_str.contains("server_url"));

@@ -29,6 +29,8 @@ fn default_grpc_config() -> GrpcConfig {
         max_receive_message_length: 4 * 1024 * 1024,
         deadline_ms: None,
         metadata: None,
+        connect_timeout_ms: 10_000,
+        default_deadline_ms: 30_000,
         tls_config: None,
         auth: camel_component_grpc::AuthConfig::None,
         interceptors: camel_component_grpc::InterceptorConfig::default(),

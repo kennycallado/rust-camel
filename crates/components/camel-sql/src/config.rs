@@ -377,6 +377,9 @@ pub struct SqlEndpointConfig {
     pub batch: bool,
     /// Use message body for SQL. Default: false.
     pub use_message_body_for_sql: bool,
+    /// Allow queries to be sourced from exchange headers (`CamelSql.Query`) or body.
+    /// Default `false` — dynamic queries are SQLi risk. Set `true` for backward compat.
+    pub allow_dynamic_query: bool,
 
     // SSL/TLS
     /// SSL mode for the connection. None = use global default.
@@ -436,6 +439,7 @@ impl std::fmt::Debug for SqlEndpointConfig {
             .field("poll_strategy", &self.poll_strategy)
             .field("batch", &self.batch)
             .field("use_message_body_for_sql", &self.use_message_body_for_sql)
+            .field("allow_dynamic_query", &self.allow_dynamic_query)
             .field("ssl_mode", &self.ssl_mode)
             .field("ssl_root_cert", &self.ssl_root_cert)
             .field("ssl_cert", &self.ssl_cert)
@@ -821,6 +825,11 @@ impl UriConfig for SqlEndpointConfig {
             .map(|v| parse_bool_param("useMessageBodyForSql", v))
             .transpose()?
             .unwrap_or(false);
+        let allow_dynamic_query = params
+            .get("allowDynamicQuery")
+            .map(|v| parse_bool_param("allowDynamicQuery", v))
+            .transpose()?
+            .unwrap_or(false);
         let ssl_mode = params.get("sslMode").cloned();
         let ssl_root_cert = params.get("sslRootCert").cloned();
         let ssl_cert = params.get("sslCert").cloned();
@@ -949,6 +958,7 @@ impl UriConfig for SqlEndpointConfig {
             poll_strategy,
             batch,
             use_message_body_for_sql,
+            allow_dynamic_query,
             ssl_mode,
             ssl_root_cert,
             ssl_cert,
@@ -991,6 +1001,7 @@ mod tests {
         assert!(!c.break_batch_on_consume_fail);
         assert!(!c.batch);
         assert!(!c.use_message_body_for_sql);
+        assert!(!c.allow_dynamic_query);
         assert!(c.ssl_mode.is_none());
         assert!(c.ssl_root_cert.is_none());
         assert!(c.ssl_cert.is_none());

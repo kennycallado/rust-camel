@@ -367,6 +367,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                 Ok(DeclarativeSecurityPolicy::Roles {
                     roles,
                     all_required: sp.all_required.unwrap_or(true),
+                    trust_upstream_principal: sp.trust_upstream_principal.unwrap_or(false),
                 })
             } else if let Some(scopes) = sp.scopes {
                 if scopes.is_empty() {
@@ -377,6 +378,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                 Ok(DeclarativeSecurityPolicy::Scopes {
                     scopes,
                     all_required: sp.all_required.unwrap_or(true),
+                    trust_upstream_principal: sp.trust_upstream_principal.unwrap_or(false),
                 })
             } else if let Some(name) = sp.r#ref {
                 if sp.all_required.is_some() {
@@ -2048,9 +2050,11 @@ routes:
             DeclarativeSecurityPolicy::Roles {
                 roles,
                 all_required,
+                trust_upstream_principal,
             } => {
                 assert_eq!(roles, &vec!["admin".to_string(), "superuser".to_string()]);
                 assert!(!all_required);
+                assert!(!trust_upstream_principal);
             }
             _ => panic!("expected Roles"),
         }
@@ -2073,9 +2077,11 @@ routes:
             DeclarativeSecurityPolicy::Scopes {
                 scopes,
                 all_required,
+                trust_upstream_principal,
             } => {
                 assert_eq!(scopes, &vec!["read:api".to_string()]);
                 assert!(*all_required);
+                assert!(!trust_upstream_principal);
             }
             _ => panic!("expected Scopes"),
         }
@@ -2099,6 +2105,61 @@ routes:
                 assert_eq!(name, "my-custom-policy");
             }
             _ => panic!("expected Ref"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_roles_trust_upstream_principal_default_false() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Roles {
+                trust_upstream_principal,
+                ..
+            } => {
+                assert!(
+                    !trust_upstream_principal,
+                    "trust_upstream_principal must default to false (fail-closed)"
+                );
+            }
+            _ => panic!("expected Roles"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_roles_trust_upstream_principal_opt_in() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+      trust_upstream_principal: true
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Roles {
+                trust_upstream_principal,
+                ..
+            } => {
+                assert!(
+                    *trust_upstream_principal,
+                    "trust_upstream_principal must be true when set in YAML"
+                );
+            }
+            _ => panic!("expected Roles"),
         }
     }
 

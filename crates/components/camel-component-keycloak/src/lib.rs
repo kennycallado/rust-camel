@@ -15,10 +15,12 @@ pub mod keycloak_producer;
 pub mod uma;
 
 use std::fmt;
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::CamelError;
+use camel_api::{CamelError, is_ssrf_blocked_ip};
 use camel_auth::claims::ClaimPaths;
 use camel_auth::oauth2::{ClientCredentialsProvider, TokenProvider};
 use camel_auth::permission::PermissionEvaluator;
@@ -193,6 +195,69 @@ pub use keycloak_endpoint::{KeycloakEndpoint, KeycloakEndpointConfig, KeycloakEn
 pub use keycloak_producer::KeycloakAdminProducer;
 pub use uma::KeycloakUmaEvaluator;
 
+/// Build a hardened `reqwest::Client` for Keycloak HTTP traffic.
+///
+/// Hardening (H15):
+/// - **No redirects** — a 302/303 to an attacker-controlled host could
+///   bypass SSRF guards. Keycloak's own API is non-redirecting; a redirect
+///   response is a signal of misconfiguration or attack.
+/// - **Connect timeout 10s** — bound TCP handshake.
+/// - **Request timeout 30s** — bound total request lifetime.
+pub fn hardened_http_client() -> Result<reqwest::Client, CamelError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("HTTP client build failed: {e}")))
+}
+
+/// Validate a Keycloak server URL.
+///
+/// Rejects non-http(s) schemes, and (when `allow_internal` is `false`)
+/// rejects hosts that resolve to any address matched by
+/// [`camel_api::is_ssrf_blocked_ip`].
+///
+/// Set `allow_internal` to `true` only for local development against a
+/// Keycloak instance bound to 127.0.0.1 / 0.0.0.0; production must keep
+/// it at the default `false`.
+pub fn validate_server_url(url: &str, allow_internal: bool) -> Result<(), CamelError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("invalid keycloak URL: {e}")))?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(CamelError::EndpointCreationFailed(format!(
+            "keycloak URL must use http/https, got: {}",
+            parsed.scheme()
+        )));
+    }
+
+    if allow_internal {
+        return Ok(());
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(CamelError::EndpointCreationFailed(format!(
+            "keycloak URL '{url}' is missing a host"
+        )));
+    };
+
+    let port = parsed.port_or_known_default().unwrap_or(0);
+    let resolved = (host, port).to_socket_addrs().map_err(|e| {
+        CamelError::EndpointCreationFailed(format!("failed to resolve keycloak host '{host}': {e}"))
+    })?;
+
+    for addr in resolved {
+        let ip = addr.ip();
+        if is_ssrf_blocked_ip(&ip) {
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "keycloak URL resolves to blocked SSRF address: {ip}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub struct KeycloakComponent {
     server_url: String,
     token_provider: Arc<dyn TokenProvider>,
@@ -204,17 +269,20 @@ impl KeycloakComponent {
         let secret = config.client_secret().ok_or_else(|| {
             CamelError::EndpointCreationFailed("keycloak component requires client_secret".into())
         })?;
-        let token_provider = Arc::new(ClientCredentialsProvider::new(
-            config.token_endpoint(),
-            config.client_id().to_string(),
-            secret.to_string(),
-            None,
-            None,
-        ));
+        let token_provider = Arc::new(
+            ClientCredentialsProvider::new(
+                config.token_endpoint(),
+                config.client_id().to_string(),
+                secret.to_string(),
+                None,
+                None,
+            )
+            .map_err(|e| CamelError::EndpointCreationFailed(format!("token provider init: {e}")))?,
+        );
         Ok(Self {
             server_url: config.server_url().to_string(),
             token_provider,
-            http: reqwest::Client::new(),
+            http: hardened_http_client()?,
         })
     }
 }
@@ -415,15 +483,18 @@ mod tests {
         .with_client_secret("secret".into());
         let component = KeycloakComponent::new(&config).unwrap();
         let ctx = NoOpComponentContext;
+        // allowInternalUrls=true: the example.com host has no DNS in CI;
+        // opting in lets us exercise the rest of create_endpoint without
+        // standing up a network.
         let endpoint = component
             .create_endpoint(
-                "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1",
+                "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1&allowInternalUrls=true",
                 &ctx,
             )
             .unwrap();
         assert_eq!(
             endpoint.uri(),
-            "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1"
+            "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1&allowInternalUrls=true"
         );
     }
 
@@ -523,5 +594,48 @@ mod tests {
         );
         let result = config.uma_evaluator();
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // H15: hardened HTTP client + SSRF URL validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hardened_http_client_builds_successfully() {
+        let _client = hardened_http_client().expect("hardened client must build");
+    }
+
+    #[test]
+    fn validate_server_url_accepts_https_public_host() {
+        // Use an IP literal so the test is independent of DNS.
+        validate_server_url("https://1.1.1.1", false).expect("public https IP literal must pass");
+    }
+
+    #[test]
+    fn validate_server_url_rejects_non_http_scheme() {
+        let err = validate_server_url("ftp://kc.example.com", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("http/https"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_server_url_rejects_loopback_when_internal_disallowed() {
+        // localhost resolves to 127.0.0.1 / ::1 — both SSRF-blocked.
+        let err = validate_server_url("http://localhost:8080", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("SSRF"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_server_url_allows_loopback_when_internal_allowed() {
+        validate_server_url("http://localhost:8080", true)
+            .expect("allow_internal opt-in must pass");
+    }
+
+    #[test]
+    fn validate_server_url_rejects_invalid_url() {
+        let err = validate_server_url("not a url", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid"), "msg: {msg}");
     }
 }

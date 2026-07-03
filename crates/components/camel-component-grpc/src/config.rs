@@ -260,6 +260,12 @@ pub struct GrpcConfig {
     pub deadline_ms: Option<u64>,
     pub metadata: Option<String>,
 
+    // H14: default connect timeout and deadline
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_deadline_ms")]
+    pub default_deadline_ms: u64,
+
     // GRPC-006: TLS/mTLS support
     #[serde(default)]
     pub tls_config: Option<TlsConfig>,
@@ -302,6 +308,8 @@ impl fmt::Debug for GrpcConfig {
                 &self.max_receive_message_length,
             )
             .field("deadline_ms", &self.deadline_ms)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("default_deadline_ms", &self.default_deadline_ms)
             .field("metadata", &self.metadata.as_ref().map(|_| "[REDACTED]"))
             .field("tls_config", &self.tls_config)
             .field("auth", &self.auth)
@@ -315,6 +323,14 @@ impl fmt::Debug for GrpcConfig {
 
 fn default_max_msg_len() -> usize {
     4 * 1024 * 1024
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_deadline_ms() -> u64 {
+    30_000
 }
 
 /// Server-side configuration for the gRPC transport layer.
@@ -380,6 +396,18 @@ fn parse_grpc_query_params(
         .map(|v| parse_numeric_param(&v, "deadline_ms"))
         .transpose()?;
 
+    let connect_timeout_ms = map
+        .remove("connectTimeoutMs")
+        .map(|v| parse_numeric_param(&v, "connectTimeoutMs"))
+        .transpose()?
+        .unwrap_or_else(default_connect_timeout_ms);
+
+    let default_deadline_ms = map
+        .remove("defaultDeadlineMs")
+        .map(|v| parse_numeric_param(&v, "defaultDeadlineMs"))
+        .transpose()?
+        .unwrap_or_else(default_deadline_ms);
+
     // GRPC-007: Parse auth from query params
     let auth = if let Some(token) = map.remove("bearerToken") {
         AuthConfig::Bearer { token }
@@ -416,6 +444,8 @@ fn parse_grpc_query_params(
         max_receive_message_length,
         deadline_ms,
         metadata,
+        connect_timeout_ms,
+        default_deadline_ms,
         tls_config: None,
         auth,
         interceptors: InterceptorConfig::default(),
@@ -613,6 +643,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_grpc_uri_connect_timeout_and_default_deadline() {
+        let uri =
+            "grpc://localhost:50051/pkg.Svc/Method?connectTimeoutMs=5000&defaultDeadlineMs=15000";
+        let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
+        assert_eq!(config.connect_timeout_ms, 5000);
+        assert_eq!(config.default_deadline_ms, 15000);
+    }
+
+    #[test]
     fn test_parse_grpc_uri_numeric_query_params_invalid() {
         let uri = "grpc://localhost:50051/pkg.Svc/Method?deadline_ms=notanumber";
         let result = parse_grpc_uri(uri);
@@ -709,6 +748,8 @@ mod tests {
         assert!(config.method.is_none());
         assert!(config.deadline_ms.is_none());
         assert!(config.metadata.is_none());
+        assert_eq!(config.connect_timeout_ms, 10_000);
+        assert_eq!(config.default_deadline_ms, 30_000);
     }
 
     #[test]

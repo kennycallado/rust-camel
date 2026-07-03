@@ -47,6 +47,7 @@ pub mod routing_slip;
 pub mod runtime;
 pub mod security_policy;
 pub mod splitter;
+pub mod ssrf;
 pub mod step_lifecycle;
 pub mod stream_cache;
 pub mod supervision;
@@ -133,6 +134,7 @@ pub use splitter::{
     StreamingSplitExpression, fragment_exchange, split_body, split_body_json_array,
     split_body_lines,
 };
+pub use ssrf::is_ssrf_blocked_ip;
 pub use step_lifecycle::{StepLifecycle, StepShutdownReason};
 pub use supervision::SupervisionConfig;
 pub use throttler::{ThrottleStrategy, ThrottlerConfig};

@@ -24,6 +24,45 @@ pub fn build_provider_map(config: &LlmGlobalConfig) -> Result<ProviderMap, LlmEr
     Ok(map)
 }
 
+/// Validate a provider `base_url` before constructing the underlying client.
+///
+/// H15: rejects non-http(s) schemes AND resolves DNS to block
+/// private/loopback/link-local IPs via the shared `is_ssrf_blocked_ip`
+/// helper. Prevents SSRF to cloud metadata endpoints (e.g. 169.254.169.254).
+///
+/// DNS resolution is **fail-closed**: if the host cannot be resolved,
+/// validation fails. An unresolvable host is treated as a configuration
+/// error — silently passing would let typos, hijacked DNS, or
+/// firewalled-internal names reach the outbound client.
+pub fn validate_llm_url(url: &str) -> Result<(), LlmError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| LlmError::InvalidRequest(format!("invalid llm base_url '{url}': {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(LlmError::InvalidRequest(format!(
+            "llm base_url must use http/https, got: {}",
+            parsed.scheme()
+        )));
+    }
+    // SSRF: resolve host and reject blocked IPs. Fail-closed on resolution
+    // failure so a misconfigured or non-resolvable host never silently
+    // bypasses the SSRF guard.
+    if let Some(host) = parsed.host_str() {
+        use std::net::ToSocketAddrs;
+        let addrs = (host, 0u16).to_socket_addrs().map_err(|e| {
+            LlmError::InvalidRequest(format!("cannot resolve llm base_url host '{host}': {e}"))
+        })?;
+        for addr in addrs {
+            if camel_api::is_ssrf_blocked_ip(&addr.ip()) {
+                return Err(LlmError::InvalidRequest(format!(
+                    "llm base_url resolves to blocked SSRF address: {}",
+                    addr.ip()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn build_single(
     name: &str,
     config: &LlmProviderConfig,
@@ -42,6 +81,9 @@ fn build_single(
         }
         #[cfg(any(feature = "openai", feature = "all-providers"))]
         LlmProviderConfig::Openai(c) => {
+            if let Some(ref base_url) = c.base_url {
+                validate_llm_url(base_url)?;
+            }
             let configured_timeout =
                 Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
             crate::provider::siumai_adapter::build_openai(name, c, configured_timeout)
@@ -53,6 +95,7 @@ fn build_single(
         )),
         #[cfg(any(feature = "ollama", feature = "all-providers"))]
         LlmProviderConfig::Ollama(c) => {
+            validate_llm_url(&c.base_url)?;
             let configured_timeout =
                 Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
             crate::provider::siumai_adapter::build_ollama(name, c, configured_timeout)
@@ -135,5 +178,92 @@ mod tests {
         });
         let provider = build_single("test", &config, None).expect("build ok");
         assert_eq!(provider.id(), "test");
+    }
+
+    // -----------------------------------------------------------------------
+    // H15: validate_llm_url
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_llm_url_accepts_http() {
+        // IP literal so the test is independent of DNS. Public IP — must
+        // pass the SSRF guard.
+        validate_llm_url("http://1.1.1.1").expect("public http IP literal must pass");
+    }
+
+    #[test]
+    fn validate_llm_url_accepts_https() {
+        validate_llm_url("https://1.1.1.1").expect("public https IP literal must pass");
+    }
+
+    #[test]
+    fn validate_llm_url_rejects_unresolvable_host() {
+        // Fail-closed on DNS resolution failure: a non-resolvable host
+        // is treated as a config error, not a silent pass-through.
+        let err = validate_llm_url("https://no-such-host.invalid").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot resolve"),
+            "expected DNS error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_llm_url_rejects_ftp_scheme() {
+        let err = validate_llm_url("ftp://api.example.com").unwrap_err();
+        assert!(matches!(err, LlmError::InvalidRequest(_)), "got: {err}");
+        assert!(err.to_string().contains("http/https"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_llm_url_rejects_file_scheme() {
+        let err = validate_llm_url("file:///etc/passwd").unwrap_err();
+        assert!(err.to_string().contains("http/https"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_llm_url_rejects_unparseable() {
+        let err = validate_llm_url("not a url").unwrap_err();
+        assert!(err.to_string().contains("invalid"), "msg: {err}");
+    }
+
+    #[cfg(any(feature = "openai", feature = "all-providers"))]
+    #[test]
+    fn build_openai_rejects_non_http_base_url() {
+        use crate::config::OpenaiProviderConfig;
+        let config = LlmProviderConfig::Openai(OpenaiProviderConfig {
+            api_key: "sk-test".into(),
+            base_url: Some("ftp://api.example.com".into()),
+            default_model: "gpt-4o".into(),
+            timeout_secs: None,
+            max_concurrency: None,
+            network_retry: None,
+            pricing: None,
+            cache_ttl_secs: None,
+            cache_max_entries: None,
+        });
+        let result = build_single("oai", &config, None);
+        assert!(result.is_err(), "expected Err for ftp:// base_url");
+        let err = result.err().expect("is_err above"); // allow-unwrap
+        assert!(err.to_string().contains("http/https"), "msg: {err}");
+    }
+
+    #[cfg(any(feature = "ollama", feature = "all-providers"))]
+    #[test]
+    fn build_ollama_rejects_non_http_base_url() {
+        use crate::config::OllamaProviderConfig;
+        let config = LlmProviderConfig::Ollama(OllamaProviderConfig {
+            base_url: "file:///tmp/ollama".into(),
+            default_model: "llama3".into(),
+            timeout_secs: None,
+            max_concurrency: None,
+            network_retry: None,
+            pricing: None,
+            cache_ttl_secs: None,
+            cache_max_entries: None,
+        });
+        let result = build_single("ol", &config, None);
+        assert!(result.is_err(), "expected Err for file:// base_url");
+        let err = result.err().expect("is_err above"); // allow-unwrap
+        assert!(err.to_string().contains("http/https"), "msg: {err}");
     }
 }

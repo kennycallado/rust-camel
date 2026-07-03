@@ -145,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_policy: Arc<dyn SecurityPolicy> = Arc::new(RolePolicy::new(
         vec!["admin".to_string()],
         true,
+        false,
         validator.clone(),
     ));
 
@@ -196,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
-    let role_policy = RolePolicy::new(vec!["admin".to_string()], true, validator.clone());
+    let role_policy = RolePolicy::new(vec!["admin".to_string()], true, false, validator.clone());
     let wrapped = BearerInjectingPolicy::new(alice_token.access_token.clone(), role_policy);
 
     let secured_route = RouteBuilder::from("timer:tick?period=2000&repeatCount=2")

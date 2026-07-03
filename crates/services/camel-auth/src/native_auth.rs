@@ -420,7 +420,7 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = RolePolicy::new(vec!["admin".to_string()], true, authenticator);
+        let policy = RolePolicy::new(vec!["admin".to_string()], true, false, authenticator);
         let mut exchange = Exchange::new(Message::default());
         exchange
             .input
@@ -443,7 +443,7 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = ScopePolicy::new(vec!["api:read".to_string()], true, authenticator);
+        let policy = ScopePolicy::new(vec!["api:read".to_string()], true, false, authenticator);
         let mut exchange = Exchange::new(Message::default());
         exchange
             .input
@@ -466,7 +466,7 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = RolePolicy::new(vec!["admin".to_string()], true, authenticator);
+        let policy = RolePolicy::new(vec!["admin".to_string()], true, false, authenticator);
         let mut exchange = Exchange::new(Message::default());
         exchange
             .input
