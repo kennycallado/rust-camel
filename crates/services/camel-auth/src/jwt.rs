@@ -3,7 +3,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use std::sync::Arc;
 
 use crate::claims::ClaimsMapper;
-use crate::jwks::JwksProvider;
+use crate::jwks::{Jwk, JwksProvider};
 use crate::types::AuthError;
 use camel_api::security_policy::Principal;
 
@@ -54,6 +54,21 @@ fn jwk_to_decoding_key(n: &str, e: &str) -> Result<DecodingKey, AuthError> {
     }
 }
 
+/// Expected signing algorithm — must match [`Validation::new(Algorithm::RS256)`].
+const EXPECTED_ALG: &str = "RS256";
+
+/// Returns `true` if the JWK matches `kid` and passes alg/use filters.
+///
+/// A JWK is considered acceptable when:
+/// - Its `kid` matches the token header.
+/// - Its `alg` is either absent (spec default) or equals [`EXPECTED_ALG`].
+/// - Its `use` is either absent (spec default) or equals `"sig"`.
+fn key_matches(k: &Jwk, kid: &str) -> bool {
+    k.kid == kid
+        && k.alg.as_deref().is_none_or(|a| a == EXPECTED_ALG)
+        && k.r#use.as_deref().is_none_or(|u| u == "sig")
+}
+
 #[async_trait]
 impl JwtValidator for LocalJwtValidator {
     async fn validate(&self, token: &str) -> Result<Principal, AuthError> {
@@ -67,7 +82,7 @@ impl JwtValidator for LocalJwtValidator {
 
         // Fetch signing keys; on kid miss, force a JWKS refresh (handles key rotation)
         let keys = self.jwks.get_signing_keys().await?;
-        let jwk = if let Some(k) = keys.iter().find(|k| k.kid == kid) {
+        let jwk = if let Some(k) = keys.iter().find(|k| key_matches(k, &kid)) {
             k.clone()
         } else {
             // Key not in cache — might be a newly rotated key; refresh once and retry
@@ -76,7 +91,7 @@ impl JwtValidator for LocalJwtValidator {
                 .get_signing_keys()
                 .await?
                 .into_iter()
-                .find(|k| k.kid == kid)
+                .find(|k| key_matches(k, &kid))
                 .ok_or_else(|| {
                     AuthError::TokenInvalid(format!("no key for kid={kid} after refresh"))
                 })?
@@ -190,6 +205,41 @@ mod tests {
             }),
             mapper,
         )
+    }
+
+    fn validator_with_jwk(jwk: Jwk, mapper: Arc<dyn ClaimsMapper>) -> LocalJwtValidator {
+        struct SingleKeyJwks {
+            jwk: Jwk,
+        }
+
+        #[async_trait]
+        impl JwksProvider for SingleKeyJwks {
+            async fn get_signing_keys(&self) -> Result<Vec<Jwk>, AuthError> {
+                Ok(vec![self.jwk.clone()])
+            }
+            async fn refresh(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+        }
+
+        LocalJwtValidator::new(
+            vec!["my-api".into()],
+            "http://localhost:8080/realms/test".into(),
+            Arc::new(SingleKeyJwks { jwk }),
+            mapper,
+        )
+    }
+
+    /// Standard claims set valid for "my-api" audience, used by multiple tests.
+    fn claims_with_defaults() -> serde_json::Value {
+        let now = chrono::Utc::now().timestamp() as u64;
+        json!({
+            "sub": "user-123",
+            "iss": "http://localhost:8080/realms/test",
+            "aud": "my-api",
+            "exp": now + 3600,
+            "iat": now,
+        })
     }
 
     fn make_token(kid: &str, claims: &serde_json::Value) -> String {
@@ -376,6 +426,58 @@ mod tests {
         let token = make_token("test-key", &claims);
         let principal = v.validate(&token).await.unwrap();
         assert_eq!(principal.scopes, vec!["read", "write", "admin"]);
+    }
+
+    #[tokio::test]
+    async fn rejects_key_with_alg_mismatch() {
+        let jwk = Jwk {
+            kid: "test-key".into(),
+            kty: "RSA".into(),
+            alg: Some("HS256".into()),
+            r#use: None,
+            n: String::from_utf8_lossy(TEST_RSA_PUBLIC_PEM).into_owned(),
+            e: "AQAB".into(),
+        };
+        let v = validator_with_jwk(jwk, multi_role_mapper(vec!["/groups".into()]));
+        let token = make_token("test-key", &claims_with_defaults());
+        assert!(matches!(
+            v.validate(&token).await,
+            Err(AuthError::TokenInvalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_key_with_use_mismatch() {
+        let jwk = Jwk {
+            kid: "test-key".into(),
+            kty: "RSA".into(),
+            alg: Some("RS256".into()),
+            r#use: Some("enc".into()),
+            n: String::from_utf8_lossy(TEST_RSA_PUBLIC_PEM).into_owned(),
+            e: "AQAB".into(),
+        };
+        let v = validator_with_jwk(jwk, multi_role_mapper(vec!["/groups".into()]));
+        let token = make_token("test-key", &claims_with_defaults());
+        assert!(matches!(
+            v.validate(&token).await,
+            Err(AuthError::TokenInvalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepts_key_without_alg_or_use() {
+        let jwk = Jwk {
+            kid: "test-key".into(),
+            kty: "RSA".into(),
+            alg: None,
+            r#use: None,
+            n: String::from_utf8_lossy(TEST_RSA_PUBLIC_PEM).into_owned(),
+            e: "AQAB".into(),
+        };
+        let v = validator_with_jwk(jwk, multi_role_mapper(vec!["/groups".into()]));
+        let token = make_token("test-key", &claims_with_defaults());
+        let principal = v.validate(&token).await.unwrap();
+        assert_eq!(principal.subject, "user-123");
     }
 
     #[tokio::test]

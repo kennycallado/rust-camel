@@ -168,6 +168,7 @@ base64 = "0.22"
 pkcs1 = { version = "0.7", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 serde_urlencoded = "0.7"
+zeroize = "1"
 rand = "0.10"
 sqlx = "0.8"
 sxd-document = "0.3"

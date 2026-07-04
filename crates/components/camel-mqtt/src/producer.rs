@@ -13,7 +13,7 @@ use tracing::warn;
 
 use camel_api::{Body, CamelError, Exchange, Value};
 use camel_component_api::NetworkRetryPolicy;
-use rumqttc::{AsyncClient, MqttOptions, QoS};
+use rumqttc::{AsyncClient, MqttOptions, NetworkOptions, QoS};
 
 use crate::client_id::build_client_id_with_override;
 use crate::config::{MqttBrokerConfig, MqttEndpointConfig, check_payload_len};
@@ -122,6 +122,10 @@ impl MqttProducer {
         let (client, mut eventloop) = AsyncClient::builder(mqtt_opts)
             .capacity(MAX_INFLIGHT)
             .build();
+
+        let mut net_opts = NetworkOptions::new();
+        net_opts.set_connection_timeout(10);
+        eventloop.set_network_options(net_opts);
 
         let reconnect = config.effective_reconnect(&fallback_reconnect);
         let cancel = CancellationToken::new();

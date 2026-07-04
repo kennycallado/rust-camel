@@ -17,7 +17,7 @@ use tokio::sync::{AcquireError, Mutex, OwnedSemaphorePermit, Semaphore};
 use tower::Service;
 use tracing::{debug, error, warn};
 
-use crate::config::{OpenSearchEndpointConfig, OpenSearchOperation};
+use crate::config::{DEFAULT_TIMEOUT_MS, OpenSearchEndpointConfig, OpenSearchOperation};
 
 mod retry;
 use retry::{ProducerError, is_retryable_producer_error, is_transient};
@@ -31,7 +31,7 @@ impl OpenSearchProducer {
     where
         F: Future<Output = Result<T, ProducerError>>,
     {
-        let timeout = Duration::from_millis(config.timeout_ms.unwrap_or(30_000));
+        let timeout = Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
         tokio::time::timeout(timeout, fut)
             .await
             .map_err(|_| ProducerError::Transient("opensearch request timed out".to_string()))?

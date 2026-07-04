@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IssuerError {
@@ -120,7 +121,7 @@ struct NativeTokenClaims {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct TokenResponse {
-    pub access_token: String,
+    pub access_token: Zeroizing<String>,
     pub token_type: String,
     pub expires_in: u64,
     pub scope: String,
@@ -251,7 +252,7 @@ impl NativeTokenIssuer {
             .map_err(|e| IssuerError::Other(format!("JWT encoding failed: {e}")))?;
 
         Ok(TokenResponse {
-            access_token: token,
+            access_token: Zeroizing::new(token),
             token_type: "Bearer".to_string(),
             expires_in: self.ttl.as_secs(),
             scope: claims.scope.clone(),
@@ -313,7 +314,7 @@ mod tests {
         M2mClientStore::try_new(vec![M2mClient {
             client_id: "billing".into(),
             secret: M2mClientSecret::Plaintext {
-                value: "secret".into(),
+                value: Zeroizing::new("secret".into()),
             },
             roles: vec!["billing".into()],
             scopes: vec!["orders:read".into(), "orders:write".into()],
@@ -453,7 +454,7 @@ mod tests {
         validation.set_issuer(&["https://orders.local"]);
         validation.set_audience(&["orders-api"]);
         let decoded = decode::<serde_json::Value>(
-            &response.access_token,
+            response.access_token.as_str(),
             &DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap(),
             &validation,
         )
@@ -477,7 +478,7 @@ mod tests {
         validation.set_issuer(&["https://orders.local"]);
         validation.set_audience(&["orders-api"]);
         let decoded = decode::<serde_json::Value>(
-            &response.access_token,
+            response.access_token.as_str(),
             &DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap(),
             &validation,
         )
@@ -535,7 +536,7 @@ mod tests {
         validation.set_issuer(&["https://orders.local"]);
         validation.set_audience(&["orders-api"]);
         let decoded = decode::<serde_json::Value>(
-            &response.access_token,
+            response.access_token.as_str(),
             &DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap(),
             &validation,
         )

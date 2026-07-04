@@ -13,11 +13,12 @@ categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
+url = { workspace = true }
 async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "net"] }
 reqwest = { workspace = true, features = ["json", "form"] }
 jsonwebtoken.workspace = true
 dashmap.workspace = true
@@ -28,6 +29,7 @@ http.workspace = true
 percent-encoding.workspace = true
 sha2 = { workspace = true }
 hex = { workspace = true }
+zeroize.workspace = true
 pkcs1 = { workspace = true }
 pkcs8 = { workspace = true }
 base64 = { workspace = true }

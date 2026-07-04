@@ -565,20 +565,6 @@ pub(crate) fn enrich_db_url_with_ssl_params(
     ssl_cert: Option<&str>,
     ssl_key: Option<&str>,
 ) -> Result<String, CamelError> {
-    let ssl_params: Vec<(&str, &str)> = [
-        ssl_mode.map(|v| ("sslMode", v)),
-        ssl_root_cert.map(|v| ("sslRootCert", v)),
-        ssl_cert.map(|v| ("sslCert", v)),
-        ssl_key.map(|v| ("sslKey", v)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
-    if ssl_params.is_empty() {
-        return Ok(db_url.to_string());
-    }
-
     let mut parsed = url::Url::parse(db_url).map_err(|e| {
         CamelError::InvalidUri(format!(
             "Cannot parse database URL for SSL enrichment: {}",
@@ -588,9 +574,12 @@ pub(crate) fn enrich_db_url_with_ssl_params(
 
     let scheme = parsed.scheme();
     if scheme.starts_with("sqlite") {
-        warn!(
-            "SSL options configured for SQLite database URL, but SQLite does not support SSL/TLS; ignoring sslMode/sslRootCert/sslCert/sslKey"
-        );
+        if ssl_mode.is_some() || ssl_root_cert.is_some() || ssl_cert.is_some() || ssl_key.is_some()
+        {
+            warn!(
+                "SSL options configured for SQLite database URL, but SQLite does not support SSL/TLS; ignoring sslMode/sslRootCert/sslCert/sslKey"
+            );
+        }
         return Ok(db_url.to_string());
     }
 
@@ -598,6 +587,19 @@ pub(crate) fn enrich_db_url_with_ssl_params(
         return Ok(db_url.to_string());
     }
     let is_mysql = scheme == "mysql";
+
+    // Compute effective ssl_mode with per-driver default when none is specified.
+    let effective_ssl_mode: &str = ssl_mode.unwrap_or(if is_mysql { "prefer" } else { "require" });
+
+    let ssl_params: Vec<(&str, &str)> = [
+        Some(("sslMode", effective_ssl_mode)),
+        ssl_root_cert.map(|v| ("sslRootCert", v)),
+        ssl_cert.map(|v| ("sslCert", v)),
+        ssl_key.map(|v| ("sslKey", v)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
     let mut query_pairs = parsed.query_pairs().collect::<Vec<_>>();
     for (camel_name, value) in &ssl_params {
@@ -616,10 +618,16 @@ pub(crate) fn enrich_db_url_with_ssl_params(
         }
     }
 
+    // Add TCP connect timeout (10s) if not already set.
+    // This is the sqlx URL-level connect_timeout, NOT the pool acquire_timeout.
+    if !query_pairs.iter().any(|(k, _)| k == "connect_timeout") {
+        query_pairs.push(("connect_timeout".into(), "10".into()));
+    }
+
     {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        for (k, v) in query_pairs {
-            serializer.append_pair(&k, &v);
+        for (k, v) in &query_pairs {
+            serializer.append_pair(k, v);
         }
         parsed.set_query(Some(&serializer.finish()));
     }
@@ -1417,12 +1425,60 @@ mod tests {
     }
 
     #[test]
-    fn enrich_no_params() {
+    fn enrich_applies_postgres_defaults() {
         let mut c =
             SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
         c.resolve_defaults();
         let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
-        assert_eq!(url, "postgres://localhost/test");
+        // Default ssl_mode and connect_timeout are applied at enrichment time
+        assert!(
+            url.contains("sslmode=require"),
+            "expected sslmode=require, got: {}",
+            url
+        );
+        assert!(
+            url.contains("connect_timeout=10"),
+            "expected connect_timeout=10, got: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn enrich_mysql_defaults_to_prefer() {
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=mysql://localhost/test").unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert!(
+            url.contains("ssl-mode=prefer"),
+            "expected ssl-mode=prefer, got: {}",
+            url
+        );
+        assert!(
+            url.contains("connect_timeout=10"),
+            "expected connect_timeout=10, got: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn enrich_preserves_explicit_connect_timeout() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test?connect_timeout=5",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert!(
+            url.contains("connect_timeout=5"),
+            "expected explicit connect_timeout=5 preserved, got: {}",
+            url
+        );
+        assert!(
+            url.contains("sslmode=require"),
+            "expected sslmode=require, got: {}",
+            url
+        );
     }
 
     #[test]

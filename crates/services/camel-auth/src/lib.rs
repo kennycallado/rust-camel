@@ -13,6 +13,7 @@ pub mod bearer_token_layer;
 pub mod built_in;
 pub mod claims;
 pub mod credential_source;
+pub mod http_client;
 pub mod introspection;
 pub mod introspection_auth;
 pub mod jwks;
@@ -34,11 +35,12 @@ pub use bearer_token_layer::{BearerTokenLayer, BearerTokenService};
 pub use built_in::{RolePolicy, ScopePolicy};
 pub use claims::{ClaimPaths, ClaimsMapper, JsonPointerClaimsMapper};
 pub use credential_source::{CredentialSource, extract_token_multi, redact_query_params};
+pub use http_client::validate_https_public_uri;
 pub use introspection::{
     CachingTokenIntrospector, IntrospectionCacheOptions, IntrospectionResult, TokenIntrospector,
 };
 pub use introspection_auth::IntrospectionAuthenticator;
-pub use jwks::{Jwk, JwksProvider, RemoteJwksProvider, validate_https_public_uri};
+pub use jwks::{Jwk, JwksProvider, RemoteJwksProvider};
 pub use jwt::{JwtValidator, LocalJwtValidator};
 pub use oauth2::{ClientCredentialsProvider, TokenProvider};
 pub use registry::PermissionEvaluatorRegistry;

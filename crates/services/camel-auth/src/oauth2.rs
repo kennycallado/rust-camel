@@ -1,9 +1,20 @@
 use async_trait::async_trait;
 use serde::Deserialize;
+use serde::de::Deserializer;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
+use zeroize::Zeroizing;
 
+use crate::http_client::build_ssrf_pinned_client;
 use crate::types::AuthError;
+
+fn deserialize_zeroizing_string<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Ok(Zeroizing::new(s))
+}
 
 const DEFAULT_SKEW: Duration = Duration::from_secs(30);
 
@@ -14,21 +25,22 @@ pub trait TokenProvider: Send + Sync + std::fmt::Debug {
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    #[serde(deserialize_with = "deserialize_zeroizing_string")]
+    access_token: Zeroizing<String>,
     #[allow(dead_code)]
     token_type: String,
     expires_in: u64,
 }
 
 struct CachedToken {
-    access_token: String,
+    access_token: Zeroizing<String>,
     #[allow(dead_code)]
     expires_at: Instant,
     refresh_at: Instant,
 }
 
 impl CachedToken {
-    fn new(access_token: String, expires_in: Duration, skew: Duration) -> Self {
+    fn new(access_token: Zeroizing<String>, expires_in: Duration, skew: Duration) -> Self {
         let expires_at = Instant::now() + expires_in;
         Self {
             access_token,
@@ -45,7 +57,7 @@ impl CachedToken {
 pub struct ClientCredentialsProvider {
     token_endpoint: String,
     client_id: String,
-    client_secret: String,
+    client_secret: Zeroizing<String>,
     scope: Option<String>,
     audience: Option<Vec<String>>,
     cache: RwLock<Option<CachedToken>>,
@@ -65,24 +77,30 @@ impl std::fmt::Debug for ClientCredentialsProvider {
 }
 
 impl ClientCredentialsProvider {
-    pub fn new(
+    /// Creates a production OAuth2 provider with HTTPS enforcement,
+    /// SSRF guard, DNS-rebinding protection, and hardened timeouts.
+    ///
+    /// Validates the token endpoint is a public HTTPS URI, resolves DNS
+    /// and pins validated IPs on the HTTP client — closing the TOCTOU
+    /// window between validation and the first outbound token request.
+    pub async fn new(
         token_endpoint: String,
         client_id: String,
         client_secret: String,
         scope: Option<String>,
         audience: Option<Vec<String>>,
     ) -> Result<Self, AuthError> {
-        // H15: harden the HTTP client — no redirects, bounded timeouts.
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| AuthError::ConfigError(format!("failed to build HTTP client: {e}")))?;
+        let http = build_ssrf_pinned_client(
+            &token_endpoint,
+            "OAuth2 token endpoint",
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        )
+        .await?;
         Ok(Self {
             token_endpoint,
             client_id,
-            client_secret,
+            client_secret: Zeroizing::new(client_secret),
             scope,
             audience,
             cache: RwLock::new(None),
@@ -95,6 +113,7 @@ impl ClientCredentialsProvider {
     ///
     /// Skips SSRF validation and allows injecting a mock-capable client
     /// (e.g. `wiremock`-configured). Do NOT use in production code.
+    #[doc(hidden)]
     pub fn new_unchecked_for_test(
         token_endpoint: String,
         client_id: String,
@@ -106,7 +125,7 @@ impl ClientCredentialsProvider {
         Self {
             token_endpoint,
             client_id,
-            client_secret,
+            client_secret: Zeroizing::new(client_secret),
             scope,
             audience,
             cache: RwLock::new(None),
@@ -116,17 +135,18 @@ impl ClientCredentialsProvider {
     }
 
     async fn fetch_token(&self) -> Result<CachedToken, AuthError> {
-        let mut params = vec![
-            ("grant_type", "client_credentials".to_string()),
-            ("client_id", self.client_id.clone()),
-            ("client_secret", self.client_secret.clone()),
+        let secret = self.client_secret.as_str();
+        let mut params: Vec<(&str, &str)> = vec![
+            ("grant_type", "client_credentials"),
+            ("client_id", &self.client_id),
+            ("client_secret", secret),
         ];
         if let Some(ref scope) = self.scope {
-            params.push(("scope", scope.clone()));
+            params.push(("scope", scope));
         }
         if let Some(ref audience) = self.audience {
             for aud in audience {
-                params.push(("resource", aud.clone()));
+                params.push(("resource", aud));
             }
         }
 
@@ -171,7 +191,7 @@ impl TokenProvider for ClientCredentialsProvider {
             if let Some(ref cached) = *cache
                 && cached.is_usable()
             {
-                return Ok(cached.access_token.clone());
+                return Ok(cached.access_token.as_str().to_owned());
             }
         }
 
@@ -182,12 +202,12 @@ impl TokenProvider for ClientCredentialsProvider {
             if let Some(ref cached) = *cache
                 && cached.is_usable()
             {
-                return Ok(cached.access_token.clone());
+                return Ok(cached.access_token.as_str().to_owned());
             }
         }
 
         let cached = self.fetch_token().await?;
-        let token = cached.access_token.clone();
+        let token = cached.access_token.as_str().to_owned();
         {
             let mut cache = self.cache.write().await;
             *cache = Some(cached);
@@ -203,6 +223,24 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn oauth2_rejects_private_ip_token_endpoint() {
+        // validate_https_public_uri catches IP literals like
+        // 169.254.169.254 before DNS resolution
+        let result = ClientCredentialsProvider::new(
+            "https://169.254.169.254/token".into(),
+            "client".into(),
+            "secret".into(),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "private IP token endpoint should be rejected"
+        );
+    }
 
     fn token_response(access_token: &str, expires_in: u64) -> serde_json::Value {
         serde_json::json!({
@@ -221,14 +259,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = ClientCredentialsProvider::new(
+        let provider = ClientCredentialsProvider::new_unchecked_for_test(
             format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
             "test-client".into(),
             "test-secret".into(),
             None,
             None,
-        )
-        .unwrap();
+            reqwest::Client::new(),
+        );
         let token = provider.get_token().await.unwrap();
         assert_eq!(token, "abc123");
     }
@@ -242,14 +280,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = ClientCredentialsProvider::new(
+        let provider = ClientCredentialsProvider::new_unchecked_for_test(
             format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
             "c".into(),
             "s".into(),
             None,
             None,
-        )
-        .unwrap();
+            reqwest::Client::new(),
+        );
         let t1 = provider.get_token().await.unwrap();
         let t2 = provider.get_token().await.unwrap();
         assert_eq!(t1, "cached");
@@ -269,14 +307,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = ClientCredentialsProvider::new(
+        let provider = ClientCredentialsProvider::new_unchecked_for_test(
             format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
             "c".into(),
             "s".into(),
             None,
             None,
-        )
-        .unwrap();
+            reqwest::Client::new(),
+        );
         let t1 = provider.get_token().await.unwrap();
         assert_eq!(t1, "first");
         tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -292,14 +330,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = ClientCredentialsProvider::new(
+        let provider = ClientCredentialsProvider::new_unchecked_for_test(
             format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
             "c".into(),
             "s".into(),
             None,
             None,
-        )
-        .unwrap();
+            reqwest::Client::new(),
+        );
         let err = provider.get_token().await.unwrap_err();
         assert!(matches!(err, AuthError::ProviderUnavailable(_)));
     }
@@ -315,14 +353,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = ClientCredentialsProvider::new(
+        let provider = ClientCredentialsProvider::new_unchecked_for_test(
             format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
             "c".into(),
             "s".into(),
             None,
             None,
-        )
-        .unwrap();
+            reqwest::Client::new(),
+        );
         let err = provider.get_token().await.unwrap_err();
         assert!(matches!(err, AuthError::ProviderUnavailable(_)));
     }
@@ -340,14 +378,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = ClientCredentialsProvider::new(
+        let provider = ClientCredentialsProvider::new_unchecked_for_test(
             format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
             "c".into(),
             "s".into(),
             None,
             Some(vec!["https://api.example.com".into()]),
-        )
-        .unwrap();
+            reqwest::Client::new(),
+        );
         let token = provider.get_token().await.unwrap();
         assert_eq!(token, "aud-token");
     }
@@ -365,16 +403,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let provider = Arc::new(
-            ClientCredentialsProvider::new(
-                format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
-                "c".into(),
-                "s".into(),
-                None,
-                None,
-            )
-            .unwrap(),
-        );
+        let provider = Arc::new(ClientCredentialsProvider::new_unchecked_for_test(
+            format!("{}/protocol/openid-connect/token", server.uri()), // allow-secret
+            "c".into(),
+            "s".into(),
+            None,
+            None,
+            reqwest::Client::new(),
+        ));
 
         let mut handles = vec![];
         for _ in 0..5 {

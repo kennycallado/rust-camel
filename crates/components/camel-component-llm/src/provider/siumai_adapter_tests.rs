@@ -362,6 +362,56 @@ async fn client_built_once_under_concurrency() {
 }
 
 // ========================================================================
+// SSRF validation tests (D-M10)
+// ========================================================================
+
+#[tokio::test]
+async fn build_client_rejects_ssrf_link_local_base_url() {
+    let config = SiumaiConfig::OpenAi {
+        api_key: "sk-test".into(),
+        base_url: Some("http://169.254.169.254/".into()),
+        model: "gpt-4".into(),
+    };
+    let result = build_client_from_config(&config, Duration::from_secs(30)).await;
+    assert!(result.is_err(), "expected Err for SSRF-blocked base_url");
+    let err = result.err().expect("is_err"); // allow-unwrap
+    assert!(
+        matches!(err, LlmError::InvalidRequest(_)),
+        "expected InvalidRequest, got: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("blocked"),
+        "expected SSRF-blocked message, got: {msg}"
+    );
+}
+
+// ========================================================================
+// Ollama SSRF rejection test
+// ========================================================================
+
+#[cfg(any(feature = "ollama", feature = "all-providers"))]
+#[tokio::test]
+async fn build_client_rejects_ollama_ssrf_link_local() {
+    let config = SiumaiConfig::Ollama {
+        base_url: "http://169.254.169.254/".into(),
+        model: "llama3".into(),
+    };
+    let result = build_client_from_config(&config, Duration::from_secs(30)).await;
+    assert!(result.is_err(), "expected Err for SSRF-blocked base_url");
+    let err = result.err().expect("is_err"); // allow-unwrap
+    assert!(
+        matches!(err, LlmError::InvalidRequest(_)),
+        "expected InvalidRequest, got: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("blocked"),
+        "expected SSRF-blocked message, got: {msg}"
+    );
+}
+
+// ========================================================================
 // Timeout error mapping tests (N4)
 // ========================================================================
 

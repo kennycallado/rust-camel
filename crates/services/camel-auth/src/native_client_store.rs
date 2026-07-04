@@ -2,6 +2,25 @@ use camel_api::CamelError;
 use std::collections::HashSet;
 use std::fmt;
 use tracing::warn;
+use zeroize::Zeroizing;
+
+/// Compare two byte slices without short-circuiting on early mismatch.
+/// Returns `true` if both slices have equal length and identical bytes.
+///
+/// The length check leaks the length of the inputs, which is acceptable
+/// because client IDs are typically fixed-length or their length is not
+/// secret. The byte-by-byte comparison runs in constant time relative to
+/// the length of the inputs.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 pub struct M2mClient {
     pub client_id: String,
@@ -13,12 +32,12 @@ pub struct M2mClient {
 #[derive(Clone)]
 pub enum M2mClientSecret {
     Env { name: String },
-    Plaintext { value: String },
+    Plaintext { value: Zeroizing<String> },
 }
 
 struct ResolvedM2mClient {
     client_id: String,
-    secret_value: String,
+    secret_value: Zeroizing<String>,
     roles: Vec<String>,
     scopes: Vec<String>,
 }
@@ -89,7 +108,7 @@ impl M2mClientStore {
                             "M2M client env var is empty: {name}"
                         )));
                     }
-                    val
+                    Zeroizing::new(val)
                 }
                 M2mClientSecret::Plaintext { value } => {
                     if value.is_empty() {
@@ -120,21 +139,20 @@ impl M2mClientStore {
 
         let secret_hash = Sha256::digest(client_secret.as_bytes());
         for c in &self.clients {
-            if c.client_id != client_id {
+            if !constant_time_eq(c.client_id.as_bytes(), client_id.as_bytes()) {
                 continue;
             }
             let stored_hash = Sha256::digest(c.secret_value.as_bytes());
-            let acc = secret_hash
-                .iter()
-                .zip(stored_hash.iter())
-                .fold(0u8, |acc, (a, b)| acc | (a ^ b));
-            if acc == 0 {
+            if constant_time_eq(&secret_hash, &stored_hash) {
                 return Some(M2mClientRef {
                     client_id: &c.client_id,
                     roles: &c.roles,
                     scopes: &c.scopes,
                 });
             }
+            // Client ID matched but secret didn't — no point scanning further
+            // (dedup guarantees at most one entry per client_id).
+            break;
         }
         None
     }
@@ -142,7 +160,7 @@ impl M2mClientStore {
     pub fn get(&self, client_id: &str) -> Option<M2mClientRef<'_>> {
         self.clients
             .iter()
-            .find(|c| c.client_id == client_id)
+            .find(|c| constant_time_eq(c.client_id.as_bytes(), client_id.as_bytes()))
             .map(|c| M2mClientRef {
                 client_id: &c.client_id,
                 roles: &c.roles,
@@ -156,12 +174,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn constant_time_eq_same_slice_returns_true() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"a", b"a"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_length_returns_false() {
+        assert!(!constant_time_eq(b"hello", b"world!"));
+        assert!(!constant_time_eq(b"a", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_differs_in_last_byte_returns_false() {
+        assert!(!constant_time_eq(b"client-aaa1", b"client-aaa2"));
+        assert!(!constant_time_eq(b"aaa", b"aab"));
+    }
+
+    #[test]
+    fn constant_time_eq_differs_in_first_byte_returns_false() {
+        assert!(!constant_time_eq(b"xabc", b"yabc"));
+    }
+
+    #[test]
+    fn store_lookup_wrong_secret_for_similar_client_id() {
+        let store = M2mClientStore::try_new(vec![
+            M2mClient {
+                client_id: "client-aaa1".into(),
+                secret: M2mClientSecret::Plaintext {
+                    value: Zeroizing::new("secret-1".into()),
+                },
+                roles: vec![],
+                scopes: vec![],
+            },
+            M2mClient {
+                client_id: "client-aaa2".into(),
+                secret: M2mClientSecret::Plaintext {
+                    value: Zeroizing::new("secret-2".into()),
+                },
+                roles: vec![],
+                scopes: vec![],
+            },
+        ])
+        .unwrap();
+        // Wrong secret for client-aaa1 should return None
+        assert!(store.lookup("client-aaa1", "wrong-secret").is_none());
+        // Right secret should succeed
+        assert!(store.lookup("client-aaa1", "secret-1").is_some());
+        assert!(store.lookup("client-aaa2", "secret-2").is_some());
+    }
+
+    #[test]
     fn store_rejects_duplicate_client_ids() {
         let result = M2mClientStore::try_new(vec![
             M2mClient {
                 client_id: "worker".into(),
                 secret: M2mClientSecret::Plaintext {
-                    value: "secret-a".into(),
+                    value: Zeroizing::new("secret-a".into()),
                 },
                 roles: vec!["read".into()],
                 scopes: vec!["api:read".into()],
@@ -169,7 +239,7 @@ mod tests {
             M2mClient {
                 client_id: "worker".into(),
                 secret: M2mClientSecret::Plaintext {
-                    value: "secret-b".into(),
+                    value: Zeroizing::new("secret-b".into()),
                 },
                 roles: vec!["write".into()],
                 scopes: vec!["api:write".into()],
@@ -183,7 +253,9 @@ mod tests {
     fn store_rejects_empty_secret() {
         let result = M2mClientStore::try_new(vec![M2mClient {
             client_id: "worker".into(),
-            secret: M2mClientSecret::Plaintext { value: "".into() },
+            secret: M2mClientSecret::Plaintext {
+                value: Zeroizing::new("".into()),
+            },
             roles: vec![],
             scopes: vec![],
         }]);
@@ -196,7 +268,7 @@ mod tests {
         let store = M2mClientStore::try_new(vec![M2mClient {
             client_id: "billing".into(),
             secret: M2mClientSecret::Plaintext {
-                value: "secret-123".into(),
+                value: Zeroizing::new("secret-123".into()),
             },
             roles: vec!["billing".into()],
             scopes: vec!["orders:read".into(), "orders:write".into()],
@@ -212,7 +284,7 @@ mod tests {
         let store = M2mClientStore::try_new(vec![M2mClient {
             client_id: "billing".into(),
             secret: M2mClientSecret::Plaintext {
-                value: "secret-123".into(),
+                value: Zeroizing::new("secret-123".into()),
             },
             roles: vec![],
             scopes: vec![],
@@ -264,7 +336,7 @@ mod tests {
         let store = M2mClientStore::try_new(vec![M2mClient {
             client_id: "worker".into(),
             secret: M2mClientSecret::Plaintext {
-                value: "super-secret".into(),
+                value: Zeroizing::new("super-secret".into()),
             },
             roles: vec![],
             scopes: vec![],

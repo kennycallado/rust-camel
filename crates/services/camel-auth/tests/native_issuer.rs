@@ -7,6 +7,7 @@ use camel_auth::native_issuer::NativeTokenIssuer;
 use camel_auth::native_jwks::NativeJwksProvider;
 use camel_auth::token_authenticator::TokenAuthenticator;
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 fn setup() -> (NativeTokenIssuer, Arc<NativeJwksProvider>) {
     let pem = include_str!("fixtures/test_rsa_private.pem");
@@ -19,7 +20,7 @@ fn setup() -> (NativeTokenIssuer, Arc<NativeJwksProvider>) {
     let store = M2mClientStore::try_new(vec![M2mClient {
         client_id: "order-worker".into(),
         secret: M2mClientSecret::Plaintext {
-            value: "worker-secret".into(),
+            value: Zeroizing::new("worker-secret".into()),
         },
         roles: vec!["orders".into()],
         scopes: vec!["orders:read".into(), "orders:write".into()],

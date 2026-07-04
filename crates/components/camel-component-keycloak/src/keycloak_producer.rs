@@ -9,6 +9,7 @@ use crate::admin_endpoint_config::AdminEndpointConfig;
 #[cfg(test)]
 use camel_component_api::test_support::PanicRuntimeObservability;
 #[cfg(test)]
+#[allow(dead_code)]
 fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
     std::sync::Arc::new(PanicRuntimeObservability)
 }

@@ -11,6 +11,10 @@ Per ADR-0012, this component's `error!` sites are categorized as:
 
 - **(a) handler-owned** (lib.rs L1210): pipeline error processing HTTP request → 500 response in `dispatch_handler`. Route ErrorHandler owns the ERROR. Downgraded to `warn!` with `// log-policy: handler-owned`. No metric call.
 
+### warn! sites (ADR-0012 advisory)
+
+- **(a) handler-owned** (lib.rs L1380): TLS verification disabled via `insecure=true` or `verify_peer=false` in `TlsConfig`. Emitted during `build_client()` when the caller opts out of certificate validation. `warn!` with `// log-policy: handler-owned`. No metric call — the operator is responsible for this config.
+
 Reviewer: r_glm5.1 verifies these classifications against source at Phase C review time.
 
 ## Contract Surface

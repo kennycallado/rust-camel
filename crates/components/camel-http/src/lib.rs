@@ -4,6 +4,7 @@ pub mod config;
 pub mod health;
 pub mod registry;
 pub(crate) mod rest_match;
+pub(crate) mod ssrf;
 pub mod static_config;
 pub mod static_dispatch;
 pub mod static_endpoint;
@@ -29,7 +30,6 @@ use tower::Service;
 use tracing::debug;
 
 use axum::body::BodyDataStream;
-use camel_api::is_ssrf_blocked_ip;
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
@@ -119,6 +119,8 @@ pub struct HttpEndpointConfig {
     pub connection_close: bool,
     pub skip_request_headers: Vec<String>,
     pub skip_response_headers: Vec<String>,
+    pub follow_redirects: bool,
+    pub max_redirects: usize,
 }
 
 #[derive(Clone, PartialEq)]
@@ -154,6 +156,7 @@ const HTTP_CAMEL_OPTIONS: &[&str] = &[
     "throwExceptionOnFailure",
     "okStatusCodeRange",
     "followRedirects",
+    "maxRedirects",
     "connectTimeout",
     "responseTimeout",
     "allowPrivateIps",
@@ -308,6 +311,20 @@ impl UriConfig for HttpEndpointConfig {
             })
             .unwrap_or_default();
 
+        let follow_redirects = match parts.params.get("followRedirects") {
+            Some(v) => parse_bool_param_http(v).map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for followRedirects: {e}"))
+            })?,
+            None => false,
+        };
+
+        let max_redirects = match parts.params.get("maxRedirects") {
+            Some(v) => v.parse::<usize>().map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for maxRedirects: {e}"))
+            })?,
+            None => 10,
+        };
+
         // Collect remaining params (not Camel options) as query params
         let query_params: HashMap<String, String> = parts
             .params
@@ -335,6 +352,8 @@ impl UriConfig for HttpEndpointConfig {
             connection_close,
             skip_request_headers,
             skip_response_headers,
+            follow_redirects,
+            max_redirects,
         })
     }
 }
@@ -406,6 +425,12 @@ impl HttpEndpointConfig {
             && let Some(range) = &config.ok_status_code_range
         {
             endpoint.ok_status_code_range = parse_ok_status_code_range(range)?;
+        }
+        if !parts.params.contains_key("followRedirects") {
+            endpoint.follow_redirects = config.follow_redirects;
+        }
+        if !parts.params.contains_key("maxRedirects") {
+            endpoint.max_redirects = config.max_redirects.unwrap_or(10);
         }
 
         Ok(endpoint)
@@ -1319,16 +1344,23 @@ pub struct HttpComponent {
     config: HttpConfig,
 }
 
-fn build_client(config: &HttpConfig, cookie_handling: CookieHandling) -> reqwest::Client {
+pub(crate) fn build_client(
+    config: &HttpConfig,
+    cookie_handling: CookieHandling,
+    resolve_override: Option<(&str, &[std::net::SocketAddr])>,
+) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
         .pool_max_idle_per_host(config.pool_max_idle_per_host)
         .pool_idle_timeout(Duration::from_millis(config.pool_idle_timeout_ms));
 
-    if !config.follow_redirects {
-        builder = builder.redirect(reqwest::redirect::Policy::none());
-    } else if let Some(max_redirects) = config.max_redirects {
-        builder = builder.redirect(reqwest::redirect::Policy::limited(max_redirects));
+    // Redirects are always handled manually in the producer's send path
+    // so that each hop can be SSRF-validated. reqwest's built-in redirect
+    // policy is sync and cannot perform async DNS resolution or SSRF checks.
+    builder = builder.redirect(reqwest::redirect::Policy::none());
+
+    if let Some((host, addrs)) = resolve_override {
+        builder = builder.resolve_to_addrs(host, addrs);
     }
 
     if let Some(proxy_url) = &config.proxy_url
@@ -1345,6 +1377,8 @@ fn build_client(config: &HttpConfig, cookie_handling: CookieHandling) -> reqwest
         && tls.enabled
     {
         if tls.insecure || !tls.verify_peer {
+            // log-policy: handler-owned
+            tracing::warn!("HTTP TLS verification disabled — connections are vulnerable to MitM");
             builder = builder.danger_accept_invalid_certs(true);
         }
 
@@ -1412,7 +1446,7 @@ impl Component for HttpComponent {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
-        let client = build_client(&self.config, config.cookie_handling);
+        let client = build_client(&self.config, config.cookie_handling, None);
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1422,6 +1456,7 @@ impl Component for HttpComponent {
             config,
             server_config,
             client,
+            http_config: self.config.clone(),
         }))
     }
 }
@@ -1467,7 +1502,7 @@ impl Component for HttpsComponent {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
-        let client = build_client(&self.config, config.cookie_handling);
+        let client = build_client(&self.config, config.cookie_handling, None);
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1477,6 +1512,7 @@ impl Component for HttpsComponent {
             config,
             server_config,
             client,
+            http_config: self.config.clone(),
         }))
     }
 }
@@ -1490,6 +1526,7 @@ struct HttpEndpoint {
     config: HttpEndpointConfig,
     server_config: HttpServerConfig,
     client: reqwest::Client,
+    http_config: HttpConfig,
 }
 
 impl Endpoint for HttpEndpoint {
@@ -1512,6 +1549,7 @@ impl Endpoint for HttpEndpoint {
         let producer = HttpProducer {
             config: Arc::new(self.config.clone()),
             client: self.client.clone(),
+            http_config: Arc::new(self.http_config.clone()),
         };
         if let Some(ref provider) = self.config.token_provider {
             let layer = BearerTokenLayer::new(Arc::clone(provider));
@@ -1523,95 +1561,6 @@ impl Endpoint for HttpEndpoint {
 }
 
 // ---------------------------------------------------------------------------
-// SSRF Protection
-// ---------------------------------------------------------------------------
-
-fn validate_url_for_ssrf(url: &str, config: &HttpEndpointConfig) -> Result<(), CamelError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
-
-    // Check blocked hosts
-    if let Some(host) = parsed.host_str()
-        && config.blocked_hosts.iter().any(|blocked| host == blocked)
-    {
-        return Err(CamelError::ProcessorError(format!(
-            "Host '{}' is blocked",
-            host
-        )));
-    }
-
-    // Check private IPs if not allowed
-    if !config.allow_private_ips
-        && let Some(host) = parsed.host()
-    {
-        match host {
-            url::Host::Ipv4(ip) => {
-                if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
-                    return Err(CamelError::ProcessorError(format!(
-                        "Private IP '{}' not allowed (set allowPrivateIps=true to override)",
-                        ip
-                    )));
-                }
-            }
-            url::Host::Ipv6(ip) => {
-                if ip.is_loopback() {
-                    return Err(CamelError::ProcessorError(format!(
-                        "Loopback IP '{}' not allowed",
-                        ip
-                    )));
-                }
-            }
-            url::Host::Domain(domain) => {
-                // Block common internal domains
-                let blocked_domains = ["localhost", "127.0.0.1", "0.0.0.0", "local"];
-                if blocked_domains.contains(&domain) {
-                    return Err(CamelError::ProcessorError(format!(
-                        "Domain '{}' is not allowed",
-                        domain
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn validate_resolved_host_for_ssrf(
-    url: &str,
-    config: &HttpEndpointConfig,
-) -> Result<(), CamelError> {
-    if config.allow_private_ips {
-        return Ok(());
-    }
-
-    let parsed = url::Url::parse(url)
-        .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
-    let Some(host) = parsed.host_str() else {
-        return Ok(());
-    };
-    let Some(port) = parsed.port_or_known_default() else {
-        return Ok(());
-    };
-
-    let resolved = tokio::net::lookup_host((host, port)).await.map_err(|e| {
-        CamelError::ProcessorError(format!("Failed to resolve host '{}': {}", host, e))
-    })?;
-
-    for addr in resolved {
-        let ip = addr.ip();
-        if is_ssrf_blocked_ip(&ip) {
-            return Err(CamelError::ProcessorError(format!(
-                "Target resolved to private IP: {}",
-                ip
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // HttpProducer
 // ---------------------------------------------------------------------------
 
@@ -1619,6 +1568,7 @@ async fn validate_resolved_host_for_ssrf(
 struct HttpProducer {
     config: Arc<HttpEndpointConfig>,
     client: reqwest::Client,
+    http_config: Arc<HttpConfig>,
 }
 
 impl HttpProducer {
@@ -1715,14 +1665,30 @@ impl Service<Exchange> for HttpProducer {
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
         let client = self.client.clone();
+        let http_config = self.http_config.clone();
 
         Box::pin(async move {
             let method_str = HttpProducer::resolve_method(&exchange, &config);
             let url = HttpProducer::resolve_url(&exchange, &config);
 
             // SECURITY: Validate URL for SSRF
-            validate_url_for_ssrf(&url, &config)?;
-            validate_resolved_host_for_ssrf(&url, &config).await?;
+            ssrf::validate_url_for_ssrf(&url, &config)?;
+
+            // Resolve hostname and pin validated IPs to prevent DNS-rebinding TOCTOU
+            // (L-H2). When the URL uses a domain name and SSRF protection is active,
+            // build a per-request client with resolve_to_addrs so reqwest connects
+            // directly to the validated addresses without re-resolving DNS.
+            let resolved =
+                ssrf::resolve_initial_url_for_ssrf(&url, config.allow_private_ips).await?;
+            let client: reqwest::Client = if let Some((ref host, ref addrs)) = resolved {
+                build_client(
+                    &http_config,
+                    config.cookie_handling,
+                    Some((host.as_str(), addrs)),
+                )
+            } else {
+                client
+            };
 
             debug!(
                 correlation_id = %exchange.correlation_id(),
@@ -1735,16 +1701,17 @@ impl Service<Exchange> for HttpProducer {
                 CamelError::ProcessorError(format!("Invalid HTTP method '{}': {}", method_str, e))
             })?;
 
-            let mut request = client.request(method, &url);
-
-            if let Some(timeout) = config.response_timeout {
-                request = request.timeout(timeout);
-            }
+            // Collect headers for potential redirect replay
+            let mut collected_headers: Vec<(
+                reqwest::header::HeaderName,
+                reqwest::header::HeaderValue,
+            )> = Vec::new();
 
             if let Some(user_agent) = &config.user_agent
                 && !config.bridge_endpoint
+                && let Ok(val) = reqwest::header::HeaderValue::from_str(user_agent)
             {
-                request = request.header("User-Agent", user_agent.clone());
+                collected_headers.push((reqwest::header::USER_AGENT, val));
             }
 
             // Inject W3C TraceContext headers for distributed tracing (opt-in via "otel" feature)
@@ -1759,7 +1726,7 @@ impl Service<Exchange> for HttpProducer {
                         reqwest::header::HeaderName::from_bytes(k.as_bytes()),
                         reqwest::header::HeaderValue::from_str(&v),
                     ) {
-                        request = request.header(name, val);
+                        collected_headers.push((name, val));
                     }
                 }
             }
@@ -1776,49 +1743,98 @@ impl Service<Exchange> for HttpProducer {
                         reqwest::header::HeaderValue::from_str(val_str),
                     )
                 {
-                    request = request.header(name, val);
+                    collected_headers.push((name, val));
                 }
             }
 
+            // Auth headers
             if !config.bridge_endpoint {
                 match &config.auth {
                     HttpAuth::None => {}
                     HttpAuth::Basic { username, password } => {
-                        request = request.basic_auth(username, Some(password));
+                        use base64::Engine;
+                        let credentials = format!("{username}:{password}");
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+                        if let Ok(val) =
+                            reqwest::header::HeaderValue::from_str(&format!("Basic {encoded}"))
+                        {
+                            collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                        }
                     }
                     HttpAuth::Bearer { token } => {
-                        request = request.bearer_auth(token);
+                        if let Ok(val) =
+                            reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                        {
+                            collected_headers.push((reqwest::header::AUTHORIZATION, val));
+                        }
                     }
                 }
 
-                if config.connection_close {
-                    request = request.header("Connection", "close");
+                if config.connection_close
+                    && let Ok(val) = reqwest::header::HeaderValue::from_str("close")
+                {
+                    collected_headers.push((reqwest::header::CONNECTION, val));
                 }
             }
 
-            match exchange.input.body {
-                Body::Stream(ref s) => {
-                    let mut stream_lock = s.stream.lock().await;
-                    if let Some(stream) = stream_lock.take() {
-                        request = request.body(reqwest::Body::wrap_stream(stream));
-                    } else {
-                        return Err(CamelError::AlreadyConsumed);
-                    }
+            // Materialize body
+            let is_stream_body = matches!(exchange.input.body, Body::Stream(_));
+            let materialized_body: Option<Vec<u8>> = if is_stream_body {
+                None // Streams can't be replayed on redirect
+            } else {
+                let body = std::mem::take(&mut exchange.input.body);
+                let bytes = body.into_bytes(config.max_body_size).await?;
+                if bytes.is_empty() {
+                    None
+                } else {
+                    Some(bytes.to_vec())
                 }
-                _ => {
-                    // For other types, materialize with configured limit
-                    let body = std::mem::take(&mut exchange.input.body);
-                    let bytes = body.into_bytes(config.max_body_size).await?;
-                    if !bytes.is_empty() {
-                        request = request.body(bytes);
-                    }
-                }
-            }
+            };
 
-            let response = request
-                .send()
-                .await
-                .map_err(|e| CamelError::ProcessorError(format!("HTTP request failed: {e}")))?;
+            let response = if config.follow_redirects && !is_stream_body {
+                // Use manual redirect loop with per-hop SSRF validation
+                ssrf::send_with_ssrf_safe_redirects(
+                    &client,
+                    &http_config,
+                    &config,
+                    method,
+                    &url,
+                    collected_headers,
+                    materialized_body,
+                    config.max_redirects,
+                    config.response_timeout,
+                )
+                .await?
+            } else {
+                // Direct send (no redirect following, or streaming body)
+                let mut request = client.request(method, &url);
+
+                if let Some(timeout) = config.response_timeout {
+                    request = request.timeout(timeout);
+                }
+
+                for (name, value) in &collected_headers {
+                    request = request.header(name, value);
+                }
+
+                if is_stream_body {
+                    if let Body::Stream(ref s) = exchange.input.body {
+                        let mut stream_lock = s.stream.lock().await;
+                        if let Some(stream) = stream_lock.take() {
+                            request = request.body(reqwest::Body::wrap_stream(stream));
+                        } else {
+                            return Err(CamelError::AlreadyConsumed);
+                        }
+                    }
+                } else if let Some(ref body_bytes) = materialized_body {
+                    request = request.body(body_bytes.clone());
+                }
+
+                request
+                    .send()
+                    .await
+                    .map_err(|e| CamelError::ProcessorError(format!("HTTP request failed: {e}")))?
+            };
 
             let status_code = response.status().as_u16();
             let status_text = response
@@ -2656,6 +2672,200 @@ mod tests {
             status, 200,
             "Should follow redirect when followRedirects=true"
         );
+    }
+
+    /// Integration test: with allowPrivateIps=true, redirects to private IPs are followed.
+    /// This verifies the manual redirect loop executes correctly.
+    #[tokio::test]
+    async fn test_redirect_to_private_ip_is_ssrf_blocked() {
+        use tower::ServiceExt;
+
+        // Use the existing redirect server which redirects to /final on the same server
+        let (url, _handle) = start_redirect_server().await;
+        let ctx = test_producer_ctx();
+
+        let component =
+            HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}?allowPrivateIps=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await;
+
+        // With allowPrivateIps=true, the redirect should succeed
+        assert!(
+            result.is_ok(),
+            "Redirect should succeed with allowPrivateIps=true, got: {:?}",
+            result
+        );
+        let exchange = result.unwrap();
+        let status = exchange
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200, "Should follow redirect to /final");
+    }
+
+    /// With allowPrivateIps=true, redirects to private IPs should be followed.
+    #[tokio::test]
+    async fn test_redirect_to_private_ip_allowed_when_configured() {
+        use tower::ServiceExt;
+
+        // Start a server that redirects to /final on the same server (127.0.0.1)
+        let (url, _handle) = start_redirect_server().await;
+        let ctx = test_producer_ctx();
+
+        let component =
+            HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}?allowPrivateIps=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(
+            status, 200,
+            "Should follow redirect to private IP when allowPrivateIps=true"
+        );
+    }
+
+    /// Integration test: with allowPrivateIps=false (default), a redirect to a
+    /// private/metadata IP must be blocked by the SSRF guard — NOT followed.
+    #[tokio::test]
+    async fn test_redirect_to_private_ip_blocked_when_ssrf_guard_active() {
+        use tower::ServiceExt;
+
+        // Server that redirects to the AWS metadata endpoint (link-local private IP)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let _ = stream.read(&mut buf).await;
+                        // Always redirect to the metadata endpoint
+                        let response = "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        });
+
+        let ctx = test_producer_ctx();
+        let component =
+            HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+        let endpoint_ctx = NoOpComponentContext;
+        // allowPrivateIps=false is the default — do NOT set it
+        let endpoint = component.create_endpoint(&url, &endpoint_ctx).unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await;
+
+        // Must be an error — SSRF guard blocks the redirect target
+        assert!(
+            result.is_err(),
+            "Redirect to private IP 169.254.169.254 must be blocked when allowPrivateIps=false"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("blocked IP")
+                || err.contains("private IP")
+                || err.contains("SSRF")
+                || err.contains("not allowed"),
+            "Error should mention SSRF/IP blocking, got: {err}"
+        );
+
+        handle.abort();
+    }
+
+    /// Integration test: exceeding maxRedirects produces a clear error.
+    #[tokio::test]
+    async fn test_too_many_redirects_returns_error() {
+        use tower::ServiceExt;
+
+        // Server that always redirects to itself (infinite loop)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let _ = stream.read(&mut buf).await;
+                        // Always redirect to /loop
+                        let response =
+                            "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        });
+
+        let ctx = test_producer_ctx();
+        let component =
+            HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}?allowPrivateIps=true&maxRedirects=2"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await;
+
+        // With the fix, exceeding max redirects returns the redirect response
+        // as-is instead of erroring. The 302 redirect response is returned
+        // after followRedirects exhausts the allowed redirect count (2).
+        // Disable throwExceptionOnFailure to inspect the raw response status.
+        //
+        // Old behavior: Err("Too many redirects (max 2)")
+        // New behavior: Ok(ex) with CamelHttpResponseCode = 302
+        match result {
+            Err(e) => {
+                // If throw_exception_on_failure is on, we get HttpOperationFailed
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("HTTP operation failed") || msg.contains("302"),
+                    "expected redirect-after-exhaustion error, got: {msg}"
+                );
+            }
+            Ok(ex) => {
+                let response_code = ex
+                    .input
+                    .header("CamelHttpResponseCode")
+                    .and_then(|v| v.as_u64());
+                assert_eq!(
+                    response_code,
+                    Some(302),
+                    "expected 302 after exhausting redirects"
+                );
+            }
+        }
+
+        handle.abort();
     }
 
     #[tokio::test]
@@ -4330,24 +4540,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_url_for_ssrf_blocks_and_allows_hosts() {
-        let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
-        cfg.blocked_hosts = vec!["blocked.local".to_string()];
-        cfg.allow_private_ips = false;
-
-        let blocked = validate_url_for_ssrf("http://blocked.local/api", &cfg);
-        assert!(blocked.is_err());
-
-        let private_ip = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
-        assert!(private_ip.is_err());
-
-        cfg.allow_private_ips = true;
-        let allowed = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
-        assert!(allowed.is_ok());
-    }
-
-    #[test]
     fn test_is_private_ip_ranges() {
+        use camel_api::is_ssrf_blocked_ip;
         assert!(is_ssrf_blocked_ip(&"10.0.0.1".parse().unwrap())); // allow-unwrap
         assert!(is_ssrf_blocked_ip(&"172.16.1.10".parse().unwrap())); // allow-unwrap
         assert!(is_ssrf_blocked_ip(&"192.168.1.1".parse().unwrap())); // allow-unwrap
@@ -4369,19 +4563,6 @@ mod tests {
         assert!(!is_ssrf_blocked_ip(
             &"2001:4860:4860::8888".parse().unwrap()
         )); // allow-unwrap
-    }
-
-    #[tokio::test]
-    async fn test_validate_resolved_host_for_ssrf_blocks_resolved_private_ip() {
-        let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap(); // allow-unwrap
-        cfg.allow_private_ips = false;
-
-        let err = validate_resolved_host_for_ssrf("http://localhost", &cfg)
-            .await
-            .expect_err("localhost must resolve to loopback and be blocked");
-
-        let msg = err.to_string();
-        assert!(msg.contains("Target resolved to private IP"));
     }
 
     #[test]

@@ -252,9 +252,19 @@ async fn run_pubsub_consumer(
     let client = redis::Client::open(config.redis_url())
         .map_err(|e| CamelError::ProcessorError(format!("Failed to create Redis client: {}", e)))?;
 
-    let mut pubsub = client.get_async_pubsub().await.map_err(|e| {
-        CamelError::ProcessorError(format!("Failed to create PubSub connection: {}", e))
-    })?;
+    let timeout_secs = config.connection_timeout_secs;
+    let mut pubsub =
+        tokio::time::timeout(Duration::from_secs(timeout_secs), client.get_async_pubsub())
+            .await
+            .map_err(|_| {
+                CamelError::ProcessorError(format!(
+                    "PubSub connection timed out after {}s",
+                    timeout_secs
+                ))
+            })?
+            .map_err(|e| {
+                CamelError::ProcessorError(format!("Failed to create PubSub connection: {}", e))
+            })?;
 
     // Subscribe to channels
     for channel in &channels {
@@ -328,10 +338,19 @@ async fn run_queue_consumer(
     let client = redis::Client::open(config.redis_url())
         .map_err(|e| CamelError::ProcessorError(format!("Failed to create Redis client: {}", e)))?;
 
-    let mut conn = client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| CamelError::ProcessorError(format!("Failed to create connection: {}", e)))?;
+    let timeout_secs = config.connection_timeout_secs;
+    let mut conn = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        client.get_multiplexed_async_connection(),
+    )
+    .await
+    .map_err(|_| {
+        CamelError::ProcessorError(format!(
+            "Queue connection timed out after {}s",
+            timeout_secs
+        ))
+    })?
+    .map_err(|e| CamelError::ProcessorError(format!("Failed to create connection: {}", e)))?;
 
     info!("Queue consumer started, waiting for items");
 
@@ -496,6 +515,7 @@ mod tests {
             db: 0,
             ssl: Some(false),
             reconnect: camel_component_api::NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         }
     }
 

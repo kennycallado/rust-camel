@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use camel_auth::http_client::build_ssrf_pinned_client;
 use camel_auth::oauth2::{ClientCredentialsProvider, TokenProvider};
 use camel_auth::permission::{PermissionDecision, PermissionEvaluator, PermissionRequest};
 use camel_auth::types::AuthError;
@@ -38,7 +39,7 @@ impl KeycloakUmaEvaluator {
     ///
     /// Validates that the derived token endpoint URI is a public HTTPS endpoint
     /// before constructing the internal [`ClientCredentialsProvider`].
-    pub fn new(
+    pub async fn new(
         server_url: String,
         realm: String,
         client_id: String,
@@ -48,21 +49,23 @@ impl KeycloakUmaEvaluator {
         let realm_url = format!("{}/realms/{}", server_url_trimmed, realm);
         let token_endpoint = format!("{}/protocol/openid-connect/token", realm_url); // allow-secret
 
-        // SSRF guard on the token endpoint URI
-        camel_auth::validate_https_public_uri(&token_endpoint, "UMA token endpoint URI")?;
-
         let token_provider = ClientCredentialsProvider::new(
-            token_endpoint,
+            token_endpoint.clone(),
             client_id.clone(),
             client_secret,
             None,
             None,
-        )?;
-        // H15: use the hardened HTTP client (no redirects, bounded timeouts)
-        // instead of an unconfigured `reqwest::Client::new()`.
-        let http = crate::hardened_http_client().map_err(|e| {
-            AuthError::ConfigError(format!("failed to build hardened UMA HTTP client: {e}"))
-        })?;
+        )
+        .await?;
+        // DNS-pin the permission client to the same host as the token endpoint,
+        // closing the TOCTOU window between validation and the first request.
+        let http = build_ssrf_pinned_client(
+            &token_endpoint,
+            "UMA permission",
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
+        )
+        .await?;
         Ok(Self {
             realm_url,
             client_id,
@@ -188,6 +191,7 @@ mod tests {
     use camel_api::security_policy::Principal;
     use serde_json::json;
 
+    #[allow(dead_code)]
     fn test_principal() -> Principal {
         Principal {
             subject: "alice".into(),
@@ -225,14 +229,15 @@ mod tests {
         assert_eq!(result, "/data#write#exclusive");
     }
 
-    #[test]
-    fn new_rejects_non_https() {
+    #[tokio::test]
+    async fn new_rejects_non_https() {
         let result = KeycloakUmaEvaluator::new(
             "http://localhost:8080".into(),
             "test".into(),
             "client".into(),
             "secret".into(),
-        );
+        )
+        .await;
         assert!(result.is_err(), "should reject non-HTTPS server URL");
     }
 

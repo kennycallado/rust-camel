@@ -17,6 +17,7 @@ trait RedisPingProbe: Send + Sync {
 struct RedisClientPingProbe {
     client: redis::Client,
     endpoint: String,
+    connection_timeout: Duration,
 }
 
 impl RedisClientPingProbe {
@@ -32,6 +33,7 @@ impl RedisClientPingProbe {
         Ok(Self {
             client,
             endpoint: config.safe_endpoint(),
+            connection_timeout: Duration::from_secs(config.connection_timeout_secs),
         })
     }
 }
@@ -40,12 +42,21 @@ impl RedisPingProbe for RedisClientPingProbe {
     fn ping(&self) -> PingFuture {
         let client = self.client.clone();
         let endpoint = self.endpoint.clone();
+        let connection_timeout = self.connection_timeout;
 
         Box::pin(async move {
-            let mut conn: MultiplexedConnection = client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| {
+            let mut conn: MultiplexedConnection = tokio::time::timeout(
+                connection_timeout,
+                client.get_multiplexed_async_connection(),
+            )
+            .await
+            .map_err(|_| {
+                CamelError::ProcessorError(format!(
+                    "Health check connection to '{}' timed out",
+                    endpoint
+                ))
+            })?
+            .map_err(|e| {
                 CamelError::ProcessorError(format!(
                     "Failed to connect to Redis for health check '{}': {}",
                     endpoint, e
@@ -73,9 +84,11 @@ pub struct RedisHealthCheck {
 impl RedisHealthCheck {
     pub fn new(config: &RedisEndpointConfig) -> Result<Self, CamelError> {
         let probe = RedisClientPingProbe::new(config)?;
+        // Outer timeout must exceed the inner connection timeout so the inner
+        // timeout fires first and produces a specific error message.
         Ok(Self {
             probe: Arc::new(probe),
-            timeout: Duration::from_secs(2),
+            timeout: Duration::from_secs(config.connection_timeout_secs + 5),
         })
     }
 

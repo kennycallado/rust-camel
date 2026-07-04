@@ -60,3 +60,12 @@ commands.rs`. The consumer's `runtime` field is metrics-only.
 
 Reviewer: r_glm5.1 verifies these classifications against source at Phase C
 review time.
+
+## Batch 6 — Security hardening
+
+### Plaintext protocol warning
+
+The `validate()` method (config.rs:240-248) emits `tracing::warn!` when `security_protocol` is
+`Plaintext` or `SaslPlaintext`. Message: "Kafka using cleartext protocol — credentials and data
+in plaintext". The warning is advisory only — validation succeeds regardless. Both `KafkaConfig`
+(global defaults) and `ResolvedKafkaEndpointConfig` (per-endpoint) call `validate()`.

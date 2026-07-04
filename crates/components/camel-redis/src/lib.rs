@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn test_component_applies_global_defaults() {
         let global = RedisConfig::default()
-            .with_host("redis-global")
+            .with_host("localhost")
             .with_port(6380);
         let component = RedisComponent::with_config(global);
         let ctx = NoOpComponentContext;

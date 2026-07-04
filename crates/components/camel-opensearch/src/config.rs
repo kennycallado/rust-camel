@@ -6,6 +6,9 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+/// Default timeout in milliseconds for OpenSearch operations.
+pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
 // --- OpenSearchOperation enum ---
 
 /// OpenSearch operations supported by this component.
@@ -184,7 +187,7 @@ impl Default for OpenSearchConfig {
             password: None,
             default_operation: None,
             index_name: None,
-            timeout_ms: None,
+            timeout_ms: Some(DEFAULT_TIMEOUT_MS),
             max_bulk_bytes: None,
             size: None,
             from: None,
@@ -871,7 +874,7 @@ mod tests {
         assert!(cfg.password.is_none());
         assert!(cfg.default_operation.is_none());
         assert!(cfg.index_name.is_none());
-        assert!(cfg.timeout_ms.is_none());
+        assert_eq!(cfg.timeout_ms, Some(30_000));
         assert!(cfg.max_bulk_bytes.is_none());
         assert!(cfg.size.is_none());
         assert!(cfg.from.is_none());

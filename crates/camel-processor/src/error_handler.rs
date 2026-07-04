@@ -271,8 +271,12 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
     ) -> Result<StepDisposition, CamelError> {
         let (disposition, producer) = self.resolve_producer(policy);
 
-        // Run on_steps if present (using the SAME policy identified by PolicyId)
-        if let Some(PolicyId(idx)) = policy
+        // Run on_steps if present (using the SAME policy identified by PolicyId).
+        // Skip on_steps for Propagate disposition to prevent double side-effects:
+        // on_steps results would be discarded (snapshot restored), and the DLC
+        // handler fires next — causing duplicate message production.
+        if !matches!(disposition, ExceptionDisposition::Propagate)
+            && let Some(PolicyId(idx)) = policy
             && let Some((p, _)) = self.policies.get(idx)
             && let Some(ref steps) = p.on_steps
         {
@@ -341,8 +345,15 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
         let policy = self.match_policy(&error);
         let (disposition, producer) = self.resolve_producer(policy);
 
-        // Run on_steps if present (shared logic with handle_step)
-        if let Some(PolicyId(idx)) = policy
+        // Run on_steps if present (shared logic with handle_step).
+        // Skip on_steps for Propagate/Continued disposition to prevent double
+        // side-effects: on_steps results would be discarded (snapshot restored),
+        // and the DLC handler fires next — causing duplicate message production.
+        // At boundary level, Continued maps to Propagate semantics.
+        if !matches!(
+            disposition,
+            ExceptionDisposition::Propagate | ExceptionDisposition::Continued
+        ) && let Some(PolicyId(idx)) = policy
             && let Some((p, _)) = self.policies.get(idx)
             && let Some(ref steps) = p.on_steps
         {
@@ -1358,49 +1369,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_step_with_on_steps_propagate_falls_through() {
-        let steps_pipeline = BoxProcessor::new(tower::service_fn(|mut ex: Exchange| {
-            ex.input.body = camel_api::Body::Bytes("on_steps_ran".into());
-            async move { Ok(ex) }
-        }));
-        let dlc_called = Arc::new(AtomicU32::new(0));
-        let dlc_called_clone = dlc_called.clone();
-        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
-            let c = dlc_called_clone.clone();
-            Box::pin(async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Ok(ex)
-            })
-        });
-        let policy = ExceptionPolicy {
-            matches: std::sync::Arc::new(|_| true),
-            retry: None,
-            handled_by: None,
-            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
-            disposition: ExceptionDisposition::Propagate,
-        };
-        let handler = DefaultRouteErrorHandler::new(Some(dlc), vec![(policy, None)]);
-        let mut ex = make_exchange();
-        ex.set_error(CamelError::ProcessorError("boom".into()));
-        let result = handler
-            .handle_step(
-                Some(PolicyId(0)),
-                ex,
-                CamelError::ProcessorError("boom".into()),
-            )
-            .await;
-        assert!(
-            matches!(result, Ok(StepDisposition::Propagate(_))),
-            "Propagate disposition should return Propagate"
-        );
-        assert_eq!(
-            dlc_called.load(Ordering::SeqCst),
-            1,
-            "DLC should be called when on_steps disposition is Propagate"
-        );
-    }
-
-    #[tokio::test]
     async fn test_handle_step_dlc_failure_propagates() {
         let failing_dlc = BoxProcessor::from_fn(|_| {
             Box::pin(async { Err(CamelError::ProcessorError("dlc broken".into())) })
@@ -1824,6 +1792,116 @@ mod tests {
         assert_eq!(
             received_text, "mutated-body",
             "When use_original_message=false, DLC should see the mutated body"
+        );
+    }
+
+    // ── D-M17: Propagate must skip on_steps (prevents double side-effects) ──
+
+    #[tokio::test]
+    async fn propagate_skips_on_steps_in_handle_step() {
+        let on_steps_called = Arc::new(AtomicU32::new(0));
+        let on_steps_called_clone = on_steps_called.clone();
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(move |mut ex: Exchange| {
+            let c = on_steps_called_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                ex.input.body = camel_api::Body::Bytes("on_steps_ran".into());
+                Ok(ex)
+            })
+        }));
+        let dlc_called = Arc::new(AtomicU32::new(0));
+        let dlc_called_clone = dlc_called.clone();
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let c = dlc_called_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            disposition: ExceptionDisposition::Propagate,
+        };
+        let handler = DefaultRouteErrorHandler::new(Some(dlc), vec![(policy, None)]);
+        let mut ex = make_exchange();
+        ex.set_error(CamelError::ProcessorError("boom".into()));
+        let result = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await;
+        assert!(
+            matches!(result, Ok(StepDisposition::Propagate(_))),
+            "Propagate disposition should return Propagate"
+        );
+        assert_eq!(
+            on_steps_called.load(Ordering::SeqCst),
+            0,
+            "on_steps must NOT be called when disposition is Propagate (double side-effect bug)"
+        );
+        assert_eq!(
+            dlc_called.load(Ordering::SeqCst),
+            1,
+            "DLC should still be called when disposition is Propagate"
+        );
+    }
+
+    #[tokio::test]
+    async fn propagate_skips_on_steps_in_handle_boundary() {
+        let on_steps_called = Arc::new(AtomicU32::new(0));
+        let on_steps_called_clone = on_steps_called.clone();
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(move |mut ex: Exchange| {
+            let c = on_steps_called_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                ex.input.body = camel_api::Body::Bytes("on_steps_ran".into());
+                Ok(ex)
+            })
+        }));
+        let dlc_called = Arc::new(AtomicU32::new(0));
+        let dlc_called_clone = dlc_called.clone();
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let c = dlc_called_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+        let policy = ExceptionPolicy {
+            matches: std::sync::Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            disposition: ExceptionDisposition::Propagate,
+        };
+        let handler = DefaultRouteErrorHandler::new(Some(dlc), vec![(policy, None)]);
+        let ex = make_exchange();
+        let result = handler
+            .handle_boundary(
+                BoundaryKind::CircuitBreaker,
+                ex,
+                CamelError::CircuitOpen("open".into()),
+            )
+            .await;
+        assert!(result.is_ok(), "boundary errors always return Ok");
+        assert!(
+            result.unwrap().has_error(),
+            "Propagate disposition should preserve error"
+        );
+        assert_eq!(
+            on_steps_called.load(Ordering::SeqCst),
+            0,
+            "on_steps must NOT be called when disposition is Propagate (double side-effect bug)"
+        );
+        assert_eq!(
+            dlc_called.load(Ordering::SeqCst),
+            1,
+            "DLC should still be called when disposition is Propagate"
         );
     }
 }

@@ -130,3 +130,24 @@ parser accepts, rejects, and silently does NOT do. Aligned with ADR-0016
 - **`::` Postgres casts are preserved literally.** The parser does NOT eat
   `::` as part of a name; it does NOT strip `::` either. `:#id::text`
   produces SQL fragment `::text` after `$N` substitution.
+
+## Batch 6 — Security hardening
+
+### `ssl_mode` default at connection build time
+
+Applied in `enrich_db_url_with_ssl_params()` (config.rs:561-636), NOT in `Default::default()`:
+- PostgreSQL (`postgres`/`postgresql` scheme): defaults to `"require"` when `ssl_mode` is `None`.
+- MySQL (`mysql` scheme): defaults to `"prefer"` when `ssl_mode` is `None`.
+- `SqlEndpointConfig.ssl_mode` stays `Option<String>` — `Default::default()` remains `None` for backward compatibility.
+- The `SqlGlobalConfig` also has `ssl_mode: Option<String>`; it propagates to endpoints via `apply_defaults()` (config.rs:467-470).
+
+### `connect_timeout=10` appended to URL
+
+In `enrich_db_url_with_ssl_params()` (config.rs:623-625): appends `connect_timeout=10` via `url::Url`
+query mutation when no `connect_timeout` query parameter already exists. This is the `sqlx` URL-level
+TCP connect timeout, NOT the pool `acquire_timeout`.
+
+### SQLite unaffected
+
+SQLite URLs (`sqlite*` scheme) return early at config.rs:583 before any SSL enrichment or connect_timeout
+appending. SSL options set alongside a SQLite URL produce a `warn!` log but are silently ignored.

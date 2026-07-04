@@ -12,7 +12,7 @@ use camel_api::CamelError;
 use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, NetworkRetryPolicy, RuntimeObservability,
 };
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, Event, MqttOptions, NetworkOptions, Packet, QoS};
 
 use crate::client_id::build_client_id_with_override;
 use crate::config::{AckMode, MqttBrokerConfig, MqttEndpointConfig, check_payload_len};
@@ -217,6 +217,11 @@ async fn run_consumer_loop(
     }
 
     let (client, mut eventloop) = AsyncClient::builder(mqtt_opts).capacity(10).build();
+
+    let mut net_opts = NetworkOptions::new();
+    net_opts.set_connection_timeout(10);
+    eventloop.set_network_options(net_opts);
+
     let qos = config.qos.to_rumqttc();
     let mut attempt: u32 = 0;
 

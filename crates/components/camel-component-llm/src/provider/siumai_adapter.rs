@@ -305,7 +305,50 @@ async fn build_cached_client(
 // Helper: build client from config (used in chat_stream try_stream! macro)
 // ============================================================================
 
+/// Validate an LLM `base_url` for SSRF and return resolved addresses for
+/// DNS-rebinding pinning (D-M10).
+///
+/// Rejects non-http(s) schemes, and resolves hostnames to check for
+/// blocked IPs (private, loopback, link-local, etc.). DNS resolution
+/// is fail-closed: an unresolvable hostname is treated as a
+/// configuration error.
+///
+/// Delegates to `validate_llm_url_pinned` in `provider_factory.rs`,
+/// which uses the workspace-wide `is_ssrf_blocked_ip` helper.
+///
+/// Returns (host_string, validated_socket_addresses) so the caller can
+/// pin them via `reqwest::ClientBuilder::resolve_to_addrs`, closing
+/// the TOCTOU window between validation and the first outbound request.
+async fn validate_base_url_ssrf(
+    base_url: &str,
+) -> Result<(String, Vec<std::net::SocketAddr>), LlmError> {
+    let url = base_url.to_string();
+    tokio::task::spawn_blocking(move || crate::provider_factory::validate_llm_url_pinned(&url))
+        .await
+        .map_err(|e| {
+            LlmError::InvalidRequest(format!("llm base_url SSRF validation task failed: {e}"))
+        })?
+}
+
+/// Returns `true` if `url_str` parses as an HTTP(S) URL with a domain hostname
+/// (as opposed to an IP literal). Only domain hostnames need DNS pinning;
+/// IP literals connect directly and aren't subject to rebinding.
+fn is_hostname_domain(url_str: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url_str) {
+        matches!(parsed.host(), Some(url::Host::Domain(_)))
+    } else {
+        false
+    }
+}
+
 /// Build a fresh chat + embedding client from config.
+///
+/// 1. **Validate & resolve** the base URL for SSRF, collecting pinned
+///    addresses for DNS-rebinding protection (D-M10).
+/// 2. **Build the hardened reqwest::Client** with `resolve_to_addrs` to
+///    pin the validated IPs — reqwest never re-resolves DNS, closing the
+///    TOCTOU window between validation and the first outbound request.
+/// 3. **Construct the siumai client** with the pinned reqwest client.
 ///
 /// Exists as a free function so it can be called inside `async_stream::try_stream!`
 /// without borrowing `self` across a yield point.
@@ -313,15 +356,28 @@ async fn build_client_from_config(
     config: &SiumaiConfig,
     configured_timeout: Duration,
 ) -> Result<(Arc<dyn ChatCapability>, Arc<dyn EmbeddingCapability>), LlmError> {
-    // H15: inject our hardened reqwest::Client (no redirects, 10s connect,
-    // 30s request). Siumai honors `BuilderBase::http_client` over its own
-    // client construction (see `siumai_core::builder::BuilderBase::http_client`).
-    let hardened = crate::hardened_http_client()
-        .map_err(|e| LlmError::InvalidRequest(format!("llm hardened client: {e}")))?;
+    // Phase 1: validate base_url and collect pinning data (before building client).
+    // Only pin hostnames (not IP literals — reqwest connects directly to IPs,
+    // no TOCTOU window exists).
+    let pinning = collect_pinning_from_config(config).await?;
+
+    // Phase 2: build hardened reqwest::Client with optional DNS pinning.
+    // Siumai honors `BuilderBase::http_client` over its own client construction
+    // (see `siumai_core::builder::BuilderBase::http_client`).
+    let hardened = match &pinning {
+        Some((host, addrs)) => {
+            crate::hardened_http_client_with_pinning(Some((host.as_str(), addrs.as_slice())))
+        }
+        None => crate::hardened_http_client(),
+    }
+    .map_err(|e| LlmError::InvalidRequest(format!("llm hardened client: {e}")))?;
+
     let base = BuilderBase {
         http_client: Some(hardened),
         ..BuilderBase::default()
     };
+
+    // Phase 3: build provider-specific siumai client.
     match config {
         #[cfg(any(feature = "openai", feature = "all-providers"))]
         SiumaiConfig::OpenAi {
@@ -355,6 +411,39 @@ async fn build_client_from_config(
             let chat: Arc<dyn ChatCapability> = client.clone();
             let embed: Arc<dyn EmbeddingCapability> = client;
             Ok((chat, embed))
+        }
+    }
+}
+
+/// Extract pinning data from a `SiumaiConfig` by validating the base URL
+/// and resolving its hostname. Returns `None` when the config has no base_url
+/// or when the host is an IP literal (no TOCTOU window).
+async fn collect_pinning_from_config(
+    config: &SiumaiConfig,
+) -> Result<Option<(String, Vec<std::net::SocketAddr>)>, LlmError> {
+    match config {
+        #[cfg(any(feature = "openai", feature = "all-providers"))]
+        SiumaiConfig::OpenAi {
+            base_url: Some(url),
+            ..
+        } => {
+            let (host, addrs) = validate_base_url_ssrf(url).await?;
+            if is_hostname_domain(url) {
+                Ok(Some((host, addrs)))
+            } else {
+                Ok(None)
+            }
+        }
+        #[cfg(any(feature = "openai", feature = "all-providers"))]
+        SiumaiConfig::OpenAi { base_url: None, .. } => Ok(None),
+        #[cfg(any(feature = "ollama", feature = "all-providers"))]
+        SiumaiConfig::Ollama { base_url, .. } => {
+            let (host, addrs) = validate_base_url_ssrf(base_url).await?;
+            if is_hostname_domain(base_url) {
+                Ok(Some((host, addrs)))
+            } else {
+                Ok(None)
+            }
         }
     }
 }

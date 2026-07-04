@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::jwks::validate_https_public_uri;
+use crate::http_client::build_ssrf_pinned_client;
 use crate::types::AuthError;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IntrospectionResult {
@@ -66,7 +67,7 @@ pub(crate) struct CachedEntry {
 pub struct CachingTokenIntrospector {
     endpoint: String,
     client_id: String,
-    client_secret: String,
+    client_secret: Zeroizing<String>,
     http: reqwest::Client,
     pub(crate) cache: Arc<RwLock<HashMap<String, CachedEntry>>>,
     in_flight: Mutex<()>,
@@ -76,22 +77,23 @@ pub struct CachingTokenIntrospector {
 }
 
 impl CachingTokenIntrospector {
-    pub fn new(
+    pub async fn new(
         endpoint: String,
         client_id: String,
         client_secret: String,
         options: IntrospectionCacheOptions,
     ) -> Result<Self, AuthError> {
-        validate_https_public_uri(&endpoint, "introspection endpoint URI")?;
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| AuthError::ConfigError(format!("failed to build HTTP client: {e}")))?;
+        let http = build_ssrf_pinned_client(
+            &endpoint,
+            "introspection endpoint",
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .await?;
         Ok(Self::with_client(
             endpoint,
             client_id,
-            client_secret,
+            Zeroizing::new(client_secret),
             options,
             http,
         ))
@@ -109,13 +111,19 @@ impl CachingTokenIntrospector {
             .timeout(Duration::from_secs(10))
             .build()
             .expect("hardened HTTP client builder config is valid"); // allow-unwrap
-        Self::with_client(endpoint, client_id, client_secret, options, http)
+        Self::with_client(
+            endpoint,
+            client_id,
+            Zeroizing::new(client_secret),
+            options,
+            http,
+        )
     }
 
     fn with_client(
         endpoint: String,
         client_id: String,
-        client_secret: String,
+        client_secret: Zeroizing<String>,
         options: IntrospectionCacheOptions,
         http: reqwest::Client,
     ) -> Self {
@@ -225,7 +233,7 @@ impl TokenIntrospector for CachingTokenIntrospector {
             .form(&[
                 ("token", token),
                 ("client_id", &self.client_id),
-                ("client_secret", &self.client_secret),
+                ("client_secret", self.client_secret.as_str()),
             ])
             .send()
             .await
@@ -515,7 +523,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
-        );
+        )
+        .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, AuthError::ConfigError(ref s) if s.contains("HTTPS")));
@@ -528,7 +537,8 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
-        );
+        )
+        .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(

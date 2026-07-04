@@ -32,7 +32,7 @@ fn native_authenticator(
     Ok(Arc::new(camel_auth::StaticTokenAuthenticator::new(store)))
 }
 
-fn keycloak_authenticator(
+async fn keycloak_authenticator(
     keycloak: &camel_config::config::KeycloakSecurityConfig,
 ) -> Result<Arc<dyn camel_auth::TokenAuthenticator>, CamelError> {
     let realm = camel_component_keycloak::KeycloakRealmConfig::new(
@@ -46,6 +46,7 @@ fn keycloak_authenticator(
         "local" => {
             let jwks = Arc::new(
                 camel_auth::RemoteJwksProvider::new(realm.jwks_uri())
+                    .await
                     .map_err(|e| CamelError::Config(e.to_string()))?,
             );
             let mapper = Arc::new(camel_auth::JsonPointerClaimsMapper::new(
@@ -68,7 +69,7 @@ fn keycloak_authenticator(
                     keycloak.introspection.negative_ttl_secs,
                 ),
             };
-            let auth = realm.introspection_authenticator(opts)?;
+            let auth = realm.introspection_authenticator(opts).await?;
             Ok(Arc::new(auth))
         }
         other => Err(CamelError::Config(format!(
@@ -82,7 +83,7 @@ fn keycloak_authenticator(
 /// Chooses at most one of `keycloak`, `oidc`, `native`.  Returns `None` if
 /// none is configured (anonymous routes are allowed).  Errors if more than
 /// one is present.
-fn resolve_authenticator(
+async fn resolve_authenticator(
     security: &camel_config::config::SecurityConfig,
 ) -> Result<Option<Arc<dyn camel_auth::TokenAuthenticator>>, CamelError> {
     let has_keycloak = security.keycloak.is_some();
@@ -101,7 +102,7 @@ fn resolve_authenticator(
     }
 
     if let Some(ref keycloak) = security.keycloak {
-        Ok(Some(keycloak_authenticator(keycloak)?))
+        Ok(Some(keycloak_authenticator(keycloak).await?))
     } else if let Some(ref native) = security.native {
         Ok(Some(native_authenticator(native)?))
     } else {
@@ -112,7 +113,7 @@ fn resolve_authenticator(
 
 /// Register Keycloak UMA permission evaluator from `[security.keycloak.uma]`
 /// config.  No-ops when no UMA config is present.
-fn register_keycloak_uma_evaluator(
+async fn register_keycloak_uma_evaluator(
     camel_config: &camel_config::config::CamelConfig,
     evaluator_registry: &camel_auth::PermissionEvaluatorRegistry,
 ) -> Result<(), CamelError> {
@@ -127,6 +128,7 @@ fn register_keycloak_uma_evaluator(
         .with_client_secret(keycloak.client_secret.clone());
         let evaluator = realm
             .uma_evaluator()
+            .await
             .map_err(|e| CamelError::Config(e.to_string()))?;
         evaluator_registry.register(uma.provider.clone(), evaluator);
     }
@@ -142,7 +144,7 @@ pub async fn build_security_compile_context_from_config(
     camel_config: &camel_config::config::CamelConfig,
     registry: Arc<std::sync::Mutex<camel_core::Registry>>,
 ) -> Result<SecurityCompileContext, CamelError> {
-    let authenticator = resolve_authenticator(&camel_config.security)?;
+    let authenticator = resolve_authenticator(&camel_config.security).await?;
     let mut security_ctx = SecurityCompileContext::new(authenticator, None);
 
     let evaluator_registry = camel_auth::PermissionEvaluatorRegistry::new();
@@ -166,7 +168,7 @@ pub async fn build_security_compile_context_from_config(
         }
     }
 
-    register_keycloak_uma_evaluator(camel_config, &evaluator_registry)?;
+    register_keycloak_uma_evaluator(camel_config, &evaluator_registry).await?;
 
     if !evaluator_registry.is_empty() {
         security_ctx = security_ctx.with_evaluator_registry(Arc::new(evaluator_registry));
@@ -192,12 +194,12 @@ pub async fn build_security_compile_context_from_config(
         ));
     }
 
-    let authenticator = resolve_authenticator(&camel_config.security)?;
+    let authenticator = resolve_authenticator(&camel_config.security).await?;
     let mut security_ctx = SecurityCompileContext::new(authenticator, None);
 
     let evaluator_registry = camel_auth::PermissionEvaluatorRegistry::new();
 
-    register_keycloak_uma_evaluator(camel_config, &evaluator_registry)?;
+    register_keycloak_uma_evaluator(camel_config, &evaluator_registry).await?;
 
     if !evaluator_registry.is_empty() {
         security_ctx = security_ctx.with_evaluator_registry(Arc::new(evaluator_registry));

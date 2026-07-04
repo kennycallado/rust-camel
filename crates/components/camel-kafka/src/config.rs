@@ -227,7 +227,8 @@ impl KafkaConfig {
                 self.request_timeout_ms
             )));
         }
-        self.security_protocol
+        let parsed_protocol = self
+            .security_protocol
             .parse::<SecurityProtocol>()
             .map_err(|_| {
                 CamelError::Config(format!(
@@ -235,6 +236,16 @@ impl KafkaConfig {
                     self.security_protocol
                 ))
             })?;
+
+        match parsed_protocol {
+            SecurityProtocol::Plaintext | SecurityProtocol::SaslPlaintext => {
+                tracing::warn!(
+                    protocol = ?parsed_protocol,
+                    "Kafka using cleartext protocol — credentials and data in plaintext"
+                );
+            }
+            _ => {}
+        }
         if !matches!(
             self.auto_offset_reset.as_str(),
             "earliest" | "latest" | "none"
@@ -2093,5 +2104,27 @@ mod kafka_config_tests {
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("sasl_password"));
         assert!(err.to_string().contains("nopass"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn kafka_plaintext_config_validates() {
+        let config = KafkaConfig {
+            security_protocol: "plaintext".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        assert!(logs_contain("cleartext protocol"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn kafka_sasl_plaintext_config_validates() {
+        let config = KafkaConfig {
+            security_protocol: "sasl_plaintext".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        assert!(logs_contain("cleartext protocol"));
     }
 }

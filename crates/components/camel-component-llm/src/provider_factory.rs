@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 #[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
 use std::time::Duration;
@@ -22,6 +23,53 @@ pub fn build_provider_map(config: &LlmGlobalConfig) -> Result<ProviderMap, LlmEr
         map.insert(name.clone(), provider);
     }
     Ok(map)
+}
+
+/// Validate LLM URL for SSRF and return resolved addresses for DNS-rebinding
+/// pinning (D-M10).
+///
+/// H15: rejects non-http(s) schemes AND resolves DNS to block
+/// private/loopback/link-local IPs via the shared `is_ssrf_blocked_ip`
+/// helper. Prevents SSRF to cloud metadata endpoints (e.g. 169.254.169.254).
+///
+/// DNS resolution is **fail-closed**: if the host cannot be resolved,
+/// validation fails. An unresolvable host is treated as a configuration
+/// error — silently passing would let typos, hijacked DNS, or
+/// firewalled-internal names reach the outbound client.
+///
+/// Returns (host_string, validated_socket_addresses) for the caller to pin
+/// via `reqwest::ClientBuilder::resolve_to_addrs`, closing the TOCTOU window
+/// between validation and the first outbound request.
+pub fn validate_llm_url_pinned(url: &str) -> Result<(String, Vec<SocketAddr>), LlmError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| LlmError::InvalidRequest(format!("invalid llm base_url '{url}': {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(LlmError::InvalidRequest(format!(
+            "llm base_url must use http/https, got: {}",
+            parsed.scheme()
+        )));
+    }
+    let host_str = parsed
+        .host_str()
+        .ok_or_else(|| LlmError::InvalidRequest("llm base_url has no host".into()))?;
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<SocketAddr> = (host_str, 0u16)
+        .to_socket_addrs()
+        .map_err(|e| {
+            LlmError::InvalidRequest(format!(
+                "cannot resolve llm base_url host '{host_str}': {e}"
+            ))
+        })?
+        .collect();
+    for addr in &addrs {
+        if camel_api::is_ssrf_blocked_ip(&addr.ip()) {
+            return Err(LlmError::InvalidRequest(format!(
+                "llm base_url resolves to blocked SSRF address: {}",
+                addr.ip()
+            )));
+        }
+    }
+    Ok((host_str.to_string(), addrs))
 }
 
 /// Validate a provider `base_url` before constructing the underlying client.
@@ -264,6 +312,33 @@ mod tests {
         let result = build_single("ol", &config, None);
         assert!(result.is_err(), "expected Err for file:// base_url");
         let err = result.err().expect("is_err above"); // allow-unwrap
+        assert!(err.to_string().contains("http/https"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_llm_url_pinned_returns_host_and_addrs() {
+        let (host, addrs) =
+            validate_llm_url_pinned("https://1.1.1.1").expect("public IP must pass");
+        assert!(!addrs.is_empty(), "must resolve at least one address");
+        assert!(
+            addrs.iter().any(|a| a.ip().to_string() == "1.1.1.1"),
+            "expected 1.1.1.1 in resolved addrs: {addrs:?}"
+        );
+        assert_eq!(host, "1.1.1.1");
+    }
+
+    #[test]
+    fn validate_llm_url_pinned_rejects_ssrf_host() {
+        let err = validate_llm_url_pinned("http://169.254.169.254/").unwrap_err();
+        assert!(
+            err.to_string().contains("blocked"),
+            "expected SSRF-blocked, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_llm_url_pinned_rejects_invalid_scheme() {
+        let err = validate_llm_url_pinned("ftp://api.example.com").unwrap_err();
         assert!(err.to_string().contains("http/https"), "msg: {err}");
     }
 }

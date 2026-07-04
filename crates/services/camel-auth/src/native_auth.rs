@@ -3,6 +3,7 @@ use camel_api::CamelError;
 use camel_api::security_policy::Principal;
 use std::fmt;
 use tracing::warn;
+use zeroize::Zeroizing;
 
 pub struct NativeCredential {
     pub secret: NativeCredentialSecret,
@@ -12,12 +13,12 @@ pub struct NativeCredential {
 #[derive(Clone)]
 pub enum NativeCredentialSecret {
     Env { name: String },
-    Plaintext { value: String },
+    Plaintext { value: Zeroizing<String> },
 }
 
 #[derive(Clone)]
 struct ResolvedCredential {
-    secret_value: String,
+    secret_value: Zeroizing<String>,
     principal: Principal,
 }
 
@@ -78,7 +79,7 @@ impl NativeCredentialStore {
                             "native auth env var is empty: {name}"
                         )));
                     }
-                    val
+                    Zeroizing::new(val)
                 }
                 NativeCredentialSecret::Plaintext { value } => {
                     if value.is_empty() {
@@ -219,7 +220,7 @@ mod tests {
     fn test_store_finds_matching_plaintext_credential() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "secret-key-123".to_string(),
+                value: Zeroizing::new("secret-key-123".to_string()),
             },
             principal: test_principal("admin", vec!["admin"], vec![]),
         }])
@@ -233,7 +234,7 @@ mod tests {
     fn test_store_returns_none_on_no_match() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "secret-key-123".to_string(),
+                value: Zeroizing::new("secret-key-123".to_string()),
             },
             principal: test_principal("admin", vec!["admin"], vec![]),
         }])
@@ -246,7 +247,7 @@ mod tests {
     fn test_store_returns_none_on_empty_input() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "secret-key-123".to_string(),
+                value: Zeroizing::new("secret-key-123".to_string()),
             },
             principal: test_principal("admin", vec!["admin"], vec![]),
         }])
@@ -287,7 +288,7 @@ mod tests {
     fn test_store_rejects_empty_plaintext() {
         let result = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "".to_string(),
+                value: Zeroizing::new("".to_string()),
             },
             principal: test_principal("bad", vec![], vec![]),
         }]);
@@ -298,7 +299,7 @@ mod tests {
     fn test_store_accepts_plaintext_for_dev() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "insecure".to_string(),
+                value: Zeroizing::new("insecure".to_string()),
             },
             principal: test_principal("dev", vec![], vec![]),
         }])
@@ -310,7 +311,7 @@ mod tests {
     async fn test_static_token_authenticator_valid_token() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "my-bearer-token".to_string(),
+                value: Zeroizing::new("my-bearer-token".to_string()),
             },
             principal: test_principal("svc-account", vec!["service"], vec![]),
         }])
@@ -325,7 +326,7 @@ mod tests {
     async fn test_static_token_authenticator_invalid_token() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "my-bearer-token".to_string(),
+                value: Zeroizing::new("my-bearer-token".to_string()),
             },
             principal: test_principal("svc-account", vec!["service"], vec![]),
         }])
@@ -345,7 +346,7 @@ mod tests {
     async fn test_api_key_authenticator_valid_key() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "ak-12345".to_string(),
+                value: Zeroizing::new("ak-12345".to_string()),
             },
             principal: test_principal("api-user", vec!["read"], vec!["api:read"]),
         }])
@@ -360,7 +361,7 @@ mod tests {
     async fn test_api_key_authenticator_invalid_key() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "ak-12345".to_string(),
+                value: Zeroizing::new("ak-12345".to_string()),
             },
             principal: test_principal("api-user", vec!["read"], vec![]),
         }])
@@ -374,7 +375,7 @@ mod tests {
     async fn test_api_key_authenticate_exchange() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "ak-exchange".to_string(),
+                value: Zeroizing::new("ak-exchange".to_string()),
             },
             principal: test_principal("ex-user", vec!["read"], vec![]),
         }])
@@ -391,7 +392,7 @@ mod tests {
     async fn test_api_key_authenticate_exchange_missing_header() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "ak-exchange".to_string(),
+                value: Zeroizing::new("ak-exchange".to_string()),
             },
             principal: test_principal("ex-user", vec!["read"], vec![]),
         }])
@@ -413,7 +414,7 @@ mod tests {
     async fn test_static_token_works_with_role_policy() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "test-token".to_string(),
+                value: Zeroizing::new("test-token".to_string()),
             },
             principal: test_principal("admin-user", vec!["admin"], vec![]),
         }])
@@ -436,7 +437,7 @@ mod tests {
     async fn test_static_token_works_with_scope_policy() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "scoped-token".to_string(),
+                value: Zeroizing::new("scoped-token".to_string()),
             },
             principal: test_principal("reader", vec![], vec!["api:read"]),
         }])
@@ -459,7 +460,7 @@ mod tests {
     async fn test_static_token_denied_by_role_policy() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Plaintext {
-                value: "user-token".to_string(),
+                value: Zeroizing::new("user-token".to_string()),
             },
             principal: test_principal("user", vec!["user"], vec![]),
         }])

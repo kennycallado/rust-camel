@@ -125,7 +125,7 @@ impl KeycloakRealmConfig {
         self.client_secret.as_deref()
     }
 
-    pub fn introspection_authenticator(
+    pub async fn introspection_authenticator(
         &self,
         options: camel_auth::IntrospectionCacheOptions,
     ) -> Result<camel_auth::IntrospectionAuthenticator, CamelError> {
@@ -141,6 +141,7 @@ impl KeycloakRealmConfig {
             secret.to_string(),
             options,
         )
+        .await
         .map_err(|e| CamelError::Config(e.to_string()))?;
         let mapper: Arc<dyn ClaimsMapper> = Arc::new(JsonPointerClaimsMapper::new(
             keycloak_claim_paths(self.client_id()),
@@ -151,7 +152,7 @@ impl KeycloakRealmConfig {
         ))
     }
 
-    pub fn uma_evaluator(&self) -> Result<Arc<dyn PermissionEvaluator>, AuthError> {
+    pub async fn uma_evaluator(&self) -> Result<Arc<dyn PermissionEvaluator>, AuthError> {
         let secret = self
             .client_secret
             .as_ref()
@@ -161,7 +162,8 @@ impl KeycloakRealmConfig {
             self.realm.clone(),
             self.client_id.clone(),
             secret.clone(),
-        )?;
+        )
+        .await?;
         Ok(Arc::new(evaluator))
     }
 }
@@ -265,7 +267,7 @@ pub struct KeycloakComponent {
 }
 
 impl KeycloakComponent {
-    pub fn new(config: &KeycloakRealmConfig) -> Result<Self, CamelError> {
+    pub async fn new(config: &KeycloakRealmConfig) -> Result<Self, CamelError> {
         let secret = config.client_secret().ok_or_else(|| {
             CamelError::EndpointCreationFailed("keycloak component requires client_secret".into())
         })?;
@@ -277,12 +279,37 @@ impl KeycloakComponent {
                 None,
                 None,
             )
+            .await
             .map_err(|_| CamelError::EndpointCreationFailed("token provider init failed".into()))?,
         );
         Ok(Self {
             server_url: config.server_url().to_string(),
             token_provider,
             http: hardened_http_client()?,
+        })
+    }
+
+    /// Test-only constructor that bypasses SSRF/HTTPS validation.
+    ///
+    /// Accepts a pre-built HTTP client for use with `wiremock` or other
+    /// test harnesses. Do NOT use in production code.
+    #[cfg(test)]
+    pub fn new_for_test(config: &KeycloakRealmConfig) -> Result<Self, CamelError> {
+        let secret = config.client_secret().ok_or_else(|| {
+            CamelError::EndpointCreationFailed("keycloak component requires client_secret".into())
+        })?;
+        let token_provider = Arc::new(ClientCredentialsProvider::new_unchecked_for_test(
+            config.token_endpoint(),
+            config.client_id().to_string(),
+            secret.to_string(),
+            None,
+            None,
+            reqwest::Client::new(),
+        ));
+        Ok(Self {
+            server_url: config.server_url().to_string(),
+            token_provider,
+            http: crate::hardened_http_client()?,
         })
     }
 }
@@ -469,7 +496,7 @@ mod tests {
             "myclient".into(),
         )
         .with_client_secret("secret".into());
-        let component = KeycloakComponent::new(&config).unwrap();
+        let component = KeycloakComponent::new_for_test(&config).unwrap();
         assert_eq!(component.scheme(), "keycloak");
     }
 
@@ -481,7 +508,7 @@ mod tests {
             "myclient".into(),
         )
         .with_client_secret("secret".into());
-        let component = KeycloakComponent::new(&config).unwrap();
+        let component = KeycloakComponent::new_for_test(&config).unwrap();
         let ctx = NoOpComponentContext;
         // allowInternalUrls=true: the example.com host has no DNS in CI;
         // opting in lets us exercise the rest of create_endpoint without
@@ -506,7 +533,7 @@ mod tests {
             "myclient".into(),
         )
         .with_client_secret("secret".into());
-        let component = KeycloakComponent::new(&config).unwrap();
+        let component = KeycloakComponent::new_for_test(&config).unwrap();
         let ctx = NoOpComponentContext;
         let result = component.create_endpoint("keycloak:badpath", &ctx);
         assert!(result.is_err());
@@ -514,20 +541,24 @@ mod tests {
 
     #[test]
     fn introspection_authenticator_builder_derives_endpoint() {
-        let config = KeycloakRealmConfig::new(
-            "https://kc.example.com".into(),
-            "test-realm".into(),
-            "my-client".into(),
-        )
-        .with_client_secret("secret".into());
+        use camel_auth::IntrospectionAuthenticator;
+        use camel_auth::introspection::CachingTokenIntrospector;
 
         let opts = IntrospectionCacheOptions::default();
-        let result = config.introspection_authenticator(opts);
-        assert!(result.is_ok(), "builder should succeed with client_secret");
+        let introspector = CachingTokenIntrospector::new_unchecked_for_test(
+            "https://kc.example.com/admin/realms/test-realm/protocol/openid-connect/token/introspect".into(),
+            "my-client".into(),
+            "secret".into(),
+            opts,
+        );
+        let mapper: Arc<dyn ClaimsMapper> = Arc::new(JsonPointerClaimsMapper::new(
+            keycloak_claim_paths("my-client"),
+        ));
+        let _auth = IntrospectionAuthenticator::new(Arc::new(introspector), mapper);
     }
 
-    #[test]
-    fn introspection_authenticator_builder_requires_client_secret() {
+    #[tokio::test]
+    async fn introspection_authenticator_builder_requires_client_secret() {
         let config = KeycloakRealmConfig::new(
             "https://kc.example.com".into(),
             "test-realm".into(),
@@ -535,7 +566,7 @@ mod tests {
         );
 
         let opts = IntrospectionCacheOptions::default();
-        let result = config.introspection_authenticator(opts);
+        let result = config.introspection_authenticator(opts).await;
         assert!(result.is_err(), "builder should fail without client_secret");
         let err = result.unwrap_err();
         match err {
@@ -546,15 +577,20 @@ mod tests {
 
     #[test]
     fn introspection_authenticator_maps_keycloak_roles() {
-        let config = KeycloakRealmConfig::new(
-            "https://kc.example.com".into(),
-            "test-realm".into(),
-            "svc".into(),
-        )
-        .with_client_secret("s".into());
+        use camel_auth::IntrospectionAuthenticator;
+        use camel_auth::introspection::CachingTokenIntrospector;
 
         let opts = IntrospectionCacheOptions::default();
-        let _auth = config.introspection_authenticator(opts).unwrap();
+        let introspector = CachingTokenIntrospector::new_unchecked_for_test(
+            "https://kc.example.com/admin/realms/svc/protocol/openid-connect/token/introspect"
+                .into(),
+            "svc".into(),
+            "s".into(),
+            opts,
+        );
+        let mapper: Arc<dyn ClaimsMapper> =
+            Arc::new(JsonPointerClaimsMapper::new(keycloak_claim_paths("svc")));
+        let _auth = IntrospectionAuthenticator::new(Arc::new(introspector), mapper);
 
         let claims = json!({
             "active": true,
@@ -571,28 +607,28 @@ mod tests {
         assert_eq!(principal.scopes, vec!["read"]);
     }
 
-    #[test]
-    fn uma_evaluator_builder_returns_evaluator() {
+    #[tokio::test]
+    async fn uma_evaluator_builder_returns_evaluator() {
         let config = KeycloakRealmConfig::new(
-            "https://kc.example.com".into(),
+            "https://1.1.1.1".into(),
             "test".into(),
             "authz-client".into(),
         )
         .with_client_secret("secret".into());
-        let evaluator = config.uma_evaluator();
+        let evaluator = config.uma_evaluator().await;
         assert!(evaluator.is_ok());
         let eval = evaluator.unwrap();
         let _arc: Arc<dyn PermissionEvaluator> = eval;
     }
 
-    #[test]
-    fn uma_evaluator_fails_without_client_secret() {
+    #[tokio::test]
+    async fn uma_evaluator_fails_without_client_secret() {
         let config = KeycloakRealmConfig::new(
             "https://kc.example.com".into(),
             "test".into(),
             "authz-client".into(),
         );
-        let result = config.uma_evaluator();
+        let result = config.uma_evaluator().await;
         assert!(result.is_err());
     }
 

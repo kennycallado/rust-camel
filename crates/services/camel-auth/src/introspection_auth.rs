@@ -33,6 +33,27 @@ impl TokenAuthenticator for IntrospectionAuthenticator {
         if !result.active {
             return Err(AuthError::TokenInvalid("token is not active".into()).into());
         }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX);
+
+        if let Some(exp) = result.exp
+            && exp < now
+        {
+            return Err(AuthError::TokenExpired.into());
+        }
+
+        if let Some(nbf) = result.nbf
+            && nbf > now
+        {
+            return Err(AuthError::TokenInvalid(
+                "token not yet valid (introspection nbf check)".into(),
+            )
+            .into());
+        }
+
         let claims = serde_json::to_value(&result).map_err(|e| {
             AuthError::ConfigError(format!("introspection result serialization failed: {e}"))
         })?;
@@ -158,6 +179,126 @@ mod tests {
             }
             other => panic!("expected ProcessorError, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn introspection_rejects_expired_token() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        struct ExpiredIntrospector(u64);
+        #[async_trait]
+        impl TokenIntrospector for ExpiredIntrospector {
+            async fn introspect(&self, _token: &str) -> Result<IntrospectionResult, AuthError> {
+                Ok(IntrospectionResult {
+                    active: true,
+                    sub: Some("user-1".into()),
+                    exp: Some(self.0 - 3600), // expired 1h ago
+                    iat: None,
+                    nbf: None,
+                    scope: Some("read".into()),
+                    client_id: None,
+                    token_type: None,
+                    iss: None,
+                    aud: None,
+                    extra: Map::new(),
+                })
+            }
+        }
+
+        let auth =
+            IntrospectionAuthenticator::new(Arc::new(ExpiredIntrospector(now)), keycloak_mapper());
+        let err = auth.authenticate_bearer("test-token").await.unwrap_err();
+        match err {
+            CamelError::Unauthenticated(msg) => {
+                assert!(
+                    msg.contains("expired"),
+                    "expected 'expired' in error, got: {msg}"
+                )
+            }
+            other => panic!("expected Unauthenticated, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn introspection_rejects_not_yet_valid_token() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        struct FutureIntrospector(u64);
+        #[async_trait]
+        impl TokenIntrospector for FutureIntrospector {
+            async fn introspect(&self, _token: &str) -> Result<IntrospectionResult, AuthError> {
+                Ok(IntrospectionResult {
+                    active: true,
+                    sub: Some("user-1".into()),
+                    exp: Some(self.0 + 7200), // valid for 2h
+                    iat: None,
+                    nbf: Some(self.0 + 3600), // not valid for 1h
+                    scope: Some("read".into()),
+                    client_id: None,
+                    token_type: None,
+                    iss: None,
+                    aud: None,
+                    extra: Map::new(),
+                })
+            }
+        }
+
+        let auth =
+            IntrospectionAuthenticator::new(Arc::new(FutureIntrospector(now)), keycloak_mapper());
+        let err = auth.authenticate_bearer("test-token").await.unwrap_err();
+        match err {
+            CamelError::Unauthenticated(msg) => {
+                assert!(
+                    msg.contains("not yet valid"),
+                    "expected 'not yet valid' in error, got: {msg}"
+                )
+            }
+            other => panic!("expected Unauthenticated, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_token_with_valid_exp_and_nbf() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        struct ValidIntrospector(u64);
+        #[async_trait]
+        impl TokenIntrospector for ValidIntrospector {
+            async fn introspect(&self, _token: &str) -> Result<IntrospectionResult, AuthError> {
+                Ok(IntrospectionResult {
+                    active: true,
+                    sub: Some("user-1".into()),
+                    exp: Some(self.0 + 3600), // valid for 1h
+                    iat: None,
+                    nbf: Some(self.0 - 3600), // was valid 1h ago
+                    scope: Some("read".into()),
+                    client_id: None,
+                    token_type: None,
+                    iss: None,
+                    aud: None,
+                    extra: {
+                        let mut m = Map::new();
+                        m.insert("realm_access".into(), json!({"roles": ["user"]}));
+                        m
+                    },
+                })
+            }
+        }
+
+        let auth =
+            IntrospectionAuthenticator::new(Arc::new(ValidIntrospector(now)), keycloak_mapper());
+        let principal = auth.authenticate_bearer("test-token").await.unwrap();
+        assert_eq!(principal.subject, "user-1");
+        assert!(principal.has_role("user"));
     }
 
     #[tokio::test]

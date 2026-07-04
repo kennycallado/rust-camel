@@ -8,6 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tower::Service;
 use tracing::{debug, info, warn};
@@ -243,15 +244,24 @@ async fn get_or_create_connection(
         ))
     })?;
 
-    let new_conn = client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| {
-            CamelError::ProcessorError(format!(
-                "Failed to connect to Redis at '{}': {}",
-                redis_url_safe, e
-            ))
-        })?;
+    let timeout_secs = config.connection_timeout_secs;
+    let new_conn = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        client.get_multiplexed_async_connection(),
+    )
+    .await
+    .map_err(|_| {
+        CamelError::ProcessorError(format!(
+            "Redis connection to '{}' timed out after {}s",
+            redis_url_safe, timeout_secs
+        ))
+    })?
+    .map_err(|e| {
+        CamelError::ProcessorError(format!(
+            "Failed to connect to Redis at '{}': {}",
+            redis_url_safe, e
+        ))
+    })?;
 
     *guard = Some(new_conn.clone());
     info!(endpoint = %endpoint, "Redis connection established");

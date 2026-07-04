@@ -128,6 +128,7 @@ mod tests {
         use crate::native_client_store::{M2mClient, M2mClientSecret, M2mClientStore};
         use crate::native_issuer::NativeTokenIssuer;
         use std::sync::Arc;
+        use zeroize::Zeroizing;
 
         let pem = include_str!("../tests/fixtures/test_rsa_private.pem");
         let signing_key = NativeSigningKey::from_pem(pem, "kid-validate".to_string()).unwrap();
@@ -135,7 +136,9 @@ mod tests {
 
         let store = M2mClientStore::try_new(vec![M2mClient {
             client_id: "test-client".into(),
-            secret: M2mClientSecret::Plaintext { value: "s".into() },
+            secret: M2mClientSecret::Plaintext {
+                value: Zeroizing::new("s".into()),
+            },
             roles: vec!["test".into()],
             scopes: vec!["read".into()],
         }])

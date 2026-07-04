@@ -249,6 +249,8 @@ pub struct RedisConfig {
     pub tls: bool,
     /// Optional path to a CA certificate file for TLS verification. Default: None.
     pub tls_ca_cert: Option<String>,
+    /// TLS connection timeout in seconds. Default: 10.
+    pub connection_timeout_secs: u64,
     /// Reconnection policy for lost Redis connections.
     #[serde(default)]
     pub reconnect: NetworkRetryPolicy,
@@ -269,6 +271,7 @@ impl std::fmt::Debug for RedisConfig {
             .field("password", &redacted_opt(&self.password))
             .field("tls", &self.tls)
             .field("tls_ca_cert", &redacted_opt(&self.tls_ca_cert))
+            .field("connection_timeout_secs", &self.connection_timeout_secs)
             .field("reconnect", &self.reconnect);
         #[cfg(feature = "cluster")]
         s.field("cluster_nodes", &self.cluster_nodes);
@@ -284,6 +287,7 @@ impl Default for RedisConfig {
             password: None,
             tls: false,
             tls_ca_cert: None,
+            connection_timeout_secs: 10,
             reconnect: NetworkRetryPolicy::default(),
             #[cfg(feature = "cluster")]
             cluster_nodes: Vec::new(),
@@ -317,6 +321,11 @@ impl RedisConfig {
         self
     }
 
+    pub fn with_connection_timeout(mut self, secs: u64) -> Self {
+        self.connection_timeout_secs = secs;
+        self
+    }
+
     pub fn with_reconnect(mut self, p: NetworkRetryPolicy) -> Self {
         self.reconnect = p;
         self
@@ -329,15 +338,43 @@ impl RedisConfig {
         self
     }
 
+    /// Returns the effective TLS setting for this config.
+    ///
+    /// TLS is auto-enabled for non-loopback hosts even when `tls` is `false`.
+    /// This allows secure-by-default connections to remote Redis instances
+    /// without requiring explicit TLS configuration.
+    pub fn effective_tls(&self) -> bool {
+        self.tls || {
+            let host = &self.host;
+            let normalized = host.trim_start_matches('[').trim_end_matches(']');
+            normalized != "localhost"
+                && !normalized.starts_with("127.")
+                && normalized != "::1"
+                && normalized != "0.0.0.0"
+                && !normalized.starts_with("::ffff:127.")
+                && !normalized.starts_with("::ffff:0:127.")
+        }
+    }
+
     /// Build the Redis connection URL from this config.
     ///
     /// Passwords are percent-encoded to handle special characters (`@`, `:`, `/`).
-    /// Uses `rediss://` scheme when `tls` is true.
+    /// Uses `rediss://` scheme when TLS is enabled (explicitly or auto-detected for non-loopback hosts).
     pub fn build_url(&self) -> Result<String, CamelError> {
+        let effective_tls = self.effective_tls();
+
+        // Warn when auto-enabling TLS
+        if effective_tls && !self.tls {
+            tracing::warn!(
+                host = %self.host,
+                "Redis auto-enabling TLS for non-loopback host (config had tls=false)"
+            );
+        }
+
         // Validate TLS feature availability
         self.validate_tls()?;
 
-        let scheme = if self.tls { "rediss" } else { "redis" };
+        let scheme = if effective_tls { "rediss" } else { "redis" };
         let auth = if let Some(password) = &self.password {
             let encoded = utf8_percent_encode(password, NON_ALPHANUMERIC).to_string();
             format!(":{}@", encoded)
@@ -352,11 +389,12 @@ impl RedisConfig {
 
     /// Validate TLS configuration.
     ///
-    /// Returns an error when `tls` is true but the `redis` crate was not compiled
-    /// with TLS support (requires one of: `tls-rustls-webpki-roots`,
+    /// Returns an error when TLS is needed (explicitly enabled or auto-detected
+    /// for non-loopback host) but the `redis` crate was not compiled with TLS
+    /// support (requires one of: `tls-rustls-webpki-roots`,
     /// `tls-rustls-native-certs`, or `tls-native-tls` feature).
     pub fn validate_tls(&self) -> Result<(), CamelError> {
-        if self.tls && !cfg!(feature = "tls") {
+        if self.effective_tls() && !cfg!(feature = "tls") {
             return Err(CamelError::Config(
                 "TLS requires redis/tls feature (enable one of: tls-rustls-webpki-roots, tls-rustls-native-certs, tls-native-tls)".into(),
             ));
@@ -467,6 +505,10 @@ pub struct RedisEndpointConfig {
     /// Reconnection policy for transient Redis errors.
     /// Filled by `apply_defaults()` from global config.
     pub reconnect: NetworkRetryPolicy,
+
+    /// Connection timeout in seconds for establishing Redis connections.
+    /// Filled by `apply_defaults()` from global config.
+    pub connection_timeout_secs: u64,
 }
 
 impl std::fmt::Debug for RedisEndpointConfig {
@@ -482,6 +524,7 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("db", &self.db)
             .field("ssl", &self.ssl)
             .field("reconnect", &self.reconnect)
+            .field("connection_timeout_secs", &self.connection_timeout_secs)
             .finish()
     }
 }
@@ -605,6 +648,7 @@ impl RedisEndpointConfig {
             db,
             ssl,
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: RedisConfig::default().connection_timeout_secs,
         })
     }
 
@@ -620,12 +664,22 @@ impl RedisEndpointConfig {
         if self.port.is_none() {
             self.port = Some(defaults.port);
         }
-        // TLS from global config applies only when ssl was not explicitly set in URI
-        if self.ssl.is_none() && defaults.tls {
-            self.ssl = Some(true);
+        // TLS from global config applies only when ssl was not explicitly set in URI.
+        // Use effective_tls() so auto-enable for non-loopback hosts propagates to endpoints.
+        if self.ssl.is_none() {
+            let effective = defaults.effective_tls();
+            self.ssl = Some(effective);
+            if effective && !defaults.tls {
+                tracing::warn!(
+                    host = %self.host.as_deref().unwrap_or(""),
+                    "Redis auto-enabling TLS for non-loopback host (config had tls=false)"
+                );
+            }
         }
         // Reconnect policy from global config (always applied — URI has no override)
         self.reconnect = defaults.reconnect.clone();
+        // Connection timeout from global config
+        self.connection_timeout_secs = defaults.connection_timeout_secs;
     }
 
     /// Resolve any remaining `None` fields to hardcoded defaults.
@@ -893,6 +947,7 @@ mod tests {
             db: 0,
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let url = c.redis_url();
         assert!(
@@ -920,6 +975,7 @@ mod tests {
             db: 0,
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let url = c.redis_url();
         assert!(
@@ -942,6 +998,7 @@ mod tests {
             db: 0,
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let url = c.redis_url();
         assert!(
@@ -985,6 +1042,7 @@ mod tests {
             db: 0,
             ssl: Some(true),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let url = c.redis_url();
         assert!(
@@ -1007,6 +1065,7 @@ mod tests {
             db: 0,
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let url = c.redis_url();
         assert!(
@@ -1029,6 +1088,7 @@ mod tests {
             db: 0,
             ssl: Some(true),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let safe = c_ssl.redis_url_safe();
         assert!(
@@ -1052,6 +1112,7 @@ mod tests {
             db: 0,
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let safe = c_no_ssl.redis_url_safe();
         assert!(
@@ -1075,6 +1136,7 @@ mod tests {
             db: 2,
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let endpoint = c.safe_endpoint();
         assert!(
@@ -1104,6 +1166,7 @@ mod tests {
             db: 0,
             ssl: Some(true),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         assert!(c_ssl.safe_endpoint().starts_with("rediss://"));
 
@@ -1118,6 +1181,7 @@ mod tests {
             db: 0,
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         assert!(c_plain.safe_endpoint().starts_with("redis://"));
     }
@@ -1267,6 +1331,41 @@ mod tests {
             config.ssl,
             Some(true),
             "TLS from global defaults should enable ssl on endpoint"
+        );
+    }
+
+    #[test]
+    fn test_apply_defaults_auto_enables_tls_for_non_loopback() {
+        // When host is non-loopback and tls=false, effective_tls() returns true.
+        // apply_defaults must propagate this to the endpoint's ssl field.
+        let mut config =
+            RedisEndpointConfig::from_uri("redis://redis-prod.example.com?command=GET").unwrap();
+        assert_eq!(config.ssl, None);
+
+        let defaults = RedisConfig {
+            host: "redis-prod.example.com".into(),
+            tls: false, // explicitly false, but non-loopback → auto-enable
+            ..RedisConfig::default()
+        };
+        config.apply_defaults(&defaults);
+
+        assert_eq!(
+            config.ssl,
+            Some(true),
+            "auto-enabled TLS from effective_tls() should propagate to endpoint ssl"
+        );
+    }
+
+    #[test]
+    fn test_apply_defaults_propagates_connection_timeout() {
+        let mut config = RedisEndpointConfig::from_uri("redis://?command=GET").unwrap();
+
+        let defaults = RedisConfig::default().with_connection_timeout(30);
+        config.apply_defaults(&defaults);
+
+        assert_eq!(
+            config.connection_timeout_secs, 30,
+            "connection_timeout_secs should propagate from global config"
         );
     }
 
@@ -1609,11 +1708,137 @@ mod tests {
             db: 0,
             ssl: None,
             reconnect: NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
         };
         let debug = format!("{:?}", config);
         assert!(
             !debug.contains("secret123"),
             "password must be redacted: {debug}"
+        );
+    }
+
+    // ── D-M15: Effective TLS and connection_timeout ────────────────────────────
+
+    #[test]
+    fn test_effective_tls_auto_enabled_for_non_loopback() {
+        let cfg = RedisConfig {
+            host: "redis-prod.example.com".into(),
+            tls: false,
+            ..RedisConfig::default()
+        };
+        assert!(
+            cfg.effective_tls(),
+            "TLS should auto-enable for non-loopback host"
+        );
+    }
+
+    #[test]
+    fn test_effective_tls_stays_disabled_for_localhost() {
+        let cfg = RedisConfig {
+            host: "localhost".into(),
+            tls: false,
+            ..RedisConfig::default()
+        };
+        assert!(
+            !cfg.effective_tls(),
+            "TLS should stay disabled for localhost"
+        );
+    }
+
+    #[test]
+    fn test_effective_tls_stays_disabled_for_127_addr() {
+        let cfg = RedisConfig {
+            host: "127.0.0.1".into(),
+            tls: false,
+            ..RedisConfig::default()
+        };
+        assert!(
+            !cfg.effective_tls(),
+            "TLS should stay disabled for 127.x.x.x"
+        );
+    }
+
+    #[test]
+    fn test_effective_tls_stays_disabled_for_ipv6_loopback() {
+        let cfg = RedisConfig {
+            host: "::1".into(),
+            tls: false,
+            ..RedisConfig::default()
+        };
+        assert!(
+            !cfg.effective_tls(),
+            "TLS should stay disabled for ::1 loopback"
+        );
+    }
+
+    #[test]
+    fn test_effective_tls_stays_disabled_for_wildcard() {
+        let cfg = RedisConfig {
+            host: "0.0.0.0".into(),
+            tls: false,
+            ..RedisConfig::default()
+        };
+        assert!(
+            !cfg.effective_tls(),
+            "TLS should stay disabled for 0.0.0.0 wildcard"
+        );
+    }
+
+    #[test]
+    fn test_effective_tls_explicit_true_overrides_loopback() {
+        let cfg = RedisConfig {
+            host: "localhost".into(),
+            tls: true,
+            ..RedisConfig::default()
+        };
+        assert!(
+            cfg.effective_tls(),
+            "explicit tls=true should work even on loopback"
+        );
+    }
+
+    #[test]
+    fn test_connection_timeout_default_is_10() {
+        let cfg = RedisConfig::default();
+        assert_eq!(
+            cfg.connection_timeout_secs, 10,
+            "connection_timeout_secs default should be 10"
+        );
+    }
+
+    #[test]
+    fn test_connection_timeout_custom_via_builder() {
+        let cfg = RedisConfig::default().with_connection_timeout(30);
+        assert_eq!(cfg.connection_timeout_secs, 30);
+    }
+
+    #[test]
+    #[cfg(not(feature = "tls"))]
+    fn test_build_url_auto_enables_rediss_for_non_loopback() {
+        let cfg = RedisConfig {
+            host: "redis-prod.example.com".into(),
+            tls: false,
+            ..RedisConfig::default()
+        };
+        let result = cfg.build_url();
+        assert!(
+            result.is_err(),
+            "build_url should error when TLS auto-enabled but feature not compiled"
+        );
+    }
+
+    #[test]
+    fn test_build_url_uses_redis_scheme_for_loopback_without_tls() {
+        let cfg = RedisConfig {
+            host: "localhost".into(),
+            tls: false,
+            ..RedisConfig::default()
+        };
+        let url = cfg.build_url().unwrap();
+        assert!(
+            url.starts_with("redis://"),
+            "loopback without tls should use redis:// scheme: {}",
+            url
         );
     }
 

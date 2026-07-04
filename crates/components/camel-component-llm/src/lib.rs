@@ -49,15 +49,30 @@ use provider_factory::ProviderMap;
 /// - **Request timeout 30s** — bound total request lifetime. (Per-request
 ///   deadlines set via siumai's `timeout` builder take precedence for
 ///   streaming activity; this is the hard ceiling.)
-pub fn hardened_http_client() -> Result<reqwest::Client, CamelError> {
-    reqwest::Client::builder()
+/// - **Optional DNS pinning** — when `pinned` is `Some((host, addrs))`,
+///   applies `resolve_to_addrs` to close the TOCTOU window between SSRF
+///   validation and the first outbound request (D-M10).
+pub fn hardened_http_client_with_pinning(
+    pinned: Option<(&str, &[std::net::SocketAddr])>,
+) -> Result<reqwest::Client, CamelError> {
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            CamelError::EndpointCreationFailed(format!("llm HTTP client build failed: {e}"))
-        })
+        .timeout(Duration::from_secs(30));
+    if let Some((host, addrs)) = pinned {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
+    builder.build().map_err(|e| {
+        CamelError::EndpointCreationFailed(format!("llm HTTP client build failed: {e}"))
+    })
+}
+
+/// Build a hardened `reqwest::Client` for outbound LLM HTTP traffic, without
+/// DNS pinning.
+///
+/// Convenience wrapper around [`hardened_http_client_with_pinning`].
+pub fn hardened_http_client() -> Result<reqwest::Client, CamelError> {
+    hardened_http_client_with_pinning(None)
 }
 
 pub struct LlmComponent {
