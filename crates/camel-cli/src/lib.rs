@@ -25,7 +25,9 @@ fn native_authenticator(
     };
     let store = camel_auth::native_auth::NativeCredentialStore::try_new(vec![
         camel_auth::NativeCredential {
-            secret: camel_auth::NativeCredentialSecret::Plaintext { value: token },
+            secret: camel_auth::NativeCredentialSecret::Plaintext {
+                value: token.into(),
+            },
             principal,
         },
     ])?;
