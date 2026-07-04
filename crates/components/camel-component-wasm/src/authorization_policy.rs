@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use wasmtime::AsContextMut;
+
 use camel_api::security_policy::store_principal_properties;
 use camel_api::{Exchange, Message};
 use camel_auth::PermissionEvaluatorRegistry;
@@ -145,15 +147,31 @@ impl PermissionEvaluator for WasmAuthorizationPolicyEvaluator {
         let ap_exchange: crate::security_policy_bindings::camel::plugin::types::WasmExchange =
             wasm_exchange.into();
 
-        let result = plugin
-            .call_evaluate(&mut store, &ap_exchange)
-            .await
-            .map_err(|e| {
+        // The async-evaluated bindgen shape returns 3 layers (see the
+        // 3-layer rationale in the original code). peel_concurrent
+        // collapses the outer 2 wasmtime layers to AuthError; the
+        // innermost bindgen WasmError is matched below to produce an
+        // AuthError.
+        let result: Result<
+            Option<String>,
+            crate::security_policy_bindings::camel::plugin::types::WasmError,
+        > = crate::error::peel_concurrent(
+            store
+                .as_context_mut()
+                .run_concurrent(async |accessor| plugin.call_evaluate(accessor, ap_exchange).await)
+                .await,
+            |e| {
                 let wasm_err = self.ctx.classify_error(e);
                 AuthError::ProviderUnavailable(format!(
                     "wasm authorization policy evaluate failed: {wasm_err:?}"
                 ))
-            })?;
+            },
+            |e| {
+                AuthError::ProviderUnavailable(format!(
+                    "wasm authorization policy evaluate trapped: {e}"
+                ))
+            },
+        )?;
 
         match result {
             Ok(None) => Ok(PermissionDecision::Granted),

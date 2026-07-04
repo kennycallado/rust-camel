@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use wasmtime::AsContextMut;
 
 use camel_api::{CamelError, Exchange};
 use camel_bean::BeanProcessor;
@@ -49,11 +50,27 @@ impl BeanProcessor for WasmBean {
 
         let wasm_exchange = serde_bridge::exchange_to_wasm(exchange)?;
         let bean_exchange = wasm_exchange.into();
+        let method_owned = method.to_string();
 
-        let result = plugin
-            .call_invoke(&mut store, method, &bean_exchange)
-            .await
-            .map_err(|e| self.ctx.classify_error(e))?;
+        // 2-layer peel (see error::peel_concurrent). The outer and middle
+        // wasmtime::Error layers are mapped to WasmError uniformly; the
+        // innermost bean::WasmError is matched below to produce a
+        // CamelError.
+        let result: Result<
+            crate::bean_bindings::camel::plugin::types::WasmExchange,
+            crate::bean_bindings::camel::plugin::types::WasmError,
+        > = crate::error::peel_concurrent(
+            store
+                .as_context_mut()
+                .run_concurrent(async |accessor| {
+                    plugin
+                        .call_invoke(accessor, method_owned, bean_exchange)
+                        .await
+                })
+                .await,
+            |e| self.ctx.classify_error(e),
+            |e| WasmError::GuestPanic(format!("bean method '{method}' trapped: {e}")),
+        )?;
 
         match result {
             Ok(bean_result) => {
@@ -77,19 +94,11 @@ impl BeanProcessor for WasmBean {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
 
     // Note: WasmBean::new requires a real WASM file. The WasmConfig propagation
     // chain (limits → from_limits → WasmConfig → create_host_state) is tested at
     // the runtime layer (memory_growth_*, timeout_kills_infinite_loop_guest).
     // All plugin types share that runtime layer, so coverage is implicit.
-
-    fn test_tokio_handle() -> tokio::runtime::Handle {
-        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test runtime"))
-            .handle()
-            .clone()
-    }
 
     #[test]
     fn test_wasm_bean_host_state_creation() {
@@ -98,7 +107,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             0,
             crate::capabilities::WasmCapabilities::default(),
         );

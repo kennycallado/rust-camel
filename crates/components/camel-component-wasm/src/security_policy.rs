@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use wasmtime::AsContextMut;
 
 use camel_api::security_policy::{AuthorizationDecision, SecurityPolicy, principal_from_exchange};
 use camel_api::{CamelError, Exchange};
@@ -49,10 +50,31 @@ impl SecurityPolicy for WasmSecurityPolicy {
         let sp_exchange: crate::security_policy_bindings::camel::plugin::types::WasmExchange =
             wasm_exchange.into();
 
-        let result = plugin
-            .call_evaluate(&mut store, &sp_exchange)
-            .await
-            .map_err(|e| self.ctx.classify_error(e))?;
+        // The async-evaluated bindgen shape returns 3 layers (see
+        // authorization_policy.rs for the rationale). peel_concurrent
+        // collapses the outer 2 wasmtime layers to CamelError; the
+        // innermost bindgen WasmError is matched below to produce a
+        // CamelError.
+        let result: Result<
+            Option<String>,
+            crate::security_policy_bindings::camel::plugin::types::WasmError,
+        > = crate::error::peel_concurrent(
+            store
+                .as_context_mut()
+                .run_concurrent(async |accessor| plugin.call_evaluate(accessor, sp_exchange).await)
+                .await,
+            |e| {
+                let wasm_err = self.ctx.classify_error(e);
+                CamelError::ProcessorError(format!(
+                    "wasm authorization policy evaluate failed: {wasm_err:?}"
+                ))
+            },
+            |e| {
+                CamelError::ProcessorError(format!(
+                    "wasm authorization policy evaluate trapped: {e}"
+                ))
+            },
+        )?;
 
         match result {
             Ok(None) => {
@@ -105,14 +127,6 @@ pub async fn build_security_policy_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
-
-    fn test_tokio_handle() -> tokio::runtime::Handle {
-        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test runtime"))
-            .handle()
-            .clone()
-    }
 
     #[tokio::test]
     async fn test_wasm_security_policy_new_missing_file() {
@@ -138,7 +152,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             0,
             crate::capabilities::WasmCapabilities::default(),
         );

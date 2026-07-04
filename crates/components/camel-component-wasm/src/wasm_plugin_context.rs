@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{AsContextMut, Config, Engine, Store};
 
 use camel_core::Registry;
 
@@ -39,6 +39,12 @@ impl WasmPluginContext {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.epoch_interruption(true);
+        // Required for component-model async imports/exports (the `async func`
+        // WIT feature). Without this, guests that import `camel:plugin/host`
+        // (which contains async `camel-call`/`camel-poll`) fail instantiation
+        // with "matching implementation not found in the linker". Mirrors
+        // `WasmRuntime::new` in runtime.rs.
+        config.concurrency_support(true);
 
         let engine =
             Engine::new(&config).map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
@@ -113,7 +119,6 @@ impl WasmPluginContext {
                 registry,
                 HashMap::new(),
                 ctx.state_store.clone(),
-                tokio::runtime::Handle::current(),
                 ctx.config.max_memory_bytes,
                 ctx.capabilities.clone(),
             );
@@ -131,10 +136,17 @@ impl WasmPluginContext {
 
             let mut config_pairs: Vec<(String, String)> = init_config.into_iter().collect();
             config_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            let init_result: Result<(), String> = plugin
-                .call_init(&mut store, &config_pairs)
-                .await
-                .map_err(|e| WasmError::GuestPanic(e.to_string()))?;
+            // 2-layer peel (see error::peel_concurrent). Both wasmtime
+            // layers are mapped to WasmError; the innermost String
+            // (the WIT result error) is mapped to WasmError::GuestPanic.
+            let init_result: Result<(), String> = crate::error::peel_concurrent(
+                store
+                    .as_context_mut()
+                    .run_concurrent(async |accessor| plugin.call_init(accessor, config_pairs).await)
+                    .await,
+                |e| WasmError::GuestPanic(e.to_string()),
+                |_e| WasmError::GuestPanic("plugin init() trapped".to_string()),
+            )?;
 
             if let Err(e) = init_result {
                 return Err(WasmError::GuestPanic(format!(
@@ -175,7 +187,6 @@ impl WasmPluginContext {
                 registry,
                 HashMap::new(),
                 ctx.state_store.clone(),
-                tokio::runtime::Handle::current(),
                 ctx.config.max_memory_bytes,
                 ctx.capabilities.clone(),
             );
@@ -193,10 +204,17 @@ impl WasmPluginContext {
 
             let mut config_pairs: Vec<(String, String)> = bean_config.into_iter().collect();
             config_pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            let init_result: Result<(), String> = plugin
-                .call_init(&mut store, &config_pairs)
-                .await
-                .map_err(|e| WasmError::GuestPanic(e.to_string()))?;
+            // 2-layer peel (see error::peel_concurrent). Both wasmtime
+            // layers are mapped to WasmError; the innermost String
+            // (the WIT result error) is mapped to WasmError::GuestPanic.
+            let init_result: Result<(), String> = crate::error::peel_concurrent(
+                store
+                    .as_context_mut()
+                    .run_concurrent(async |accessor| plugin.call_init(accessor, config_pairs).await)
+                    .await,
+                |e| WasmError::GuestPanic(e.to_string()),
+                |_e| WasmError::GuestPanic("bean init() trapped".to_string()),
+            )?;
 
             if let Err(e) = init_result {
                 return Err(WasmError::GuestPanic(format!(
@@ -206,10 +224,17 @@ impl WasmPluginContext {
                 )));
             }
 
-            plugin
-                .call_methods(&mut store)
-                .await
-                .map_err(|e| WasmError::GuestPanic(e.to_string()))?
+            // call_methods returns Vec<String> directly. The 2-layer shape
+            // has wasmtime::Error as both layers (no inner WIT result),
+            // so peel_concurrent collapses to a single Result.
+            crate::error::peel_concurrent(
+                store
+                    .as_context_mut()
+                    .run_concurrent(async |accessor| plugin.call_methods(accessor).await)
+                    .await,
+                |e| WasmError::GuestPanic(e.to_string()),
+                |e| WasmError::GuestPanic(format!("call_methods trapped: {e}")),
+            )?
         };
 
         Ok((ctx, methods))
@@ -220,7 +245,6 @@ impl WasmPluginContext {
             self.registry.clone(),
             properties,
             self.state_store.clone(),
-            tokio::runtime::Handle::current(),
             self.config.max_memory_bytes,
             self.capabilities.clone(),
         );

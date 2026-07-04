@@ -51,7 +51,7 @@ interface source-host {
         stopped,
     }
 
-    /// Blocking accept — returns the next HTTP request, or none if cancelled.
+    /// Non-blocking accept — returns the next HTTP request, or none if cancelled.
     accept-http: func(listener: borrow<http-listener>)
         -> result<option<http-request>, wasm-error>;
 

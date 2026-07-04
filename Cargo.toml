@@ -181,8 +181,8 @@ ts-rs = "12"
 
 # WASM dependencies
 wit-bindgen = "0.58"
-wasmtime = { version = "45", features = ["component-model"] }
-wasmtime-wasi = "45"
+wasmtime = { version = "46.0.1", features = ["component-model", "component-model-async"] }
+wasmtime-wasi = "46.0.1"
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.32", features = ["trace", "logs", "metrics"] }

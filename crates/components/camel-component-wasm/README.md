@@ -13,6 +13,7 @@ WASM plugin component for rust-camel — loads and executes WASM modules as rout
 - **Tower Service**: Implements `Service<Exchange>` for async processing
 - **Exchange Properties**: Per-request properties accessible from WASM via host functions
 - **Persistent State**: `host_store`/`host_load` for per-endpoint state that survives across `process()` calls
+- **Streaming Bodies**: `Body::Stream` crosses the WASM boundary via WASI 0.3 `stream<u8>` without materialization
 - **Production Hardening**: Epoch-based timeouts, memory limits, structured trap classification, automatic recovery
 
 ## Installation
@@ -331,16 +332,43 @@ pub struct WasmHostState {
     pub wasi: WasiCtx,                  // WASI system calls
     pub properties: HashMap<String, Value>, // Exchange properties
     pub registry: Arc<Mutex<Registry>>, // Component registry
-    pub call_depth: u32,                // Recursion guard (0 = allowed)
+    pub call_depth: Arc<AtomicUsize>,   // Recursion guard (0 = allowed)
     pub state_store: StateStore,        // Per-endpoint persistent state
     pub limits: StoreLimits,            // Memory allocation limits
+    pub capabilities: WasmCapabilities, // Feature flags (streaming, etc.)
 }
 ```
 
 Each request gets a new `WasmHostState` with:
 - Exchange properties copied from the incoming `Exchange`
-- `call_depth` reset to 0
+- `call_depth` reset to 0 (`AtomicUsize::new(0)`)
 - Fresh WASI context with stderr inheritance
+
+## Streaming Bodies
+
+The WASM component supports `Body::Stream` — streaming bodies cross the WASM boundary via WASI 0.3 `stream<u8>` without materialization in WASM linear memory.
+
+### How it works
+
+1. Host extracts the `BoxStream` from `Body::Stream` before `run_concurrent`
+2. Inside `run_concurrent`, `assemble_stream_body` creates a `StreamReader`
+3. The guest reads chunks via `StreamReader::read(buf)` in a loop
+4. A terminal `future<result<_, wasm-error>>` signals completion or error
+5. A no-progress watchdog aborts stalled streams after a configurable timeout
+
+### Resource limits
+
+- `max_bytes`: per-stream byte limit. Overflow → terminal error + stream drop.
+- `CancellationToken`: host can abort the stream mid-flight.
+- `no_progress_timeout`: watchdog fires if no chunks are produced within the window.
+
+### Guest migration
+
+See `MIGRATION-ASYNC.md` for instructions on migrating sync guests to async exports.
+
+### Example
+
+See `examples/wasm-streaming-plugin/` for a byte-counter guest that reads a streaming body without materializing it.
 
 ## Testing
 

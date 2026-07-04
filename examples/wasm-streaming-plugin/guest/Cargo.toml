@@ -1,0 +1,13 @@
+[package]
+name = "streaming-plugin-guest"
+description = "WASM streaming byte-counter guest — reads stream<u8> incrementally"
+version = "0.8.1"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.58"

@@ -35,12 +35,13 @@ bytes.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 tokio-util.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
 camel-component-file.workspace = true
 camel-component-log.workspace = true
-futures = { workspace = true }
+opentelemetry = { workspace = true }
 tempfile = { workspace = true }
 wat = "1"
 

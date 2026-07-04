@@ -162,6 +162,74 @@ impl From<WasmError> for CamelError {
     }
 }
 
+/// Map a WIT bindings [`plugin::WasmError`] to the canonical crate-level [`WasmError`].
+///
+/// Both the `call_process` and `process_streaming_exchange` paths encounter
+/// the WIT-level error type after [`peel_concurrent`] strips the wasmtime
+/// error layers. This remaps the four WIT variants to the crate's own
+/// error variants, collapsing `Timeout` into `GuestPanic` (the guest timed
+/// out — not a host-level epoch deadline).
+pub fn map_plugin_error(wasm_err: crate::bindings::camel::plugin::types::WasmError) -> WasmError {
+    use crate::bindings::camel::plugin::types::WasmError as PluginWasmError;
+    match wasm_err {
+        PluginWasmError::ProcessorError(s) => WasmError::GuestPanic(s),
+        PluginWasmError::TypeConversion(s) => WasmError::TypeConversion(s),
+        PluginWasmError::Io(s) => WasmError::Io(s),
+        PluginWasmError::Timeout => WasmError::GuestPanic("guest timeout".into()),
+    }
+}
+
+/// `?` ergonomics for the bindgen trappable layer: when a generated
+/// `call_*(...)` returns `Result<_, wasmtime::Error>` (the trappable wrapper
+/// around a WIT `result<_, _>`), this impl lets `?` convert the trap to
+/// the canonical `WasmError::GuestPanic` (further classified later via
+/// `classify_error` if more precision is needed).
+impl From<wasmtime::Error> for WasmError {
+    fn from(err: wasmtime::Error) -> Self {
+        WasmError::GuestPanic(err.to_string())
+    }
+}
+
+/// Peel the layers of a `run_concurrent` result.
+///
+/// The bindgen-generated `async | store` shape with a WIT `result<_, _>`
+/// produces a 2-layer result from `Store::run_concurrent`:
+///
+/// ```text
+///     Result<Result<T, Inner>, wasmtime::Error>
+///      ─────────────────┬─────────────────────  outer wasmtime::Error:
+///      │              │                       infrastructure trap, epoch
+///      │              │                       interrupt, store access
+///      │              │                       failure
+///      │              └────────────────────  inner `Inner`:
+///      │                                      WIT result, guest trap,
+///      │                                      or domain error
+///      └─────────────────────  success: T
+/// ```
+///
+/// Both layers carry errors that the caller wants to collapse into a
+/// single target error type (`E`). The bindgen shapes vary across
+/// per-world modules (plugin, bean, security-policy) and the inner
+/// type varies too (String, plugin::WasmError, bean::WasmError,
+/// security_policy::WasmError), so the helper takes two closures —
+/// one for each layer — and is fully generic over `T`, `Inner`, and `E`.
+///
+/// This replaces the copy-pasted 6+ `match outer { ... }` / `match
+/// middle { ... }` chain at the call sites in `runtime.rs`,
+/// `wasm_plugin_context.rs`, `bean.rs`, `authorization_policy.rs`, and
+/// `security_policy.rs`.
+pub fn peel_concurrent<T, Inner, E>(
+    result: Result<Result<T, Inner>, wasmtime::Error>,
+    map_outer: impl FnOnce(wasmtime::Error) -> E,
+    map_inner: impl FnOnce(Inner) -> E,
+) -> Result<T, E> {
+    match result {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(inner)) => Err(map_inner(inner)),
+        Err(outer) => Err(map_outer(outer)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +391,30 @@ mod tests {
 
         let err = WasmError::GuestPanic("msg".to_string());
         assert_eq!(err.plugin_name(), None);
+    }
+
+    // ── peel_concurrent helper (I1) ──────────────────────────────────────
+
+    #[test]
+    fn peel_concurrent_ok_outer_ok_inner_returns_t() {
+        let r: Result<Result<i32, String>, wasmtime::Error> = Ok(Ok(42));
+        let result = peel_concurrent(r, |_| 0, |_| -1);
+        assert_eq!(result, Ok(42));
+    }
+
+    #[test]
+    fn peel_concurrent_ok_outer_err_inner_runs_map_inner() {
+        let r: Result<Result<i32, String>, wasmtime::Error> = Ok(Err("inner".to_string()));
+        let result = peel_concurrent(r, |_| "outer".to_string(), |s| s.to_uppercase());
+        assert_eq!(result, Err("INNER".to_string()));
+    }
+
+    #[test]
+    fn peel_concurrent_err_outer_runs_map_outer() {
+        // Construct a fake wasmtime::Error via the Into function.
+        let wt_err = wasmtime::Error::msg("outer trap");
+        let r: Result<Result<i32, String>, wasmtime::Error> = Err(wt_err);
+        let result = peel_concurrent(r, |_| "outer-mapped".to_string(), |_| "inner".to_string());
+        assert_eq!(result, Err("outer-mapped".to_string()));
     }
 }

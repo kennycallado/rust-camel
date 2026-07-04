@@ -1,0 +1,21 @@
+[package]
+name = "wasm-streaming-plugin"
+description = "WASM streaming body example — plugin receives a stream and counts bytes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-wasm.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+bytes.workspace = true
+futures.workspace = true
+
+[lints]
+workspace = true

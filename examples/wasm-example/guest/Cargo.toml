@@ -1,0 +1,13 @@
+[package]
+name = "echo-plugin"
+description = "WASM echo plugin — body round-trip for rust-camel"
+version = "0.8.1"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.58"

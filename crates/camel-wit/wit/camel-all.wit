@@ -11,6 +11,16 @@ package camel:plugin;
 /// These types mirror the host's Exchange/Message/Body but exclude
 /// non-serializable fields (streams, Arc<dyn Any>, OpenTelemetry Context).
 interface types {
+    /// Handle for a streaming body crossing the WASM boundary.
+    /// %stream escapes the `stream` WIT keyword.
+    record stream-body-handle {
+        %stream: stream<u8>,
+        terminal: future<result<_, wasm-error>>,
+        size-hint: option<u64>,
+        content-type: option<string>,
+        origin: option<string>,
+    }
+
     /// Body content variants crossing the WASM boundary.
     variant wasm-body {
         empty,
@@ -18,6 +28,7 @@ interface types {
         bytes(list<u8>),
         json(string),
         xml(string),
+        %stream(stream-body-handle),
     }
 
     /// Exchange pattern: fire-and-forget or request-reply.
@@ -59,13 +70,13 @@ interface types {
 interface host {
     use types.{wasm-error};
 
-    /// Invoke any Camel endpoint synchronously.
+    /// Invoke any Camel endpoint asynchronously.
     /// TODO(WIT-009): Only string payloads are supported; binary/bytes support is deferred.
-    camel-call: func(uri: string, payload: string) -> result<string, wasm-error>;
+    camel-call: async func(uri: string, payload: string) -> result<string, wasm-error>;
 
-    /// Poll an endpoint for a message synchronously (pull model).
+    /// Poll an endpoint for a message asynchronously (pull model).
     /// Returns the body as a string, or an error on timeout/failure.
-    camel-poll: func(uri: string, timeout-ms: u32) -> result<string, wasm-error>;
+    camel-poll: async func(uri: string, timeout-ms: u32) -> result<string, wasm-error>;
 
     /// Read a property from the host Exchange.
     get-property: func(key: string) -> option<string>;
@@ -89,7 +100,7 @@ world plugin {
 
     use types.{wasm-exchange, wasm-error};
 
-    export process: func(exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
+    export process: async func(exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
     export init: func() -> result<_, string>;
 }
 
@@ -102,7 +113,7 @@ world bean {
 
     use types.{wasm-exchange, wasm-error};
 
-    export invoke: func(method: string, exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
+    export invoke: async func(method: string, exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
     export methods: func() -> list<string>;
     export init: func(config: list<tuple<string, string>>) -> result<_, string>;
 }

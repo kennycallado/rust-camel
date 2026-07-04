@@ -35,6 +35,7 @@ pub mod source_bindings;
 pub mod source_consumer;
 pub mod source_host;
 pub mod state_store;
+pub mod stream_bridge;
 pub mod wasm_plugin_context;
 
 pub use authorization_policy::{WasmAuthorizationPolicyEvaluator, build_permission_registry};

@@ -1,13 +1,18 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{AsContextMut, Config, Engine, Store};
 use wasmtime_wasi::WasiCtxBuilder;
 
+use camel_api::{Body, Exchange};
 use camel_core::Registry;
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::bindings::Plugin;
 use crate::bindings::camel::plugin::types::WasmExchange;
@@ -18,10 +23,9 @@ pub struct WasmHostState {
     pub wasi: wasmtime_wasi::WasiCtx,
     pub properties: HashMap<String, Value>,
     pub registry: Arc<std::sync::Mutex<Registry>>,
-    pub call_depth: u32,
+    pub call_depth: Arc<std::sync::atomic::AtomicUsize>,
     pub limits: wasmtime::StoreLimits,
     pub state_store: crate::state_store::StateStore,
-    pub tokio_handle: tokio::runtime::Handle,
     pub capabilities: crate::capabilities::WasmCapabilities,
 }
 
@@ -54,6 +58,7 @@ impl WasmRuntime {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.epoch_interruption(true);
+        config.concurrency_support(true);
 
         let engine =
             Engine::new(&config).map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
@@ -109,7 +114,6 @@ impl WasmRuntime {
         registry: Arc<std::sync::Mutex<Registry>>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
-        tokio_handle: tokio::runtime::Handle,
         max_memory_bytes: u64,
         capabilities: crate::capabilities::WasmCapabilities,
     ) -> WasmHostState {
@@ -125,10 +129,9 @@ impl WasmRuntime {
             wasi: WasiCtxBuilder::new().inherit_stderr().build(),
             properties,
             registry,
-            call_depth: 0,
+            call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             limits,
             state_store,
-            tokio_handle,
             capabilities,
         }
     }
@@ -146,13 +149,11 @@ impl WasmRuntime {
         registry: Arc<std::sync::Mutex<Registry>>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
-        tokio_handle: tokio::runtime::Handle,
     ) -> Result<(), WasmError> {
         let host_state = Self::create_host_state(
             registry,
             properties,
             state_store,
-            tokio_handle,
             self.config.max_memory_bytes,
             crate::capabilities::WasmCapabilities::from_scheme_list(
                 &self.config.allow_call_schemes,
@@ -166,10 +167,19 @@ impl WasmRuntime {
             .await
             .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
 
-        let result: Result<(), String> = plugin
-            .call_init(&mut store)
-            .await
-            .map_err(|e| self.classify_error(e))?;
+        // The async-with-trappable WIT shape produces a 2-layer Result:
+        //   run_concurrent Result<inner, wasmtime::Error>     (outer)
+        //   trappable     Result<Result<(), String>, wasmtime::Error>  (inner)
+        // Both layers carry wasmtime::Error — use peel_concurrent to map
+        // each to WasmError uniformly.
+        let result: Result<(), String> = crate::error::peel_concurrent(
+            store
+                .as_context_mut()
+                .run_concurrent(async |accessor| plugin.call_init(accessor).await)
+                .await,
+            |e| self.classify_error(e),
+            |e| self.classify_error(e),
+        )?;
 
         if let Err(e) = result {
             tracing::debug!(
@@ -186,14 +196,12 @@ impl WasmRuntime {
         registry: Arc<std::sync::Mutex<Registry>>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
-        tokio_handle: tokio::runtime::Handle,
         exchange: WasmExchange,
     ) -> Result<WasmExchange, WasmError> {
         let host_state = Self::create_host_state(
             registry,
             properties,
             state_store,
-            tokio_handle,
             self.config.max_memory_bytes,
             crate::capabilities::WasmCapabilities::from_scheme_list(
                 &self.config.allow_call_schemes,
@@ -207,23 +215,182 @@ impl WasmRuntime {
             .await
             .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
 
-        let result: Result<WasmExchange, crate::bindings::camel::plugin::types::WasmError> = plugin
-            .call_process(&mut store, &exchange)
-            .await
-            .map_err(|e| self.classify_error(e))?;
+        // 2-layer peel — outer (run_concurrent) and middle (trappable) both
+        // carry wasmtime::Error, mapped via the same classify_error closure.
+        // The innermost plugin::WasmError is left as-is and remapped below
+        // to the canonical WasmError variants.
+        let result: Result<WasmExchange, crate::bindings::camel::plugin::types::WasmError> =
+            crate::error::peel_concurrent(
+                store
+                    .as_context_mut()
+                    .run_concurrent(async |accessor| plugin.call_process(accessor, exchange).await)
+                    .await,
+                |e| self.classify_error(e),
+                |e| self.classify_error(e),
+            )?;
 
-        result.map_err(|wasm_err| match wasm_err {
-            crate::bindings::camel::plugin::types::WasmError::ProcessorError(s) => {
-                WasmError::GuestPanic(s)
+        result.map_err(crate::error::map_plugin_error)
+    }
+
+    /// Process an [`Exchange`] through the WASM guest with streaming-body
+    /// support and a no-progress watchdog.
+    ///
+    /// Unlike [`call_process`](Self::call_process), which takes a fully
+    /// materialised [`WasmExchange`], this accepts a host [`Exchange`] and
+    /// handles a `Body::Stream` input specially:
+    ///
+    /// 1. The byte stream is drained out of the `Arc<Mutex<Option<BoxStream>>>`
+    ///    **before** `run_concurrent` — that mutex is `tokio::sync::Mutex`,
+    ///    which cannot be locked from the concurrent runtime thread.
+    /// 2. Inside `run_concurrent`, the stream is re-attached as a
+    ///    guest-readable `stream<u8>` via
+    ///    [`crate::stream_bridge::assemble_stream_body`].
+    ///
+    /// A **no-progress watchdog** wraps the invocation: if no stream chunk is
+    /// shipped within `no_progress_timeout`, the call fails with a timeout.
+    /// Progress is signalled by a [`Notify`] shared with
+    /// [`crate::stream_bridge::BoxStreamProducer`], which pings it per shipped
+    /// chunk. `cancel` is forwarded to the producer (host-side cancellation
+    /// ends the stream promptly); `max_bytes` caps total bytes before an
+    /// overflow error.
+    ///
+    /// On success returns the guest's [`WasmExchange`] (same shape as
+    /// `call_process`) so callers can apply [`crate::serde_bridge::wasm_to_exchange`].
+    #[allow(clippy::too_many_arguments)] // mirrors call_process + 3 streaming knobs
+    pub async fn process_streaming_exchange(
+        &self,
+        registry: Arc<std::sync::Mutex<Registry>>,
+        properties: HashMap<String, Value>,
+        state_store: crate::state_store::StateStore,
+        exchange: Exchange,
+        cancel: CancellationToken,
+        max_bytes: u64,
+        no_progress_timeout: Duration,
+    ) -> Result<WasmExchange, WasmError> {
+        let host_state = Self::create_host_state(
+            registry,
+            properties,
+            state_store,
+            self.config.max_memory_bytes,
+            crate::capabilities::WasmCapabilities::from_scheme_list(
+                &self.config.allow_call_schemes,
+            ),
+        );
+        let mut store = Store::new(&self.engine, host_state);
+        store.limiter(|state| &mut state.limits);
+        store.set_epoch_deadline(self.config.epoch_deadline());
+
+        let plugin = Plugin::instantiate_async(&mut store, &self.component, &self.linker)
+            .await
+            .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+
+        // Take the body out of the exchange so any stream can be extracted
+        // before run_concurrent. Non-stream bodies are restored for the
+        // closure to route through exchange_to_wasm (→ body_to_wasm), exactly
+        // like call_process.
+        let mut exchange = exchange;
+        let taken_body = std::mem::replace(&mut exchange.input.body, Body::Empty);
+        let mut stream_parts = match taken_body {
+            Body::Stream(stream_body) => {
+                let (stream, metadata) =
+                    crate::stream_bridge::extract_stream_body(stream_body).await;
+                Some((stream, metadata))
             }
-            crate::bindings::camel::plugin::types::WasmError::TypeConversion(s) => {
-                WasmError::TypeConversion(s)
+            other => {
+                exchange.input.body = other;
+                None
             }
-            crate::bindings::camel::plugin::types::WasmError::Io(s) => WasmError::Io(s),
-            crate::bindings::camel::plugin::types::WasmError::Timeout => {
-                WasmError::GuestPanic("guest timeout".to_string())
+        };
+
+        // Shared progress heartbeat: the producer pings it per shipped chunk;
+        // the watchdog below consumes it to reset its no-progress window.
+        let progress_notify = Arc::new(Notify::new());
+
+        // Drive the guest under run_concurrent. The stream body is assembled
+        // INSIDE the closure because assemble_stream_body needs the &Accessor
+        // that only exists there.
+        let processing = async {
+            let run_result = store
+                .as_context_mut()
+                .run_concurrent(async |accessor| {
+                    let wasm_exchange = if let Some((stream_opt, metadata)) = stream_parts.take() {
+                        let body = match stream_opt {
+                            Some(stream) => crate::stream_bridge::assemble_stream_body(
+                                accessor,
+                                stream,
+                                &metadata,
+                                cancel.clone(),
+                                max_bytes,
+                                progress_notify.clone(),
+                            )?,
+                            None => {
+                                return Err(wasmtime::Error::msg(
+                                    "wasm: stream body already consumed before guest invocation",
+                                ));
+                            }
+                        };
+                        crate::serde_bridge::exchange_to_wasm_with_body(&exchange, body)
+                            .map_err(|e| wasmtime::Error::msg(e.to_string()))?
+                    } else {
+                        crate::serde_bridge::exchange_to_wasm(&exchange)
+                            .map_err(|e| wasmtime::Error::msg(e.to_string()))?
+                    };
+                    plugin.call_process(accessor, wasm_exchange).await
+                })
+                .await;
+
+            let peeled: Result<WasmExchange, crate::bindings::camel::plugin::types::WasmError> =
+                crate::error::peel_concurrent(
+                    run_result,
+                    |e| self.classify_error(e),
+                    |e| self.classify_error(e),
+                )?;
+
+            peeled.map_err(crate::error::map_plugin_error)
+        };
+
+        let result =
+            WasmRuntime::drive_with_watchdog(processing, &progress_notify, no_progress_timeout)
+                .await;
+        if result.is_err() {
+            cancel.cancel();
+        }
+        result
+    }
+
+    /// No-progress watchdog: drive `run_fut` to completion, but fail with a
+    /// [`WasmError::GuestPanic`] timeout if `max_duration` elapses without
+    /// `progress_notify` firing.
+    ///
+    /// Each notification resets the no-progress window. This guards against
+    /// guests (or upstream producers) that stall indefinitely without ever
+    /// producing another chunk — the epoch deadline alone does not cover that
+    /// case, because the guest may be cooperatively awaiting the stream
+    /// rather than burning cycles.
+    ///
+    /// On the stream path, [`crate::stream_bridge::BoxStreamProducer`] calls
+    /// `notify_one()` per shipped chunk; the resulting wakeup re-arms the
+    /// timer via the `continue` branch.
+    async fn drive_with_watchdog<F, T>(
+        run_fut: F,
+        progress_notify: &Notify,
+        max_duration: Duration,
+    ) -> Result<T, WasmError>
+    where
+        F: Future<Output = Result<T, WasmError>>,
+    {
+        let mut run_fut = std::pin::pin!(run_fut);
+        loop {
+            tokio::select! {
+                r = &mut run_fut => return r,
+                _ = progress_notify.notified() => continue,
+                _ = tokio::time::sleep(max_duration) => {
+                    return Err(WasmError::GuestPanic(
+                        "wasm: no-progress timeout (stream stalled)".into(),
+                    ));
+                }
             }
-        })
+        }
     }
 
     pub fn module_path(&self) -> &Path {
@@ -234,14 +401,6 @@ impl WasmRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
-
-    fn test_tokio_handle() -> tokio::runtime::Handle {
-        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test runtime"))
-            .handle()
-            .clone()
-    }
 
     #[test]
     fn test_wasm_host_state_creation() {
@@ -252,14 +411,16 @@ mod tests {
             wasi: WasiCtxBuilder::new().inherit_stderr().build(),
             properties: props,
             registry,
-            call_depth: 0,
+            call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),
-            tokio_handle: test_tokio_handle(),
             capabilities: crate::capabilities::WasmCapabilities::default(),
         };
         assert!(state.properties.is_empty());
-        assert_eq!(state.call_depth, 0);
+        assert_eq!(
+            state.call_depth.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
 
     #[test]
@@ -271,7 +432,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             0,
             crate::capabilities::WasmCapabilities::default(),
         );
@@ -310,7 +470,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             64 * 1024, // 64 KiB cap
             crate::capabilities::WasmCapabilities::default(),
         );
@@ -357,7 +516,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             128 * 1024,
             crate::capabilities::WasmCapabilities::default(),
         );
@@ -385,7 +543,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             0,
             crate::capabilities::WasmCapabilities::default(),
         );
@@ -403,7 +560,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             0,
             crate::capabilities::WasmCapabilities::default(),
         );
@@ -426,7 +582,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             1024, // 1 KiB cap; threaded through create_host_state
             crate::capabilities::WasmCapabilities::default(),
         );
@@ -434,6 +589,111 @@ mod tests {
         store.limiter(|state| &mut state.limits);
         // Verifies store.limiter accepts WasmHostState::limits after the new
         // create_host_state wires the memory cap through StoreLimitsBuilder.
+    }
+
+    // ── Non-stream passthrough (M2) ────────────────────────────────────
+    //
+    // Drives exchange_to_wasm_with_body on the path that process_streaming_exchange
+    // uses for non-stream bodies — proves the Body::Text path is equivalent
+    // to what call_process would produce.
+
+    #[test]
+    fn test_exchange_to_wasm_with_body_text_passthrough() {
+        let msg = camel_api::Message::new("hello-world");
+        let exchange = camel_api::Exchange::new(msg);
+
+        let wasm = crate::serde_bridge::exchange_to_wasm_with_body(
+            &exchange,
+            crate::bindings::camel::plugin::types::WasmBody::Text("hello-world".into()),
+        )
+        .expect("exchange_to_wasm_with_body must succeed");
+
+        assert!(
+            matches!(
+                wasm.input.body,
+                crate::bindings::camel::plugin::types::WasmBody::Text(ref s)
+                if s == "hello-world"
+            ),
+            "non-stream passthrough must preserve Text body"
+        );
+    }
+
+    // ── drive_with_watchdog (no-progress watchdog) ───────────────────────
+
+    #[tokio::test]
+    async fn watchdog_times_out_on_stalled_future() {
+        // A future that never resolves and never reports progress must trip
+        // the no-progress timeout.
+        use std::future::pending;
+
+        let notify = Arc::new(Notify::new());
+        let result: Result<(), WasmError> =
+            WasmRuntime::drive_with_watchdog(pending(), &notify, Duration::from_millis(50)).await;
+        let err = result.expect_err("stalled future must time out");
+        assert!(
+            err.to_string().contains("no-progress"),
+            "expected no-progress timeout, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn watchdog_passes_through_immediate_completion() {
+        // A future that resolves right away must return its value untouched,
+        // even with a long watchdog window still pending.
+        let notify = Arc::new(Notify::new());
+        let result: Result<i32, WasmError> =
+            WasmRuntime::drive_with_watchdog(async { Ok(42) }, &notify, Duration::from_secs(60))
+                .await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn watchdog_passes_through_guest_error() {
+        // A future that resolves with an error must surface that error, not a
+        // timeout — the watchdog only fires on NO progress.
+        let notify = Arc::new(Notify::new());
+        let result: Result<(), WasmError> = WasmRuntime::drive_with_watchdog(
+            async { Err(WasmError::GuestPanic("boom".into())) },
+            &notify,
+            Duration::from_secs(60),
+        )
+        .await;
+        let err = result.expect_err("guest error must propagate");
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watchdog_resets_on_progress_avoids_timeout() {
+        // A slow future (longer than the watchdog window) that receives
+        // periodic progress pings must NOT time out — each ping resets the
+        // no-progress timer.
+        let notify = Arc::new(Notify::new());
+        let pinger_notify = notify.clone();
+
+        // Pinger: fire 4 progress notifications 25ms apart, then stop. The
+        // future completes at 120ms; without resets the 40ms watchdog would
+        // fire at ~40ms.
+        let pinger = tokio::spawn(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                pinger_notify.notify_one();
+            }
+        });
+
+        let result: Result<(), WasmError> = WasmRuntime::drive_with_watchdog(
+            async {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                Ok(())
+            },
+            &notify,
+            Duration::from_millis(40),
+        )
+        .await;
+        pinger.await.expect("pinger joins");
+        assert!(
+            result.is_ok(),
+            "progress pings should have reset the watchdog, got: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -473,7 +733,6 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
-            test_tokio_handle(),
             0, // no memory cap — this test is about timeout, not memory
             crate::capabilities::WasmCapabilities::default(),
         );

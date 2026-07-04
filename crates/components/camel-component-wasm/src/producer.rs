@@ -5,17 +5,38 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{debug, warn};
 
-use camel_api::{CamelError, Exchange};
+use camel_api::body::DEFAULT_MATERIALIZE_LIMIT;
+use camel_api::{Body, CamelError, Exchange};
 use camel_core::Registry;
 
 fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
     CamelError::ProcessorError(format!("lock poisoned: {}", e))
 }
+
+/// Returns `true` when the body is a streaming body that requires the
+/// asynchronous streaming host bridge (`process_streaming_exchange`).
+///
+/// Non-stream variants (`Empty`, `Text`, `Bytes`, `Json`, `Xml`) route to
+/// the synchronous `call_process` path instead.
+pub(crate) fn is_streaming(body: &Body) -> bool {
+    matches!(body, Body::Stream(_))
+}
+
+/// Default per-stream byte cap passed to `process_streaming_exchange`.
+/// Mirrors `camel_api::DEFAULT_MATERIALIZE_LIMIT`; re-stated as `u64` because
+/// the streaming host bridge takes bytes as `u64`.
+const DEFAULT_STREAM_MAX_BYTES: u64 = DEFAULT_MATERIALIZE_LIMIT as u64;
+
+/// Default watchdog window: if the guest makes no progress shipping/receiving
+/// stream chunks for this duration, the call is cancelled.
+const DEFAULT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Standalone runtime init — takes owned Arcs so the resulting future is `Send`
 /// without requiring `WasmProducer: Sync`.
@@ -36,12 +57,7 @@ async fn ensure_runtime_fn(
     let runtime = Arc::new(WasmRuntime::new(&module_path, config).await?);
 
     runtime
-        .call_init_once(
-            registry,
-            HashMap::new(),
-            state_store,
-            tokio::runtime::Handle::current(),
-        )
+        .call_init_once(registry, HashMap::new(), state_store)
         .await?;
 
     {
@@ -75,6 +91,17 @@ pub struct WasmProducer {
     /// existing `runtime: Arc<Mutex<Option<Arc<WasmRuntime>>>>` field above
     /// which holds the WASM runtime instance, not the observability surface.
     observability: Arc<dyn camel_component_api::RuntimeObservability>,
+    /// Producer-local cancellation root. A child token is derived per `call`
+    /// and handed to `process_streaming_exchange` so a stuck guest can be
+    /// cancelled without disturbing sibling in-flight calls.
+    ///
+    /// Root cancellation (graceful shutdown of all in-flight streams) is
+    /// deferred — currently only the per-call watchdog triggers cancellation.
+    cancel: CancellationToken,
+    /// Per-stream byte cap forwarded to `process_streaming_exchange`.
+    max_bytes: u64,
+    /// Watchdog window forwarded to `process_streaming_exchange`.
+    no_progress_timeout: Duration,
 }
 
 impl Clone for WasmProducer {
@@ -90,6 +117,9 @@ impl Clone for WasmProducer {
             pending_permit: None,
             acquire_fut: None,
             observability: Arc::clone(&self.observability),
+            cancel: self.cancel.clone(),
+            max_bytes: self.max_bytes,
+            no_progress_timeout: self.no_progress_timeout,
         }
     }
 }
@@ -113,6 +143,9 @@ impl WasmProducer {
             pending_permit: None,
             acquire_fut: None,
             observability,
+            cancel: CancellationToken::new(),
+            max_bytes: DEFAULT_STREAM_MAX_BYTES,
+            no_progress_timeout: DEFAULT_NO_PROGRESS_TIMEOUT,
         }
     }
 
@@ -167,6 +200,12 @@ impl Service<Exchange> for WasmProducer {
         let state_store = self.state_store.clone();
         let state_store2 = self.state_store.clone();
         let init_failed = Arc::clone(&self.init_failed);
+        // Streaming knobs: clone the root token (cheap) and derive a child
+        // per call inside the future; the byte cap and watchdog window are
+        // Copy types.
+        let cancel_root = self.cancel.clone();
+        let max_bytes = self.max_bytes;
+        let no_progress_timeout = self.no_progress_timeout;
         Box::pin(async move {
             tracing::debug!(component = "wasm", "wasm call started");
             let _permit = permit;
@@ -194,37 +233,84 @@ impl Service<Exchange> for WasmProducer {
                 }
             };
 
-            let wasm_exchange = exchange_to_wasm(&exchange)?;
+            // Route on body shape: a Stream body must traverse the streaming
+            // host bridge (run_concurrent + BoxStreamProducer) because the
+            // guest reads bytes asynchronously; anything else stays on the
+            // synchronous call_process path.
+            let is_stream = is_streaming(&exchange.input.body);
 
-            let result = runtime
-                .call_process(
-                    registry2,
-                    exchange.properties.clone(),
-                    state_store2,
-                    tokio::runtime::Handle::current(),
-                    wasm_exchange,
-                )
-                .await;
+            if is_stream {
+                // `process_streaming_exchange` takes the Exchange by value and
+                // extracts the stream internally, so clone first to preserve
+                // the non-body fields (extensions, otel_context, correlation_id)
+                // that `wasm_to_exchange` does not overwrite. The clone shares
+                // the stream's Arc handle, but its body is discarded by the
+                // merge anyway.
+                let mut out = exchange.clone();
+                let cancel = cancel_root.child_token();
+                let result = runtime
+                    .process_streaming_exchange(
+                        registry2,
+                        exchange.properties.clone(),
+                        state_store2,
+                        exchange,
+                        cancel,
+                        max_bytes,
+                        no_progress_timeout,
+                    )
+                    .await;
 
-            match result {
-                Ok(wasm_result) => {
-                    let mut out = exchange;
-                    wasm_to_exchange(wasm_result, &mut out);
-                    debug!(
-                        module = %module_path.display(),
-                        "WASM producer completed successfully"
-                    );
-                    Ok(out)
+                match result {
+                    Ok(wasm_result) => {
+                        wasm_to_exchange(wasm_result, &mut out);
+                        debug!(
+                            module = %module_path.display(),
+                            "WASM streaming producer completed successfully"
+                        );
+                        Ok(out)
+                    }
+                    Err(e) => {
+                        // log-policy: handler-owned
+                        warn!(
+                            component = "wasm",
+                            error = %e,
+                            "wasm streaming call failed"
+                        );
+                        Err(e.into())
+                    }
                 }
-                Err(e) => {
-                    // log-policy: handler-owned
-                    warn!(component = "wasm", error = %e, "wasm call failed");
-                    warn!(
-                        module = %module_path.display(),
-                        error = %e,
-                        "WASM guest error"
-                    );
-                    Err(e.into())
+            } else {
+                let wasm_exchange = exchange_to_wasm(&exchange)?;
+
+                let result = runtime
+                    .call_process(
+                        registry2,
+                        exchange.properties.clone(),
+                        state_store2,
+                        wasm_exchange,
+                    )
+                    .await;
+
+                match result {
+                    Ok(wasm_result) => {
+                        let mut out = exchange;
+                        wasm_to_exchange(wasm_result, &mut out);
+                        debug!(
+                            module = %module_path.display(),
+                            "WASM producer completed successfully"
+                        );
+                        Ok(out)
+                    }
+                    Err(e) => {
+                        // log-policy: handler-owned
+                        warn!(component = "wasm", error = %e, "wasm call failed");
+                        warn!(
+                            module = %module_path.display(),
+                            error = %e,
+                            "WASM guest error"
+                        );
+                        Err(e.into())
+                    }
                 }
             }
         })
@@ -327,5 +413,65 @@ mod tests {
         drop(permit);
         let second = producer.poll_ready(&mut cx);
         assert!(matches!(second, Poll::Ready(Ok(()))));
+    }
+
+    #[test]
+    fn test_streaming_defaults_set_on_construction() {
+        let producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            WasmConfig::default(),
+            test_rt(),
+        );
+        assert_eq!(producer.max_bytes, DEFAULT_STREAM_MAX_BYTES);
+        assert_eq!(producer.no_progress_timeout, DEFAULT_NO_PROGRESS_TIMEOUT);
+        // Root token is not yet cancelled; a child must also be live.
+        assert!(!producer.cancel.is_cancelled());
+        let child = producer.cancel.child_token();
+        assert!(!child.is_cancelled());
+        producer.cancel.cancel();
+        assert!(child.is_cancelled(), "child must observe parent cancel");
+    }
+
+    #[test]
+    fn test_is_streaming_all_variants() {
+        // Property: Stream → true, all other variants → false.
+        // Locks the discriminator so a future refactor that widens the
+        // stream set must also update this test.
+        use bytes::Bytes;
+        use camel_api::{StreamBody, StreamMetadata};
+
+        let stream_body = Body::Stream(StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(
+                futures::stream::empty(),
+            )))),
+            metadata: StreamMetadata::default(),
+        });
+        assert!(is_streaming(&stream_body));
+
+        assert!(!is_streaming(&Body::Empty));
+        assert!(!is_streaming(&Body::Text("x".into())));
+        assert!(!is_streaming(&Body::Bytes(Bytes::from_static(b"x"))));
+        assert!(!is_streaming(&Body::Json(serde_json::Value::Null)));
+        assert!(!is_streaming(&Body::Xml("<x/>".into())));
+    }
+
+    #[test]
+    fn test_clone_preserves_streaming_knobs() {
+        let mut producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            WasmConfig::default(),
+            test_rt(),
+        );
+        producer.max_bytes = 2048;
+        producer.no_progress_timeout = Duration::from_secs(7);
+        let cloned = producer.clone();
+        assert_eq!(cloned.max_bytes, 2048);
+        assert_eq!(cloned.no_progress_timeout, Duration::from_secs(7));
+        // Cloned token shares the same cancellation lineage.
+        let child = cloned.cancel.child_token();
+        producer.cancel.cancel();
+        assert!(child.is_cancelled());
     }
 }

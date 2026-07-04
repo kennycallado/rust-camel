@@ -314,6 +314,20 @@ fn to_plugin_wasm_exchange(
             source::WasmBody::Bytes(b) => plugin::WasmBody::Bytes(b),
             source::WasmBody::Json(s) => plugin::WasmBody::Json(s),
             source::WasmBody::Xml(s) => plugin::WasmBody::Xml(s),
+            // Unreachable in Phase 1: source-world stream handles cannot cross
+            // into the plugin world yet. The host→guest direction goes through
+            // assemble_stream_body inside run_concurrent. If reached, the
+            // stream body is silently dropped — guest→host streaming is Phase 2.
+            source::WasmBody::Stream(_) => {
+                debug_assert!(
+                    false,
+                    "source::WasmBody::Stream should not reach plugin-world conversion"
+                );
+                tracing::warn!(
+                    "stream body unsupported in source→plugin conversion — data dropped"
+                );
+                plugin::WasmBody::Empty
+            }
         }
     };
 

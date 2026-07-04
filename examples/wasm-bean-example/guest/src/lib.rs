@@ -26,7 +26,7 @@ impl Guest for TextUtils {
         vec!["upper".into(), "reverse".into(), "last".into()]
     }
 
-    fn invoke(method: String, mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
+    async fn invoke(method: String, mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
         match method.as_str() {
             "upper" => {
                 let text = extract_text(&exchange.input.body);
