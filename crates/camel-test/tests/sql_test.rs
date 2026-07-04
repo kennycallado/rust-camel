@@ -108,7 +108,7 @@ async fn producer_select() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .to(format!(
-            "sql:SELECT * FROM test_select ORDER BY id?db_url={}",
+            "sql:SELECT * FROM test_select ORDER BY id?db_url={}&sslMode=disable",
             conn_str
         ))
         .to("mock:result")
@@ -177,7 +177,7 @@ async fn producer_insert() {
         .set_header("name", Value::String("Charlie".into()))
         .set_header("value", Value::Number(300.into()))
         .to(format!(
-            "sql:INSERT INTO test_insert (name, value) VALUES (:#name, :#value)?db_url={}",
+            "sql:INSERT INTO test_insert (name, value) VALUES (:#name, :#value)?db_url={}&sslMode=disable",
             conn_str
         ))
         .to("mock:result")
@@ -244,7 +244,7 @@ async fn producer_update() {
         .set_header("new_value", Value::Number(999.into()))
         .set_header("target_name", Value::String("Dave".into()))
         .to(format!(
-            "sql:UPDATE test_update SET value = :#new_value WHERE name = :#target_name?db_url={}",
+            "sql:UPDATE test_update SET value = :#new_value WHERE name = :#target_name?db_url={}&sslMode=disable",
             conn_str
         ))
         .to("mock:result")
@@ -310,7 +310,7 @@ async fn producer_delete() {
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("target_name", Value::String("ToDelete".into()))
         .to(format!(
-            "sql:DELETE FROM test_delete WHERE name = :#target_name?db_url={}",
+            "sql:DELETE FROM test_delete WHERE name = :#target_name?db_url={}&sslMode=disable",
             conn_str
         ))
         .to("mock:result")
@@ -375,7 +375,7 @@ async fn producer_select_one() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .to(format!(
-            "sql:SELECT * FROM test_select_one WHERE name = 'SingleRow'?db_url={}&outputType=SelectOne",
+            "sql:SELECT * FROM test_select_one WHERE name = 'SingleRow'?db_url={}&sslMode=disable&outputType=SelectOne",
             conn_str
         ))
         .to("mock:result")
@@ -436,7 +436,7 @@ async fn producer_batch() {
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(Value::from(batch_body))
         .to(format!(
-            "sql:INSERT INTO test_batch (name, value) VALUES (#, #)?db_url={}&batch=true",
+            "sql:INSERT INTO test_batch (name, value) VALUES (#, #)?db_url={}&sslMode=disable&batch=true",
             conn_str
         ))
         .to("mock:result")
@@ -502,7 +502,7 @@ async fn producer_noop() {
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(Body::Text("OriginalBody".into()))
         .to(format!(
-            "sql:UPDATE test_noop SET value = 999 WHERE name = 'NoOpTest'?db_url={}&noop=true",
+            "sql:UPDATE test_noop SET value = 999 WHERE name = 'NoOpTest'?db_url={}&sslMode=disable&noop=true",
             conn_str
         ))
         .to("mock:result")
@@ -573,7 +573,7 @@ async fn consumer_polling() {
         .await;
 
     let sql_uri = format!(
-        "sql:SELECT * FROM test_consumer WHERE name = 'ConsumerRow'?db_url={}&delay=100&initialDelay=50",
+        "sql:SELECT * FROM test_consumer WHERE name = 'ConsumerRow'?db_url={}&sslMode=disable&delay=100&initialDelay=50",
         conn_str
     );
     let consumer_route = RouteBuilder::from(sql_uri.as_str())
@@ -645,7 +645,7 @@ async fn consumer_on_consume() {
         .await;
 
     let sql_uri = format!(
-        "sql:SELECT * FROM test_on_consume?db_url={}&delay=100&initialDelay=50&onConsume=INSERT INTO processed_rows (id, name) VALUES (:#id, :#name)",
+        "sql:SELECT * FROM test_on_consume?db_url={}&sslMode=disable&delay=100&initialDelay=50&onConsume=INSERT INTO processed_rows (id, name) VALUES (:#id, :#name)",
         conn_str
     );
     let consumer_route = RouteBuilder::from(sql_uri.as_str())
@@ -699,7 +699,7 @@ async fn consumer_empty_result() {
         .await;
 
     let sql_uri = format!(
-        "sql:SELECT * FROM test_empty?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=false",
+        "sql:SELECT * FROM test_empty?db_url={}&sslMode=disable&delay=100&initialDelay=50&routeEmptyResultSet=false",
         conn_str
     );
     let consumer_route = RouteBuilder::from(sql_uri.as_str())
@@ -757,7 +757,7 @@ async fn consumer_on_consume_failed() {
         .await;
 
     let sql_uri = format!(
-        "sql:SELECT * FROM test_on_consume_failed_src?db_url={}&delay=100&initialDelay=50\
+        "sql:SELECT * FROM test_on_consume_failed_src?db_url={}&sslMode=disable&delay=100&initialDelay=50\
          &onConsumeFailed=INSERT INTO failed_rows (id, name) VALUES (:#id, :#name)",
         conn_str
     );
@@ -810,7 +810,7 @@ async fn consumer_empty_result_routed() {
         .await;
 
     let sql_uri = format!(
-        "sql:SELECT * FROM test_empty_routed?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=true&useIterator=false",
+        "sql:SELECT * FROM test_empty_routed?db_url={}&sslMode=disable&delay=100&initialDelay=50&routeEmptyResultSet=true&useIterator=false",
         conn_str
     );
     let consumer_route = RouteBuilder::from(sql_uri.as_str())
