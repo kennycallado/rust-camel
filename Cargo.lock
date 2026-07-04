@@ -1589,6 +1589,7 @@ dependencies = [
  "camel-component-api",
  "hex",
  "rumqttc-v4-next",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",

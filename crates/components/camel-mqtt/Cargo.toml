@@ -30,6 +30,7 @@ hex                 = { workspace = true }
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
 tokio               = { workspace = true, features = ["test-util", "macros"] }
+rustls              = { version = "0.23", features = ["ring"] }
 
 [features]
 default = ["tls"]

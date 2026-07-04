@@ -34,6 +34,8 @@ mod tests {
     #[test]
     #[cfg(feature = "tls")]
     fn build_tls_config_with_no_ca_cert() {
+        // rustls 0.23 requires a process-level CryptoProvider.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         // Relies on a readable host cert store: `TlsConfiguration::default()` calls
         // `load_native_certs().expect(...)` internally, so this panics (not fails
         // cleanly) on a minimal CI image lacking ca-certificates.
