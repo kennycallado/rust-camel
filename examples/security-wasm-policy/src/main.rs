@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         M2mClient {
             client_id: "alice".to_string(),
             secret: M2mClientSecret::Plaintext {
-                value: "alice-secret".to_string(),
+                value: "alice-secret".to_string().into(),
             },
             scopes: vec!["read".to_string(), "write".to_string()],
             roles: vec!["admin".to_string(), "user".to_string()],
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         M2mClient {
             client_id: "bob".to_string(),
             secret: M2mClientSecret::Plaintext {
-                value: "bob-secret".to_string(),
+                value: "bob-secret".to_string().into(),
             },
             scopes: vec!["read".to_string()],
             roles: vec!["viewer".to_string()],
@@ -132,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
 
     let policy =
-        AuthenticatedWasmPolicy::new(validator, alice_token.access_token.clone(), wasm_policy);
+        AuthenticatedWasmPolicy::new(validator, alice_token.access_token.to_string(), wasm_policy);
 
     println!("\n=== WASM Security Policy Example ===");
     println!("Plugin:    role-check.wasm (authorization-policy world)");

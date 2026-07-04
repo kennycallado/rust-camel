@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         M2mClient {
             client_id: "alice".to_string(),
             secret: M2mClientSecret::Plaintext {
-                value: "alice-secret".to_string(),
+                value: "alice-secret".to_string().into(),
             },
             scopes: vec!["read".to_string(), "write".to_string()],
             roles: vec!["admin".to_string(), "user".to_string()],
@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         M2mClient {
             client_id: "bob".to_string(),
             secret: M2mClientSecret::Plaintext {
-                value: "bob-secret".to_string(),
+                value: "bob-secret".to_string().into(),
             },
             scopes: vec!["read".to_string()],
             roles: vec!["viewer".to_string()],
@@ -152,13 +152,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut alice_exchange = Exchange::default();
     alice_exchange.input.headers.insert(
         "authorization".to_string(),
-        Value::String(format!("Bearer {}", alice_token.access_token)), // allow-secret
+        Value::String(format!("Bearer {}", &*alice_token.access_token)), // allow-secret
     );
 
     let mut bob_exchange = Exchange::default();
     bob_exchange.input.headers.insert(
         "authorization".to_string(),
-        Value::String(format!("Bearer {}", bob_token.access_token)), // allow-secret
+        Value::String(format!("Bearer {}", &*bob_token.access_token)), // allow-secret
     );
 
     let alice_decision = admin_policy.evaluate(&mut alice_exchange).await;
@@ -198,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_component(LogComponent::new());
 
     let role_policy = RolePolicy::new(vec!["admin".to_string()], true, false, validator.clone());
-    let wrapped = BearerInjectingPolicy::new(alice_token.access_token.clone(), role_policy);
+    let wrapped = BearerInjectingPolicy::new(alice_token.access_token.to_string(), role_policy);
 
     let secured_route = RouteBuilder::from("timer:tick?period=2000&repeatCount=2")
         .route_id("admin-only-route")
