@@ -612,10 +612,10 @@ mod tests {
                     "host": "0.0.0.0",
                     "port": 8080,
                     "path": "/users",
-                    "operations": {
-                        "get": { "path": "/{id}", "operation_id": "getUser", "to": "bean:svc" },
-                        "post": { "path": "/", "operation_id": "createUser", "to": "bean:create" }
-                    }
+                    "operations": [
+                        { "method": "GET", "path": "/{id}", "operation_id": "getUser", "to": "bean:svc" },
+                        { "method": "POST", "path": "/", "operation_id": "createUser", "to": "bean:create" }
+                    ]
                 }
             ]
         }"#;
@@ -639,15 +639,15 @@ mod tests {
             "rest": [
                 {
                     "path": "/users",
-                    "operations": {
-                        "get": { "path": "/{id}", "operation_id": "a", "to": "bean:x" }
-                    }
+                    "operations": [
+                        { "method": "GET", "path": "/{id}", "operation_id": "a", "to": "bean:x" }
+                    ]
                 },
                 {
                     "path": "/users",
-                    "operations": {
-                        "get": { "path": "/{id}", "operation_id": "b", "to": "bean:y" }
-                    }
+                    "operations": [
+                        { "method": "GET", "path": "/{id}", "operation_id": "b", "to": "bean:y" }
+                    ]
                 }
             ]
         }"#;

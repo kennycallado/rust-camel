@@ -5,19 +5,6 @@ use crate::route_ast::{
     SetHeaderStep, ToStep, UnmarshalStep,
 };
 
-/// Lower a REST resource into N RouteDslRoute entries (one per verb+path).
-pub fn lower_rest_to_routes(rest: &RouteDslRest) -> Result<Vec<RouteDslRoute>, CamelError> {
-    validate_rest_block(rest)?;
-    let mut routes = Vec::with_capacity(rest.operations.len());
-
-    for (verb, op) in &rest.operations {
-        let route = lower_operation(rest, verb, op)?;
-        routes.push(route);
-    }
-
-    Ok(routes)
-}
-
 /// Lower ALL REST blocks in a document into route entries, enforcing the
 /// cross-block validation rules the spec mandates (§6.3 + §7.2, review C3):
 ///
@@ -25,9 +12,8 @@ pub fn lower_rest_to_routes(rest: &RouteDslRest) -> Result<Vec<RouteDslRoute>, C
 ///   claiming the same listener, verb, and full path are rejected. The key is
 ///   scoped per listener: the same `(method, path)` on two different
 ///   `host:port` combinations are independent servers and NOT a duplicate
-///   (spec §6.3). (Within a single `rest:` block this is impossible:
-///   `operations` is a `BTreeMap` keyed by verb, so each verb appears at most
-///   once. The check catches cross-block collisions on the same listener.)
+///   (spec §6.3). With `operations` now a `Vec`, within-block collisions are
+///   also possible and are caught by this same `registered` check.
 /// - **Ambiguous templates** — on the SAME listener, two templates of the SAME
 ///   method, SAME segment count, SAME specificity (literal count), that could
 ///   BOTH match some request are rejected at compile time. The canonical case
@@ -48,12 +34,13 @@ pub fn lower_all_rest_to_routes(
 
     for rest in rest_blocks {
         validate_rest_block(rest)?;
-        for (verb, op) in &rest.operations {
-            let route = lower_operation(rest, verb, op)?;
-            let verb_upper = verb.to_uppercase();
+        for op in &rest.operations {
+            let route = lower_operation(rest, &op.method, op)?;
+            let verb_upper = op.method.to_uppercase();
+            let verb_lc = op.method.to_lowercase();
             let full_path = build_full_path(&rest.path, &op.path);
             let segs = parse_path_template(&full_path);
-            let op_label = op.operation_id.as_deref().unwrap_or(verb);
+            let op_label = op.operation_id.as_deref().unwrap_or(&verb_lc);
 
             // Duplicate (host, port, method, path) tuple on the SAME listener?
             if registered.iter().any(|(h, p, m, s)| {
@@ -200,10 +187,10 @@ fn lower_operation(
     verb: &str,
     op: &RouteDslRestOperation,
 ) -> Result<RouteDslRoute, CamelError> {
-    // Validate the HTTP verb key against the closed set (spec §6.2/§6.3,
-    // review I5). Comparison is case-insensitive so an uppercase YAML key
-    // like `GET:` is accepted; `verb_lc` feeds the lowercase-keyed helpers
-    // below, `verb.to_uppercase()` feeds the from-URI.
+    // Validate the HTTP method against the closed set (spec §6.2/§6.3,
+    // review I5). Comparison is case-insensitive so an uppercase `method`
+    // value like `GET` is accepted; `verb_lc` feeds the lowercase-keyed
+    // helpers below, `verb.to_uppercase()` feeds the from-URI.
     const KNOWN_VERBS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
     let verb_lc = verb.to_lowercase();
     if !KNOWN_VERBS.contains(&verb_lc.as_str()) {
@@ -439,35 +426,49 @@ mod tests {
     use super::*;
 
     fn make_rest(op_id: &str, verb: &str, path: &str, to: &str) -> RouteDslRest {
-        let mut ops = BTreeMap::new();
-        ops.insert(
-            verb.to_string(),
-            RouteDslRestOperation {
-                path: path.to_string(),
-                operation_id: Some(op_id.to_string()),
-                to: Some(to.to_string()),
-                steps: vec![],
-                consumes: "application/json".to_string(),
-                produces: "application/json".to_string(),
-                success_status: None,
-                request_schema: None,
-                response: None,
-                description: None,
-                parameters: BTreeMap::new(),
-            },
-        );
+        let operations = vec![RouteDslRestOperation {
+            method: verb.to_string(),
+            path: path.to_string(),
+            operation_id: Some(op_id.to_string()),
+            to: Some(to.to_string()),
+            steps: vec![],
+            consumes: "application/json".to_string(),
+            produces: "application/json".to_string(),
+            success_status: None,
+            request_schema: None,
+            response: None,
+            description: None,
+            parameters: BTreeMap::new(),
+        }];
         RouteDslRest {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/users".to_string(),
-            operations: ops,
+            operations,
+        }
+    }
+
+    fn make_op(operation_id: &str) -> RouteDslRestOperation {
+        RouteDslRestOperation {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            operation_id: Some(operation_id.to_string()),
+            to: Some(format!("direct:{operation_id}")),
+            steps: vec![],
+            consumes: "application/json".to_string(),
+            produces: "application/json".to_string(),
+            success_status: None,
+            request_schema: None,
+            response: None,
+            description: None,
+            parameters: BTreeMap::new(),
         }
     }
 
     #[test]
     fn lower_single_get_operation() {
         let rest = make_rest("getUser", "get", "/{id}", "bean:userService");
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].id, "getUser");
         assert!(routes[0].from.contains("httpMethod=GET"));
@@ -478,7 +479,7 @@ mod tests {
     #[test]
     fn lower_post_has_201_default() {
         let rest = make_rest("createUser", "post", "/", "bean:createUser");
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         // The default status (201 for POST) should be injected as the FIRST step
         // (default-first, user-overrides-after semantics — reviewer fix I1)
         let first = routes[0].steps.first().unwrap();
@@ -494,7 +495,7 @@ mod tests {
     #[test]
     fn lower_get_defaults_to_200() {
         let rest = make_rest("getUser", "get", "/{id}", "bean:userService");
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         let first = routes[0].steps.first().unwrap();
         match first {
             RouteDslStep::SetHeader(h) => {
@@ -507,7 +508,7 @@ mod tests {
     #[test]
     fn lower_delete_defaults_to_204() {
         let rest = make_rest("deleteUser", "delete", "/{id}", "bean:deleteUser");
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         let first = routes[0].steps.first().unwrap();
         match first {
             RouteDslStep::SetHeader(h) => {
@@ -520,19 +521,18 @@ mod tests {
     #[test]
     fn lower_rejects_to_and_steps_both() {
         let mut rest = make_rest("op", "get", "/", "bean:svc");
-        rest.operations.get_mut("get").unwrap().steps =
-            vec![RouteDslStep::To(crate::route_ast::ToStep {
-                to: "bean:other".into(),
-            })];
-        let result = lower_rest_to_routes(&rest);
+        rest.operations[0].steps = vec![RouteDslStep::To(crate::route_ast::ToStep {
+            to: "bean:other".into(),
+        })];
+        let result = lower_all_rest_to_routes(&[rest]);
         assert!(result.is_err());
     }
 
     #[test]
     fn lower_rejects_non_json_consumes() {
         let mut rest = make_rest("op", "get", "/", "bean:svc");
-        rest.operations.get_mut("get").unwrap().consumes = "application/xml".to_string();
-        let result = lower_rest_to_routes(&rest);
+        rest.operations[0].consumes = "application/xml".to_string();
+        let result = lower_all_rest_to_routes(&[rest]);
         assert!(result.is_err());
     }
 
@@ -582,8 +582,8 @@ mod tests {
         // The shared check_duplicate_route_ids helper (now used by both the
         // YAML and JSON parsers — review I2) enforces uniqueness across the
         // full lowered route set.
-        let mut all = lower_rest_to_routes(&rest1).unwrap();
-        all.extend(lower_rest_to_routes(&rest2).unwrap());
+        let mut all = lower_all_rest_to_routes(&[rest1]).unwrap();
+        all.extend(lower_all_rest_to_routes(&[rest2]).unwrap());
         assert!(check_duplicate_route_ids(&all).is_err());
     }
 
@@ -596,28 +596,25 @@ mod tests {
         path: &str,
         to: &str,
     ) -> RouteDslRest {
-        let mut ops = BTreeMap::new();
-        ops.insert(
-            verb.to_string(),
-            RouteDslRestOperation {
-                path: path.to_string(),
-                operation_id: Some(op_id.to_string()),
-                to: Some(to.to_string()),
-                steps: vec![],
-                consumes: "application/json".to_string(),
-                produces: "application/json".to_string(),
-                success_status: None,
-                request_schema: None,
-                response: None,
-                description: None,
-                parameters: BTreeMap::new(),
-            },
-        );
+        let operations = vec![RouteDslRestOperation {
+            method: verb.to_string(),
+            path: path.to_string(),
+            operation_id: Some(op_id.to_string()),
+            to: Some(to.to_string()),
+            steps: vec![],
+            consumes: "application/json".to_string(),
+            produces: "application/json".to_string(),
+            success_status: None,
+            request_schema: None,
+            response: None,
+            description: None,
+            parameters: BTreeMap::new(),
+        }];
         RouteDslRest {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: base.to_string(),
-            operations: ops,
+            operations,
         }
     }
 
@@ -721,7 +718,7 @@ mod tests {
     fn lower_rejects_empty_base_path() {
         let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
         rest.path = "".to_string();
-        let err = lower_rest_to_routes(&rest)
+        let err = lower_all_rest_to_routes(&[rest])
             .err()
             .expect("empty base path must be rejected");
         assert!(err.to_string().contains("path"), "got: {err}");
@@ -731,7 +728,7 @@ mod tests {
     fn lower_rejects_whitespace_only_base_path() {
         let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
         rest.path = "   ".to_string();
-        assert!(lower_rest_to_routes(&rest).is_err());
+        assert!(lower_all_rest_to_routes(&[rest]).is_err());
     }
 
     #[test]
@@ -740,9 +737,9 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/users".to_string(),
-            operations: BTreeMap::new(),
+            operations: vec![],
         };
-        let err = lower_rest_to_routes(&rest)
+        let err = lower_all_rest_to_routes(&[rest])
             .err()
             .expect("empty operations must be rejected");
         assert!(err.to_string().contains("operations"), "got: {err}");
@@ -765,7 +762,7 @@ mod tests {
         // lowering must inject Content-Type: application/json as the final
         // step so the HTTP finaliser advertises JSON (spec §8.1).
         let rest = make_rest("getUser", "get", "/{id}", "bean:svc");
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         let last = routes[0].steps.last().expect("steps must be non-empty");
         match last {
             RouteDslStep::SetHeader(h) => {
@@ -784,7 +781,7 @@ mod tests {
         // The Content-Type header MUST come after marshal (which produces the
         // Body::Text wire form) so it overrides the text/plain inference.
         let rest = make_rest("getUser", "get", "/{id}", "bean:svc");
-        let steps = &lower_rest_to_routes(&rest).unwrap()[0].steps;
+        let steps = &lower_all_rest_to_routes(&[rest]).unwrap()[0].steps;
         let marshal_idx = steps
             .iter()
             .position(|s| matches!(s, RouteDslStep::Marshal(_)))
@@ -803,7 +800,7 @@ mod tests {
     #[test]
     fn lower_rejects_unknown_verb() {
         let rest = make_rest("op", "geet", "/", "bean:svc");
-        let err = lower_rest_to_routes(&rest).err();
+        let err = lower_all_rest_to_routes(&[rest]).err();
         assert!(err.is_some(), "unknown verb must be rejected");
         let msg = format!("{}", err.unwrap());
         assert!(msg.contains("unknown HTTP verb 'geet'"), "got: {msg}");
@@ -814,7 +811,7 @@ mod tests {
         // Case-insensitive verb key; lowercase helpers must still pick the
         // right defaults (POST → 201).
         let rest = make_rest("createUser", "POST", "/", "bean:create");
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         assert!(routes[0].from.contains("httpMethod=POST"));
         let first = match routes[0].steps.first().unwrap() {
             RouteDslStep::SetHeader(h) => h,
@@ -828,14 +825,14 @@ mod tests {
     #[test]
     fn lower_rejects_empty_path_param() {
         let rest = make_rest_with_base("op", "get", "/users", "/{}", "bean:svc");
-        let err = lower_rest_to_routes(&rest).err();
+        let err = lower_all_rest_to_routes(&[rest]).err();
         assert!(err.is_some(), "empty {{}} param must be rejected");
     }
 
     #[test]
     fn lower_rejects_duplicate_path_param() {
         let rest = make_rest_with_base("op", "get", "/users", "/{id}/{id}", "bean:svc");
-        let err = lower_rest_to_routes(&rest).err();
+        let err = lower_all_rest_to_routes(&[rest]).err();
         assert!(err.is_some(), "duplicate path param must be rejected");
     }
 
@@ -851,7 +848,7 @@ mod tests {
     #[test]
     fn check_duplicate_route_ids_detects_collision() {
         let rest = make_rest("getUser", "get", "/{id}", "bean:svc");
-        let mut routes = lower_rest_to_routes(&rest).unwrap();
+        let mut routes = lower_all_rest_to_routes(&[rest]).unwrap();
         // Duplicate the single route → collision.
         let dup = routes[0].clone();
         routes.push(dup);
@@ -864,7 +861,7 @@ mod tests {
     fn rest_lowering_omits_schema_when_absent() {
         // No request_schema → UnmarshalStep.schema is None.
         let rest = make_rest("createUser", "post", "/", "bean:create");
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         let unmarshal = routes[0]
             .steps
             .iter()
@@ -885,8 +882,8 @@ mod tests {
             "properties": { "name": { "type": "string" } },
             "required": ["name"]
         });
-        rest.operations.get_mut("post").unwrap().request_schema = Some(schema.clone());
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        rest.operations[0].request_schema = Some(schema.clone());
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         let unmarshal = routes[0]
             .steps
             .iter()
@@ -902,13 +899,122 @@ mod tests {
     fn rest_lowering_skips_schema_for_verb_without_body() {
         // GET (no body) → no unmarshal step at all, regardless of schema.
         let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
-        rest.operations.get_mut("get").unwrap().request_schema =
-            Some(serde_json::json!({ "type": "object" }));
-        let routes = lower_rest_to_routes(&rest).unwrap();
+        rest.operations[0].request_schema = Some(serde_json::json!({ "type": "object" }));
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         let has_unmarshal = routes[0]
             .steps
             .iter()
             .any(|s| matches!(s, RouteDslStep::Unmarshal(_)));
         assert!(!has_unmarshal, "GET must not emit unmarshal");
+    }
+
+    // ── Within-block duplicate & ambiguous detection (rc-y1xa Task 2) ──
+
+    #[test]
+    fn within_block_identical_verb_path_is_duplicate() {
+        let rest = RouteDslRest {
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            path: "/api".to_string(),
+            operations: vec![
+                RouteDslRestOperation {
+                    method: "GET".to_string(),
+                    path: "/health".to_string(),
+                    to: Some("direct:a".to_string()),
+                    ..make_op("a")
+                },
+                RouteDslRestOperation {
+                    method: "GET".to_string(),
+                    path: "/health".to_string(),
+                    to: Some("direct:b".to_string()),
+                    ..make_op("b")
+                },
+            ],
+        };
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("expected duplicate error");
+        assert!(
+            err.to_string().contains("duplicate"),
+            "expected duplicate error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn within_block_same_shape_distinct_param_is_ambiguous() {
+        let rest = RouteDslRest {
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            path: "/api".to_string(),
+            operations: vec![
+                RouteDslRestOperation {
+                    method: "GET".to_string(),
+                    path: "/x/{id}".to_string(),
+                    to: Some("direct:a".to_string()),
+                    ..make_op("a")
+                },
+                RouteDslRestOperation {
+                    method: "GET".to_string(),
+                    path: "/x/{name}".to_string(),
+                    to: Some("direct:b".to_string()),
+                    ..make_op("b")
+                },
+            ],
+        };
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("expected ambiguous error");
+        assert!(
+            err.to_string().contains("ambiguous"),
+            "expected ambiguous error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_operations_list_is_rejected() {
+        let rest = RouteDslRest {
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            path: "/api".to_string(),
+            operations: vec![],
+        };
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("expected error for empty operations");
+        assert!(err.to_string().contains("operations"), "got: {err}");
+    }
+
+    #[test]
+    fn multiple_ops_same_verb_preserve_declaration_order() {
+        let rest = RouteDslRest {
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            path: "/api".to_string(),
+            operations: vec![
+                RouteDslRestOperation {
+                    method: "GET".to_string(),
+                    path: "/conteos".to_string(),
+                    ..make_op("getConteos")
+                },
+                RouteDslRestOperation {
+                    method: "GET".to_string(),
+                    path: "/health".to_string(),
+                    ..make_op("healthCheck")
+                },
+            ],
+        };
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert_eq!(routes.len(), 2);
+        // Declaration order, NOT alphabetical: conteos before health.
+        assert!(
+            routes[0].id.contains("getConteos"),
+            "expected first id to contain 'getConteos', got: {}",
+            routes[0].id
+        );
+        assert!(
+            routes[1].id.contains("healthCheck"),
+            "expected second id to contain 'healthCheck', got: {}",
+            routes[1].id
+        );
     }
 }

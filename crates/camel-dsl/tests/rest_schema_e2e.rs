@@ -43,7 +43,7 @@ rest:
     port: 8080
     path: /api/users
     operations:
-      post:
+      - method: POST
         operation_id: createUser
         consumes: application/json
         produces: application/json
@@ -205,4 +205,46 @@ fn rest_request_schema_e2e_yaml_to_compiled_step_is_wired() {
     // Sanity: the schema variable matches the YAML we wrote, so any future
     // drift in either side of this test is caught here.
     assert_eq!(user_schema()["required"][0], "name");
+}
+
+const MULTI_OP_REST_YAML: &str = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api/estado
+    operations:
+      - method: GET
+        path: /health
+        operation_id: healthCheck
+        to: direct:healthCheck
+      - method: GET
+        path: /conteos
+        operation_id: getConteos
+        to: direct:getConteos
+"#;
+
+#[test]
+fn rest_multi_op_same_verb_lowers_to_distinct_routes() {
+    // Feature headline: two GET endpoints under ONE rest block (previously
+    // impossible) parse and lower end-to-end into two distinct routes.
+    let routes = parse_yaml(MULTI_OP_REST_YAML).expect("multi-op YAML must parse + compile");
+    assert_eq!(
+        routes.len(),
+        2,
+        "two GETs in one block must produce two routes"
+    );
+    // Declaration order preserved, not alphabetical: health before conteos.
+    // `RouteDefinition` exposes `from_uri()` (returns &str including the sub-path);
+    // its fields are pub(crate), so use the accessor.
+    let froms: Vec<String> = routes.iter().map(|r| r.from_uri().to_string()).collect();
+    assert!(
+        froms[0].contains("health"),
+        "first route must be /health, got: {}",
+        froms[0]
+    );
+    assert!(
+        froms[1].contains("conteos"),
+        "second route must be /conteos, got: {}",
+        froms[1]
+    );
 }

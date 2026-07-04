@@ -1052,16 +1052,19 @@ pub struct RouteDslRest {
     /// Base path for all operations in this block (e.g. `/api/users`).
     #[serde(default)]
     pub path: String,
-    /// Operations keyed by HTTP verb (`get`, `post`, `put`, `delete`, etc.).
+    /// Operations for this block, each carrying its own HTTP method.
     #[serde(default)]
-    pub operations: BTreeMap<String, RouteDslRestOperation>,
+    pub operations: Vec<RouteDslRestOperation>,
 }
 
-/// A single REST operation (identified by HTTP verb key in the `operations` map).
+/// A single REST operation (identified by its `method` field).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RouteDslRestOperation {
+    /// HTTP method for this operation (e.g. `GET`, `post`). Case-insensitive;
+    /// validated against the known-verb set during lowering.
+    pub method: String,
     /// Sub-path relative to the parent RouteDslRest path.
     #[serde(default = "default_operation_path")]
     pub path: String,
@@ -1524,12 +1527,12 @@ rest:
     port: 8080
     path: /users
     operations:
-      get:
+      - method: GET
         path: /{id}
         operation_id: getUser
         to: bean:userService
         produces: application/json
-      post:
+      - method: POST
         operation_id: createUser
         consumes: application/json
         produces: application/json
@@ -1544,13 +1547,15 @@ rest:
         assert_eq!(rest.path, "/users");
         assert_eq!(rest.operations.len(), 2);
 
-        let get_op = rest.operations.get("get").unwrap();
+        let get_op = &rest.operations[0];
+        assert_eq!(get_op.method, "GET");
         assert_eq!(get_op.path, "/{id}");
         assert_eq!(get_op.operation_id.as_deref(), Some("getUser"));
         assert_eq!(get_op.to.as_deref(), Some("bean:userService"));
         assert_eq!(get_op.produces, "application/json");
 
-        let post_op = rest.operations.get("post").unwrap();
+        let post_op = &rest.operations[1];
+        assert_eq!(post_op.method, "POST");
         assert_eq!(post_op.operation_id.as_deref(), Some("createUser"));
         assert_eq!(post_op.consumes, "application/json");
         assert_eq!(post_op.produces, "application/json");
@@ -1564,7 +1569,7 @@ rest:
 rest:
   - path: /api
     operations:
-      get:
+      - method: GET
         to: direct:handler
 "#;
         let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
@@ -1572,7 +1577,8 @@ rest:
         assert_eq!(rest.host, "0.0.0.0");
         assert_eq!(rest.port, 8080);
         assert_eq!(rest.path, "/api");
-        let op = rest.operations.get("get").unwrap();
+        let op = &rest.operations[0];
+        assert_eq!(op.method, "GET");
         assert_eq!(op.path, "/");
         assert_eq!(op.consumes, "application/json");
         assert_eq!(op.produces, "application/json");
@@ -1598,11 +1604,11 @@ routes:
 rest:
   - path: /users
     operations:
-      get:
+      - method: GET
         to: direct:handleUsers
   - path: /orders
     operations:
-      get:
+      - method: GET
         to: direct:handleOrders
 "#;
         let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
@@ -1638,7 +1644,7 @@ rest:
     port: 3000
     path: /api
     operations:
-      get:
+      - method: GET
         to: direct:apiHandler
 "#;
         let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
@@ -1647,7 +1653,8 @@ rest:
         assert_eq!(parsed.rest[0].host, "localhost");
         assert_eq!(parsed.rest[0].port, 3000);
         assert_eq!(parsed.rest[0].path, "/api");
-        assert!(parsed.rest[0].operations.contains_key("get"));
+        assert_eq!(parsed.rest[0].operations.len(), 1);
+        assert_eq!(parsed.rest[0].operations[0].method, "GET");
     }
 
     #[test]
@@ -1656,7 +1663,7 @@ rest:
 rest:
   - path: /api
     operations:
-      get:
+      - method: GET
         path: /items
         to: direct:listItems
         response:
@@ -1671,7 +1678,7 @@ rest:
 "#;
         let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         let rest = &parsed.rest[0];
-        let op = rest.operations.get("get").unwrap();
+        let op = &rest.operations[0];
         let resp = op.response.as_ref().unwrap();
         assert_eq!(resp.description.as_deref(), Some("A list of items"));
         assert!(resp.schema.is_some());
@@ -1684,7 +1691,7 @@ rest:
 rest:
   - path: /api
     operations:
-      post:
+      - method: POST
         path: /create
         to: direct:create
         request_schema:
@@ -1699,7 +1706,7 @@ rest:
             type: integer
 "#;
         let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
-        let op = parsed.rest[0].operations.get("post").unwrap();
+        let op = &parsed.rest[0].operations[0];
         assert!(op.request_schema.is_some());
         assert!(op.parameters.contains_key("limit"));
         assert!(op.parameters.contains_key("offset"));
@@ -1711,26 +1718,26 @@ rest:
 rest:
   - path: /api
     operations:
-      get:
+      - method: GET
         path: /items
         to: direct:getItems
-      post:
+      - method: POST
         path: /items
         to: direct:createItem
-      put:
+      - method: PUT
         path: /items/{id}
         to: direct:updateItem
-      delete:
+      - method: DELETE
         path: /items/{id}
         to: direct:deleteItem
 "#;
         let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         let ops = &parsed.rest[0].operations;
         assert_eq!(ops.len(), 4);
-        assert!(ops.contains_key("get"));
-        assert!(ops.contains_key("post"));
-        assert!(ops.contains_key("put"));
-        assert!(ops.contains_key("delete"));
+        assert_eq!(ops[0].method, "GET");
+        assert_eq!(ops[1].method, "POST");
+        assert_eq!(ops[2].method, "PUT");
+        assert_eq!(ops[3].method, "DELETE");
     }
 }
 

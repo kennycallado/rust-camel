@@ -138,10 +138,10 @@ rest:
     port: 8080
     path: /api/users
     operations:
-      get:
+      - method: GET
         operation_id: listUsers
         to: direct:listUsers
-      post:
+      - method: POST
         operation_id: createUser
         consumes: application/json
         produces: application/json
@@ -152,7 +152,7 @@ rest:
           properties:
             name: { type: string }
           required: [name]
-      delete:
+      - method: DELETE
         path: /{id}
         operation_id: deleteUser
         success_status: 204
@@ -166,8 +166,9 @@ Key features:
   is validated after unmarshaling. Failures return `ValidationError → 400`.
 - **Default status**: `success_status` sets the initial `CamelHttpResponseCode`
   (200 for GET/PUT, 201 for POST, 204 for DELETE by default).
-- **Operations per verb**: each HTTP verb (`get`, `post`, `put`, `delete`,
-  `patch`) maps to one operation per `rest:` block.
+- **Multiple operations per verb**: declare any number of operations with the
+  same HTTP method in one `rest:` block by repeating the `method:` field with
+  different sub-paths.
 
 ### OpenAPI generation
 

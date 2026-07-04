@@ -14,9 +14,10 @@ use crate::route_ast::{RouteDslRest, RouteDslRestOperation};
 use std::collections::HashSet;
 
 /// OpenAPI 3.0.3 HTTP verbs — anything else is logged as a warning.
-const VALID_OPENAPI_VERBS: &[&str] = &[
-    "get", "post", "put", "delete", "patch", "head", "options", "trace",
-];
+/// Kept in sync with `KNOWN_VERBS` in rest.rs (the lowering authority); verbs
+/// not in that set are rejected before reaching OpenAPI generation, so they
+/// must not appear here either.
+const VALID_OPENAPI_VERBS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
 
 /// Result of OpenAPI generation — the document plus any warnings.
 #[derive(Debug, Clone)]
@@ -41,17 +42,18 @@ pub fn generate_openapi(
     let mut seen_operation_ids: HashSet<String> = HashSet::new();
 
     for rest in rest_blocks {
-        for (verb, op) in &rest.operations {
-            let verb_lower = verb.to_lowercase();
+        for op in &rest.operations {
+            let verb_lower = op.method.to_lowercase();
             // I3: warn on unknown HTTP verbs (don't reject — weak-stub philosophy)
             if !VALID_OPENAPI_VERBS.contains(&verb_lower.as_str()) {
                 warnings.push(format!(
-                    "unknown HTTP verb '{verb}' — may produce invalid OpenAPI"
+                    "unknown HTTP verb '{}' — may produce invalid OpenAPI",
+                    op.method
                 ));
             }
             let full_path = build_full_path(&rest.path, &op.path);
             let path_entry = paths.entry(full_path.clone()).or_insert_with(|| json!({}));
-            let op_label = op.operation_id.as_deref().unwrap_or(verb);
+            let op_label = op.operation_id.as_deref().unwrap_or(&verb_lower);
             // I1: detect duplicate (path, verb) — last wins, warn
             if path_entry.get(&verb_lower).is_some() {
                 warnings.push(format!(
@@ -261,10 +263,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn make_rest(path: &str, ops: &[(&str, RouteDslRestOperation)]) -> RouteDslRest {
-        let mut operations = BTreeMap::new();
-        for (verb, op) in ops {
-            operations.insert(verb.to_string(), op.clone());
-        }
+        let operations = ops
+            .iter()
+            .map(|(verb, op)| {
+                let mut op = op.clone();
+                op.method = verb.to_string();
+                op
+            })
+            .collect();
         RouteDslRest {
             host: "0.0.0.0".to_string(),
             port: 8080,
@@ -275,6 +281,7 @@ mod tests {
 
     fn make_op(operation_id: &str) -> RouteDslRestOperation {
         RouteDslRestOperation {
+            method: "GET".to_string(),
             path: "/".to_string(),
             operation_id: Some(operation_id.to_string()),
             to: Some(format!("direct:{operation_id}")),
@@ -533,10 +540,14 @@ mod tests {
         path: &str,
         ops: &[(&str, RouteDslRestOperation)],
     ) -> RouteDslRest {
-        let mut operations = BTreeMap::new();
-        for (verb, op) in ops {
-            operations.insert(verb.to_string(), op.clone());
-        }
+        let operations = ops
+            .iter()
+            .map(|(verb, op)| {
+                let mut op = op.clone();
+                op.method = verb.to_string();
+                op
+            })
+            .collect();
         RouteDslRest {
             host: host.to_string(),
             port,
@@ -645,6 +656,73 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("duplicate operationId 'sameId'")),
             "expected duplicate operationId warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    // ── Within-block detection (rc-y1xa Task 2) ──
+
+    #[test]
+    fn openapi_two_gets_distinct_paths_produce_distinct_path_entries() {
+        // Provide response schemas to avoid weak-stub warnings.
+        let op_a = RouteDslRestOperation {
+            path: "/health".to_string(),
+            response: Some(crate::route_ast::RouteDslRestResponse {
+                description: None,
+                schema: Some(json!({"type": "object"})),
+                headers: BTreeMap::new(),
+            }),
+            ..make_op("health")
+        };
+        let op_b = RouteDslRestOperation {
+            path: "/conteos".to_string(),
+            response: Some(crate::route_ast::RouteDslRestResponse {
+                description: None,
+                schema: Some(json!({"type": "object"})),
+                headers: BTreeMap::new(),
+            }),
+            ..make_op("conteos")
+        };
+        let rest = make_rest("/api", &[("GET", op_a), ("GET", op_b)]);
+        let result = generate_openapi(&[rest], "t", "1.0.0");
+        let paths = result.document["paths"].as_object().unwrap();
+        assert!(paths.contains_key("/api/health"));
+        assert!(paths.contains_key("/api/conteos"));
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn openapi_within_block_duplicate_path_verb_warns_last_wins() {
+        let rest = make_rest(
+            "/api",
+            &[
+                (
+                    "GET",
+                    RouteDslRestOperation {
+                        path: "/x".to_string(),
+                        ..make_op("first")
+                    },
+                ),
+                (
+                    "GET",
+                    RouteDslRestOperation {
+                        path: "/x".to_string(),
+                        ..make_op("second")
+                    },
+                ),
+            ],
+        );
+        let result = generate_openapi(&[rest], "t", "1.0.0");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("duplicate operation")),
+            "expected duplicate-operation warning, got: {:?}",
             result.warnings
         );
     }

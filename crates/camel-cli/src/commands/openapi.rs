@@ -104,10 +104,10 @@ rest:
     port: 9090
     path: /api/users
     operations:
-      get:
+      - method: GET
         operation_id: listUsers
         to: direct:listUsers
-      post:
+      - method: POST
         operation_id: createUser
         consumes: application/json
         produces: application/json
@@ -146,7 +146,7 @@ rest:
 
     #[test]
     fn generate_from_json_file() {
-        let json = r#"{"rest":[{"host":"0.0.0.0","port":9090,"path":"/api/users","operations":{"get":{"operation_id":"listUsers","to":"direct:listUsers"}}}]}"#;
+        let json = r#"{"rest":[{"host":"0.0.0.0","port":9090,"path":"/api/users","operations":[{"method":"GET","operation_id":"listUsers","to":"direct:listUsers"}]}]}"#;
         let mut tmp = tempfile::NamedTempFile::with_suffix(".json").unwrap(); // allow-unwrap
         write!(tmp, "{json}").unwrap(); // allow-unwrap
 
@@ -195,14 +195,14 @@ rest:
     port: 9090
     path: /api/users
     operations:
-      get:
+      - method: GET
         operation_id: listUsers
         to: direct:listUsers
   - host: 0.0.0.0
     port: 9090
     path: /api/users
     operations:
-      get:
+      - method: GET
         operation_id: listUsers2
         to: direct:listUsers
 "#;

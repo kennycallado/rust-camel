@@ -12,23 +12,23 @@ rest:
     port: 9090
     path: /api/users
     operations:
-      get:
+      - method: GET
         operation_id: listUsers
         to: direct:listUsers
         produces: application/json
-      post:
+      - method: POST
         operation_id: createUser
         consumes: application/json
         produces: application/json
         success_status: 201
         to: direct:createUser
-      put:
+      - method: PUT
         path: /{id}
         operation_id: updateUser
         consumes: application/json
         produces: application/json
         to: direct:updateUser
-      delete:
+      - method: DELETE
         path: /{id}
         operation_id: deleteUser
         to: direct:deleteUser

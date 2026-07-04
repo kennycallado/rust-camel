@@ -174,11 +174,11 @@ rest:
     port: 8080
     path: /api/users
     operations:
-      get:
+      - method: GET
         operation_id: listUsers
         to: direct:listUsers
         produces: application/json
-      post:
+      - method: POST
         operation_id: createUser
         consumes: application/json
         produces: application/json
@@ -192,11 +192,11 @@ rest:
             email:
               type: string
           required: [name, email]
-      get:
+      - method: GET
         path: /{id}
         operation_id: getUser
         to: direct:getUser
-      delete:
+      - method: DELETE
         path: /{id}
         operation_id: deleteUser
         to: direct:deleteUser

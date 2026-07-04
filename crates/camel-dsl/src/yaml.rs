@@ -4231,11 +4231,11 @@ rest:
     port: 8080
     path: /users
     operations:
-      get:
+      - method: GET
         path: /{id}
         operation_id: getUser
         to: bean:userService
-      post:
+      - method: POST
         operation_id: createUser
         to: bean:createUser
 "#;
@@ -4262,7 +4262,7 @@ rest:
     port: 8080
     path: /api
     operations:
-      get:
+      - method: GET
         path: /items
         operation_id: listItems
         to: bean:listHandler
@@ -4284,10 +4284,10 @@ routes:
 rest:
   - path: /api
     operations:
-      get:
+      - method: GET
         operation_id: getApi
         to: bean:handler
-      post:
+      - method: POST
         operation_id: postApi
         to: bean:creator
 "#;
@@ -4310,13 +4310,13 @@ rest:
 rest:
   - path: /users
     operations:
-      get:
+      - method: GET
         path: /{id}
         operation_id: duplicateOp
         to: bean:svc
   - path: /orders
     operations:
-      get:
+      - method: GET
         path: /{id}
         operation_id: duplicateOp
         to: bean:other
@@ -4343,7 +4343,7 @@ routes:
 rest:
   - path: /api
     operations:
-      get:
+      - method: GET
         operation_id: conflictRoute
         to: bean:handler
 "#;
@@ -4362,25 +4362,43 @@ rest:
 rest:
   - path: /items
     operations:
-      get:
+      - method: GET
         to: bean:list
-      post:
+      - method: POST
         operation_id: createItem
         to: bean:create
-      put:
+      - method: PUT
         operation_id: updateItem
         to: bean:update
-      delete:
+      - method: DELETE
         operation_id: deleteItem
         to: bean:delete
 "#;
         let routes = parse_yaml_to_declarative(yaml).unwrap();
         assert_eq!(routes.len(), 4);
-        // BTreeMap iterates alphabetically by verb: delete, get, post, put
-        assert!(routes[0].from.contains("httpMethod=DELETE"));
-        assert!(routes[1].from.contains("httpMethod=GET"));
-        assert!(routes[2].from.contains("httpMethod=POST"));
-        assert!(routes[3].from.contains("httpMethod=PUT"));
+        // Declaration order (Vec), not alphabetical
+        assert!(routes[0].from.contains("httpMethod=GET"));
+        assert!(routes[1].from.contains("httpMethod=POST"));
+        assert!(routes[2].from.contains("httpMethod=PUT"));
+        assert!(routes[3].from.contains("httpMethod=DELETE"));
+    }
+
+    #[test]
+    fn rest_op_without_method_fails_to_parse() {
+        let yaml = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api
+    operations:
+      - path: /health
+        to: direct:a
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("method"),
+            "expected method-related parse error, got: {err}"
+        );
     }
 
     #[test]
@@ -4391,7 +4409,7 @@ rest:
     port: 9090
     path: /api/users
     operations:
-      get:
+      - method: GET
         operation_id: listUsers
         to: direct:listUsers
 routes:
@@ -4404,7 +4422,7 @@ routes:
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].path, "/api/users");
         assert_eq!(blocks[0].operations.len(), 1);
-        assert!(blocks[0].operations.contains_key("get"));
+        assert_eq!(blocks[0].operations[0].method, "GET");
     }
 
     #[test]
