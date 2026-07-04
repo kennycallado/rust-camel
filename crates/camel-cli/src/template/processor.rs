@@ -30,7 +30,7 @@ pub fn processor_files(plugin_name: &str) -> Vec<TemplateFile> {
 }
 
 fn lib_rs() -> &'static str {
-    "use bindings::camel::plugin::types::{WasmBody, WasmError, WasmExchange};\nuse bindings::Guest;\n\n#[allow(clippy::too_many_arguments)]\nmod bindings {\n    wit_bindgen::generate!({\n        world: \"plugin\",\n        path: \"../wit\",\n    });\n}\n\nstruct Processor;\n\nimpl Guest for Processor {\n    fn init() -> Result<(), String> {\n        Ok(())\n    }\n\n    fn process(mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {\n        exchange.input.body = match &exchange.input.body {\n            WasmBody::Text(s) => WasmBody::Text(format!(\"processed: {s}\")),\n            other => other.clone(),\n        };\n        Ok(exchange)\n    }\n}\n\nbindings::export!(Processor with_types_in bindings);\n"
+    "use bindings::camel::plugin::types::{WasmBody, WasmError, WasmExchange};\nuse bindings::Guest;\n\n#[allow(clippy::too_many_arguments)]\nmod bindings {\n    wit_bindgen::generate!({\n        world: \"plugin\",\n        path: \"../wit\",\n    });\n}\n\nstruct Processor;\n\nimpl Guest for Processor {\n    fn init() -> Result<(), String> {\n        Ok(())\n    }\n\n    async fn process(mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {\n        exchange.input.body = match &exchange.input.body {\n            WasmBody::Text(s) => WasmBody::Text(format!(\"processed: {s}\")),\n            WasmBody::Stream(_) => WasmBody::Text(\"stream body not supported\".into()),\n            other => other.clone(),\n        };\n        Ok(exchange)\n    }\n}\n\nbindings::export!(Processor with_types_in bindings);\n"
 }
 
 #[cfg(test)]
@@ -69,7 +69,7 @@ mod tests {
         assert!(lib.contains("use bindings::Guest;"));
         assert!(lib.contains("bindings::export!(Processor with_types_in bindings);"));
         assert!(lib.contains("impl Guest for Processor"));
-        assert!(lib.contains("fn process("));
+        assert!(lib.contains("async fn process("));
         assert!(lib.contains("fn init()"));
         assert!(lib.contains("wit_bindgen::generate!"));
         assert!(lib.contains("mod bindings"));

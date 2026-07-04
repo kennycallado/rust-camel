@@ -36,7 +36,7 @@ pub fn bean_files(plugin_name: &str) -> Vec<TemplateFile> {
 fn lib_rs(plugin_name: &str) -> String {
     let plugin_type = to_pascal_case(plugin_name);
     format!(
-        "use bindings::camel::plugin::types::{{WasmBody, WasmError, WasmExchange}};\nuse bindings::Guest;\n\nmod bindings {{\n    wit_bindgen::generate!({{\n        world: \"bean\",\n        path: \"../wit\",\n    }});\n}}\n\nstruct {plugin_type};\n\nimpl Guest for {plugin_type} {{\n    fn init() -> Result<(), String> {{\n        Ok(())\n    }}\n\n    fn methods() -> Vec<String> {{\n        vec![\"hello\".into()]\n    }}\n\n    fn invoke(method: String, mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {{\n        match method.as_str() {{\n            \"hello\" => {{\n                let text = match &exchange.input.body {{\n                    WasmBody::Text(s) => s.clone(),\n                    _ => String::new(),\n                }};\n                exchange.input.body = WasmBody::Text(format!(\"Hello from {plugin_name}: {{text}}\"));\n                Ok(exchange)\n            }}\n            _ => Err(WasmError::ProcessorError(format!(\"unknown method: {{method}}\"))),\n        }}\n    }}\n}}\n\nbindings::export!({plugin_type} with_types_in bindings);\n"
+        "use bindings::camel::plugin::types::{{WasmBody, WasmError, WasmExchange}};\nuse bindings::Guest;\n\nmod bindings {{\n    wit_bindgen::generate!({{\n        world: \"bean\",\n        path: \"../wit\",\n    }});\n}}\n\nstruct {plugin_type};\n\nimpl Guest for {plugin_type} {{\n    fn init() -> Result<(), String> {{\n        Ok(())\n    }}\n\n    fn methods() -> Vec<String> {{\n        vec![\"hello\".into()]\n    }}\n\n    async fn invoke(method: String, mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {{\n        match method.as_str() {{\n            \"hello\" => {{\n                let text = match &exchange.input.body {{\n                    WasmBody::Text(s) => s.clone(),\n                    _ => String::new(),\n                }};\n                exchange.input.body = WasmBody::Text(format!(\"Hello from {plugin_name}: {{text}}\"));\n                Ok(exchange)\n            }}\n            _ => Err(WasmError::ProcessorError(format!(\"unknown method: {{method}}\"))),\n        }}\n    }}\n}}\n\nbindings::export!({plugin_type} with_types_in bindings);\n"
     )
 }
 
@@ -120,7 +120,7 @@ mod tests {
         assert!(lib.contains("path: \"../wit\""));
         assert!(lib.contains("impl Guest for AcmeBean"));
         assert!(lib.contains("fn methods() -> Vec<String>"));
-        assert!(lib.contains("fn invoke("));
+        assert!(lib.contains("async fn invoke("));
         assert!(lib.contains("Hello from acme-bean: {text}"));
         assert!(lib.contains("bindings::export!(AcmeBean with_types_in bindings);"));
         assert!(!lib.contains("camel_wasm_sdk"));
