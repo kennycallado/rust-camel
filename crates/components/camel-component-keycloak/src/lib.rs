@@ -277,7 +277,7 @@ impl KeycloakComponent {
                 None,
                 None,
             )
-            .map_err(|e| CamelError::EndpointCreationFailed(format!("token provider init: {e}")))?,
+            .map_err(|_| CamelError::EndpointCreationFailed("token provider init failed".into()))?,
         );
         Ok(Self {
             server_url: config.server_url().to_string(),
