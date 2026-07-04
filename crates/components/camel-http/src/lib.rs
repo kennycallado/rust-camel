@@ -1753,6 +1753,7 @@ impl Service<Exchange> for HttpProducer {
                     HttpAuth::None => {}
                     HttpAuth::Basic { username, password } => {
                         use base64::Engine;
+                        // allow-secret: credentials combined for base64 Basic auth header
                         let credentials = format!("{username}:{password}");
                         let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
                         if let Ok(val) =
@@ -1762,9 +1763,9 @@ impl Service<Exchange> for HttpProducer {
                         }
                     }
                     HttpAuth::Bearer { token } => {
-                        if let Ok(val) =
-                            reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                        {
+                        // allow-secret: Bearer token in Authorization header
+                        let bearer = format!("Bearer {token}");
+                        if let Ok(val) = reqwest::header::HeaderValue::from_str(&bearer) {
                             collected_headers.push((reqwest::header::AUTHORIZATION, val));
                         }
                     }

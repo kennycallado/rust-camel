@@ -2049,8 +2049,22 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
                     .unwrap_or(content.len());
                 let first_line = &content[line_start..line_end];
 
-                // Skip comment-only lines
-                if !first_line.trim().starts_with("//") && !first_line.contains("// allow-secret") {
+                // Also check the previous line for the escape hatch
+                // (cargo fmt may reflow trailing comments onto other lines).
+                let prev_line = if line_num > 1 {
+                    let prev_start = line_starts[line_num - 2];
+                    let prev_end = line_starts[line_num - 1].saturating_sub(1);
+                    &content[prev_start..prev_end]
+                } else {
+                    ""
+                };
+
+                // Skip comment-only lines and lines (or their preceding line)
+                // carrying the `// allow-secret` escape hatch.
+                if !first_line.trim().starts_with("//")
+                    && !first_line.contains("// allow-secret")
+                    && !prev_line.contains("// allow-secret")
+                {
                     violations.push(SecretViolation {
                         file: path.to_string_lossy().to_string(),
                         line: line_num,
