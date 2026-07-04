@@ -28,6 +28,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
         CompiledStep::Process {
             processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: BoxProcessor::from_fn(|mut ex: Exchange| {
@@ -36,6 +37,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 Box::pin(async move { Ok(ex) })
             }),
             body_contract: None,
+            lifecycle: None,
         },
         CompiledStep::Process {
             processor: BoxProcessor::from_fn(|mut ex: Exchange| {
@@ -47,6 +49,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 })
             }),
             body_contract: None,
+            lifecycle: None,
         },
     ])
 }
