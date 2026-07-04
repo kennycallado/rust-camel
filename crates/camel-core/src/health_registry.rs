@@ -147,12 +147,20 @@ impl HealthCheckRegistry {
                             std::panic::AssertUnwindSafe(async {
                                 match timeout(dur, check.check()).await {
                                     Ok(result) => result,
-                                    Err(_) => CheckResult::unhealthy(&check_name, "timed out"),
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "health check '{}' timed out after {:?}",
+                                            check_name,
+                                            dur
+                                        );
+                                        CheckResult::unhealthy(&check_name, "timed out")
+                                    }
                                 }
                             })
                             .catch_unwind()
                             .await
                             .unwrap_or_else(|_| {
+                                tracing::warn!("health check '{}' panicked", check_name);
                                 CheckResult::unhealthy(&check_name, "checker panicked")
                             })
                         }

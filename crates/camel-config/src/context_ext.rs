@@ -3,7 +3,10 @@ use crate::config::{CamelConfig, KubernetesPlatformCamelConfig, PlatformCamelCon
 use crate::config::{OtelProtocol, OtelSampler};
 use crate::discovery::discover_routes_with_threshold;
 use async_trait::async_trait;
-use camel_api::{CamelError, HealthSource, HealthStatus, PlatformService as PlatformServiceTrait};
+use camel_api::{
+    CamelError, HealthReport, HealthSource, HealthStatus, PlatformService as PlatformServiceTrait,
+    ServiceHealth, ServiceStatus,
+};
 use camel_core::CamelContext;
 use camel_core::OutputFormat;
 use camel_core::TracerConfig;
@@ -51,6 +54,41 @@ impl HealthSource for ContextHealthSource {
             return HealthStatus::Unhealthy;
         }
         self.health_registry.check_all().await.status
+    }
+
+    async fn health_report(&self) -> HealthReport {
+        let mut report = self.health_registry.check_all().await;
+        let mut worst = report.status;
+        let guard = self.services.lock().await;
+        for (name, state) in guard.iter() {
+            let svc_status = match state.load(Ordering::SeqCst) {
+                1 => ServiceStatus::Started,
+                0 => ServiceStatus::Stopped,
+                _ => ServiceStatus::Failed,
+            };
+            let health = match svc_status {
+                ServiceStatus::Started => HealthStatus::Healthy,
+                ServiceStatus::Stopped => HealthStatus::Degraded,
+                ServiceStatus::Failed => HealthStatus::Unhealthy,
+            };
+            if matches!(worst, HealthStatus::Healthy)
+                && matches!(health, HealthStatus::Degraded | HealthStatus::Unhealthy)
+            {
+                worst = health;
+            }
+            if matches!(worst, HealthStatus::Degraded) && matches!(health, HealthStatus::Unhealthy)
+            {
+                worst = health;
+            }
+            report.services.push(ServiceHealth {
+                name: name.clone(),
+                status: svc_status,
+                message: None,
+            });
+        }
+        drop(guard);
+        report.status = worst;
+        report
     }
 
     async fn startup(&self) -> HealthStatus {
@@ -1345,5 +1383,93 @@ format = "json"
         let err = CamelConfig::configure_context(&cfg).await.err().unwrap();
         let msg = err.to_string();
         assert!(msg.contains("Failed to open trace file"));
+    }
+}
+
+#[cfg(test)]
+mod context_health_source_tests {
+    use super::*;
+    use camel_api::{AsyncHealthCheck, CheckResult};
+
+    struct FixedCheck {
+        check_name: String,
+        result: CheckResult,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncHealthCheck for FixedCheck {
+        fn name(&self) -> &str {
+            &self.check_name
+        }
+        async fn check(&self) -> CheckResult {
+            self.result.clone()
+        }
+    }
+
+    fn make_source(
+        registry: Arc<HealthCheckRegistry>,
+        services: HealthState,
+    ) -> ContextHealthSource {
+        ContextHealthSource {
+            health_registry: registry,
+            services,
+        }
+    }
+
+    #[tokio::test]
+    async fn health_report_populates_services_from_registry() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        registry.register_for_route(
+            "datasource:cartodb",
+            Arc::new(FixedCheck {
+                check_name: "datasource:cartodb".to_string(),
+                result: CheckResult::unhealthy("datasource:cartodb", "timed out"),
+            }),
+        );
+        registry.mark_route_started("datasource:cartodb");
+
+        let source = make_source(Arc::clone(&registry), Arc::new(Mutex::new(Vec::new())));
+        let report = source.health_report().await;
+
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        let ds = report
+            .services
+            .iter()
+            .find(|s| s.name == "datasource:cartodb")
+            .expect("datasource check should appear in report");
+        assert_eq!(ds.status, ServiceStatus::Failed);
+        assert_eq!(ds.message.as_deref(), Some("timed out"));
+    }
+
+    #[tokio::test]
+    async fn health_report_reflects_failed_platform_service() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        let state: HealthState = Arc::new(Mutex::new(vec![(
+            "health".to_string(),
+            Arc::new(AtomicU8::new(2)),
+        )]));
+
+        let source = make_source(registry, state);
+        let report = source.health_report().await;
+
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert!(
+            report
+                .services
+                .iter()
+                .any(|s| s.name == "health" && s.status == ServiceStatus::Failed),
+            "failed platform service should appear: {:?}",
+            report.services
+        );
+    }
+
+    #[tokio::test]
+    async fn health_report_empty_is_healthy() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        let source = make_source(registry, Arc::new(Mutex::new(Vec::new())));
+        let report = source.health_report().await;
+
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.services.is_empty());
     }
 }

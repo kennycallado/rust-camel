@@ -64,7 +64,15 @@ impl PoolFactory for SqlPoolFactory {
                         HealthStatus::Unhealthy
                     }
                 },
-                Err(_) => HealthStatus::Unhealthy,
+                Err(e) => {
+                    // log-policy: outside-contract
+                    tracing::warn!(
+                        "datasource '{}' health check failed: pool downcast error: {}",
+                        handle.name,
+                        e
+                    );
+                    HealthStatus::Unhealthy
+                }
             }
         })
     }
