@@ -107,7 +107,11 @@ impl Component for SqlComponent {
         }
         config.resolve_defaults();
         let pool: SharedPool = Arc::new(OnceCell::new());
-        let health_check = SqlHealthCheck::new(Arc::clone(&pool));
+        let health_check = SqlHealthCheck::new(
+            Arc::clone(&pool),
+            self.catalog.clone(),
+            config.datasource_name.clone(),
+        );
         ctx.register_current_route_health_check(Arc::new(health_check));
 
         if config.datasource_name.is_some()
