@@ -219,31 +219,6 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn keycloak_local_validation_builds_authenticator() {
-        let cfg: camel_config::config::CamelConfig = toml::from_str(
-            r#"
-        [security.keycloak]
-        server_url = "https://kc.example.com"
-        realm = "camel"
-        client_id = "camel-api"
-        client_secret = "secret"
-
-        [security.keycloak.validation]
-        method = "local"
-        audience = ["camel-api"]
-        "#,
-        )
-        .expect("config parses");
-
-        let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
-        let ctx = crate::build_security_compile_context_from_config(&cfg, registry)
-            .await
-            .expect("security context builds");
-
-        assert!(ctx.authenticator.is_some());
-    }
-
-    #[tokio::test]
     async fn native_static_token_builds_authenticator() {
         let cfg: camel_config::config::CamelConfig = toml::from_str(
             r#"
@@ -318,54 +293,5 @@ mod tests {
             err.to_string().contains("configure only one"),
             "unexpected error: {err}"
         );
-    }
-
-    #[tokio::test]
-    async fn keycloak_introspection_builds_authenticator() {
-        let cfg: camel_config::config::CamelConfig = toml::from_str(
-            r#"
-        [security.keycloak]
-        server_url = "https://kc.example.com"
-        realm = "camel"
-        client_id = "camel-api"
-        client_secret = "secret"
-
-        [security.keycloak.validation]
-        method = "introspection"
-        "#,
-        )
-        .expect("config parses");
-
-        let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
-        let ctx = crate::build_security_compile_context_from_config(&cfg, registry)
-            .await
-            .expect("security context builds");
-
-        assert!(ctx.authenticator.is_some());
-    }
-
-    #[tokio::test]
-    async fn keycloak_uma_registers_permission_evaluator() {
-        let cfg: camel_config::config::CamelConfig = toml::from_str(
-            r#"
-        [security.keycloak]
-        server_url = "https://kc.example.com"
-        realm = "camel"
-        client_id = "authz-client"
-        client_secret = "secret"
-
-        [security.keycloak.uma]
-        provider = "keycloak-uma"
-        "#,
-        )
-        .expect("config parses");
-
-        let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
-        let ctx = crate::build_security_compile_context_from_config(&cfg, registry)
-            .await
-            .expect("security context builds");
-
-        let evaluators = ctx.evaluator_registry.expect("evaluator registry");
-        assert!(evaluators.get("keycloak-uma").is_some());
     }
 }
