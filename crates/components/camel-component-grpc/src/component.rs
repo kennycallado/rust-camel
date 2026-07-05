@@ -6,7 +6,9 @@ use camel_component_api::{
     RuntimeObservability,
 };
 
-use crate::config::{GrpcConfig, parse_grpc_uri};
+use crate::config::{
+    GrpcConfig, GrpcServerConfig, ServerTransport, TransportIntent, parse_grpc_uri,
+};
 use crate::consumer::{GrpcConsumer, resolve_grpc_mode};
 use crate::health::GrpcHealthCheck;
 use crate::producer::GrpcProducer;
@@ -81,8 +83,27 @@ impl Endpoint for GrpcEndpoint {
         &self,
         rt: Arc<dyn RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
+        // C2: direction-aware fail-closed. transport=tls declared but the
+        // server has no certs → refuse (no silent plaintext on a TLS port).
+        // Check this BEFORE proto compilation to fail fast.
+        if self.config.transport_intent == TransportIntent::Tls
+            && !matches!(self.config.server_transport, ServerTransport::Tls(_))
+        {
+            return Err(CamelError::EndpointCreationFailed(
+                "gRPC from grpc://...?transport=tls requires serverCertPath + serverKeyPath \
+                 (inbound TLS termination). Refusing to serve plaintext on a TLS-intent endpoint."
+                    .to_string(),
+            ));
+        }
+
         let path = format!("/{}/{}", self.service_name, self.method_name);
         let mode = resolve_grpc_mode(&self.proto_path, &self.service_name, &self.method_name)?;
+
+        let server_config = GrpcServerConfig {
+            max_receive_message_len: Some(self.config.max_receive_message_length),
+            transport: self.config.server_transport.clone(),
+        };
+
         Ok(Box::new(GrpcConsumer::new(
             self.host.clone(),
             self.port,
@@ -92,6 +113,7 @@ impl Endpoint for GrpcEndpoint {
             self.method_name.clone(),
             mode,
             rt,
+            server_config,
         )))
     }
 
@@ -101,6 +123,10 @@ impl Endpoint for GrpcEndpoint {
         ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
         let mode = resolve_grpc_mode(&self.proto_path, &self.service_name, &self.method_name)?;
+        // NOTE: direction-aware outbound intent is already enforced at parse time
+        // (parse_grpc_query_params rejects conflicting transport+cert combos) and
+        // in GrpcProducer::new (ClientTransport::Tls hard-errors on bad config).
+        // No extra validation needed here.
         // route_id may not be set in test scenarios (e.g., standalone endpoint tests)
         let route_id = ctx.route_id().unwrap_or("unknown");
         let producer = GrpcProducer::new(
@@ -115,5 +141,80 @@ impl Endpoint for GrpcEndpoint {
             route_id,
         )?;
         Ok(BoxProcessor::new(producer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use camel_component_api::{NoOpComponentContext, RuntimeObservability};
+
+    use super::*;
+
+    fn test_runtime() -> Arc<dyn RuntimeObservability> {
+        Arc::new(NoOpComponentContext)
+    }
+
+    /// Regression: C2 — inbound transport=tls without server certs must error at create_consumer.
+    /// Parse succeeds (defers to create_consumer), but create_consumer must hard-error with
+    /// "serverCertPath" in the message.
+    #[test]
+    fn test_c2_inbound_tls_without_server_certs_errors() {
+        // Construct a GrpcEndpoint directly with transport_intent=Tls but server_transport=Plaintext
+        // This simulates the state after parsing "grpc://...?transport=tls" without server certs
+        let proto_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+
+        let config = GrpcConfig {
+            proto_file: None,
+            service: None,
+            method: None,
+            reflection: false,
+            transport_intent: TransportIntent::Tls,
+            client_transport: crate::config::ClientTransport::Plaintext,
+            server_transport: ServerTransport::Plaintext, // No server certs
+            max_receive_message_length: 4 * 1024 * 1024,
+            deadline_ms: None,
+            metadata: None,
+            connect_timeout_ms: 10_000,
+            default_deadline_ms: 30_000,
+            auth: crate::config::AuthConfig::None,
+            interceptors: crate::config::InterceptorConfig::default(),
+            consumer_strategy: crate::config::ConsumerStrategy::default(),
+            producer_strategy: crate::config::ProducerStrategy::default(),
+            retry: camel_component_api::NetworkRetryPolicy::default(),
+        };
+
+        let endpoint = GrpcEndpoint {
+            uri: "grpc://127.0.0.1:0/helloworld.Greeter/SayHello?transport=tls".to_string(),
+            addr: "http://127.0.0.1:0".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            proto_path,
+            service_name: "helloworld.Greeter".to_string(),
+            method_name: "SayHello".to_string(),
+            deadline_ms: None,
+            config,
+        };
+
+        // Now call create_consumer — this MUST fail because transport_intent=Tls but
+        // server_transport=Plaintext means no server certs were provided (C2 violation)
+        let result = endpoint.create_consumer(test_runtime());
+
+        assert!(
+            result.is_err(),
+            "C2: transport=tls without serverCertPath/serverKeyPath must fail at create_consumer"
+        );
+        match result {
+            Err(e) => {
+                let err = e.to_string();
+                assert!(
+                    err.contains("serverCertPath") || err.contains("serverKeyPath"),
+                    "error must mention the missing server certs: {err}"
+                );
+            }
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 }

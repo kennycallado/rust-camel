@@ -17,7 +17,7 @@ use tower::Service;
 use tracing::{debug, error};
 
 use crate::codec::RawBytesCodec;
-use crate::config::{AuthConfig, GrpcConfig, apply_auth_metadata};
+use crate::config::{AuthConfig, ClientTransport, GrpcConfig, apply_auth_metadata, read_tls_file};
 use crate::mode::GrpcMode;
 
 mod retry;
@@ -57,15 +57,12 @@ pub struct GrpcProducer {
     auth: AuthConfig,
     config_metadata: Option<String>,
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
-    /// C1: when `config.tls` is true, this is `true` AND the underlying
-    /// `Channel`'s endpoint scheme is `https://...`. Together these prove
-    /// the channel is TLS-protected, never plaintext.
+    /// ADR-0033: when `client_transport` is `Tls`, this is `true` AND the
+    /// underlying `Channel`'s endpoint scheme is `https://...`.
     pub tls_enabled: bool,
-    /// C1: the `https://host:port/...` URL the channel is bound to.
-    /// Stored so tests can assert the scheme (which tonic's `Channel`
-    /// does not expose publicly).
+    /// ADR-0033: the `https://host:port/...` URL the channel is bound to.
     pub endpoint_url: String,
-    /// C1: the SNI / TLS server name plumbed into `ClientTlsConfig`.
+    /// ADR-0033: the SNI / TLS server name plumbed into `ClientTlsConfig`.
     pub server_name: Option<String>,
 }
 
@@ -137,171 +134,87 @@ impl GrpcProducer {
         runtime: Arc<dyn camel_component_api::RuntimeObservability>,
         route_id: &str,
     ) -> Result<Self, CamelError> {
-        let endpoint = Endpoint::from_shared(addr.clone()).map_err(|e| {
-            runtime.health().force_unhealthy_for_route(
-                route_id,
-                "g:grpc:producer-create",
-                &format!("invalid grpc endpoint: {e}"),
-            );
-            // log-policy: outside-contract
-            error!(error = %e, "grpc producer creation failed");
-            CamelError::EndpointCreationFailed(format!("invalid grpc endpoint: {e}"))
-        })?;
-
-        // C1 Batch 1: fail-closed TLS. When the operator declares `tls = true`
-        // (Intent-Violation disposition), the channel MUST be TLS-protected.
-        // Four outcomes (`config.tls` is the single source of truth):
-        //   1. `config.tls_config` is Some(...) → wire `tonic::ClientTlsConfig`
-        //      and establish a real TLS channel. The endpoint URL is rewritten
-        //      from `http://` to `https://` so the scheme reflects TLS at the
-        //      transport layer.
-        //   2. `config.tls_config` is None and `config.tls = true` → hard-error
-        //      (EndpointCreationFailed) so the producer never silently falls
-        //      back to h2c / h2 plaintext. Auth tokens MUST NOT travel cleartext.
-        //   3. `config.tls = false` and no `tls_config` → h2c (unchanged;
-        //      explicit plaintext).
-        //   4. `config.tls = false` WITH a `tls_config` supplied → hard-error
-        //      (conflicting intent, review fix I-3): certs wired but TLS
-        //      disabled is a misconfiguration; refuse rather than guess.
         let mut tls_enabled = false;
         let mut server_name: Option<String> = None;
-        let endpoint = if config.tls {
-            let tls_cfg = config.tls_config.as_ref().ok_or_else(|| {
+        let endpoint = match &config.client_transport {
+            ClientTransport::Plaintext => Endpoint::from_shared(addr.clone()).map_err(|e| {
                 runtime.health().force_unhealthy_for_route(
                     route_id,
                     "g:grpc:producer-create",
-                    "tls=true but no tls_config supplied; refusing plaintext h2c",
+                    &format!("invalid grpc endpoint: {e}"),
                 );
                 // log-policy: outside-contract
-                error!("gRPC producer refused: tls=true with no tls_config (fail-closed)");
-                CamelError::EndpointCreationFailed(
-                    "gRPC tls=true requires tls_config; refusing to fall back to plaintext \
-                     (C1 fail-closed). Provide a TlsConfig in the producer config or set \
-                     tls=false explicitly."
-                        .to_string(),
-                )
-            })?;
-            let sn = tls_cfg.server_name.clone().unwrap_or_else(|| {
-                // Fall back to the addr host (strip scheme). tonic requires a
-                // DNS name; if we have no server name AND no host-derived
-                // alternative, refuse to guess.
-                let host = addr
-                    .split_once("://")
-                    .map(|(_, rest)| rest)
-                    .unwrap_or(&addr);
-                host.split(':').next().unwrap_or(host).to_string()
-            });
-            server_name = Some(sn.clone());
-            let mut client_tls = tonic::transport::ClientTlsConfig::new().domain_name(sn);
-            if let Some(ca_cert) = &tls_cfg.ca_cert_path {
-                let pem = std::fs::read(ca_cert).map_err(|e| {
+                error!(error = %e, "grpc producer creation failed");
+                CamelError::EndpointCreationFailed(format!("invalid grpc endpoint: {e}"))
+            })?,
+            ClientTransport::Tls(tls_cfg) => {
+                if tls_cfg.insecure_skip_verify {
                     runtime.health().force_unhealthy_for_route(
                         route_id,
                         "g:grpc:producer-create",
-                        &format!("failed to read ca_cert: {e}"),
+                        "insecure_skip_verify=true is rejected (fail-closed)",
                     );
                     // log-policy: outside-contract
-                    error!(error = %e, "grpc producer TLS read failed");
-                    CamelError::EndpointCreationFailed(format!("failed to read ca_cert: {e}"))
-                })?;
-                client_tls =
-                    client_tls.ca_certificate(tonic::transport::Certificate::from_pem(pem));
+                    error!("gRPC producer refused: insecure_skip_verify=true (fail-closed)");
+                    return Err(CamelError::EndpointCreationFailed(
+                        "gRPC insecure_skip_verify=true is rejected; refusing to disable \
+                         server verification (fail-closed)."
+                            .to_string(),
+                    ));
+                }
+                let sn = tls_cfg.server_name.clone().unwrap_or_else(|| {
+                    let host = addr.split_once("://").map(|(_, r)| r).unwrap_or(&addr);
+                    host.split(':').next().unwrap_or(host).to_string()
+                });
+                server_name = Some(sn.clone());
+                let mut client_tls = tonic::transport::ClientTlsConfig::new().domain_name(sn);
+                if let Some(ca_cert) = &tls_cfg.ca_cert_path {
+                    let pem = read_tls_file(ca_cert, "ca_cert", &runtime, route_id)?;
+                    client_tls =
+                        client_tls.ca_certificate(tonic::transport::Certificate::from_pem(pem));
+                }
+                match (&tls_cfg.client_cert_path, &tls_cfg.client_key_path) {
+                    (Some(cert), Some(key)) => {
+                        let cert_pem = read_tls_file(cert, "client_cert", &runtime, route_id)?;
+                        let key_pem = read_tls_file(key, "client_key", &runtime, route_id)?;
+                        let id = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+                        client_tls = client_tls.identity(id);
+                    }
+                    (None, None) => {}
+                    _ => {
+                        runtime.health().force_unhealthy_for_route(
+                            route_id,
+                            "g:grpc:producer-create",
+                            "clientCertPath and clientKeyPath must be supplied together",
+                        );
+                        return Err(CamelError::EndpointCreationFailed(
+                            "gRPC clientCertPath and clientKeyPath must both be present or both \
+                             absent (incomplete mTLS identity is rejected)."
+                                .to_string(),
+                        ));
+                    }
+                }
+                tls_enabled = true;
+                let https_addr = addr.replacen("http://", "https://", 1);
+                Endpoint::from_shared(https_addr)
+                    .map_err(|e| {
+                        runtime.health().force_unhealthy_for_route(
+                            route_id,
+                            "g:grpc:producer-create",
+                            &format!("invalid grpc endpoint: {e}"),
+                        );
+                        CamelError::EndpointCreationFailed(format!("invalid grpc endpoint: {e}"))
+                    })?
+                    .tls_config(client_tls)
+                    .map_err(|e| {
+                        runtime.health().force_unhealthy_for_route(
+                            route_id,
+                            "g:grpc:producer-create",
+                            &format!("invalid tls config: {e}"),
+                        );
+                        CamelError::EndpointCreationFailed(format!("invalid tls config: {e}"))
+                    })?
             }
-            if let (Some(cert), Some(key)) = (&tls_cfg.client_cert_path, &tls_cfg.client_key_path) {
-                let cert_pem = std::fs::read(cert).map_err(|e| {
-                    runtime.health().force_unhealthy_for_route(
-                        route_id,
-                        "g:grpc:producer-create",
-                        &format!("failed to read client_cert: {e}"),
-                    );
-                    // log-policy: outside-contract
-                    error!(error = %e, "grpc producer TLS read failed");
-                    CamelError::EndpointCreationFailed(format!("failed to read client_cert: {e}"))
-                })?;
-                let key_pem = std::fs::read(key).map_err(|e| {
-                    runtime.health().force_unhealthy_for_route(
-                        route_id,
-                        "g:grpc:producer-create",
-                        &format!("failed to read client_key: {e}"),
-                    );
-                    // log-policy: outside-contract
-                    error!(error = %e, "grpc producer TLS read failed");
-                    CamelError::EndpointCreationFailed(format!("failed to read client_key: {e}"))
-                })?;
-                let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
-                client_tls = client_tls.identity(identity);
-            }
-            // `insecure_skip_verify` honors the operator's opt-in. In tonic 0.14,
-            // skip-verification requires a custom `ServerCertVerifier` via
-            // `tls_config_with_verifier`; the verifier requires a direct
-            // tokio-rustls dep the workspace does not currently have. Rather
-            // than pull a new transitive crypto crate in for one flag, we
-            // log the operator's intent and document the limitation: when
-            // `insecure_skip_verify=true`, we attempt the verifier-via-
-            // custom-tls-config path; on failure (e.g. feature not
-            // available in the locked-down build), we hard-error rather
-            // than silently skip verification. The operator MUST explicitly
-            // set this flag; the default (`false`) is the safe path.
-            let endpoint = if tls_cfg.insecure_skip_verify {
-                // Documented limitation: the custom-verifier path requires
-                // a direct tokio-rustls dep, which is not in the
-                // workspace. Surface the operator's intent as a hard
-                // error so the misconfiguration cannot silently ship
-                // without TLS. If a follow-up batch adds a verifier
-                // shim, the implementation swaps in `tls_config_with_verifier`.
-                runtime.health().force_unhealthy_for_route(
-                    route_id,
-                    "g:grpc:producer-create",
-                    "insecure_skip_verify=true is not supported in this build; \
-                     refusing plaintext h2c (C1 fail-closed).",
-                );
-                // log-policy: outside-contract
-                error!(
-                    "gRPC producer refused: insecure_skip_verify=true not supported in this build"
-                );
-                return Err(CamelError::EndpointCreationFailed(
-                    "gRPC insecure_skip_verify=true is not supported in this build. \
-                     The C1 fail-closed policy refuses to silently fall back to plaintext. \
-                     Either set insecure_skip_verify=false or wait for a follow-up \
-                     batch that adds a tokio-rustls verifier. See ADR-0032 / ADR-0033."
-                        .to_string(),
-                ));
-            } else {
-                endpoint.tls_config(client_tls).map_err(|e| {
-                    runtime.health().force_unhealthy_for_route(
-                        route_id,
-                        "g:grpc:producer-create",
-                        &format!("failed to configure TLS: {e}"),
-                    );
-                    // log-policy: outside-contract
-                    error!(error = %e, "grpc producer TLS config failed");
-                    CamelError::EndpointCreationFailed(format!("failed to configure TLS: {e}"))
-                })?
-            };
-            tls_enabled = true;
-            endpoint
-        } else {
-            // Outcome 4 (review fix I-3): conflicting intent — a TlsConfig
-            // is supplied but `tls = false`. Refuse rather than silently
-            // running plaintext with certs configured.
-            if config.tls_config.is_some() {
-                runtime.health().force_unhealthy_for_route(
-                    route_id,
-                    "g:grpc:producer-create",
-                    "tls=false but tls_config supplied; conflicting TLS intent",
-                );
-                // log-policy: outside-contract
-                error!(
-                    "gRPC producer refused: tls=false with tls_config supplied (conflicting intent)"
-                );
-                return Err(CamelError::EndpointCreationFailed(
-                    "gRPC tls=false conflicts with a supplied tls_config. Set tls=true \
-                     to use the tls_config, or remove tls_config for explicit plaintext \
-                     (C1 fail-closed). See ADR-0032 / ADR-0033."
-                        .to_string(),
-                ));
-            }
-            endpoint
         };
         let channel = endpoint
             .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
@@ -771,7 +684,7 @@ mod tests {
     use super::GrpcProducer;
     use super::rt;
     use crate::GrpcMode;
-    use crate::config::{GrpcConfig, TlsConfig};
+    use crate::config::{ClientTlsConfig, ClientTransport, GrpcConfig};
     use camel_api::{Body, CamelError, Exchange, Message, MetricsCollector};
     use camel_component_api::{HealthCheckRegistry, NetworkRetryPolicy, RuntimeObservability};
     use tonic::Request;
@@ -791,13 +704,14 @@ mod tests {
             service: None,
             method: None,
             reflection: false,
-            tls: false,
+            transport_intent: crate::config::TransportIntent::Plaintext,
+            client_transport: ClientTransport::Plaintext,
+            server_transport: crate::config::ServerTransport::Plaintext,
             max_receive_message_length: 4 * 1024 * 1024,
             deadline_ms: None,
             metadata: None,
             connect_timeout_ms: 10_000,
             default_deadline_ms: 30_000,
-            tls_config: None,
             auth: crate::config::AuthConfig::None,
             interceptors: crate::config::InterceptorConfig::default(),
             consumer_strategy: crate::config::ConsumerStrategy::default(),
@@ -1212,20 +1126,17 @@ mod tests {
         assert!(request.metadata().get("x-good").is_some());
     }
 
-    // ── C1 Batch 1: fail-closed TLS ────────────────────────────────
+    // ── ADR-0033: fail-closed TLS ──────────────────────────────────────
 
-    /// C1 (fail-closed): when `config.tls = true` and the operator has NOT
-    /// supplied a `TlsConfig`, the producer MUST hard-error at construction.
-    /// h2c / h2 plaintext is never silently substituted. This is the
-    /// fail-closed default: a gRPC producer that declares `tls = true`
-    /// either establishes TLS (when `tls_config` is present) or refuses
-    /// to start. Credentials never travel cleartext when `tls = true`.
+    /// ADR-0033 (fail-closed): `insecure_skip_verify=true` is rejected.
     #[tokio::test]
-    async fn test_grpc_tls_true_without_tls_config_hard_errors() {
+    async fn test_grpc_insecure_skip_verify_rejected() {
         let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
         let mut config = default_config();
-        config.tls = true; // operator declares intent
-        // config.tls_config left None deliberately.
+        config.client_transport = ClientTransport::Tls(ClientTlsConfig {
+            insecure_skip_verify: true,
+            ..ClientTlsConfig::default()
+        });
 
         let result = GrpcProducer::new(
             "http://localhost:50051".to_string(),
@@ -1240,50 +1151,24 @@ mod tests {
         );
         assert!(
             result.is_err(),
-            "tls=true with no tls_config must hard-error, never silently h2c"
+            "insecure_skip_verify=true must hard-error (fail-closed)"
         );
         let err = match result {
-            Err(e) => e,
+            Err(e) => e.to_string(),
             Ok(_) => panic!("expected error"),
         };
-        let err = err.to_string();
-        // The error must name the missing piece so operators can fix it.
         assert!(
-            err.contains("tls")
-                || err.contains("TLS")
-                || err.contains("mtls")
-                || err.contains("mTLS"),
-            "error must mention TLS: {err}"
+            err.contains("insecure_skip_verify") || err.contains("fail-closed"),
+            "error must mention the refusal: {err}"
         );
     }
 
-    /// C1 (TLS wired, not plaintext): when `config.tls = true` AND a
-    /// `TlsConfig` is supplied, the producer creates successfully AND
-    /// the resulting channel's underlying endpoint uses `https://...`
-    /// (not `http://...`) — i.e. the channel is TLS-protected, never
-    /// plaintext. The endpoint URL is rewritten to `https` as a load-bearing
-    /// detail: tonic's `tls_config` only matters at handshake time, but
-    /// the scheme is what a real-world proxy / ALPN will inspect.
-    ///
-    /// SCOPE (review fix I-5): this is PLUMBING EVIDENCE, not a handshake
-    /// proof — `connect_lazy()` never negotiates TLS in this test and the
-    /// PEM is fake (tonic's `Certificate::from_pem` stores bytes without
-    /// eager validation). A real handshake integration test against a
-    /// rustls test server is a filed follow-up (see Follow-ups block at
-    /// the end of Task 4). What Batch 1 proves: fail-closed refusal +
-    /// correct ClientTlsConfig/scheme plumbing.
+    /// ADR-0033 (TLS wired, not plaintext): when `ClientTransport::Tls` is
+    /// configured, the producer creates successfully AND the resulting
+    /// channel's underlying endpoint uses `https://...` (not `http://...`).
     #[tokio::test]
-    async fn test_grpc_tls_true_with_tls_config_rewrites_to_https_and_wires_tls() {
-        // Install a rustls CryptoProvider: tonic's TLS path builds a rustls
-        // ClientConfig eagerly, which needs a process-default provider. The
-        // test binary doesn't install one (the main runtime does), so do it
-        // here. Idempotent — safe if another test installed it first.
+    async fn test_grpc_tls_transport_rewrites_to_https_and_wires_tls() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        // Use a temp CA cert so the TLS path actually reads a cert.
-        // An invalid / empty PEM is OK here: the producer should still
-        // build (it does not handshake in this test); what we verify is
-        // (a) creation succeeds, (b) the endpoint scheme is https, and
-        // (c) the producer's `tls_enabled` diagnostic field is true.
         let tmp = std::env::temp_dir().join("camel-grpc-ca-test.pem");
         std::fs::write(
             &tmp,
@@ -1293,9 +1178,7 @@ mod tests {
 
         let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
         let mut config = default_config();
-        config.tls = true;
-        config.tls_config = Some(TlsConfig {
-            tls_enabled: true,
+        config.client_transport = ClientTransport::Tls(ClientTlsConfig {
             ca_cert_path: Some(tmp.to_string_lossy().into_owned()),
             client_cert_path: None,
             client_key_path: None,
@@ -1314,15 +1197,13 @@ mod tests {
             rt(),
             "grpc-tls-wired-route",
         )
-        .expect("tls=true + tls_config must build a TLS producer, not error");
+        .expect("ClientTransport::Tls must build a TLS producer, not error");
 
-        // The producer stores the endpoint URL it was given AND a
-        // diagnostic `tls_enabled` flag. Both must reflect TLS.
         assert!(producer.tls_enabled, "tls_enabled must be true");
         assert_eq!(
             producer.endpoint_scheme(),
             "https",
-            "endpoint scheme MUST be https when tls=true, never http (proves the channel is TLS, not plaintext)"
+            "endpoint scheme MUST be https when TLS, never http"
         );
         assert_eq!(
             producer.server_name(),
@@ -1331,24 +1212,15 @@ mod tests {
         );
     }
 
-    /// C1 (conflicting intent, review fix I-3): `tls = false` while a
-    /// `TlsConfig` IS supplied is contradictory — the operator wired
-    /// certs but disabled TLS. `config.tls` is the single source of
-    /// truth; a dormant `tls_config` under `tls=false` is a
-    /// misconfiguration that would silently run plaintext with certs
-    /// configured. Fail-closed: refuse construction.
+    /// ADR-0033: incomplete mTLS identity (cert without key) is rejected.
     #[tokio::test]
-    async fn test_grpc_tls_false_with_tls_config_conflicting_intent_errors() {
+    async fn test_grpc_tls_incomplete_mtls_identity_errors() {
         let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
         let mut config = default_config();
-        config.tls = false; // explicit plaintext...
-        config.tls_config = Some(TlsConfig {
-            tls_enabled: true, // ...but a TLS config is wired
-            ca_cert_path: None,
-            client_cert_path: None,
-            client_key_path: None,
-            insecure_skip_verify: false,
-            server_name: None,
+        config.client_transport = ClientTransport::Tls(ClientTlsConfig {
+            client_cert_path: Some("/some/cert.pem".to_string()),
+            client_key_path: None, // missing key — incomplete identity
+            ..ClientTlsConfig::default()
         });
 
         let result = GrpcProducer::new(
@@ -1360,20 +1232,16 @@ mod tests {
             None,
             &config,
             rt(),
-            "grpc-tls-conflict-route",
+            "grpc-tls-incomplete-mtls-route",
         );
-        assert!(
-            result.is_err(),
-            "tls=false with tls_config supplied is conflicting intent and must error"
-        );
+        assert!(result.is_err(), "incomplete mTLS identity must error");
         let err = match result {
-            Err(e) => e,
+            Err(e) => e.to_string(),
             Ok(_) => panic!("expected error"),
         };
-        let err = err.to_string();
         assert!(
-            err.contains("conflict") || err.contains("tls"),
-            "error must name the conflict: {err}"
+            err.contains("clientCertPath") || err.contains("clientKeyPath") || err.contains("both"),
+            "error must name the incomplete identity: {err}"
         );
     }
 }

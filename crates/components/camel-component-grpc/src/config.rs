@@ -8,29 +8,63 @@ use camel_auth::oauth2::TokenProvider;
 use camel_component_api::NetworkRetryPolicy;
 use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
+use tracing::error;
 
-// ── TLS configuration (GRPC-006) ──────────────────────────────────────────
+// ── Transport configuration (ADR-0033) ────────────────────────────────────
 
-/// TLS/mTLS configuration for gRPC channels.
-///
-/// When `tls_enabled` is `true`, the producer will attempt to establish a
-/// TLS-secured connection using the provided certificate paths.
-///
-/// /// TODO(GRPC-006): load cert files at runtime
+/// Outbound (client) TLS configuration. The client VERIFIES the server
+/// (ca_cert) and optionally presents its own identity (mTLS).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[non_exhaustive]
-pub struct TlsConfig {
-    #[serde(default)]
-    pub tls_enabled: bool,
-    pub ca_cert_path: Option<String>,
-    pub client_cert_path: Option<String>,
-    pub client_key_path: Option<String>,
-    #[serde(default)]
-    pub insecure_skip_verify: bool,
-    /// Optional SNI / TLS server name. If `None`, the producer falls back to
-    /// the host portion of the endpoint address.
+pub struct ClientTlsConfig {
     #[serde(default)]
     pub server_name: Option<String>,
+    #[serde(default)]
+    pub ca_cert_path: Option<String>,
+    #[serde(default)]
+    pub client_cert_path: Option<String>,
+    #[serde(default)]
+    pub client_key_path: Option<String>,
+    /// If true, skip server cert verification. Hard-errors today (fail-closed);
+    /// the field is preserved so the gate is explicit, not silent.
+    #[serde(default)]
+    pub insecure_skip_verify: bool,
+}
+
+/// Outbound transport intent. Plaintext MUST be declared explicitly (ADR-0033).
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub enum ClientTransport {
+    #[default]
+    Plaintext,
+    Tls(ClientTlsConfig),
+}
+
+/// Inbound (server) TLS configuration. Server-auth by default; when
+/// `client_ca_path` is set, the server verifies client certificates (mTLS).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ServerTlsConfig {
+    pub server_cert_path: String,
+    pub server_key_path: String,
+    /// Optional CA (PEM) to verify CLIENT certificates (mTLS). When set,
+    /// the server rejects clients that don't present a valid cert signed
+    /// by this CA. When absent, server-auth only (backward compatible).
+    #[serde(default)]
+    pub client_ca_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub enum ServerTransport {
+    #[default]
+    Plaintext,
+    Tls(ServerTlsConfig),
+}
+
+/// Top-level transport intent — mirrors the URI `transport=` parameter.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub enum TransportIntent {
+    #[default]
+    Plaintext,
+    Tls,
 }
 
 // ── Auth configuration (GRPC-007) ─────────────────────────────────────────
@@ -254,7 +288,9 @@ pub struct GrpcConfig {
     #[serde(default)]
     pub reflection: bool,
     #[serde(default)]
-    pub tls: bool,
+    pub transport_intent: TransportIntent,
+    pub client_transport: ClientTransport,
+    pub server_transport: ServerTransport,
     #[serde(default = "default_max_msg_len")]
     pub max_receive_message_length: usize,
     pub deadline_ms: Option<u64>,
@@ -265,10 +301,6 @@ pub struct GrpcConfig {
     pub connect_timeout_ms: u64,
     #[serde(default = "default_deadline_ms")]
     pub default_deadline_ms: u64,
-
-    // GRPC-006: TLS/mTLS support
-    #[serde(default)]
-    pub tls_config: Option<TlsConfig>,
 
     // GRPC-007: Auth support
     #[serde(default)]
@@ -302,7 +334,8 @@ impl fmt::Debug for GrpcConfig {
             .field("service", &self.service)
             .field("method", &self.method)
             .field("reflection", &self.reflection)
-            .field("tls", &self.tls)
+            .field("client_transport", &self.client_transport)
+            .field("server_transport", &self.server_transport)
             .field(
                 "max_receive_message_length",
                 &self.max_receive_message_length,
@@ -311,7 +344,6 @@ impl fmt::Debug for GrpcConfig {
             .field("connect_timeout_ms", &self.connect_timeout_ms)
             .field("default_deadline_ms", &self.default_deadline_ms)
             .field("metadata", &self.metadata.as_ref().map(|_| "[REDACTED]"))
-            .field("tls_config", &self.tls_config)
             .field("auth", &self.auth)
             .field("interceptors", &self.interceptors)
             .field("consumer_strategy", &self.consumer_strategy)
@@ -334,10 +366,41 @@ fn default_deadline_ms() -> u64 {
 }
 
 /// Server-side configuration for the gRPC transport layer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GrpcServerConfig {
     /// Maximum incoming message size in bytes. None means use tonic/hyper default.
     pub max_receive_message_len: Option<usize>,
+    /// Transport mode for inbound connections (plaintext or TLS).
+    pub transport: ServerTransport,
+}
+
+impl Default for GrpcServerConfig {
+    fn default() -> Self {
+        Self {
+            max_receive_message_len: None,
+            transport: ServerTransport::Plaintext,
+        }
+    }
+}
+
+// ── TLS file I/O helper ───────────────────────────────────────────────────
+
+pub(crate) fn read_tls_file(
+    path: &str,
+    label: &str,
+    runtime: &Arc<dyn camel_component_api::RuntimeObservability>,
+    route_id: &str,
+) -> Result<Vec<u8>, CamelError> {
+    std::fs::read(path).map_err(|e| {
+        runtime.health().force_unhealthy_for_route(
+            route_id,
+            "g:grpc:tls-read",
+            &format!("failed to read {label}: {e}"),
+        );
+        // log-policy: outside-contract
+        error!(error = %e, "grpc TLS file read failed");
+        CamelError::EndpointCreationFailed(format!("failed to read {label}: {e}"))
+    })
 }
 
 // ── URI param parsing helpers ──────────────────────────────────────────────
@@ -379,11 +442,106 @@ fn parse_grpc_query_params(
         .transpose()?
         .unwrap_or(false);
 
-    let tls = map
-        .remove("tls")
-        .map(|v| parse_bool_param(&v))
-        .transpose()?
-        .unwrap_or(false);
+    let transport_val = map.remove("transport").ok_or_else(|| {
+        CamelError::Config(
+            "gRPC URI missing required 'transport' parameter. \
+                 Use transport=plaintext (explicit h2c) or transport=tls \
+                 (TLS). Omitted transport is rejected (ADR-0033)."
+                .to_string(),
+        )
+    })?;
+
+    if map.remove("tls").is_some() {
+        return Err(CamelError::Config(
+            "gRPC URI uses legacy 'tls' parameter — removed. \
+             Use transport=plaintext|tls (ADR-0033)."
+                .to_string(),
+        ));
+    }
+
+    let ca_cert_path = map.remove("caCertPath");
+    let client_cert_path = map.remove("clientCertPath");
+    let client_key_path = map.remove("clientKeyPath");
+    let client_server_name = map.remove("serverName");
+    let server_cert_path = map.remove("serverCertPath");
+    let server_key_path = map.remove("serverKeyPath");
+    let client_ca_path = map.remove("clientCaPath");
+
+    let (transport_intent, client_transport, server_transport) = match transport_val.as_str() {
+        "plaintext" => {
+            if [
+                ca_cert_path.as_ref(),
+                client_cert_path.as_ref(),
+                client_key_path.as_ref(),
+                client_server_name.as_ref(),
+                client_ca_path.as_ref(),
+            ]
+            .iter()
+            .any(|v| v.is_some())
+            {
+                return Err(CamelError::Config(
+                    "gRPC transport=plaintext with client cert params — conflicting intent. \
+                     Remove caCertPath/clientCertPath/clientKeyPath/serverName/clientCaPath."
+                        .to_string(),
+                ));
+            }
+            if [server_cert_path.as_ref(), server_key_path.as_ref()]
+                .iter()
+                .any(|v| v.is_some())
+            {
+                return Err(CamelError::Config(
+                    "gRPC transport=plaintext with server cert params — conflicting intent. \
+                     Remove serverCertPath/serverKeyPath."
+                        .to_string(),
+                ));
+            }
+            (
+                TransportIntent::Plaintext,
+                ClientTransport::Plaintext,
+                ServerTransport::Plaintext,
+            )
+        }
+        "tls" => {
+            let client = ClientTransport::Tls(ClientTlsConfig {
+                server_name: client_server_name,
+                ca_cert_path,
+                client_cert_path,
+                client_key_path,
+                insecure_skip_verify: false,
+            });
+            let server = match (server_cert_path, server_key_path) {
+                (Some(cert), Some(key)) => ServerTransport::Tls(ServerTlsConfig {
+                    server_cert_path: cert,
+                    server_key_path: key,
+                    client_ca_path,
+                }),
+                (None, None) => {
+                    if client_ca_path.is_some() {
+                        return Err(CamelError::Config(
+                            "gRPC transport=tls with clientCaPath requires serverCertPath + \
+                             serverKeyPath (inbound TLS). clientCaPath cannot apply to \
+                             plaintext serve."
+                                .to_string(),
+                        ));
+                    }
+                    ServerTransport::Plaintext
+                }
+                _ => {
+                    return Err(CamelError::Config(
+                        "gRPC transport=tls inbound requires BOTH serverCertPath and \
+                         serverKeyPath (or neither for plaintext serve)."
+                            .to_string(),
+                    ));
+                }
+            };
+            (TransportIntent::Tls, client, server)
+        }
+        other => {
+            return Err(CamelError::Config(format!(
+                "gRPC invalid transport='{other}'. Use transport=plaintext|tls."
+            )));
+        }
+    };
 
     let max_receive_message_length = map
         .remove("max_receive_message_length")
@@ -440,13 +598,14 @@ fn parse_grpc_query_params(
         service,
         method,
         reflection,
-        tls,
+        transport_intent,
+        client_transport,
+        server_transport,
         max_receive_message_length,
         deadline_ms,
         metadata,
         connect_timeout_ms,
         default_deadline_ms,
-        tls_config: None,
         auth,
         interceptors: InterceptorConfig::default(),
         consumer_strategy,
@@ -483,20 +642,6 @@ pub fn parse_grpc_uri(uri: &str) -> Result<(String, u16, String, String, GrpcCon
     }
     if config.reflection {
         tracing::warn!("gRPC reflection is not supported in v1 — parameter ignored");
-    }
-    if config.tls && config.tls_config.is_none() {
-        // C1 Batch 1: fail-closed. The earlier behavior was `tracing::warn!`
-        // and silently fall through to h2c. Auth tokens would travel
-        // cleartext. The producer now refuses to build (the check at
-        // GrpcProducer::new will return EndpointCreationFailed before any
-        // channel is created). At config-parse time we surface the same
-        // error so `camel doctor` and YAML preflight catch it earlier.
-        return Err(CamelError::EndpointCreationFailed(
-            "gRPC tls=true requires tls_config; refusing plaintext h2c. \
-             Set tls=false (explicit plaintext) or supply a tls_config \
-             (C1 fail-closed). See ADR-0032 / ADR-0033."
-                .to_string(),
-        ));
     }
     Ok((host, port, service.to_string(), method.to_string(), config))
 }
@@ -569,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_valid() {
-        let uri = "grpc://localhost:50051/com.example.MyService/MyMethod";
+        let uri = "grpc://localhost:50051/com.example.MyService/MyMethod?transport=plaintext";
         let (host, port, service, method, config) = parse_grpc_uri(uri).unwrap();
         assert_eq!(host, "localhost");
         assert_eq!(port, 50051);
@@ -577,43 +722,43 @@ mod tests {
         assert_eq!(method, "MyMethod");
         assert_eq!(config.max_receive_message_length, 4 * 1024 * 1024);
         assert!(!config.reflection);
-        assert!(!config.tls);
+        assert_eq!(config.transport_intent, TransportIntent::Plaintext);
     }
 
     #[test]
     fn test_parse_grpc_uri_bool_query_params_case_insensitive() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=true";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=true&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert!(config.reflection);
 
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=TRUE";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=TRUE&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert!(config.reflection);
 
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=1";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=1&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert!(config.reflection);
 
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=yes";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=yes&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert!(config.reflection);
 
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=false";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=false&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert!(!config.reflection);
 
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=0";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=0&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert!(!config.reflection);
 
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=no";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=no&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert!(!config.reflection);
     }
 
     #[test]
     fn test_parse_grpc_uri_bool_query_params_invalid() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=maybe";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?reflection=maybe&transport=plaintext";
         let result = parse_grpc_uri(uri);
         assert!(result.is_err());
         assert!(
@@ -626,26 +771,25 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_with_proto_file() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?protoFile=my.proto";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?protoFile=my.proto&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert_eq!(config.proto_file, Some("my.proto".to_string()));
     }
 
     #[test]
     fn test_parse_grpc_uri_numeric_query_params_work() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?max_receive_message_length=8388608";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?max_receive_message_length=8388608&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert_eq!(config.max_receive_message_length, 8388608);
 
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?deadline_ms=5000";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?deadline_ms=5000&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert_eq!(config.deadline_ms, Some(5000));
     }
 
     #[test]
     fn test_parse_grpc_uri_connect_timeout_and_default_deadline() {
-        let uri =
-            "grpc://localhost:50051/pkg.Svc/Method?connectTimeoutMs=5000&defaultDeadlineMs=15000";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?connectTimeoutMs=5000&defaultDeadlineMs=15000&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert_eq!(config.connect_timeout_ms, 5000);
         assert_eq!(config.default_deadline_ms, 15000);
@@ -653,7 +797,8 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_numeric_query_params_invalid() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?deadline_ms=notanumber";
+        let uri =
+            "grpc://localhost:50051/pkg.Svc/Method?deadline_ms=notanumber&transport=plaintext";
         let result = parse_grpc_uri(uri);
         assert!(result.is_err());
         assert!(
@@ -666,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_with_metadata() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?metadata=some-value";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?metadata=some-value&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert_eq!(config.metadata, Some("some-value".to_string()));
     }
@@ -688,14 +833,14 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_missing_port() {
-        let result = parse_grpc_uri("grpc://localhost/pkg.Svc/Method");
+        let result = parse_grpc_uri("grpc://localhost/pkg.Svc/Method?transport=plaintext");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing port"));
     }
 
     #[test]
     fn test_parse_grpc_uri_missing_method_separator() {
-        let result = parse_grpc_uri("grpc://localhost:50051/NoSlashHere");
+        let result = parse_grpc_uri("grpc://localhost:50051/NoSlashHere?transport=plaintext");
         assert!(result.is_err());
         assert!(
             result
@@ -707,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_proto_absolute_path_rejected() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?protoFile=/etc/passwd";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?protoFile=/etc/passwd&transport=plaintext";
         let result = parse_grpc_uri(uri);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("proto path"));
@@ -715,7 +860,8 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_proto_traversal_rejected() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?protoFile=../secret.proto";
+        let uri =
+            "grpc://localhost:50051/pkg.Svc/Method?protoFile=../secret.proto&transport=plaintext";
         let result = parse_grpc_uri(uri);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains(".."));
@@ -727,7 +873,7 @@ mod tests {
     /// running h2c. Explicit plaintext (`tls=false` or omitted) still parses.
     #[test]
     fn test_parse_grpc_uri_tls_true_without_config_rejected() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?tls=true";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?tls=true&transport=plaintext";
         let result = parse_grpc_uri(uri);
         assert!(
             result.is_err(),
@@ -739,10 +885,22 @@ mod tests {
 
     #[test]
     fn test_grpc_config_defaults_via_deserialize() {
-        let config: GrpcConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        // ADR-0033: transport fields are REQUIRED — omitting them must error.
+        let result: Result<GrpcConfig, _> = serde_json::from_value(serde_json::json!({}));
+        assert!(
+            result.is_err(),
+            "GrpcConfig without explicit transport must fail (ADR-0033)"
+        );
+
+        // With explicit transports, defaults work:
+        let config: GrpcConfig = serde_json::from_value(serde_json::json!({
+            "client_transport": "Plaintext",
+            "server_transport": "Plaintext"
+        }))
+        .unwrap();
         assert_eq!(config.max_receive_message_length, 4 * 1024 * 1024);
         assert!(!config.reflection);
-        assert!(!config.tls);
+        assert_eq!(config.transport_intent, TransportIntent::Plaintext);
         assert!(config.proto_file.is_none());
         assert!(config.service.is_none());
         assert!(config.method.is_none());
@@ -759,7 +917,9 @@ mod tests {
             "service": "MyService",
             "method": "MyMethod",
             "reflection": true,
-            "tls": true,
+            "transport_intent": "Tls",
+            "client_transport": {"Tls": {"server_name": "example.com"}},
+            "server_transport": "Plaintext",
             "max_receive_message_length": 1024,
             "deadline_ms": 3000,
             "metadata": "auth-token"
@@ -769,7 +929,7 @@ mod tests {
         assert_eq!(config.service, Some("MyService".to_string()));
         assert_eq!(config.method, Some("MyMethod".to_string()));
         assert!(config.reflection);
-        assert!(config.tls);
+        assert_eq!(config.transport_intent, TransportIntent::Tls);
         assert_eq!(config.max_receive_message_length, 1024);
         assert_eq!(config.deadline_ms, Some(3000));
         assert_eq!(config.metadata, Some("auth-token".to_string()));
@@ -778,7 +938,9 @@ mod tests {
     #[test]
     fn test_grpc_config_clone_and_debug() {
         let config: GrpcConfig = serde_json::from_value(serde_json::json!({
-            "protoFile": "test.proto"
+            "protoFile": "test.proto",
+            "client_transport": "Plaintext",
+            "server_transport": "Plaintext"
         }))
         .unwrap();
         let cloned = config.clone();
@@ -793,12 +955,14 @@ mod tests {
     fn test_server_config_default() {
         let cfg = GrpcServerConfig::default();
         assert!(cfg.max_receive_message_len.is_none());
+        assert!(matches!(cfg.transport, ServerTransport::Plaintext));
     }
 
     #[test]
     fn test_server_config_max_receive_message_len_applied() {
         let cfg = GrpcServerConfig {
             max_receive_message_len: Some(4096),
+            transport: ServerTransport::Plaintext,
         };
         assert_eq!(cfg.max_receive_message_len, Some(4096));
     }
@@ -807,6 +971,7 @@ mod tests {
     fn test_server_config_clone_and_debug() {
         let cfg = GrpcServerConfig {
             max_receive_message_len: Some(8192),
+            transport: ServerTransport::Plaintext,
         };
         let cloned = cfg.clone();
         assert_eq!(cfg.max_receive_message_len, cloned.max_receive_message_len);
@@ -841,7 +1006,9 @@ mod tests {
     #[test]
     fn test_apply_config_metadata_single_pair() {
         let config: GrpcConfig = serde_json::from_value(serde_json::json!({
-            "metadata": "x-custom=hello"
+            "metadata": "x-custom=hello",
+            "client_transport": "Plaintext",
+            "server_transport": "Plaintext"
         }))
         .unwrap();
         let mut request = tonic::Request::new(());
@@ -860,7 +1027,9 @@ mod tests {
     #[test]
     fn test_apply_config_metadata_multiple_pairs() {
         let config: GrpcConfig = serde_json::from_value(serde_json::json!({
-            "metadata": "x-a=1, x-b=2"
+            "metadata": "x-a=1, x-b=2",
+            "client_transport": "Plaintext",
+            "server_transport": "Plaintext"
         }))
         .unwrap();
         let mut request = tonic::Request::new(());
@@ -878,35 +1047,34 @@ mod tests {
     #[test]
     fn test_apply_config_metadata_empty_metadata() {
         let config: GrpcConfig =
-            serde_json::from_value(serde_json::json!({"metadata": ""})).unwrap();
+            serde_json::from_value(serde_json::json!({"metadata": "", "client_transport": "Plaintext", "server_transport": "Plaintext"})).unwrap();
         let mut request = tonic::Request::new(());
         apply_config_metadata(&config, &mut request);
         assert!(request.metadata().is_empty());
     }
 
-    // ── GRPC-006: TlsConfig tests ──────────────────────────────────────────
+    // ── ADR-0033: ClientTlsConfig tests ─────────────────────────────────────
 
     #[test]
-    fn test_tls_config_default() {
-        let tls = TlsConfig::default();
-        assert!(!tls.tls_enabled);
+    fn test_client_tls_config_default() {
+        let tls = ClientTlsConfig::default();
         assert!(tls.ca_cert_path.is_none());
         assert!(tls.client_cert_path.is_none());
         assert!(tls.client_key_path.is_none());
         assert!(!tls.insecure_skip_verify);
+        assert!(tls.server_name.is_none());
     }
 
     #[test]
-    fn test_tls_config_deserialize_enabled() {
-        let tls: TlsConfig = serde_json::from_value(serde_json::json!({
-            "tls_enabled": true,
+    fn test_client_tls_config_deserialize() {
+        let tls: ClientTlsConfig = serde_json::from_value(serde_json::json!({
             "ca_cert_path": "/path/to/ca.pem",
             "client_cert_path": "/path/to/client.pem",
             "client_key_path": "/path/to/client.key",
-            "insecure_skip_verify": true
+            "insecure_skip_verify": true,
+            "server_name": "grpc.example.com"
         }))
         .unwrap();
-        assert!(tls.tls_enabled);
         assert_eq!(tls.ca_cert_path, Some("/path/to/ca.pem".to_string()));
         assert_eq!(
             tls.client_cert_path,
@@ -914,12 +1082,12 @@ mod tests {
         );
         assert_eq!(tls.client_key_path, Some("/path/to/client.key".to_string()));
         assert!(tls.insecure_skip_verify);
+        assert_eq!(tls.server_name, Some("grpc.example.com".to_string()));
     }
 
     #[test]
-    fn test_tls_config_clone_and_debug() {
-        let tls = TlsConfig {
-            tls_enabled: true,
+    fn test_client_tls_config_clone_and_debug() {
+        let tls = ClientTlsConfig {
             ca_cert_path: Some("/ca.pem".to_string()),
             client_cert_path: None,
             client_key_path: None,
@@ -927,9 +1095,9 @@ mod tests {
             server_name: None,
         };
         let cloned = tls.clone();
-        assert_eq!(tls.tls_enabled, cloned.tls_enabled);
+        assert_eq!(tls.ca_cert_path, cloned.ca_cert_path);
         let debug_str = format!("{tls:?}");
-        assert!(debug_str.contains("TlsConfig"));
+        assert!(debug_str.contains("ClientTlsConfig"));
     }
 
     // ── GRPC-007: AuthConfig tests ─────────────────────────────────────────
@@ -1103,7 +1271,9 @@ mod tests {
     #[test]
     fn test_grpc_config_debug_redacts_metadata() {
         let config: GrpcConfig = serde_json::from_value(serde_json::json!({
-            "metadata": "secret-key=value"
+            "metadata": "secret-key=value",
+            "client_transport": "Plaintext",
+            "server_transport": "Plaintext"
         }))
         .unwrap();
         let debug_str = format!("{config:?}");
@@ -1114,7 +1284,9 @@ mod tests {
     #[test]
     fn test_grpc_config_debug_no_redaction_without_secrets() {
         let config: GrpcConfig = serde_json::from_value(serde_json::json!({
-            "protoFile": "test.proto"
+            "protoFile": "test.proto",
+            "client_transport": "Plaintext",
+            "server_transport": "Plaintext"
         }))
         .unwrap();
         let debug_str = format!("{config:?}");
@@ -1152,7 +1324,7 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_bearer_token() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?bearerToken=my-token";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?bearerToken=my-token&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         match config.auth {
             AuthConfig::Bearer { ref token } => assert_eq!(token, "my-token"),
@@ -1168,6 +1340,8 @@ mod tests {
             protoFile = "helloworld.proto"
             service = "Greeter"
             method = "SayHello"
+            client_transport = "Plaintext"
+            server_transport = "Plaintext"
             [retry]
             max_attempts = 3
             initial_delay_ms = 500
@@ -1184,6 +1358,8 @@ mod tests {
     fn grpc_config_retry_defaults_when_not_specified() {
         let toml_str = r#"
             protoFile = "helloworld.proto"
+            client_transport = "Plaintext"
+            server_transport = "Plaintext"
         "#;
         let cfg: GrpcConfig = toml::from_str(toml_str).expect("parse");
         assert_eq!(
@@ -1196,15 +1372,152 @@ mod tests {
 
     #[test]
     fn test_parse_grpc_uri_consumer_strategy() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?consumerStrategy=first";
+        let uri =
+            "grpc://localhost:50051/pkg.Svc/Method?consumerStrategy=first&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert_eq!(config.consumer_strategy, ConsumerStrategy::First);
     }
 
     #[test]
     fn test_parse_grpc_uri_producer_strategy() {
-        let uri = "grpc://localhost:50051/pkg.Svc/Method?producerStrategy=fireAndForget";
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?producerStrategy=fireAndForget&transport=plaintext";
         let (_, _, _, _, config) = parse_grpc_uri(uri).unwrap();
         assert_eq!(config.producer_strategy, ProducerStrategy::FireAndForget);
+    }
+
+    // ── Fail-closed regression tests (rc-j0gl, rc-vnrl, rc-xp76) ───────────
+
+    /// Regression: omitted transport must error (ADR-0033).
+    #[test]
+    fn test_parse_rejects_omitted_transport() {
+        let res =
+            parse_grpc_uri("grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=a.proto");
+        assert!(res.is_err(), "omitted transport must fail-closed");
+        assert!(
+            res.unwrap_err().to_string().contains("transport"),
+            "error must mention transport"
+        );
+    }
+
+    /// Regression: legacy tls=true key rejected even alongside transport=tls.
+    #[test]
+    fn test_parse_rejects_legacy_tls_key_alone() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=a.proto&tls=true",
+        );
+        assert!(res.is_err(), "legacy tls= alone must fail");
+        assert!(
+            res.unwrap_err().to_string().contains("tls"),
+            "error must mention tls"
+        );
+    }
+
+    /// Regression: clientCaPath without server certs rejected at parse time.
+    #[test]
+    fn test_parse_rejects_client_ca_without_server_certs() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=tls&clientCaPath=/ca.pem",
+        );
+        assert!(
+            res.is_err(),
+            "clientCaPath without serverCertPath/serverKeyPath must fail at parse"
+        );
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("clientCaPath") || msg.contains("serverCertPath"),
+            "error must name the missing params: {msg}"
+        );
+    }
+
+    /// Regression: transport=tls with serverCertPath but not serverKeyPath → error.
+    #[test]
+    fn test_parse_rejects_tls_with_server_cert_only() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=tls&serverCertPath=/c.pem",
+        );
+        assert!(res.is_err(), "serverCertPath without serverKeyPath must fail");
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("serverCertPath") && msg.contains("serverKeyPath"),
+            "error must name both params: {msg}"
+        );
+    }
+
+    /// Regression: transport=plaintext with caCertPath → conflicting-intent error.
+    #[test]
+    fn test_parse_rejects_plaintext_with_ca_cert() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=plaintext&caCertPath=/ca.pem",
+        );
+        assert!(res.is_err(), "plaintext + caCertPath must conflict");
+        assert!(
+            res.unwrap_err().to_string().contains("conflicting"),
+            "error must mention conflicting intent"
+        );
+    }
+
+    /// Regression: transport=plaintext with serverCertPath → conflicting-intent error.
+    #[test]
+    fn test_parse_rejects_plaintext_with_server_cert() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=plaintext&serverCertPath=/cert.pem",
+        );
+        assert!(res.is_err(), "plaintext + serverCertPath must conflict");
+        assert!(
+            res.unwrap_err().to_string().contains("conflicting"),
+            "error must mention conflicting intent"
+        );
+    }
+
+    /// Regression: transport=plaintext with clientCertPath → conflicting-intent error.
+    #[test]
+    fn test_parse_rejects_plaintext_with_client_cert() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=plaintext&clientCertPath=/cert.pem",
+        );
+        assert!(res.is_err(), "plaintext + clientCertPath must conflict");
+        assert!(
+            res.unwrap_err().to_string().contains("conflicting"),
+            "error must mention conflicting intent"
+        );
+    }
+
+    /// Regression: transport=plaintext with clientKeyPath → conflicting-intent error.
+    #[test]
+    fn test_parse_rejects_plaintext_with_client_key() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=plaintext&clientKeyPath=/key.pem",
+        );
+        assert!(res.is_err(), "plaintext + clientKeyPath must conflict");
+        assert!(
+            res.unwrap_err().to_string().contains("conflicting"),
+            "error must mention conflicting intent"
+        );
+    }
+
+    /// Regression: transport=plaintext with serverName → conflicting-intent error.
+    #[test]
+    fn test_parse_rejects_plaintext_with_server_name() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=plaintext&serverName=example.com",
+        );
+        assert!(res.is_err(), "plaintext + serverName must conflict");
+        assert!(
+            res.unwrap_err().to_string().contains("conflicting"),
+            "error must mention conflicting intent"
+        );
+    }
+
+    /// Regression: transport=plaintext with clientCaPath → conflicting-intent error.
+    #[test]
+    fn test_parse_rejects_plaintext_with_client_ca() {
+        let res = parse_grpc_uri(
+            "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=plaintext&clientCaPath=/ca.pem",
+        );
+        assert!(res.is_err(), "plaintext + clientCaPath must conflict");
+        assert!(
+            res.unwrap_err().to_string().contains("conflicting"),
+            "error must mention conflicting intent"
+        );
     }
 }

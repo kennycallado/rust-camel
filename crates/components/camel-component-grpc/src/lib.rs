@@ -11,8 +11,8 @@ pub mod server;
 pub use bundle::GrpcBundle;
 pub use component::GrpcComponent;
 pub use config::{
-    AuthConfig, ConsumerStrategy, GrpcConfig, GrpcServerConfig, InterceptorConfig,
-    ProducerStrategy, TlsConfig,
+    AuthConfig, ClientTlsConfig, ClientTransport, ConsumerStrategy, GrpcConfig, GrpcServerConfig,
+    InterceptorConfig, ProducerStrategy, ServerTlsConfig, ServerTransport, TransportIntent,
 };
 pub use health::GrpcHealthCheck;
 pub use mode::GrpcMode;

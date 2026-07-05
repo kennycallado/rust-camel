@@ -30,6 +30,9 @@ toml.workspace = true
 hyper = "1"
 hyper-util = "0.1"
 http-body-util = "0.1"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 async-trait.workspace = true
 futures.workspace = true
 
@@ -43,7 +46,7 @@ tokio-util.workspace = true
 tower.workspace = true
 tonic-prost.workspace = true
 futures.workspace = true
-rustls = "0.23"
+rcgen = "0.13"
 
 [build-dependencies]
 tonic-prost-build.workspace = true

@@ -10,6 +10,7 @@ use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::sync::{OnceCell, RwLock, mpsc};
+use tokio_rustls::TlsAcceptor;
 use tonic::body::Body as TonicBody;
 use tonic::codec::Streaming;
 use tonic::{Request, Response, Status};
@@ -19,7 +20,7 @@ use tracing::{debug, error};
 use camel_component_api::RuntimeObservability;
 
 use crate::codec::RawBytesCodec;
-use crate::config::GrpcServerConfig;
+use crate::config::{GrpcServerConfig, ServerTransport, read_tls_file};
 use crate::consumer::{GrpcReply, GrpcRequestEnvelope, GrpcStreamItem};
 use crate::mode::GrpcMode;
 
@@ -37,8 +38,7 @@ struct ServerHandle {
     dispatch: GrpcDispatchTable,
     #[allow(dead_code)]
     _task: tokio::task::JoinHandle<()>,
-    #[allow(dead_code)]
-    config: GrpcServerConfig,
+    transport: ServerTransport,
 }
 
 pub(crate) struct GrpcServerRegistry {
@@ -75,6 +75,8 @@ impl GrpcServerRegistry {
 
         let handle = cell
             .get_or_try_init(|| async {
+                let route_id = format!("grpc-server:{host_owned}:{port}");
+                let acceptor = build_tls_acceptor(&config.transport, &route_id, &runtime)?;
                 let addr = format!("{host_owned}:{port}");
                 let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
                     CamelError::EndpointCreationFailed(format!(
@@ -87,22 +89,18 @@ impl GrpcServerRegistry {
                     listener,
                     Arc::clone(&dispatch),
                     config.clone(),
+                    acceptor,
                     rt,
                 ));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
                     dispatch,
                     _task: task,
-                    config,
+                    transport: config.transport.clone(),
                 })
             })
             .await?;
 
-        if handle._task.is_finished() {
-            return Err(CamelError::EndpointCreationFailed(
-                "gRPC server task has terminated unexpectedly".into(),
-            ));
-        }
-
+        validate_server_handle(handle, &config.transport, &host_owned, port)?;
         Ok(Arc::clone(&handle.dispatch))
     }
 
@@ -114,6 +112,8 @@ impl GrpcServerRegistry {
         config: GrpcServerConfig,
         runtime: Arc<dyn RuntimeObservability>,
     ) -> Result<GrpcDispatchTable, CamelError> {
+        let host_owned = host.to_string();
+
         let cell = {
             let mut guard = self.inner.lock().map_err(|_| {
                 CamelError::EndpointCreationFailed("GrpcServerRegistry lock poisoned".into())
@@ -127,28 +127,26 @@ impl GrpcServerRegistry {
 
         let handle = cell
             .get_or_try_init(|| async {
+                let route_id = format!("grpc-server:{host_owned}:{port}");
+                let acceptor = build_tls_acceptor(&config.transport, &route_id, &runtime)?;
                 let dispatch: GrpcDispatchTable = Arc::new(RwLock::new(HashMap::new()));
                 let rt = Arc::clone(&runtime);
                 let task = tokio::spawn(run_grpc_server(
                     listener,
                     Arc::clone(&dispatch),
                     config.clone(),
+                    acceptor,
                     rt,
                 ));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
                     dispatch,
                     _task: task,
-                    config,
+                    transport: config.transport.clone(),
                 })
             })
             .await?;
 
-        if handle._task.is_finished() {
-            return Err(CamelError::EndpointCreationFailed(
-                "gRPC server task has terminated unexpectedly".into(),
-            ));
-        }
-
+        validate_server_handle(handle, &config.transport, &host_owned, port)?;
         Ok(Arc::clone(&handle.dispatch))
     }
 
@@ -169,10 +167,137 @@ impl GrpcServerRegistry {
     }
 }
 
+/// Validate a server handle after registry lookup: reject transport mismatches
+/// (Plaintext↔Tls OR Tls(A)↔Tls(B)) and reap finished tasks.
+fn validate_server_handle(
+    handle: &ServerHandle,
+    requested: &ServerTransport,
+    host: &str,
+    port: u16,
+) -> Result<(), CamelError> {
+    if &handle.transport != requested {
+        return Err(CamelError::EndpointCreationFailed(format!(
+            "gRPC server {host}:{port} already bound with transport={:?}; \
+             requested {:?} — refusing to mix incompatible transport configs on one listener",
+            handle.transport, requested,
+        )));
+    }
+    if handle._task.is_finished() {
+        return Err(CamelError::EndpointCreationFailed(
+            "gRPC server task has terminated unexpectedly".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build a TlsAcceptor from ServerTransport (server-auth, optional mTLS, ALPN h2).
+/// Returns Ok(None) for Plaintext. Hard-errors on missing/invalid cert.
+fn build_tls_acceptor(
+    transport: &ServerTransport,
+    route_id: &str,
+    runtime: &Arc<dyn RuntimeObservability>,
+) -> Result<Option<TlsAcceptor>, CamelError> {
+    match transport {
+        ServerTransport::Plaintext => Ok(None),
+        ServerTransport::Tls(cfg) => {
+            let cert_pem = read_tls_file(&cfg.server_cert_path, "server_cert", runtime, route_id)?;
+            let key_pem = read_tls_file(&cfg.server_key_path, "server_key", runtime, route_id)?;
+            let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_slice())
+                .collect::<Result<_, _>>()
+                .map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!("invalid server cert PEM: {e}"))
+                })?;
+            let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+                .map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!("invalid server key PEM: {e}"))
+                })?
+                .ok_or_else(|| {
+                    CamelError::EndpointCreationFailed("no private key in server_key PEM".into())
+                })?;
+            // rustls 0.23: explicit ring provider via builder_with_provider —
+            // ServerConfig::builder() panics at runtime if no process-default provider.
+            let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+
+            // Optional mTLS: build client cert verifier if client_ca_path is set.
+            let client_verifier: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>> =
+                match &cfg.client_ca_path {
+                    Some(ca_path) => {
+                        let ca_pem = read_tls_file(ca_path, "client_ca", runtime, route_id)?;
+                        let ca_certs: Vec<_> = rustls_pemfile::certs(&mut ca_pem.as_slice())
+                            .collect::<Result<_, _>>()
+                            .map_err(|e| {
+                                CamelError::EndpointCreationFailed(format!(
+                                    "invalid client CA PEM: {e}"
+                                ))
+                            })?;
+                        let mut roots = rustls::RootCertStore::empty();
+                        for cert in ca_certs {
+                            roots.add(cert).map_err(|e| {
+                                CamelError::EndpointCreationFailed(format!(
+                                    "client CA root add: {e}"
+                                ))
+                            })?;
+                        }
+                        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                            Arc::new(roots),
+                            Arc::clone(&provider),
+                        )
+                        .build()
+                        .map_err(|e| {
+                            CamelError::EndpointCreationFailed(format!("client cert verifier: {e}"))
+                        })?;
+                        Some(verifier)
+                    }
+                    None => None,
+                };
+
+            let mut server_cfg = {
+                let builder = rustls::ServerConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .map_err(|e| {
+                        CamelError::EndpointCreationFailed(format!("rustls protocol versions: {e}"))
+                    })?;
+                match client_verifier {
+                    None => builder.with_no_client_auth(),
+                    Some(verifier) => builder.with_client_cert_verifier(verifier),
+                }
+                .with_single_cert(certs, key)
+                .map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!("rustls ServerConfig: {e}"))
+                })?
+            };
+            server_cfg.alpn_protocols = vec![b"h2".to_vec()];
+            Ok(Some(TlsAcceptor::from(Arc::new(server_cfg))))
+        }
+    }
+}
+
+/// Serve h2 over a concrete IO type. Generic so both plaintext (TcpStream)
+/// and TLS (TlsStream<TcpStream>) call sites type-check.
+async fn serve_h2<I>(io: I, dispatch: GrpcDispatchTable, config: GrpcServerConfig)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(io);
+    let service = service_fn(move |req| {
+        let dispatch = dispatch.clone();
+        handle_grpc_request(req, dispatch)
+    });
+    let mut builder = http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+    if let Some(max_len) = config.max_receive_message_len {
+        let frame_size = max_len.clamp(16_384, 16_777_215) as u32;
+        builder.max_frame_size(frame_size);
+    }
+    if let Err(e) = builder.serve_connection(io, service).await {
+        debug!(error = %e, "gRPC connection error");
+    }
+}
+
 async fn run_grpc_server(
     listener: tokio::net::TcpListener,
     dispatch: GrpcDispatchTable,
     config: GrpcServerConfig,
+    tls_acceptor: Option<TlsAcceptor>,
     runtime: Arc<dyn RuntimeObservability>,
 ) {
     // Q-B1: route_id derived from listener local address. The accept loop runs
@@ -197,29 +322,23 @@ async fn run_grpc_server(
             }
         };
 
-        let io = TokioIo::new(stream);
-        let dispatch = dispatch.clone();
+        let tls_acceptor = tls_acceptor.clone();
         let config = config.clone();
-
+        let dispatch = dispatch.clone();
+        let rt_metrics = runtime.clone();
+        let route_id_clone = route_id.clone();
         tokio::spawn(async move {
-            let service = service_fn(move |req| {
-                let dispatch = dispatch.clone();
-                handle_grpc_request(req, dispatch)
-            });
-
-            let mut builder = http2::Builder::new(hyper_util::rt::TokioExecutor::new());
-
-            // Apply max_receive_message_len as max_frame_size on the http2 builder.
-            // NOTE: HTTP/2 frames are capped at 16 MB per spec; this limits individual
-            // frame sizes. For true message-level limits, a Tower layer would be needed.
-            if let Some(max_len) = config.max_receive_message_len {
-                // Clamp to HTTP/2 spec maximum (16 MB - 1 byte)
-                let frame_size = max_len.clamp(16_384, 16_777_215) as u32;
-                builder.max_frame_size(frame_size);
-            }
-
-            if let Err(e) = builder.serve_connection(io, service).await {
-                debug!(error = %e, "gRPC connection error");
+            match tls_acceptor.as_ref() {
+                None => serve_h2(stream, dispatch, config).await,
+                Some(acceptor) => match acceptor.accept(stream).await {
+                    Ok(tls_stream) => serve_h2(tls_stream, dispatch, config).await,
+                    Err(e) => {
+                        rt_metrics
+                            .metrics()
+                            .increment_errors(&route_id_clone, "e:grpc:tls-accept");
+                        debug!(error = %e, "gRPC TLS handshake error");
+                    }
+                },
             }
         });
     }
@@ -1500,7 +1619,7 @@ mod tests {
         let handle = ServerHandle {
             dispatch,
             _task: task,
-            config: GrpcServerConfig::default(),
+            transport: ServerTransport::Plaintext,
         };
         let _ = handle;
     }
@@ -1569,6 +1688,7 @@ mod tests {
             listener,
             _dispatch,
             GrpcServerConfig::default(),
+            None,
             rt,
         ));
 
@@ -1589,5 +1709,61 @@ mod tests {
 
         handle.abort();
         let _ = handle.await;
+    }
+
+    /// Regression: Registry transport-mismatch — cannot mix TLS/plaintext on same listener.
+    /// This test verifies the behavioral fail-closed path: first bind plaintext, then
+    /// attempt TLS on the same port → must error with "transport" in the message.
+    #[tokio::test]
+    async fn test_registry_transport_mismatch_errors() {
+        use crate::config::ServerTlsConfig;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let errors = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(RecordingRuntime::new(errors));
+
+        // First, bind plaintext on this port
+        let plaintext_config = GrpcServerConfig {
+            max_receive_message_len: None,
+            transport: ServerTransport::Plaintext,
+        };
+        let dispatch = GrpcServerRegistry::global()
+            .get_or_spawn_with_listener(listener, "127.0.0.1", port, plaintext_config, rt.clone())
+            .await;
+        assert!(dispatch.is_ok(), "plaintext bind should succeed");
+
+        // Now attempt TLS on the SAME port — MUST FAIL with transport mismatch
+        let tls_config = GrpcServerConfig {
+            max_receive_message_len: None,
+            transport: ServerTransport::Tls(ServerTlsConfig {
+                server_cert_path: "/nonexistent/cert.pem".to_string(),
+                server_key_path: "/nonexistent/key.pem".to_string(),
+                client_ca_path: None,
+            }),
+        };
+
+        // Bind a new listener for the TLS attempt (will fail at validation, not bind)
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        // Use the SAME port as the first bind to trigger mismatch
+        let result = GrpcServerRegistry::global()
+            .get_or_spawn_with_listener(listener2, "127.0.0.1", port, tls_config, rt)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "TLS on port already serving plaintext must fail (transport-mismatch)"
+        );
+        match result {
+            Err(e) => {
+                let err = e.to_string();
+                assert!(
+                    err.contains("transport"),
+                    "error must mention transport mismatch: {err}"
+                );
+            }
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 }

@@ -264,6 +264,7 @@ pub struct GrpcConsumer {
     mode: GrpcMode,
     security_ctx: Option<SecurityContext>,
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    server_config: GrpcServerConfig,
 }
 
 impl GrpcConsumer {
@@ -277,6 +278,7 @@ impl GrpcConsumer {
         method_name: String,
         mode: GrpcMode,
         runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+        server_config: GrpcServerConfig,
     ) -> Self {
         Self {
             host,
@@ -288,6 +290,7 @@ impl GrpcConsumer {
             mode,
             security_ctx: None,
             runtime,
+            server_config,
         }
     }
 
@@ -331,7 +334,7 @@ impl GrpcConsumer {
                 listener,
                 &self.host,
                 self.port,
-                GrpcServerConfig::default(),
+                self.server_config.clone(),
                 Arc::clone(&self.runtime),
             )
             .await?;
@@ -582,7 +585,7 @@ impl Consumer for GrpcConsumer {
             .get_or_spawn(
                 &self.host,
                 self.port,
-                GrpcServerConfig::default(),
+                self.server_config.clone(),
                 Arc::clone(&self.runtime),
             )
             .await?;
