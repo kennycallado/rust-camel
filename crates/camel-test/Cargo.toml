@@ -48,7 +48,7 @@ camel-platform-kubernetes = { workspace = true, optional = true }
 camel-master = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
-sqlx = { workspace = true, features = ["runtime-tokio", "any", "postgres"], optional = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "any", "postgres", "tls-rustls"], optional = true }
 
 [dev-dependencies]
 camel-master = { workspace = true }
