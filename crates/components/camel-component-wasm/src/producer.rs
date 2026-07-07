@@ -32,11 +32,11 @@ pub(crate) fn is_streaming(body: &Body) -> bool {
 /// Default per-stream byte cap passed to `process_streaming_exchange`.
 /// Mirrors `camel_api::DEFAULT_MATERIALIZE_LIMIT`; re-stated as `u64` because
 /// the streaming host bridge takes bytes as `u64`.
-const DEFAULT_STREAM_MAX_BYTES: u64 = DEFAULT_MATERIALIZE_LIMIT as u64;
+pub(crate) const DEFAULT_STREAM_MAX_BYTES: u64 = DEFAULT_MATERIALIZE_LIMIT as u64;
 
 /// Default watchdog window: if the guest makes no progress shipping/receiving
 /// stream chunks for this duration, the call is cancelled.
-const DEFAULT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Standalone runtime init — takes owned Arcs so the resulting future is `Send`
 /// without requiring `WasmProducer: Sync`.

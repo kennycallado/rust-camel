@@ -371,7 +371,7 @@ impl WasmRuntime {
     /// On the stream path, [`crate::stream_bridge::BoxStreamProducer`] calls
     /// `notify_one()` per shipped chunk; the resulting wakeup re-arms the
     /// timer via the `continue` branch.
-    async fn drive_with_watchdog<F, T>(
+    pub(crate) async fn drive_with_watchdog<F, T>(
         run_fut: F,
         progress_notify: &Notify,
         max_duration: Duration,

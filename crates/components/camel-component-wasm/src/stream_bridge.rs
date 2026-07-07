@@ -203,14 +203,29 @@ pub(crate) async fn extract_stream_body(
 ///   with the guest's `future<result<_, wasm-error>>` (`terminal_rx`).
 ///
 /// Returns a fully-populated [`StreamBodyHandle`] wrapped in [`WasmBody::Stream`].
-pub(crate) fn assemble_stream_body(
+/// Build the shared core of a streaming-body handle — the wasmtime
+/// `StreamReader` (pumping `stream` into the guest) and the terminal
+/// `FutureReader` (carrying the producer's end-of-stream / error outcome) —
+/// for any binding whose `wasm-error` variant maps from a `String` via
+/// `mk_err`.
+///
+/// `Accessor::with` yields an `Access<'_, T>` that impls `AsContextMut`,
+/// which both readers need. Keeping the reader-creation (and its subtle
+/// terminal-error semantics around producer abandonment) in one place
+/// prevents the plugin and bean bindings from diverging.
+#[allow(clippy::type_complexity)] // wasmtime reader generics are inherently nested
+fn build_stream_readers<E>(
     accessor: &Accessor<WasmHostState>,
     stream: BoxStream<'static, Result<Bytes, CamelError>>,
-    metadata: &StreamMetadata,
     cancel: CancellationToken,
     max_bytes: u64,
     progress_notify: Arc<Notify>,
-) -> wasmtime::Result<WasmBody> {
+    mk_err: impl FnOnce(String) -> E + Send + 'static,
+) -> wasmtime::Result<(StreamReader<u8>, FutureReader<Result<(), E>>)>
+where
+    E: Send + Sync + 'static,
+    E: wasmtime::component::Lower + wasmtime::component::Lift,
+{
     let (terminal_tx, terminal_rx) = oneshot::channel::<Option<String>>();
 
     let producer = BoxStreamProducer::new(
@@ -221,9 +236,6 @@ pub(crate) fn assemble_stream_body(
         max_bytes,
     );
 
-    // `Accessor::with` yields an `Access<'_, T>` that impls `AsContextMut`,
-    // which both readers need. `with` takes `&self` and forwards the
-    // closure's result.
     let stream_reader = accessor.with(|mut access| StreamReader::new(&mut access, producer))?;
 
     let terminal_reader = accessor.with(|mut access| {
@@ -231,8 +243,8 @@ pub(crate) fn assemble_stream_body(
             // Map the producer's terminal outcome to the `result<(), wasm-error>`
             // value the guest reads. The outer `Ok` satisfies the
             // `FutureProducer` blanket impl over `Future<Output = Result<T, _>>`.
-            let value: Result<(), WasmError> = match terminal_rx.await {
-                Ok(Some(msg)) => Err(WasmError::ProcessorError(msg)),
+            let value: Result<(), E> = match terminal_rx.await {
+                Ok(Some(msg)) => Err(mk_err(msg)),
                 // Clean completion — success.
                 Ok(None) => Ok(()),
                 // Producer abandoned (guest trapped mid-stream) — best-effort
@@ -246,6 +258,66 @@ pub(crate) fn assemble_stream_body(
         })
     })?;
 
+    Ok((stream_reader, terminal_reader))
+}
+
+/// Assemble a plugin-world [`WasmBody::Stream`] handle from an extracted byte
+/// stream. **Must be called inside `Store::run_concurrent`** — it borrows the
+/// [`Accessor`] needed to create the readers.
+pub(crate) fn assemble_stream_body(
+    accessor: &Accessor<WasmHostState>,
+    stream: BoxStream<'static, Result<Bytes, CamelError>>,
+    metadata: &StreamMetadata,
+    cancel: CancellationToken,
+    max_bytes: u64,
+    progress_notify: Arc<Notify>,
+) -> wasmtime::Result<WasmBody> {
+    let (stream_reader, terminal_reader) = build_stream_readers(
+        accessor,
+        stream,
+        cancel,
+        max_bytes,
+        progress_notify,
+        WasmError::ProcessorError,
+    )?;
+    Ok(WasmBody::Stream(StreamBodyHandle {
+        r#stream: stream_reader,
+        terminal: terminal_reader,
+        size_hint: metadata.size_hint,
+        content_type: metadata.content_type.clone(),
+        origin: metadata.origin.clone(),
+    }))
+}
+
+/// Bean-binding twin of [`assemble_stream_body`].
+///
+/// The bean world (`bean_bindings`) is a *separate* generated binding from
+/// the plugin world (`bindings`), so its `WasmBody`/`StreamBodyHandle` are
+/// distinct Rust types — even though the `stream<u8>` / `future<…>` field
+/// types are the same shared wasmtime `StreamReader`/`FutureReader`. The
+/// cross-binding `From<WasmBody>` impl deliberately does not carry a
+/// `Stream` variant (the live handle cannot be re-wrapped blindly), so the
+/// bean streaming path must assemble the handle directly in the
+/// `bean_bindings` namespace. The reader-creation logic is identical to
+/// [`assemble_stream_body`]; only the terminal-error type and the wrapper
+/// struct differ.
+pub(crate) fn assemble_stream_body_bean(
+    accessor: &Accessor<WasmHostState>,
+    stream: BoxStream<'static, Result<Bytes, CamelError>>,
+    metadata: &StreamMetadata,
+    cancel: CancellationToken,
+    max_bytes: u64,
+    progress_notify: Arc<Notify>,
+) -> wasmtime::Result<crate::bean_bindings::camel::plugin::types::WasmBody> {
+    use crate::bean_bindings::camel::plugin::types::{StreamBodyHandle, WasmBody, WasmError};
+    let (stream_reader, terminal_reader) = build_stream_readers(
+        accessor,
+        stream,
+        cancel,
+        max_bytes,
+        progress_notify,
+        WasmError::ProcessorError,
+    )?;
     Ok(WasmBody::Stream(StreamBodyHandle {
         r#stream: stream_reader,
         terminal: terminal_reader,
