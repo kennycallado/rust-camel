@@ -1,56 +1,8 @@
 // Shared test harness for TLS integration tests (rc-1vb2)
 
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-
-/// Per-call counter for unique temp filenames (avoids collision when tests run in parallel).
-static PEM_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Generate a self-signed CA + server cert signed by that CA.
-/// Returns (ca_pem, server_cert_pem, server_key_pem).
-/// Server cert SAN includes "localhost" and "127.0.0.1".
-pub fn gen_server_cert() -> (String, String, String) {
-    // CA cert
-    let ca_key = KeyPair::generate().expect("ca keygen");
-    let mut ca_params = CertificateParams::new(vec!["Test CA".to_string()]).expect("ca params");
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let ca_cert = ca_params.self_signed(&ca_key).expect("ca self-sign");
-
-    // Server cert signed by CA
-    let server_key = KeyPair::generate().expect("server keygen");
-    let server_params =
-        CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
-            .expect("server params");
-    let server_cert = server_params
-        .signed_by(&server_key, &ca_cert, &ca_key)
-        .expect("server cert sign");
-
-    (ca_cert.pem(), server_cert.pem(), server_key.serialize_pem())
-}
-
-/// Write PEM content to a unique temp file, return the path.
-/// Each call produces a distinct filename (pid + atomic counter) so parallel
-/// tests don't race on the same path.
-pub fn write_pem_tmp(name: &str, pem: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("camel-grpc-tls-test");
-    std::fs::create_dir_all(&dir).expect("create tmp dir");
-    let counter = PEM_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stem = std::path::Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(name);
-    let ext = std::path::Path::new(name)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("pem");
-    let unique_name = format!("{stem}-{}-{counter}.{ext}", std::process::id());
-    let path = dir.join(unique_name);
-    std::fs::write(&path, pem).expect("write pem");
-    path
-}
 
 /// Generate a full mTLS PKI: CA + server cert + client cert, all signed by the same CA.
 /// Returns (ca_pem, server_cert_pem, server_key_pem, client_cert_pem, client_key_pem).

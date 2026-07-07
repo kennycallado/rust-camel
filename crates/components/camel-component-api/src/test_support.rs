@@ -20,6 +20,10 @@ use crate::{HealthCheckRegistry, RuntimeObservability};
 /// Uses rcgen (pure Rust, no openssl, no Docker).
 pub mod tls {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Per-call counter for unique temp filenames (avoids collision when tests run in parallel).
+    static PEM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Generate a self-signed CA + server cert signed by that CA.
     /// SANs: "localhost", "127.0.0.1", "::1".
@@ -50,12 +54,23 @@ pub mod tls {
         (ca_cert.pem(), server_cert.pem(), server_key.serialize_pem())
     }
 
-    /// Write PEM content to /tmp/camel-tls-test/{name}.
-    /// Creates parent dir if needed. Returns the path.
+    /// Write PEM content to a unique temp file, return the path.
+    /// Each call produces a distinct filename (pid + atomic counter) so parallel
+    /// tests don't race on the same path.
     pub fn write_pem_tmp(name: &str, pem: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("camel-tls-test");
         std::fs::create_dir_all(&dir).expect("create tmp dir");
-        let path = dir.join(name);
+        let counter = PEM_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name);
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("pem");
+        let unique_name = format!("{stem}_{}_{counter}.{ext}", std::process::id());
+        let path = dir.join(unique_name);
         std::fs::write(&path, pem).expect("write pem");
         path
     }

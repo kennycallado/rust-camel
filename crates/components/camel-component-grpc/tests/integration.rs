@@ -3,6 +3,7 @@ mod support;
 use std::path::PathBuf;
 
 use camel_component_api::NoOpComponentContext;
+use camel_component_api::test_support::tls;
 use camel_component_api::{
     Body, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message, RuntimeObservability,
 };
@@ -1120,13 +1121,13 @@ async fn outbound_tls_handshake_roundtrip() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // 1. Generate CA + server cert
-    let (ca_pem, server_cert_pem, server_key_pem) = support::gen_server_cert();
+    let (ca_pem, server_cert_pem, server_key_pem) = tls::gen_server_cert();
 
     // 2. Spawn TLS server
     let port = support::spawn_tls_test_server(&server_cert_pem, &server_key_pem).await;
 
     // 3. Write CA cert to temp file
-    let ca_path = support::write_pem_tmp("ca.pem", &ca_pem);
+    let ca_path = tls::write_pem_tmp("ca.pem", &ca_pem);
 
     // 4. Build producer with TLS config
     let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
@@ -1262,11 +1263,11 @@ async fn inbound_tls_handshake_real() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // 1. Generate CA + server cert
-    let (ca_pem, server_cert_pem, server_key_pem) = support::gen_server_cert();
+    let (ca_pem, server_cert_pem, server_key_pem) = tls::gen_server_cert();
 
     // 2. Write server cert+key to temp files
-    let cert_path = support::write_pem_tmp("inbound-server.pem", &server_cert_pem);
-    let key_path = support::write_pem_tmp("inbound-server-key.pem", &server_key_pem);
+    let cert_path = tls::write_pem_tmp("inbound-server.pem", &server_cert_pem);
+    let key_path = tls::write_pem_tmp("inbound-server-key.pem", &server_key_pem);
 
     // 3. Build GrpcServerConfig with TLS (server-auth only, no client_ca)
     let server_config = GrpcServerConfig {
@@ -1318,9 +1319,9 @@ async fn inbound_mtls_handshake_real() {
         support::gen_mtls_certs();
 
     // 2. Write certs to temp files
-    let server_cert_path = support::write_pem_tmp("mtls-server.pem", &server_cert_pem);
-    let server_key_path = support::write_pem_tmp("mtls-server-key.pem", &server_key_pem);
-    let client_ca_path = support::write_pem_tmp("mtls-client-ca.pem", &ca_pem);
+    let server_cert_path = tls::write_pem_tmp("mtls-server.pem", &server_cert_pem);
+    let server_key_path = tls::write_pem_tmp("mtls-server-key.pem", &server_key_pem);
+    let client_ca_path = tls::write_pem_tmp("mtls-client-ca.pem", &ca_pem);
 
     // 3. Build GrpcServerConfig with mTLS (client_ca_path set)
     let server_config = GrpcServerConfig {
@@ -1375,9 +1376,9 @@ async fn inbound_mtls_rejects_certless_client() {
     let (ca_pem, server_cert_pem, server_key_pem, _client_cert_pem, _client_key_pem) =
         support::gen_mtls_certs();
 
-    let server_cert_path = support::write_pem_tmp("mtls-reject-server.pem", &server_cert_pem);
-    let server_key_path = support::write_pem_tmp("mtls-reject-server-key.pem", &server_key_pem);
-    let client_ca_path = support::write_pem_tmp("mtls-reject-client-ca.pem", &ca_pem);
+    let server_cert_path = tls::write_pem_tmp("mtls-reject-server.pem", &server_cert_pem);
+    let server_key_path = tls::write_pem_tmp("mtls-reject-server-key.pem", &server_key_pem);
+    let client_ca_path = tls::write_pem_tmp("mtls-reject-client-ca.pem", &ca_pem);
 
     let server_config = GrpcServerConfig {
         max_receive_message_len: None,

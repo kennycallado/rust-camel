@@ -1435,7 +1435,10 @@ mod tests {
         let res = parse_grpc_uri(
             "grpc://127.0.0.1:50051/pkg.Svc/Method?transport=tls&serverCertPath=/c.pem",
         );
-        assert!(res.is_err(), "serverCertPath without serverKeyPath must fail");
+        assert!(
+            res.is_err(),
+            "serverCertPath without serverKeyPath must fail"
+        );
         let msg = res.unwrap_err().to_string();
         assert!(
             msg.contains("serverCertPath") && msg.contains("serverKeyPath"),
