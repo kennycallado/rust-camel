@@ -1,0 +1,7 @@
+syntax = "proto3";
+package test;
+// Recursive schema used by test_unmarshal_recursive_schema_hits_recursion_limit
+// to prove prost's built-in RECURSION_LIMIT=100 fires.
+message Node {
+  Node child = 1;
+}

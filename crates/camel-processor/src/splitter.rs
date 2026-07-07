@@ -27,6 +27,12 @@ pub const CAMEL_SPLIT_COMPLETE: &str = "CamelSplitComplete";
 /// Splits an incoming exchange into fragments via a configurable expression,
 /// processes each fragment through a sub-pipeline, and aggregates the results.
 ///
+/// **DoS bound (R3-M4):** the eager splitter materializes the whole fragment
+/// `Vec` before processing. `SplitterConfig::max_fragments` (default 100_000)
+/// rejects a split that would explode memory. For unbounded or lazy byte-stream
+/// input, prefer `StreamingSplitterService`, which processes fragments as they
+/// arrive and never materializes the full set.
+///
 /// **Note:** In parallel mode, `stop_on_exception` only affects the aggregation
 /// phase. All spawned fragments run to completion because `join_all` cannot
 /// cancel in-flight futures. Sequential mode stops processing immediately.
@@ -38,6 +44,7 @@ pub struct SplitterService {
     parallel: bool,
     parallel_limit: Option<usize>,
     stop_on_exception: bool,
+    max_fragments: usize,
     cancel_token: CancellationToken,
 }
 
@@ -52,6 +59,7 @@ impl SplitterService {
             parallel: config.parallel,
             parallel_limit: config.parallel_limit,
             stop_on_exception: config.stop_on_exception,
+            max_fragments: config.max_fragments,
             cancel_token: CancellationToken::new(),
         })
     }
@@ -84,6 +92,7 @@ impl Service<Exchange> for SplitterService {
         let parallel = self.parallel;
         let parallel_limit = self.parallel_limit;
         let stop_on_exception = self.stop_on_exception;
+        let max_fragments = self.max_fragments;
         let cancel_token = self.cancel_token.clone();
 
         Box::pin(async move {
@@ -93,6 +102,16 @@ impl Service<Exchange> for SplitterService {
             // If no fragments were produced, return the original exchange.
             if fragments.is_empty() {
                 return Ok(original);
+            }
+
+            // R3-M4: the eager splitter materializes the whole Vec before
+            // processing — cap the fragment count to bound memory.
+            if fragments.len() > max_fragments {
+                return Err(CamelError::ProcessorError(format!(
+                    "Splitter produced {} fragments, exceeding max_fragments {}",
+                    fragments.len(),
+                    max_fragments
+                )));
             }
 
             let total = fragments.len();
@@ -808,5 +827,28 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "cancelled splitter should return error");
+    }
+
+    // ── 15. Fragment count cap ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_splitter_rejects_fragment_flood() {
+        // Expression that produces 5 fragments; cap at 2.
+        let expression: camel_api::SplitExpression = std::sync::Arc::new(|_| {
+            (0..5)
+                .map(|i| Exchange::new(Message::new(Body::Text(i.to_string()))))
+                .collect::<Vec<_>>()
+        });
+        let cfg = SplitterConfig::new(expression).max_fragments(2);
+        let passthrough = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
+        let mut svc = SplitterService::new(cfg, passthrough).unwrap();
+
+        let ex = Exchange::new(Message::new(Body::Text("parent".into())));
+        let result = svc.ready().await.unwrap().call(ex).await;
+        let err = result.unwrap_err();
+        assert!(
+            format!("{err}").contains("max_fragments"),
+            "error should mention max_fragments: {err}"
+        );
     }
 }

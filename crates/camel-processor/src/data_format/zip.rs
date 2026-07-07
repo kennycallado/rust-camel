@@ -7,11 +7,17 @@ use std::io::Write;
 use zip::ZipArchive;
 
 const DEFAULT_MAX_DECOMPRESSED_SIZE: u64 = 1_073_741_824;
+/// Default cap on the materialized input size of `marshal` (R3-L1). The eager
+/// marshal collects the whole body into a `Vec<u8>` before compression; this
+/// bounds that allocation.
+const DEFAULT_MAX_INPUT_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 const ENTRY_NAME: &str = "payload";
 
 #[derive(Debug, Clone)]
 pub struct ZipConfig {
     pub max_decompressed_size: u64,
+    /// Maximum materialized input size accepted by `marshal` (DoS cap, R3-L1).
+    pub max_input_size: u64,
     pub compression_level: Option<i32>,
     pub allow_multi_entry: bool,
 }
@@ -20,6 +26,7 @@ impl Default for ZipConfig {
     fn default() -> Self {
         Self {
             max_decompressed_size: DEFAULT_MAX_DECOMPRESSED_SIZE,
+            max_input_size: DEFAULT_MAX_INPUT_SIZE,
             compression_level: None,
             allow_multi_entry: false,
         }
@@ -63,6 +70,14 @@ impl DataFormat for ZipDataFormat {
                 ));
             }
         };
+
+        if content.len() as u64 > self.config.max_input_size {
+            return Err(CamelError::TypeConversionFailed(format!(
+                "ZipDataFormat::marshal input {} bytes exceeds max_input_size {}",
+                content.len(),
+                self.config.max_input_size
+            )));
+        }
 
         let mut buf = Vec::new();
         {
@@ -482,6 +497,31 @@ mod tests {
         let df = ZipDataFormat::new(config);
         let result = df.marshal(Body::Text("test".to_string()));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_marshal_input_size_cap() {
+        let config = ZipConfig {
+            max_input_size: 16,
+            ..Default::default()
+        };
+        let df = ZipDataFormat::new(config);
+        let body = Body::Text("x".repeat(64));
+        let result = df.marshal(body);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("max_input_size"),
+            "error should mention max_input_size: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_marshal_default_cap_accepts_small_input() {
+        let df = ZipDataFormat::default();
+        let body = Body::Text("hello".to_string());
+        let result = df.marshal(body).unwrap();
+        assert!(matches!(result, Body::Bytes(_)));
     }
 
     #[test]

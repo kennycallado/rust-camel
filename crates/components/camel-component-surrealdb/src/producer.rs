@@ -65,11 +65,28 @@ impl SurrealDbProducer {
     /// `Body::Json(Value::String(...))` (the shape DSL `set_body(Value::String)`
     /// materializes when no `Text` body_contract coerces it). Both are
     /// treated equivalently — query is "SQL text" regardless of body variant.
+    ///
+    /// # Trust boundary (R5-L1, ADR-0032)
+    ///
+    /// This is **by-design query passthrough**: the query text from the header
+    /// or body is untrusted/adversary-controlled. SurrealDB parameterizes
+    /// *values* via bindings (see `extract_params`), but the query *text*
+    /// itself is executed as-is. Operators exposing the `query` operation on an
+    /// untrusted-input route MUST ensure the query text is operator-curated
+    /// (e.g. set by a trusted upstream transform), not directly attacker-
+    /// controlled. A `warn!` is emitted whenever the query is taken from the
+    /// header or body to surface this on untrusted routes.
     pub(crate) fn resolve_query_source(&self, exchange: &Exchange) -> String {
         // Priority 1: Header
         if let Some(query_value) = exchange.input.headers.get(headers::QUERY)
             && let Some(query_str) = query_value.as_str()
         {
+            tracing::warn!(
+                source = "header",
+                "SurrealDB query operation resolved query text from exchange header \
+                 (untrusted source); ensure the route does not expose raw query text \
+                 to adversaries"
+            );
             return query_str.to_string();
         }
 
@@ -80,6 +97,12 @@ impl SurrealDbProducer {
             _ => None,
         };
         if let Some(s) = body_str.filter(|s| !s.is_empty()) {
+            tracing::warn!(
+                source = "body",
+                "SurrealDB query operation resolved query text from exchange body \
+                 (untrusted source); ensure the route does not expose raw query text \
+                 to adversaries"
+            );
             return s.to_string();
         }
 
@@ -139,6 +162,17 @@ impl SurrealDbProducer {
     /// transport-drop from query-rejected in the classifier (ADR-0013),
     /// which is not implemented.
     pub(crate) async fn execute(&self, exchange: &Exchange) -> Result<JsonValue, SurrealDbError> {
+        // R5-M1: a table-wide SELECT (config.id is None) without a LIMIT is an
+        // unbounded scan — reject it before acquiring a client connection.
+        if matches!(self.config.operation, SurrealDbOperation::Select)
+            && self.config.id.is_none()
+            && self.config.limit.is_none()
+        {
+            return Err(SurrealDbError::MissingParam(
+                "SELECT without `id` requires a `limit` to bound the result set".into(),
+            ));
+        }
+
         let client = self.resolve_client().await?;
 
         match self.config.operation {
@@ -223,10 +257,18 @@ impl SurrealDbProducer {
                 })
             }
             None => {
-                let rows: Vec<JsonValue> = client
-                    .select(table.as_str())
-                    .await
-                    .map_err(SurrealDbError::query)?;
+                // R5-M1: bounded table-wide select. The pre-check in `execute`
+                // guarantees `limit` is Some here. Use a bound query rather than
+                // the SDK's unbounded `client.select(table)`.
+                let lim = self.config.limit.ok_or_else(|| {
+                    SurrealDbError::MissingParam("limit (required for table-wide SELECT)".into())
+                })?;
+                let sql = "SELECT * FROM type::table($tb) LIMIT $lim";
+                let bindings: Vec<(&str, JsonValue)> = vec![
+                    ("tb", JsonValue::String(table)),
+                    ("lim", JsonValue::from(lim)),
+                ];
+                let rows = Self::run_raw_query(client, sql, bindings).await?;
                 Ok(JsonValue::Array(rows))
             }
         }
@@ -959,10 +1001,12 @@ mod tests {
         // Query op with SQL from URI ?query=...: producer resolves the SQL
         // from config.query when the body is empty. body_contract is None,
         // so the empty body never gets rejected upstream.
-        let mut config = SurrealDbEndpointConfig::default();
-        config.operation = SurrealDbOperation::Query;
-        config.datasource = "test-ds".into();
-        config.query = Some("SELECT 1".to_string());
+        let config = SurrealDbEndpointConfig {
+            operation: SurrealDbOperation::Query,
+            datasource: "test-ds".into(),
+            query: Some("SELECT 1".to_string()),
+            ..Default::default()
+        };
         let producer = SurrealDbProducer::new(config, None, "test-route");
         let exchange = Exchange::new(Message::new(Body::Empty));
         let sql = producer.resolve_query_source(&exchange);
@@ -989,15 +1033,59 @@ mod tests {
         // header provides the query vector. We verify the producer config
         // shape that would route to the header path (body_contract returns
         // None, so the empty body never gets rejected upstream).
-        let mut config = SurrealDbEndpointConfig::default();
-        config.operation = SurrealDbOperation::Search;
-        config.datasource = "test-ds".into();
-        config.table = Some("docs".into());
-        config.top_k = Some(5);
+        let config = SurrealDbEndpointConfig {
+            operation: SurrealDbOperation::Search,
+            datasource: "test-ds".into(),
+            table: Some("docs".into()),
+            top_k: Some(5),
+            ..Default::default()
+        };
         // body_contract is None for Search — verified separately on the
         // Endpoint impl; here we just check that the config can be
         // constructed without a body requirement.
         assert_eq!(config.operation, SurrealDbOperation::Search);
         assert_eq!(config.top_k, Some(5));
+    }
+
+    // --- R5-M1: bounded SELECT tests ---
+
+    fn make_select_producer(id: Option<&str>, limit: Option<usize>) -> SurrealDbProducer {
+        let config = SurrealDbEndpointConfig {
+            operation: SurrealDbOperation::Select,
+            datasource: "test-ds".into(),
+            table: Some("test_table".into()),
+            id: id.map(str::to_string),
+            limit,
+            ..Default::default()
+        };
+        SurrealDbProducer::new(config, None, "test-route")
+    }
+
+    #[tokio::test]
+    async fn select_without_id_or_limit_is_rejected() {
+        // R5-M1: table-wide SELECT without a limit must fail BEFORE touching a client.
+        let producer = make_select_producer(None, None);
+        let ex = Exchange::new(Message::new(Body::Empty));
+        let err = producer.execute(&ex).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::SurrealDbError::MissingParam(_)),
+            "expected MissingParam, got {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("limit"), "error should mention limit: {msg}");
+    }
+
+    #[tokio::test]
+    async fn select_without_id_and_with_limit_proceeds_past_guard() {
+        // R5-M1: with a limit, the select passes the guard. With no catalog it
+        // fails later at datasource resolution (not at the MissingParam guard).
+        let producer = make_select_producer(None, Some(10));
+        let ex = Exchange::new(Message::new(Body::Empty));
+        let err = producer.execute(&ex).await.unwrap_err();
+        // Must NOT be the MissingParam limit error.
+        assert!(
+            !format!("{err}").contains("limit"),
+            "limit-present must pass the guard: {err}"
+        );
     }
 }

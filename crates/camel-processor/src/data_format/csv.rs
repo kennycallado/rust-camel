@@ -38,6 +38,12 @@ pub struct CsvConfig {
     pub ignore_surrounding_spaces: bool,
     pub trim: bool,
     pub use_maps: bool,
+    /// Maximum number of data records accepted by `unmarshal` (DoS cap, R3-M1).
+    /// Default 100_000. `None` disables the cap (not recommended for untrusted input).
+    pub max_records: Option<usize>,
+    /// Maximum byte length of a single CSV field accepted by `unmarshal` (DoS cap, R3-M1).
+    /// Default 1_048_576 (1 MiB). `None` disables the cap.
+    pub max_field_size: Option<usize>,
 }
 
 impl Default for CsvConfig {
@@ -58,6 +64,8 @@ impl Default for CsvConfig {
             ignore_surrounding_spaces: true,
             trim: false,
             use_maps: true,
+            max_records: Some(100_000),
+            max_field_size: Some(1_048_576),
         }
     }
 }
@@ -145,6 +153,14 @@ impl CsvConfig {
         self.use_maps = b;
         self
     }
+    pub fn max_records(mut self, max: usize) -> Self {
+        self.max_records = Some(max);
+        self
+    }
+    pub fn max_field_size(mut self, max: usize) -> Self {
+        self.max_field_size = Some(max);
+        self
+    }
 }
 
 #[derive(Clone, Default)]
@@ -201,6 +217,34 @@ impl CsvDataFormat {
         CamelError::TypeConversionFailed(format!("CSV write error: {e}"))
     }
 
+    /// Enforce the DoS caps (max_records, max_field_size) against a parsed record.
+    /// Returns Err on exceed; `count` is 1-based.
+    fn check_record_caps(
+        record: &csv::StringRecord,
+        count: usize,
+        max_records: Option<usize>,
+        max_field_size: Option<usize>,
+    ) -> Result<(), CamelError> {
+        if let Some(max) = max_records
+            && count > max
+        {
+            return Err(CamelError::TypeConversionFailed(format!(
+                "CSV unmarshal exceeded max_records {max}"
+            )));
+        }
+        if let Some(max_field) = max_field_size {
+            for s in record.iter() {
+                if s.len() > max_field {
+                    return Err(CamelError::TypeConversionFailed(format!(
+                        "CSV unmarshal field length {} exceeds max_field_size {max_field}",
+                        s.len()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn unmarshal_internal(&self, body: Body) -> Result<(Body, Option<Vec<String>>), CamelError> {
         let input_text: String =
             match body {
@@ -234,6 +278,7 @@ impl CsvDataFormat {
         rdr_builder
             .delimiter(self.config.delimiter as u8)
             .has_headers(effective_has_headers)
+            .flexible(true)
             .trim(if self.config.trim {
                 csv::Trim::All
             } else if self.config.ignore_surrounding_spaces {
@@ -274,9 +319,26 @@ impl CsvDataFormat {
             if self.config.skip_header_record && self.config.headers.is_some() {
                 iter.next();
             }
+            let mut count: usize = 0;
             for result in iter {
                 let record = result
                     .map_err(|e| CamelError::TypeConversionFailed(format!("CSV parse: {e}")))?;
+                count += 1;
+                Self::check_record_caps(
+                    &record,
+                    count,
+                    self.config.max_records,
+                    self.config.max_field_size,
+                )?;
+                // R4-L9: warn on header/row width mismatch instead of silent pad/drop.
+                if record.len() != keys.len() {
+                    tracing::warn!(
+                        header_width = keys.len(),
+                        row_width = record.len(),
+                        record_index = count,
+                        "CSV record width differs from header width; fields will be padded or truncated"
+                    );
+                }
                 let mut obj = serde_json::Map::new();
                 for (i, key) in keys.iter().enumerate() {
                     let val = record.get(i).unwrap_or("");
@@ -294,9 +356,17 @@ impl CsvDataFormat {
                 records.push(serde_json::Value::Object(obj));
             }
         } else {
+            let mut count: usize = 0;
             for result in rdr.records() {
                 let record = result
                     .map_err(|e| CamelError::TypeConversionFailed(format!("CSV parse: {e}")))?;
+                count += 1;
+                Self::check_record_caps(
+                    &record,
+                    count,
+                    self.config.max_records,
+                    self.config.max_field_size,
+                )?;
                 let arr: Vec<serde_json::Value> = record
                     .iter()
                     .map(|s| serde_json::Value::String(s.to_string()))
@@ -973,6 +1043,64 @@ mod tests {
     }
 
     #[test]
+    fn test_unmarshal_max_records_exceeded() {
+        let cfg = CsvConfig::default().max_records(3);
+        let df = CsvDataFormat::new(cfg);
+        let body = Body::Text("a,b\n1,2\n3,4\n5,6\n7,8".into());
+        let result = df.unmarshal(body);
+        let msg = match result {
+            Err(CamelError::TypeConversionFailed(m)) => m,
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        };
+        assert!(
+            msg.contains("max_records"),
+            "msg should mention max_records: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_unmarshal_max_records_exceeded_lists_mode() {
+        let cfg = CsvConfig::default().use_maps(false).max_records(2);
+        let df = CsvDataFormat::new(cfg);
+        // 3 data rows with lists-mode → cap at 2 => 3rd row triggers max_records
+        let body = Body::Text("a,b,c\n1,2,3\n4,5,6\n7,8,9".into());
+        let result = df.unmarshal(body);
+        let msg = match result {
+            Err(CamelError::TypeConversionFailed(m)) => m,
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        };
+        assert!(
+            msg.contains("max_records"),
+            "msg should mention max_records: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_unmarshal_max_field_size_exceeded() {
+        let cfg = CsvConfig::default().max_field_size(4);
+        let df = CsvDataFormat::new(cfg);
+        let body = Body::Text("a,b\n12345,1".into());
+        let result = df.unmarshal(body);
+        let msg = match result {
+            Err(CamelError::TypeConversionFailed(m)) => m,
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        };
+        assert!(
+            msg.contains("max_field_size"),
+            "msg should mention max_field_size: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_unmarshal_default_caps_accept_normal_input() {
+        // Default caps must not reject ordinary CSV.
+        let df = CsvDataFormat::default();
+        let body = Body::Text("a,b\n1,2\n3,4".into());
+        let result = df.unmarshal(body).unwrap();
+        assert!(matches!(result, Body::Json(_)));
+    }
+
+    #[test]
     fn marshal_neutralizes_formula_injection_cells() {
         let df = CsvDataFormat::default();
         let body = Body::Json(json!([
@@ -1008,6 +1136,23 @@ mod tests {
                 );
             }
             _ => panic!("expected Body::Text"),
+        }
+    }
+
+    #[test]
+    fn test_unmarshal_width_mismatch_does_not_error() {
+        // Row has fewer fields than the header — must not panic, must pad.
+        let df = CsvDataFormat::default();
+        let body = Body::Text("a,b,c\n1,2".into());
+        let result = df.unmarshal(body).unwrap();
+        match result {
+            Body::Json(serde_json::Value::Array(rows)) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0]["a"], json!("1"));
+                assert_eq!(rows[0]["b"], json!("2"));
+                assert_eq!(rows[0]["c"], json!(""));
+            }
+            other => panic!("expected JSON array, got {other:?}"),
         }
     }
 }

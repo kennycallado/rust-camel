@@ -112,6 +112,24 @@ impl AggregatorService {
         language_registry: SharedLanguageRegistry,
         route_cancel: CancellationToken,
     ) -> Self {
+        // R3-M2: at least one memory-release bound is mandatory.
+        config.validate().expect(
+            // allow-unwrap: fail-closed startup invariant (ADR-0033); a config without a bound is a programmer/operator error.
+            "AggregatorService::new: config failed validation \
+             (need max_buckets, completionTimeout, or bucket_ttl)",
+        );
+
+        // R3-M2 advisory: Size/Predicate-only completion (no Timeout) with no
+        // bucket_ttl means buckets accumulate until max_buckets is hit. Bounded
+        // by max_buckets (validated above) but worth surfacing to operators.
+        let has_timeout = has_timeout_condition(&config.completion);
+        if !has_timeout && config.bucket_ttl.is_none() {
+            tracing::warn!(
+                "Aggregator configured with Size/Predicate completion and no \
+                 bucket_ttl: buckets accumulate until max_buckets is reached"
+            );
+        }
+
         // Build the shared buckets map up front so the sweep task can
         // share it via Arc::clone.
         let buckets: Arc<Mutex<HashMap<String, Bucket>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -332,42 +350,62 @@ impl Service<Exchange> for AggregatorService {
             };
 
             if completed_bucket.0.is_none() && has_timeout_condition(&config.completion) {
-                let cancel = {
-                    let mut tt_guard = timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
-                    // Cancel and remove old handle for this key (if any).
-                    if let Some(existing) = tt_guard.get(&key_str) {
-                        existing.cancel();
-                    }
-                    let token = CancellationToken::new();
-                    tt_guard.insert(key_str.clone(), token.clone());
-                    token
-                };
-
                 let timeout_dur = extract_timeout_duration(&config.completion);
                 if let Some(timeout) = timeout_dur {
-                    // Remove old handle if present.
-                    {
-                        let mut hh = timeout_handles.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(old) = hh.remove(&key_str) {
-                            old.abort();
-                        }
-                    }
-                    let handle = spawn_timeout_task(
-                        key_str.clone(),
-                        timeout,
-                        cancel,
-                        buckets.clone(),
-                        timeout_tasks.clone(),
-                        timeout_handles.clone(),
-                        late_tx,
-                        config.strategy.clone(),
-                        config.discard_on_timeout,
-                        route_cancel,
-                    );
-                    timeout_handles
+                    // R3-M3: bound the number of concurrently-live per-bucket
+                    // timeout tasks. When the cap is reached, skip the dedicated
+                    // spawn — the bucket relies on bucket_ttl eviction (graceful
+                    // degradation). max_buckets already caps total buckets, so
+                    // memory stays bounded regardless.
+                    let live_count = timeout_handles
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .insert(key_str.clone(), handle);
+                        .len();
+                    if live_count >= config.max_timeout_tasks {
+                        tracing::warn!(
+                            live_timeout_tasks = live_count,
+                            max_timeout_tasks = config.max_timeout_tasks,
+                            correlation_key = %key_str,
+                            "Aggregator timeout-task cap reached; bucket will rely on \
+                             bucket_ttl eviction instead of a dedicated timeout task"
+                        );
+                    } else {
+                        // Cancel old token for this key (if any).
+                        {
+                            let tt_guard = timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(existing) = tt_guard.get(&key_str) {
+                                existing.cancel();
+                            }
+                        }
+                        // Remove old handle if present.
+                        {
+                            let mut hh = timeout_handles.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(old) = hh.remove(&key_str) {
+                                old.abort();
+                            }
+                        }
+                        let cancel = CancellationToken::new();
+                        timeout_tasks
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key_str.clone(), cancel.clone());
+                        let handle = spawn_timeout_task(
+                            key_str.clone(),
+                            timeout,
+                            cancel,
+                            buckets.clone(),
+                            timeout_tasks.clone(),
+                            timeout_handles.clone(),
+                            late_tx,
+                            config.strategy.clone(),
+                            config.discard_on_timeout,
+                            route_cancel,
+                        );
+                        timeout_handles
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key_str.clone(), handle);
+                    }
                 }
             }
 
@@ -1498,5 +1536,63 @@ mod tests {
         cancel.cancel();
         // Give the task a moment to observe the cancel.
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // ── R3-M3: bounded timeout-task spawn ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_aggregator_timeout_task_cap_no_panic_under_flood() {
+        // R3-M3: a flood of unique keys with a tiny max_timeout_tasks must not
+        // spawn unbounded tasks, panic, or deadlock. Each call returns Ok(pending).
+        use camel_api::aggregator::CorrelationStrategy;
+
+        let config = AggregatorConfig {
+            header_name: "k".into(),
+            completion: CompletionMode::Any(vec![
+                CompletionCondition::Size(999),
+                CompletionCondition::Timeout(Duration::from_secs(30)),
+            ]),
+            correlation: CorrelationStrategy::HeaderName("k".into()),
+            strategy: AggregationStrategy::CollectAll,
+            max_buckets: Some(50),
+            bucket_ttl: Some(Duration::from_secs(30)),
+            force_completion_on_stop: false,
+            discard_on_timeout: false,
+            max_timeout_tasks: 2,
+        };
+        let (late_tx, mut late_rx) = mpsc::channel(64);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let svc = AggregatorService::new(config, late_tx, registry, cancel);
+
+        // Drive 20 unique-key exchanges — far exceeding max_timeout_tasks=2.
+        for i in 0..20u64 {
+            let mut ex = Exchange::new(Message {
+                headers: HashMap::from([("k".to_string(), serde_json::json!(i))]),
+                body: Body::Text(i.to_string()),
+            });
+            ex.input
+                .headers
+                .insert("k".to_string(), serde_json::json!(i));
+            let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+                let mut s = svc.clone();
+                use tower::ServiceExt;
+                s.ready().await.unwrap().call(ex).await
+            })
+            .await;
+            assert!(outcome.is_ok(), "call {} hung/panicked under task cap", i);
+            // Each returns Ok(pending) since Size(999) is never reached.
+            let res = outcome.unwrap().unwrap();
+            assert_eq!(
+                res.properties
+                    .get(CAMEL_AGGREGATOR_PENDING)
+                    .and_then(|v| v.as_bool()),
+                Some(true),
+                "exchange {} should be pending",
+                i
+            );
+        }
+        // Drain any late emissions to avoid blocking the channel.
+        let _ = late_rx.try_recv();
     }
 }

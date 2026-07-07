@@ -2,6 +2,11 @@ use camel_api::body::Body;
 use camel_api::data_format::DataFormat;
 use camel_api::error::CamelError;
 
+/// Maximum input size accepted by `JsonDataFormat::unmarshal` (DoS cap, R3-L2).
+/// `serde_json` retains its built-in 128-level recursion limit; this cap bounds
+/// the byte volume before parsing begins.
+const MAX_JSON_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+
 pub struct JsonDataFormat;
 
 impl DataFormat for JsonDataFormat {
@@ -51,6 +56,12 @@ impl DataFormat for JsonDataFormat {
         match body {
             Body::Json(_) => Ok(body),
             Body::Text(s) => {
+                if s.len() > MAX_JSON_BYTES {
+                    return Err(CamelError::TypeConversionFailed(format!(
+                        "JSON unmarshal input {} bytes exceeds max {MAX_JSON_BYTES}",
+                        s.len()
+                    )));
+                }
                 let v = serde_json::from_str(&s).map_err(|e| {
                     CamelError::TypeConversionFailed(format!(
                         "cannot unmarshal Body::Text as JSON: {e}"
@@ -59,6 +70,12 @@ impl DataFormat for JsonDataFormat {
                 Ok(Body::Json(v))
             }
             Body::Bytes(b) => {
+                if b.len() > MAX_JSON_BYTES {
+                    return Err(CamelError::TypeConversionFailed(format!(
+                        "JSON unmarshal input {} bytes exceeds max {MAX_JSON_BYTES}",
+                        b.len()
+                    )));
+                }
                 let v = serde_json::from_slice(&b).map_err(|e| {
                     CamelError::TypeConversionFailed(format!(
                         "cannot unmarshal Body::Bytes as JSON: {e}"
@@ -201,5 +218,27 @@ mod tests {
         let body = Body::Bytes(Bytes::from_static(b"not json"));
         let result = JsonDataFormat.marshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn test_unmarshal_text_size_cap() {
+        // Build a valid JSON string exceeding the 16 MiB cap.
+        let big = format!(r#"{{"k":"{}"}}"#, "x".repeat(16 * 1024 * 1024 + 10));
+        let body = Body::Text(big);
+        let result = JsonDataFormat.unmarshal(body);
+        assert!(result.is_err(), "expected error for oversized JSON text");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("exceeds") && msg.contains("max"),
+            "error should mention size cap: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_unmarshal_bytes_size_cap() {
+        let big = format!(r#"{{"k":"{}"}}"#, "x".repeat(16 * 1024 * 1024 + 10));
+        let body = Body::Bytes(bytes::Bytes::from(big));
+        let result = JsonDataFormat.unmarshal(body);
+        assert!(result.is_err());
     }
 }

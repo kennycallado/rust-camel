@@ -23,6 +23,11 @@ pub const CAMEL_MULTICAST_COMPLETE: &str = "CamelMulticastComplete";
 
 /// Tower Service implementing the Multicast EIP.
 ///
+/// **DoS bound (R3-L4):** fan-out is bounded by the static endpoint list
+/// (operator-configured at route build, not attacker-controlled). In parallel
+/// mode, `parallel_limit` defaults to `endpoints.len()` so the code path always
+/// carries an explicit concurrency bound.
+///
 /// Sends a message to multiple endpoints, processing each independently,
 /// and then aggregating the results.
 ///
@@ -38,9 +43,24 @@ pub struct MulticastService {
 
 impl MulticastService {
     /// Create a new `MulticastService` from a list of endpoints and a [`MulticastConfig`].
-    pub fn new(endpoints: Vec<BoxProcessor>, config: MulticastConfig) -> Result<Self, CamelError> {
+    pub fn new(
+        endpoints: Vec<BoxProcessor>,
+        mut config: MulticastConfig,
+    ) -> Result<Self, CamelError> {
+        // R3-L4: parallel fan-out is bounded by the static endpoint list
+        // (operator-controlled at route build time, not attacker-controlled).
+        // Normalize parallel_limit to the explicit endpoint count so the
+        // parallel path always carries a concrete semaphore bound.
+        if config.parallel && config.parallel_limit.is_none() {
+            config.parallel_limit = Some(endpoints.len());
+        }
         config.validate()?;
         Ok(Self { endpoints, config })
+    }
+
+    /// Borrow the effective config (post-normalization).
+    pub fn config(&self) -> &MulticastConfig {
+        &self.config
     }
 }
 

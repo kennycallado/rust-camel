@@ -749,3 +749,23 @@ async fn test_multicast_collect_all_converts_bytes_xml_and_empty() {
         _ => panic!("expected json"),
     }
 }
+
+// ── 20. R3-L4: parallel_limit defaults to endpoint count ─────────────
+
+#[test]
+fn test_parallel_defaults_parallel_limit_to_endpoint_count() {
+    // R3-L4: parallel mode with no explicit parallel_limit normalizes to
+    // Some(endpoints.len()) so the code path always carries an explicit bound.
+    let endpoints = vec![
+        passthrough_processor(),
+        passthrough_processor(),
+        passthrough_processor(),
+    ];
+    let config = MulticastConfig::new().parallel(true); // parallel_limit is None
+    let svc = MulticastService::new(endpoints, config).unwrap();
+    assert_eq!(
+        svc.config().parallel_limit,
+        Some(3),
+        "parallel_limit should default to endpoint count"
+    );
+}

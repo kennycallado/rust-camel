@@ -114,6 +114,11 @@ pub struct AggregatorConfig {
     pub force_completion_on_stop: bool,
     /// Discard bucket contents on timeout instead of emitting.
     pub discard_on_timeout: bool,
+    /// Maximum number of concurrently-live per-bucket timeout tasks (DoS cap, R3-M3).
+    /// When the cap is reached, new buckets skip the dedicated timeout spawn and
+    /// rely on `bucket_ttl` eviction (graceful degradation under a key flood).
+    /// Default 1024.
+    pub max_timeout_tasks: usize,
 }
 
 impl AggregatorConfig {
@@ -134,7 +139,45 @@ impl AggregatorConfig {
             bucket_ttl: Some(Duration::from_secs(300)),
             force_completion_on_stop: false,
             discard_on_timeout: false,
+            // R3-M3: cap concurrently-live per-bucket timeout tasks.
+            max_timeout_tasks: 1024,
         }
+    }
+
+    /// Validate that at least one memory-release bound is configured (R3-M2).
+    ///
+    /// At least one of `max_buckets`, a `Timeout` completion condition, or
+    /// `bucket_ttl` MUST be set, otherwise a flood of unique correlation keys
+    /// grows the bucket map without limit (remote-OOM vector).
+    ///
+    /// Additionally, when a `Timeout` completion condition is present,
+    /// `bucket_ttl` MUST also be set. The R3-M3 timeout-task cap may skip
+    /// spawning a dedicated timeout task under flood; without `bucket_ttl`
+    /// there is no fallback eviction path and the bucket leaks until shutdown.
+    /// Requiring `bucket_ttl` whenever Timeout is present makes the cap-skip
+    /// degradation safe by construction.
+    pub fn validate(&self) -> Result<(), CamelError> {
+        let has_timeout = match &self.completion {
+            CompletionMode::Single(CompletionCondition::Timeout(_)) => true,
+            CompletionMode::Any(conds) => conds
+                .iter()
+                .any(|c| matches!(c, CompletionCondition::Timeout(_))),
+            _ => false,
+        };
+        let has_bound = self.max_buckets.is_some() || has_timeout || self.bucket_ttl.is_some();
+        if !has_bound {
+            return Err(CamelError::from(
+                ConfigValidationError::AggregatorMissingMemoryBound,
+            ));
+        }
+        // R3-M3: Timeout completion requires bucket_ttl so the cap-skip
+        // degradation always has an eviction path.
+        if has_timeout && self.bucket_ttl.is_none() {
+            return Err(CamelError::from(
+                ConfigValidationError::AggregatorTimeoutRequiresTtl,
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -148,6 +191,7 @@ pub struct AggregatorConfigBuilder {
     bucket_ttl: Option<Duration>,
     force_completion_on_stop: bool,
     discard_on_timeout: bool,
+    max_timeout_tasks: usize,
 }
 
 impl AggregatorConfigBuilder {
@@ -225,6 +269,12 @@ impl AggregatorConfigBuilder {
         self
     }
 
+    /// Override the maximum number of concurrently-live per-bucket timeout tasks.
+    pub fn max_timeout_tasks(mut self, max: usize) -> Self {
+        self.max_timeout_tasks = max;
+        self
+    }
+
     pub fn try_build(self) -> Result<AggregatorConfig, CamelError> {
         // R3-C1 Batch 1: a completion-bound is mandatory. A config with no
         // completion bound lets a bucket live forever — combined with a
@@ -243,6 +293,7 @@ impl AggregatorConfigBuilder {
             bucket_ttl: self.bucket_ttl,
             force_completion_on_stop: self.force_completion_on_stop,
             discard_on_timeout: self.discard_on_timeout,
+            max_timeout_tasks: self.max_timeout_tasks,
         })
     }
 
@@ -495,6 +546,67 @@ mod tests {
                 )
             ),
             "expected ConfigValidation(AggregatorMissingCompletionBound), got: {err}"
+        );
+    }
+
+    // ── R3-M2: memory-bound validation ────────────────────────────────
+
+    #[test]
+    fn test_aggregator_config_rejects_no_memory_bound() {
+        // Direct construction bypassing the builder defaults — simulate a config
+        // with no max_buckets, no timeout, no ttl.
+        let config = AggregatorConfig {
+            header_name: "k".into(),
+            completion: CompletionMode::Single(CompletionCondition::Size(2)),
+            correlation: CorrelationStrategy::HeaderName("k".into()),
+            strategy: AggregationStrategy::CollectAll,
+            max_buckets: None,
+            bucket_ttl: None,
+            force_completion_on_stop: false,
+            discard_on_timeout: false,
+            max_timeout_tasks: 1024,
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("max_buckets")
+                || err.to_string().contains("completionTimeout")
+                || err.to_string().contains("bucket_ttl"),
+            "error should explain the required bound: {err}"
+        );
+    }
+
+    #[test]
+    fn test_aggregator_config_accepts_size_only_with_max_buckets() {
+        // Builder path defaults max_buckets + bucket_ttl — must validate OK.
+        let config = AggregatorConfig::correlate_by("k")
+            .complete_when_size(2)
+            .build()
+            .unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    /// R3-M3: Timeout completion requires bucket_ttl so the cap-skip
+    /// degradation always has an eviction path. A config with Timeout but
+    /// no bucket_ttl is rejected by validate().
+    #[test]
+    fn test_aggregator_timeout_requires_bucket_ttl() {
+        let config = AggregatorConfig {
+            header_name: "k".into(),
+            completion: CompletionMode::Single(CompletionCondition::Timeout(Duration::from_secs(
+                5,
+            ))),
+            correlation: CorrelationStrategy::HeaderName("k".into()),
+            strategy: AggregationStrategy::CollectAll,
+            max_buckets: Some(100),
+            bucket_ttl: None, // <-- missing ttl fallback
+            force_completion_on_stop: false,
+            discard_on_timeout: false,
+            max_timeout_tasks: 1024,
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("bucket_ttl") || err.to_string().contains("Timeout"),
+            "error should explain the timeout-requires-ttl invariant: {err}"
         );
     }
 }

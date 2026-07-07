@@ -3,6 +3,9 @@ use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 
+/// Default maximum XML nesting depth accepted by [`xml_to_json`] (R5-L3).
+const MAX_XML_DEPTH: usize = 100;
+
 fn check_root_element(depth: usize, root_count: &mut usize) -> Result<(), CamelError> {
     if depth == 0 {
         *root_count += 1;
@@ -77,6 +80,27 @@ pub fn validate_xml(input: &str) -> Result<(), CamelError> {
 /// Returns `CamelError::TypeConversionFailed` if the input is not well-formed XML,
 /// contains multiple root elements, or is empty.
 pub fn xml_to_json(input: &str) -> Result<serde_json::Value, CamelError> {
+    xml_to_json_with_depth_limit(input, MAX_XML_DEPTH)
+}
+
+/// Convert XML to JSON with an explicit maximum nesting depth.
+///
+/// `xml_to_json` calls this with [`MAX_XML_DEPTH`]. Kept as a separate
+/// private helper so tests can exercise the depth cap directly.
+///
+/// # DocType handling (R3-L3)
+///
+/// Unlike [`validate_xml`], this function does **not** reject `<!DOCTYPE ...>`.
+/// The two have different contracts: `validate_xml` is a security gate that
+/// refuses DOCTYPE outright, while `xml_to_json` is a converter that swallows
+/// DOCTYPE via the catch-all `_ => {}` arm and only honors quick-xml's
+/// predefined entity set (no external entity resolution, no DTD evaluation).
+/// This is intentional and not exploitable: quick-xml does not fetch external
+/// entities, and the result tree carries no DOCTYPE content.
+fn xml_to_json_with_depth_limit(
+    input: &str,
+    max_depth: usize,
+) -> Result<serde_json::Value, CamelError> {
     let mut reader = Reader::from_str(input);
     reader.config_mut().trim_text(true);
 
@@ -95,6 +119,12 @@ pub fn xml_to_json(input: &str) -> Result<serde_json::Value, CamelError> {
                 got_root = true;
                 let name = local_name(&e);
                 let attrs = parse_attrs(&e, reader.decoder())?;
+                // R5-L3: cap nesting depth to bound stack/memory growth.
+                if stack.len() >= max_depth {
+                    return Err(CamelError::TypeConversionFailed(format!(
+                        "XML nesting depth exceeds limit of {max_depth}"
+                    )));
+                }
                 stack.push(XmlNode {
                     name,
                     attrs,
@@ -650,6 +680,39 @@ mod tests {
         let xml = r#"<root a="&amp;val"/>"#;
         let result = xml_to_json(xml).unwrap();
         assert_eq!(result, json!({"root": {"@a": "&val"}}));
+    }
+
+    #[test]
+    fn xml_to_json_rejects_excessive_depth() {
+        let mut xml = String::new();
+        for _ in 0..150 {
+            xml.push_str("<a>");
+        }
+        xml.push('1');
+        for _ in 0..150 {
+            xml.push_str("</a>");
+        }
+        let result = xml_to_json(&xml);
+        assert!(result.is_err(), "deeply nested XML should be rejected");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("depth"), "error should mention depth: {msg}");
+    }
+
+    #[test]
+    fn xml_to_json_accepts_depth_within_cap() {
+        let mut xml = String::new();
+        for _ in 0..50 {
+            xml.push_str("<a>");
+        }
+        xml.push('1');
+        for _ in 0..50 {
+            xml.push_str("</a>");
+        }
+        let result = xml_to_json(&xml);
+        assert!(
+            result.is_ok(),
+            "depth 50 must be within the cap: {result:?}"
+        );
     }
 
     #[test]

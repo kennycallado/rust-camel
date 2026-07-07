@@ -175,6 +175,12 @@ pub struct SplitterConfig {
     /// propagated), **not** in-flight futures — `join_all` cannot cancel
     /// already-spawned work.
     pub stop_on_exception: bool,
+    /// Maximum number of fragments materialized by `expression` (DoS cap, R3-M4).
+    ///
+    /// The eager splitter materializes the whole `Vec<Exchange>` before
+    /// processing; this cap rejects a split that would explode memory.
+    /// Default 100_000. For unbounded/lazy input use `StreamingSplitter`.
+    pub max_fragments: usize,
 }
 
 impl SplitterConfig {
@@ -186,6 +192,7 @@ impl SplitterConfig {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: 100_000,
         }
     }
 
@@ -216,6 +223,12 @@ impl SplitterConfig {
         self
     }
 
+    /// Set the maximum number of fragments the eager splitter will materialize.
+    pub fn max_fragments(mut self, max: usize) -> Self {
+        self.max_fragments = max;
+        self
+    }
+
     /// Validates the configuration.
     ///
     /// Returns `Err(CamelError::Config)` if `parallel_limit` is set to 0,
@@ -224,6 +237,11 @@ impl SplitterConfig {
         if self.parallel && self.parallel_limit == Some(0) {
             return Err(CamelError::Config(
                 "splitter parallel_limit must be > 0".to_string(),
+            ));
+        }
+        if self.max_fragments == 0 {
+            return Err(CamelError::Config(
+                "splitter max_fragments must be > 0".to_string(),
             ));
         }
         Ok(())
@@ -410,6 +428,19 @@ mod tests {
         assert!(config.parallel);
         assert_eq!(config.parallel_limit, Some(4));
         assert!(!config.stop_on_exception);
+    }
+
+    #[test]
+    fn test_splitter_config_default_max_fragments() {
+        let cfg = SplitterConfig::new(Arc::new(|_: &Exchange| Vec::new()) as SplitExpression);
+        assert_eq!(cfg.max_fragments, 100_000);
+    }
+
+    #[test]
+    fn test_splitter_config_rejects_zero_max_fragments() {
+        let cfg = SplitterConfig::new(Arc::new(|_: &Exchange| Vec::new()) as SplitExpression)
+            .max_fragments(0);
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

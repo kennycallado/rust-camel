@@ -12,6 +12,17 @@
 //!
 //! **Heap cap:** not supported by Boa 0.21.
 
+/// Maximum source-string size accepted by [`BoaEngine::eval`] (DoS cap, M-L1).
+///
+/// Boa 0.21 exposes no heap/allocation cap (`runtime_limits_mut()` covers only
+/// loop iterations, recursion depth, and stack size). This pre-eval source-size
+/// check neutralizes large-payload bombs before Boa allocates; the residual
+/// in-heap amplification vector (a small source that grows a huge structure via
+/// `String.prototype.repeat` or array builders) cannot be bounded without a Boa
+/// heap API and is accepted as a documented upstream limitation. The existing
+/// loop/recursion/stack/timeout limits neutralize CPU-bombs.
+const MAX_SOURCE_BYTES: usize = 1024 * 1024; // 1 MiB
+
 use boa_engine::{Context, JsValue, Source, js_string};
 
 use crate::{
@@ -74,6 +85,18 @@ fn resolve_js_limits(limits: &camel_language_api::JsLimitsConfig) -> ResolvedJsL
 
 impl JsEngine for BoaEngine {
     fn eval(&self, source: &str, exchange: JsExchange) -> Result<JsEvalResult, JsLanguageError> {
+        // M-L1: pre-eval source-size cap (Boa 0.21 has no heap cap; see const doc).
+        if source.len() > MAX_SOURCE_BYTES {
+            return Err(JsLanguageError::Execution {
+                message: format!(
+                    "JS source {} bytes exceeds max source bytes {} (Boa 0.21 has no heap cap; \
+                     reject oversized input before eval)",
+                    source.len(),
+                    MAX_SOURCE_BYTES
+                ),
+            });
+        }
+
         let mut ctx = Context::default();
 
         // Apply resource limits before executing any script
@@ -350,6 +373,47 @@ mod tests {
                 || msg.to_lowercase().contains("iteration"),
             "error should reference loop limit: {msg}"
         );
+    }
+
+    #[test]
+    fn test_eval_rejects_oversized_source() {
+        // M-L1: source larger than MAX_SOURCE_BYTES is rejected before Boa eval.
+        let engine = BoaEngine::default();
+        let big = "x".repeat(MAX_SOURCE_BYTES + 1);
+        let result = engine.eval(&big, JsExchange::default());
+        assert!(result.is_err(), "oversized source must be rejected");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("source") && msg.to_lowercase().contains("bytes"),
+            "error should mention source size: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_eval_accepts_source_under_cap() {
+        let engine = BoaEngine::default();
+        // Small script well under the cap.
+        let result = engine.eval("1 + 1", JsExchange::default()).unwrap();
+        assert_eq!(result.return_value.as_i64().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_documented_heap_amplification_gap() {
+        // M-L1 residual gap documentation test: Boa 0.21 exposes no heap cap.
+        // The existing loop/recursion/stack/timeout limits neutralize CPU-bombs;
+        // an in-heap amplification bomb ('x'.repeat(huge)) cannot be bounded
+        // without a Boa heap API. This test asserts the CPU-bomb variant IS
+        // caught by the loop limit, documenting that the heap-amplification
+        // vector is the accepted residual gap.
+        use camel_language_api::JsLimitsConfig;
+        let limits = JsLimitsConfig {
+            max_loop_iterations: Some(1_000),
+            ..Default::default()
+        };
+        let engine = BoaEngine::new(limits);
+        // A CPU-bound loop is bounded by the iteration limit.
+        let result = engine.eval("let i=0; while(true){i++;}", JsExchange::default());
+        assert!(result.is_err(), "CPU-bomb must trip the loop limit");
     }
 
     #[test]

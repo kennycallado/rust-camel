@@ -14,6 +14,24 @@ pub enum ConfigValidationError {
     )]
     AggregatorMissingCompletionBound,
 
+    /// Raised when an Aggregator has none of: max_buckets, a Timeout completion
+    /// condition, or a bucket_ttl. At least one memory-release bound is mandatory
+    /// (R3-M2) so a unique-correlation-key flood cannot grow the bucket map
+    /// without limit.
+    #[error("aggregator requires at least one of max_buckets, completionTimeout, or bucket_ttl")]
+    AggregatorMissingMemoryBound,
+
+    /// Raised when an Aggregator has a Timeout completion condition but no
+    /// `bucket_ttl`. The R3-M3 timeout-task cap may skip spawning a dedicated
+    /// timeout task under flood; without `bucket_ttl` there is no fallback
+    /// eviction path and the bucket leaks until shutdown. Requiring `bucket_ttl`
+    /// whenever Timeout is present makes the cap-skip degradation safe by
+    /// construction.
+    #[error(
+        "aggregator Timeout completion requires bucket_ttl (memory-release bound for the timeout-task cap fallback)"
+    )]
+    AggregatorTimeoutRequiresTtl,
+
     #[error("throttler max_requests must be > 0")]
     ThrottlerMaxRequestsZero,
 

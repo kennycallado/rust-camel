@@ -12,8 +12,12 @@ use serde_json::Value as JsonValue;
 /// Default maximum nesting depth for JSON values.
 const DEFAULT_MAX_DEPTH: usize = 64;
 
+/// Default maximum input size in bytes for text-to-JSON conversion (M-L2).
+/// Matches the spirit of the XPath language's input cap.
+const DEFAULT_MAX_INPUT_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+
 /// Configuration for [`JsonPathLanguage`] resource limits.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct JsonPathConfig {
     /// Maximum allowed input size in bytes for text-to-JSON conversion.
     /// When `None`, no size limit is enforced.
@@ -27,6 +31,15 @@ impl JsonPathConfig {
     /// Returns the effective max depth, applying the default when not explicitly set.
     fn effective_max_depth(&self) -> usize {
         self.max_depth.unwrap_or(DEFAULT_MAX_DEPTH)
+    }
+}
+
+impl Default for JsonPathConfig {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: Some(DEFAULT_MAX_INPUT_BYTES),
+            max_depth: None,
+        }
     }
 }
 
@@ -561,10 +574,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_config_has_no_limits() {
+    async fn default_config_has_safe_defaults() {
+        // M-L2: max_input_bytes defaults to 16 MiB (was None).
         let config = JsonPathConfig::default();
-        assert_eq!(config.max_input_bytes, None);
+        assert_eq!(config.max_input_bytes, Some(16 * 1024 * 1024));
+        // max_depth still defaults to DEFAULT_MAX_DEPTH via effective_max_depth().
         assert_eq!(config.max_depth, None);
+    }
+
+    #[tokio::test]
+    async fn default_config_rejects_oversized_text_body() {
+        // Default config must reject a >16 MiB text body without an explicit cap.
+        let lang = JsonPathLanguage::new(); // default config
+        let expr = lang.create_expression("$.key").unwrap();
+        let big_value = "x".repeat(16 * 1024 * 1024 + 10);
+        let big_json = format!(r#"{{"key":"{}"}}"#, big_value);
+        let ex = exchange_with_text_body(&big_json).await;
+        let result = expr.evaluate(&ex).await;
+        assert!(
+            result.is_err(),
+            "default config must reject oversized input, got {result:?}"
+        );
     }
 
     #[tokio::test]
