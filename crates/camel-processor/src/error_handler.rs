@@ -1156,24 +1156,21 @@ mod tests {
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
         assert!(result.error.is_none(), "handled:true should clear error");
         assert!(
-            result
+            !result
                 .properties
-                .get(camel_api::exchange::PROPERTY_EXCEPTION_MESSAGE)
-                .is_none(),
+                .contains_key(camel_api::exchange::PROPERTY_EXCEPTION_MESSAGE),
             "handled:true should clear exception properties"
         );
         assert!(
-            result
+            !result
                 .properties
-                .get(camel_api::exchange::PROPERTY_EXCEPTION_KIND)
-                .is_none(),
+                .contains_key(camel_api::exchange::PROPERTY_EXCEPTION_KIND),
             "handled:true should clear exception kind property"
         );
         assert!(
-            result
+            !result
                 .properties
-                .get(camel_api::exchange::PROPERTY_EXCEPTION_CAUGHT)
-                .is_none(),
+                .contains_key(camel_api::exchange::PROPERTY_EXCEPTION_CAUGHT),
             "handled:true should clear exception caught property"
         );
     }

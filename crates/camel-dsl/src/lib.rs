@@ -17,6 +17,7 @@ mod parity_tests;
 pub mod rest;
 pub mod route_ast;
 pub mod template;
+mod util;
 pub mod yaml;
 
 pub use canonical::{parse_canonical_json, parse_canonical_route};

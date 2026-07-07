@@ -350,6 +350,12 @@ impl StepCompiler for CoreCompiler {
                     let bean = Arc::clone(&bean);
                     let method = method.clone();
                     async move {
+                        // R3-L6: method-allowlist check (mirrors BeanRegistry::invoke).
+                        if !bean.methods().iter().any(|m| m == &method) {
+                            return Err(
+                                camel_bean::BeanError::MethodNotFound(method.clone()).into()
+                            );
+                        }
                         bean.call(&method, &mut exchange).await?;
                         Ok(exchange)
                     }
@@ -480,7 +486,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use camel_api::{LanguageExpressionDef, ProducerContext};
+    use camel_api::{CamelError, Exchange, LanguageExpressionDef, Message, ProducerContext};
     use camel_bean::BeanRegistry;
     use camel_component_api::{
         ComponentContext, NoOpComponentContext, RuntimeObservability,
@@ -593,6 +599,99 @@ mod tests {
         assert!(
             err.to_string().contains("top-level"),
             "error should mention 'top-level', got: {err}"
+        );
+    }
+
+    /// A bean whose `call` accepts any method, but whose `methods()` allowlist
+    /// is restricted. Used to verify the compiler-level allowlist check fires
+    /// before `bean.call()` is reached.
+    struct PermissiveBean;
+
+    #[async_trait::async_trait]
+    impl camel_bean::BeanProcessor for PermissiveBean {
+        async fn call(
+            &self,
+            _method: &str,
+            _exchange: &mut camel_api::Exchange,
+        ) -> Result<(), CamelError> {
+            // Always succeeds — the allowlist check must catch unauthorized
+            // methods before we get here.
+            Ok(())
+        }
+
+        fn methods(&self) -> Vec<String> {
+            vec!["handle".to_string()]
+        }
+    }
+
+    /// R3-L6: bean step compiler must reject methods not in the allowlist
+    /// before invoking `bean.call()`.
+    #[tokio::test]
+    async fn bean_step_rejects_method_not_in_allowlist() {
+        use tower::ServiceExt;
+
+        // Register a bean with allowlist ["handle"].
+        let beans = BeanRegistry::new();
+        beans.register("test_bean", PermissiveBean).unwrap();
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(beans));
+
+        // Build a CompilationContext referencing the bean registry.
+        let producer_ctx: &'static ProducerContext =
+            Box::leak(Box::new(ProducerContext::default()));
+        let staging: &'static FunctionStagingMode =
+            Box::leak(Box::new(FunctionStagingMode::DirectAdd));
+        let languages: &'static SharedLanguageRegistry =
+            Box::leak(Box::new(Arc::new(Mutex::new(HashMap::new()))));
+        let beans_ref: &'static Arc<Mutex<BeanRegistry>> = Box::leak(Box::new(beans));
+        let idempotent: &'static crate::IdempotentRegistry =
+            Box::leak(Box::new(crate::IdempotentRegistry::new()));
+        let claim_check: &'static crate::ClaimCheckRegistry =
+            Box::leak(Box::new(crate::ClaimCheckRegistry::new()));
+
+        let ctx = CompilationContext {
+            producer_ctx,
+            rt: Arc::new(NoopRuntimeObservability),
+            languages,
+            beans: beans_ref,
+            function_invoker: None,
+            component_ctx: Arc::new(NoOpComponentContext),
+            route_id: None,
+            staging_mode: staging,
+            idempotent_repositories: idempotent,
+            claim_check_repositories: claim_check,
+        };
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        // Compile a Bean step calling an unauthorized method.
+        let step = BuilderStep::Bean {
+            name: "test_bean".into(),
+            method: "unauthorized_method".into(),
+        };
+        let result = reg.compile_step(step, 0, &ctx);
+        let compiled = result
+            .expect("compilation should return Some")
+            .expect("compilation should succeed");
+
+        // Extract the processor and invoke it.
+        let processor = match compiled {
+            CompiledStep::Process { processor, .. } => processor,
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        };
+
+        let exchange = Exchange::new(Message::default());
+        let result = processor.oneshot(exchange).await;
+
+        assert!(
+            result.is_err(),
+            "bean step should reject method not in allowlist"
+        );
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unauthorized_method") && msg.contains("not found"),
+            "error should mention method name and 'not found', got: {msg}"
         );
     }
 

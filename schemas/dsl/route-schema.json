@@ -84,6 +84,7 @@
       "type": "object"
     },
     "AggregateStep": {
+      "additionalProperties": false,
       "properties": {
         "aggregate": {
           "$ref": "#/$defs/AggregateData"
@@ -183,6 +184,7 @@
       "type": "object"
     },
     "ChoiceStep": {
+      "additionalProperties": false,
       "properties": {
         "choice": {
           "$ref": "#/$defs/ChoiceData"
@@ -237,6 +239,7 @@
       "type": "object"
     },
     "ConvertBodyToStep": {
+      "additionalProperties": false,
       "properties": {
         "convert_body_to": {
           "type": "string"
@@ -281,6 +284,7 @@
       "type": "object"
     },
     "DelayStep": {
+      "additionalProperties": false,
       "properties": {
         "delay": {
           "$ref": "#/$defs/DelayBody"
@@ -323,6 +327,7 @@
       "type": "object"
     },
     "DoTryStep": {
+      "additionalProperties": false,
       "properties": {
         "do_try": {
           "$ref": "#/$defs/DoTryData"
@@ -471,6 +476,7 @@
       ]
     },
     "FilterStep": {
+      "additionalProperties": false,
       "properties": {
         "filter": {
           "$ref": "#/$defs/PredicateBlock"
@@ -581,6 +587,7 @@
       "type": "object"
     },
     "IdempotentConsumerStep": {
+      "additionalProperties": false,
       "properties": {
         "idempotent_consumer": {
           "$ref": "#/$defs/IdempotentConsumerBody"
@@ -723,6 +730,7 @@
       "type": "object"
     },
     "LogStep": {
+      "additionalProperties": false,
       "properties": {
         "log": {
           "$ref": "#/$defs/LogBody"
@@ -780,6 +788,7 @@
       "type": "object"
     },
     "LoopStep": {
+      "additionalProperties": false,
       "properties": {
         "loop": {
           "$ref": "#/$defs/LoopData"
@@ -840,6 +849,7 @@
       "type": "object"
     },
     "MarshalStep": {
+      "additionalProperties": false,
       "properties": {
         "marshal": {
           "type": "string"
@@ -893,6 +903,7 @@
       "type": "object"
     },
     "MulticastStep": {
+      "additionalProperties": false,
       "properties": {
         "multicast": {
           "$ref": "#/$defs/MulticastData"
@@ -1126,6 +1137,7 @@
       "type": "object"
     },
     "ResequenceStep": {
+      "additionalProperties": false,
       "properties": {
         "resequence": {
           "$ref": "#/$defs/ResequenceData"
@@ -1171,6 +1183,7 @@
       "type": "object"
     },
     "RouteDslCircuitBreaker": {
+      "additionalProperties": false,
       "properties": {
         "failure_threshold": {
           "default": 5,
@@ -1188,6 +1201,7 @@
       "type": "object"
     },
     "RouteDslErrorHandler": {
+      "additionalProperties": false,
       "properties": {
         "dead_letter_channel": {
           "default": null,
@@ -1223,6 +1237,7 @@
       "type": "object"
     },
     "RouteDslOnException": {
+      "additionalProperties": false,
       "properties": {
         "continued": {
           "default": null,
@@ -1272,6 +1287,7 @@
       "type": "object"
     },
     "RouteDslPermissionContext": {
+      "additionalProperties": false,
       "properties": {
         "headers": {
           "default": [],
@@ -1291,6 +1307,7 @@
       "type": "object"
     },
     "RouteDslPermissionPolicy": {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "anyOf": [
@@ -1360,6 +1377,7 @@
       "type": "object"
     },
     "RouteDslPermissionValueSource": {
+      "additionalProperties": false,
       "properties": {
         "header": {
           "default": null,
@@ -1386,6 +1404,7 @@
       "type": "object"
     },
     "RouteDslRedeliveryPolicy": {
+      "additionalProperties": false,
       "properties": {
         "handled_by": {
           "default": null,
@@ -1428,6 +1447,7 @@
       "type": "object"
     },
     "RouteDslRoute": {
+      "additionalProperties": false,
       "properties": {
         "auto_startup": {
           "default": true,
@@ -1515,6 +1535,7 @@
       "type": "object"
     },
     "RouteDslSecurityPolicy": {
+      "additionalProperties": false,
       "properties": {
         "all_required": {
           "default": null,
@@ -1791,6 +1812,7 @@
       "type": "object"
     },
     "SamplingStep": {
+      "additionalProperties": false,
       "properties": {
         "sampling": {
           "$ref": "#/$defs/SamplingBody"
@@ -1820,6 +1842,7 @@
       "type": "object"
     },
     "ScatterGatherStep": {
+      "additionalProperties": false,
       "properties": {
         "scatter_gather": {
           "$ref": "#/$defs/ScatterGatherData"
@@ -1847,6 +1870,7 @@
       "type": "object"
     },
     "ScriptStep": {
+      "additionalProperties": false,
       "properties": {
         "script": {
           "$ref": "#/$defs/ScriptData"
@@ -1917,6 +1941,7 @@
       ]
     },
     "SetBodyStep": {
+      "additionalProperties": false,
       "properties": {
         "set_body": {
           "$ref": "#/$defs/SetBodyData"
@@ -1985,6 +2010,7 @@
       "type": "object"
     },
     "SetHeaderStep": {
+      "additionalProperties": false,
       "properties": {
         "set_header": {
           "$ref": "#/$defs/SetHeaderData"
@@ -2053,6 +2079,7 @@
       "type": "object"
     },
     "SetPropertyStep": {
+      "additionalProperties": false,
       "properties": {
         "set_property": {
           "$ref": "#/$defs/SetPropertyData"
@@ -2217,6 +2244,7 @@
       ]
     },
     "SplitStep": {
+      "additionalProperties": false,
       "properties": {
         "split": {
           "$ref": "#/$defs/SplitData"
@@ -2228,6 +2256,7 @@
       "type": "object"
     },
     "StopStep": {
+      "additionalProperties": false,
       "properties": {
         "stop": {
           "type": "boolean"
@@ -2264,6 +2293,7 @@
       "type": "object"
     },
     "StreamCacheStep": {
+      "additionalProperties": false,
       "properties": {
         "stream_cache": {
           "$ref": "#/$defs/StreamCacheBody"
@@ -2376,6 +2406,7 @@
       "type": "object"
     },
     "ToStep": {
+      "additionalProperties": false,
       "properties": {
         "to": {
           "type": "string"
@@ -2387,6 +2418,7 @@
       "type": "object"
     },
     "TransformStep": {
+      "additionalProperties": false,
       "description": "`transform:` step — alias for `set_body:`, reuses all SetBodyData types.",
       "properties": {
         "transform": {
@@ -2415,6 +2447,7 @@
       "type": "object"
     },
     "ValidateStep": {
+      "additionalProperties": false,
       "properties": {
         "validate": {
           "type": "string"
@@ -2426,6 +2459,7 @@
       "type": "object"
     },
     "WireTapStep": {
+      "additionalProperties": false,
       "properties": {
         "wire_tap": {
           "type": "string"

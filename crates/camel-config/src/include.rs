@@ -70,13 +70,10 @@ pub fn load_includes(
         }
         seen.insert(canonical.clone(), idx);
 
-        let content = std::fs::read_to_string(&canonical).map_err(|e| {
-            ConfigError::Message(format!(
-                "failed to read included file \"{}\": {}",
-                canonical.display(),
-                e
-            ))
-        })?;
+        let content = crate::config::read_capped(
+            &canonical.to_string_lossy(),
+            crate::config::MAX_CONFIG_FILE_SIZE,
+        )?;
 
         let mut value: toml::Value = toml::from_str(&content).map_err(|e| {
             ConfigError::Message(format!(
@@ -357,7 +354,7 @@ log_level = "warn"
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         assert!(
-            err.to_string().contains("failed to read"),
+            err.to_string().contains("Cannot read"),
             "expected read error, got: {err}"
         );
     }

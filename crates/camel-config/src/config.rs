@@ -885,6 +885,35 @@ fn default_max_delay_ms() -> u64 {
     60000
 }
 
+/// Maximum size (in bytes) for config files read via `read_capped`.
+/// Prevents OOM from abnormally large config/route files.
+pub(crate) const MAX_CONFIG_FILE_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Read a file with a size cap. Stats the file first, rejects if too large.
+pub(crate) fn read_capped(path: &str, max_bytes: u64) -> Result<String, ConfigError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| ConfigError::Message(format!("Cannot stat `{path}`: {e}")))?;
+    if metadata.len() > max_bytes {
+        return Err(ConfigError::Message(format!(
+            "Config file `{path}` is {} bytes, exceeds max {} bytes",
+            metadata.len(),
+            max_bytes
+        )));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| ConfigError::Message(format!("Cannot read `{path}`: {e}")))
+}
+
+/// Async variant of [`read_capped`] — uses `spawn_blocking` so the stat + read
+/// does not block the async executor. Config loading is startup-only and files
+/// are always under the cap in normal use, so the blocking cost is negligible.
+async fn read_capped_async(path: &str, max_bytes: u64) -> Result<String, ConfigError> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || read_capped(&path, max_bytes))
+        .await
+        .map_err(|e| ConfigError::Message(format!("spawn_blocking join error: {e}")))?
+}
+
 /// Deep merge two TOML values
 /// Tables are merged recursively, with overlay values taking precedence
 pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
@@ -915,14 +944,14 @@ impl CamelConfig {
             if let Ok(resolved) = resolver.resolve(route) {
                 *route = resolved;
             } else {
-                tracing::warn!(route = %route, "Failed to resolve placeholder in routes entry; keeping original");
+                tracing::warn!("Failed to resolve placeholder in routes entry; keeping original");
             }
         }
 
         if let Ok(resolved) = resolver.resolve(&self.log_level) {
             self.log_level = resolved;
         } else {
-            tracing::warn!(log_level = %self.log_level, "Failed to resolve placeholder in log_level; keeping original");
+            tracing::warn!("Failed to resolve placeholder in log_level; keeping original");
         }
 
         if let Some(otel) = self.observability.otel.as_mut() {
@@ -973,7 +1002,7 @@ impl CamelConfig {
                 .map(|(k, v)| match resolver.resolve(&v) {
                     Ok(resolved) => (k, resolved),
                     Err(err) => {
-                        tracing::warn!(key = %k, value = %v, error = %err, "Failed to resolve bean config placeholder; keeping original");
+                        tracing::warn!(key = %k, error = %err, "Failed to resolve bean config placeholder; keeping original");
                         (k, v)
                     }
                 })
@@ -1094,8 +1123,7 @@ impl CamelConfig {
         profile: Option<&str>,
         merge_env: bool,
     ) -> Result<Self, ConfigError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
+        let content = read_capped(path, MAX_CONFIG_FILE_SIZE)?;
 
         let base_dir = std::path::Path::new(path)
             .parent()
@@ -1116,7 +1144,7 @@ impl CamelConfig {
 
         let pre_sources = crate::include::load_includes(base_dir, &includes, effective_profile)?;
 
-        Self::build_from_toml_value_inner(root_value, profile, merge_env, pre_sources)
+        build_from_toml_value_inner(root_value, profile, merge_env, pre_sources)
     }
 
     /// Validates and extracts the `include` field from a parsed TOML value.
@@ -1162,9 +1190,7 @@ impl CamelConfig {
         path: &str,
         profile: Option<&str>,
     ) -> Result<Self, ConfigError> {
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
+        let content = read_capped_async(path, MAX_CONFIG_FILE_SIZE).await?;
 
         let base_dir_owned = std::path::Path::new(path)
             .parent()
@@ -1186,7 +1212,7 @@ impl CamelConfig {
         let pre_sources =
             crate::include::load_includes(&base_dir_owned, &includes, effective_profile)?;
 
-        Self::build_from_toml_value_inner(root_value, profile, false, pre_sources)
+        build_from_toml_value_inner(root_value, profile, false, pre_sources)
     }
 
     /// Async version of [`Self::from_file_with_env`] — uses `tokio::fs`.
@@ -1199,9 +1225,7 @@ impl CamelConfig {
         path: &str,
         profile: Option<&str>,
     ) -> Result<Self, ConfigError> {
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
+        let content = read_capped_async(path, MAX_CONFIG_FILE_SIZE).await?;
 
         let base_dir_owned = std::path::Path::new(path)
             .parent()
@@ -1223,77 +1247,175 @@ impl CamelConfig {
         let pre_sources =
             crate::include::load_includes(&base_dir_owned, &includes, effective_profile)?;
 
-        Self::build_from_toml_value_inner(root_value, profile, true, pre_sources)
+        build_from_toml_value_inner(root_value, profile, true, pre_sources)
+    }
+}
+
+/// Parse an env var value into a JSON value with type awareness.
+/// Tries int, float, bool, then falls back to string.
+fn parse_env_value(val: &str) -> serde_json::Value {
+    if let Ok(n) = val.parse::<i64>() {
+        serde_json::Value::from(n)
+    } else if let Ok(f) = val.parse::<f64>() {
+        serde_json::Value::from(f)
+    } else if let Ok(b) = val.parse::<bool>() {
+        serde_json::Value::from(b)
+    } else {
+        serde_json::Value::from(val)
+    }
+}
+
+/// Allowlisted env vars that can override config fields (L-C2 security hardening).
+///
+/// Only these `CAMEL_*` vars are read as config overrides via the
+/// `build_from_toml_value_inner` env-merging path. Non-allowlisted `CAMEL_*` vars
+/// are silently ignored (NOT rejected). This is intentional: many `CAMEL_*` env
+/// vars are component-specific (e.g. `CAMEL_JMS_BRIDGE_BINARY_PATH`,
+/// `CAMEL_NATIVE_ISSUER_KEY_PEM`) or consumed directly by the caller
+/// (`CAMEL_CONFIG_FILE`) or read directly in `build_from_toml_value_inner`
+/// (`CAMEL_PROFILE`). The security property — that no security-sensitive field can
+/// be overridden via env — is still achieved.
+///
+/// Two vars handled outside this allowlist:
+/// - `CAMEL_CONFIG_FILE` — consumed by `from_env_or_default()` before config loading.
+/// - `CAMEL_PROFILE` — read directly in `build_from_toml_value_inner` (needed before
+///   the config source is built).
+const ALLOWED_ENV_OVERRIDES: &[&str] = &[
+    "CAMEL_TIMEOUT_MS",
+    "CAMEL_DRAIN_TIMEOUT_MS",
+    "CAMEL_WATCH",
+    "CAMEL_WATCH_DEBOUNCE_MS",
+    "CAMEL_LOG_LEVEL",
+    "CAMEL_RUNTIME_JOURNAL_PATH",
+    "CAMEL_SUPERVISION_INITIAL_DELAY_MS",
+    "CAMEL_SUPERVISION_MAX_ATTEMPTS",
+];
+
+/// Core config builder. Accepts a pre-parsed (and `include`-stripped) `toml::Value`
+/// so callers do not need to re-parse the content.
+fn build_from_toml_value_inner(
+    mut config_value: toml::Value,
+    profile: Option<&str>,
+    merge_env: bool,
+    pre_sources: Vec<String>,
+) -> Result<CamelConfig, ConfigError> {
+    // CAMEL_PROFILE is read directly (not through the allowlist) because it's
+    // needed before the config source is built — the profile determines which
+    // TOML sections to merge.
+    let env_profile = env::var("CAMEL_PROFILE").ok();
+    let profile = profile.or(env_profile.as_deref());
+
+    // Defensively strip `include` in case callers forgot — it is not a CamelConfig field.
+    if let toml::Value::Table(ref mut table) = config_value {
+        table.remove("include");
     }
 
-    /// Core config builder. Accepts a pre-parsed (and `include`-stripped) `toml::Value`
-    /// so callers do not need to re-parse the content.
-    fn build_from_toml_value_inner(
-        mut config_value: toml::Value,
-        profile: Option<&str>,
-        merge_env: bool,
-        pre_sources: Vec<String>,
-    ) -> Result<Self, ConfigError> {
-        let env_profile = env::var("CAMEL_PROFILE").ok();
-        let profile = profile.or(env_profile.as_deref());
+    // Detect whether the root file has profile sections (e.g. [default], [production]).
+    // If it does, use strict profile handling (unknown profile → error).
+    // If it doesn't (flat config), use lenient handling (keep as-is).
+    let has_profile_structure = if let toml::Value::Table(ref table) = config_value {
+        table.contains_key("default") || profile.is_some_and(|p| table.contains_key(p))
+    } else {
+        false
+    };
 
-        // Defensively strip `include` in case callers forgot — it is not a CamelConfig field.
-        if let toml::Value::Table(ref mut table) = config_value {
-            table.remove("include");
-        }
+    if has_profile_structure {
+        apply_profile(&mut config_value, profile)?;
+    } else {
+        // Flat config — no profile sections, keep as-is
+        apply_profile_lenient(&mut config_value, profile);
+    }
 
-        // Detect whether the root file has profile sections (e.g. [default], [production]).
-        // If it does, use strict profile handling (unknown profile → error).
-        // If it doesn't (flat config), use lenient handling (keep as-is).
-        let has_profile_structure = if let toml::Value::Table(ref table) = config_value {
-            table.contains_key("default") || profile.is_some_and(|p| table.contains_key(p))
-        } else {
-            false
-        };
+    let merged_toml = toml::to_string(&config_value)
+        .map_err(|e| ConfigError::Message(format!("Failed to serialize merged config: {}", e)))?;
 
-        if has_profile_structure {
-            apply_profile(&mut config_value, profile)?;
-        } else {
-            // Flat config — no profile sections, keep as-is
-            apply_profile_lenient(&mut config_value, profile);
-        }
-
-        let merged_toml = toml::to_string(&config_value).map_err(|e| {
-            ConfigError::Message(format!("Failed to serialize merged config: {}", e))
-        })?;
-
-        let mut builder = Config::builder();
-        for source_toml in pre_sources {
-            builder = builder.add_source(config::File::from_str(
-                &source_toml,
-                config::FileFormat::Toml,
-            ));
-        }
+    let mut builder = Config::builder();
+    for source_toml in pre_sources {
         builder = builder.add_source(config::File::from_str(
-            &merged_toml,
+            &source_toml,
             config::FileFormat::Toml,
         ));
-        if merge_env {
-            builder =
-                builder.add_source(config::Environment::with_prefix("CAMEL").try_parsing(true));
-        }
-        let config = builder.build()?;
-
-        let mut config: Self = config.try_deserialize()?;
-        config.resolve_placeholders();
-        config
-            .validate()
-            .map_err(|e| ConfigError::Message(e.to_string()))?;
-        Ok(config)
     }
+    builder = builder.add_source(config::File::from_str(
+        &merged_toml,
+        config::FileFormat::Toml,
+    ));
+    if merge_env {
+        // L-C2: Only allowlisted env vars override config (security hardening).
+        // Warn about non-allowlisted CAMEL_* vars (operator feedback for typos/stale vars).
+        for (key, _) in std::env::vars().filter(|(k, _)| {
+            k.starts_with("CAMEL_") && !ALLOWED_ENV_OVERRIDES.contains(&k.as_str())
+        }) {
+            tracing::warn!(var = %key, "CAMEL_* env var not in config override allowlist; ignored");
+        }
+        // Build a JSON object with nested structure for fields like supervision.*.
+        let mut env_map = serde_json::Map::new();
+        for var in ALLOWED_ENV_OVERRIDES {
+            if let Ok(val) = env::var(var) {
+                let key = var.strip_prefix("CAMEL_").unwrap().to_lowercase();
+                // Handle nested keys (e.g., supervision_initial_delay_ms → supervision.initial_delay_ms)
+                let parsed = parse_env_value(&val);
+                if key.starts_with("supervision_") {
+                    let nested_key = key.strip_prefix("supervision_").unwrap();
+                    let sup = env_map
+                        .entry("supervision".to_string())
+                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                    if let serde_json::Value::Object(sup_map) = sup {
+                        sup_map.insert(nested_key.to_string(), parsed);
+                    }
+                } else if key.starts_with("runtime_journal_") {
+                    let nested_key = key.strip_prefix("runtime_journal_").unwrap();
+                    let journal = env_map
+                        .entry("runtime_journal".to_string())
+                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                    if let serde_json::Value::Object(journal_map) = journal {
+                        journal_map.insert(nested_key.to_string(), parsed);
+                    }
+                } else {
+                    env_map.insert(key, parsed);
+                }
+            }
+        }
+        if !env_map.is_empty() {
+            let json = serde_json::to_string(&serde_json::Value::Object(env_map)).map_err(|e| {
+                ConfigError::Message(format!("Failed to serialize env overrides: {}", e))
+            })?;
+            builder = builder.add_source(config::File::from_str(&json, config::FileFormat::Json));
+        }
+    }
+    let config = builder.build()?;
+
+    let mut config: CamelConfig = config.try_deserialize()?;
+    config.resolve_placeholders();
+    config
+        .validate()
+        .map_err(|e| ConfigError::Message(e.to_string()))?;
+    Ok(config)
 }
 
 fn resolve_string_in_place(resolver: &PropertiesResolver, value: &mut String, field: &str) {
     match resolver.resolve(value) {
         Ok(resolved) => *value = resolved,
         Err(err) => {
-            tracing::warn!(field = field, value = %value, error = %err, "Failed to resolve placeholder; keeping original");
+            tracing::warn!(field = field, error = %err, "Failed to resolve placeholder; keeping original");
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_string_in_place_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_string_in_place_keeps_value_unchanged_on_failure() {
+        let resolver = PropertiesResolver::new();
+        let original = "{{env:NONEXISTENT_SECRET_TOKEN}}".to_string();
+        let mut value = original.clone();
+        resolve_string_in_place(&resolver, &mut value, "test_field");
+        assert_eq!(
+            value, original,
+            "value must be unchanged on resolution failure"
+        );
     }
 }
 
@@ -1765,6 +1887,75 @@ timeout_ms = 1000
     }
 
     #[test]
+    fn env_override_allows_supervision_nested_field() {
+        // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.supervision]
+initial_delay_ms = 500
+max_attempts = 3
+"#,
+        );
+
+        // SAFETY: tests run in controlled process; we set and immediately restore env vars.
+        unsafe {
+            std::env::set_var("CAMEL_SUPERVISION_INITIAL_DELAY_MS", "2000");
+            std::env::set_var("CAMEL_SUPERVISION_MAX_ATTEMPTS", "10");
+        }
+
+        let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
+            .expect("config should load with env override");
+        let sup = cfg.supervision.expect("supervision should be present");
+        assert_eq!(sup.initial_delay_ms, 2000);
+        assert_eq!(sup.max_attempts, Some(10));
+
+        // SAFETY: restore process env for test isolation.
+        unsafe {
+            std::env::remove_var("CAMEL_SUPERVISION_INITIAL_DELAY_MS");
+            std::env::remove_var("CAMEL_SUPERVISION_MAX_ATTEMPTS");
+        }
+    }
+
+    #[test]
+    fn env_allowlist_accepts_allowlisted_ignores_non_allowlisted() {
+        // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+
+        let file = write_temp_config(
+            r#"
+[default]
+drain_timeout_ms = 5000
+"#,
+        );
+
+        // SAFETY: tests run in controlled process; we set and immediately restore env vars.
+        unsafe {
+            // Allowlisted — should override.
+            std::env::set_var("CAMEL_DRAIN_TIMEOUT_MS", "999");
+            // Non-allowlisted — should be silently ignored, not crash.
+            std::env::set_var("CAMEL_BEANS_FOO", "bar");
+        }
+
+        let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
+            .expect("config should load with allowlisted env var and ignore non-allowlisted");
+        // Allowlisted drain_timeout_ms should be overridden to 999.
+        assert_eq!(cfg.drain_timeout_ms, 999);
+        // Beans should remain at default (empty), unaffected by non-allowlisted CAMEL_BEANS_FOO.
+        assert!(cfg.beans.is_empty());
+
+        // SAFETY: restore process env for test isolation.
+        unsafe {
+            std::env::remove_var("CAMEL_DRAIN_TIMEOUT_MS");
+            std::env::remove_var("CAMEL_BEANS_FOO");
+        }
+    }
+
+    #[test]
     fn test_from_file_resolves_placeholders_in_components_and_beans() {
         let file = write_temp_config(
             r#"
@@ -2127,8 +2318,10 @@ mod config_validation_tests {
 
     #[test]
     fn test_config_zero_otel_metrics_interval_rejected() {
-        let mut otel = OtelCamelConfig::default();
-        otel.metrics_interval_ms = 0;
+        let otel = OtelCamelConfig {
+            metrics_interval_ms: 0,
+            ..Default::default()
+        };
         let config = CamelConfig {
             observability: ObservabilityConfig {
                 otel: Some(otel),
@@ -2767,6 +2960,7 @@ timeout_ms = 99
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_from_file_async_with_env_completes() {
         // Serialize against env-touching tests (see ENV_OVERRIDE_LOCK). Held
         // across the `.await` because `config::Environment::with_prefix(...)`
@@ -2914,5 +3108,30 @@ mod languages_config_integration_tests {
         assert_eq!(cfg.timeout_ms, 5000);
         assert_eq!(cfg.languages.rhai.limits.max_operations, Some(500_000));
         assert_eq!(cfg.languages.js.limits.execution_timeout_ms, Some(3000));
+    }
+}
+
+#[cfg(test)]
+mod oversized_file_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn from_file_rejects_oversized_config() {
+        // A single key with a very long string value — valid TOML, > 16 MiB
+        let val = "a".repeat(17 * 1024 * 1024);
+        let big_content = format!("x = \"{val}\"\n");
+        assert!(
+            big_content.len() > 16 * 1024 * 1024,
+            "test content must exceed 16 MiB (was {} bytes)",
+            big_content.len()
+        );
+
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(big_content.as_bytes()).expect("write");
+        f.flush().expect("flush");
+        let result =
+            CamelConfig::from_file_with_profile(f.path().to_str().unwrap(), Some("default"));
+        assert!(result.is_err(), "oversized config file must be rejected");
     }
 }

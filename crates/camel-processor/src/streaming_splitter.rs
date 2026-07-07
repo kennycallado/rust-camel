@@ -296,8 +296,10 @@ mod tests {
         };
 
         // Recorder sub-pipeline: captures per-fragment body + properties
-        let fragments: Arc<Mutex<Vec<(Option<serde_json::Value>, Option<Value>, Option<Value>)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        #[allow(clippy::type_complexity)]
+        let fragments: Arc<
+            Mutex<Vec<(Option<serde_json::Value>, Option<Value>, Option<Value>)>>,
+        > = Arc::new(Mutex::new(Vec::new()));
         let fragments_clone = Arc::clone(&fragments);
         let recorder = BoxProcessor::from_fn(move |ex: Exchange| {
             let frags = Arc::clone(&fragments_clone);

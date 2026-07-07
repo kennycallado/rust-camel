@@ -309,11 +309,11 @@ mod tests {
             .unwrap()
             .expect("ok");
         assert!(
-            ex.input.headers.get("Content-Type").is_none(),
+            !ex.input.headers.contains_key("Content-Type"),
             "Content-Type should be excluded"
         );
         assert!(
-            ex.input.headers.get("Content-Length").is_none(),
+            !ex.input.headers.contains_key("Content-Length"),
             "Content-Length should be excluded"
         );
         assert_eq!(
@@ -355,7 +355,7 @@ mod tests {
         for frag in &fragments {
             let ex = frag.as_ref().expect("should be ok");
             assert!(
-                matches!(&ex.input.body, Body::Text(s) if s.len() > 0),
+                matches!(&ex.input.body, Body::Text(s) if !s.is_empty()),
                 "batch should contain lines"
             );
         }

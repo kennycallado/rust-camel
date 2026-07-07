@@ -131,12 +131,13 @@ fn parse_json_to_canonical_inner(json: &str) -> Result<Vec<CanonicalRouteSpec>, 
         .collect()
 }
 
+use crate::util::read_route_file_capped;
+
 /// Load a JSON route definition from a file.
 ///
 /// Reads the file contents and parses them as JSON. No environment variable interpolation is performed.
 pub fn load_json_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| CamelError::Io(format!("Failed to read {}: {e}", path.display())))?;
+    let content = read_route_file_capped(path)?;
     let annotated = annotate_format(InputFormat::Json, parse_json_inner(&content));
     annotated.map_err(|e| match e {
         CamelError::RouteError(msg) => {
@@ -150,6 +151,7 @@ pub fn load_json_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelErr
 mod tests {
     use super::*;
     use crate::model::DeclarativeStep;
+    use std::fs::File;
 
     /// Basic route: parse JSON to declarative model.
     #[test]
@@ -655,6 +657,26 @@ mod tests {
         assert!(
             result.is_err(),
             "JSON rest must reject duplicate (method, path)"
+        );
+    }
+
+    #[test]
+    fn load_json_from_file_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.json");
+        std::fs::write(&path, "{}").unwrap();
+        // Extend the file past the 16 MiB cap (sparse file, no actual disk usage)
+        let file = File::create(&path).unwrap();
+        file.set_len(16 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+
+        let err = match load_json_from_file(&path) {
+            Ok(_) => panic!("expected oversized file error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("exceeds max"),
+            "expected size cap error, got: {err}"
         );
     }
 }

@@ -2,6 +2,28 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::RwLock;
 
+/// Replace line/paragraph-break chars with SPACE to prevent YAML
+/// structural injection when values are spliced into raw YAML before parse.
+///
+/// Covers: `\n`, `\r`, `\0`, `\u{2028}`, `\u{2029}`.
+///
+/// Does NOT strip flow indicators (`[ ] { } ,`), plain-scalar colon
+/// (`: `), comment truncation (` #`), or tag/anchor chars (`! & * %`).
+/// These can alter YAML within a single line but cannot inject new
+/// keys/structure (that requires newlines). Values are inserted into
+/// already-trusted template positions, not arbitrary escaping.
+fn sanitize_env_value(val: &str) -> String {
+    val.chars()
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\0' | '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 pub struct PropertiesResolver {
     // TODO(CONFIG-015): Property value caching not implemented.
     // Values are re-read from source on every access.
@@ -85,8 +107,8 @@ impl PropertiesResolver {
                 }
 
                 let value = match (self.lookup(key), default) {
-                    (Some(v), _) => v,
-                    (None, Some(d)) => d.to_string(),
+                    (Some(v), _) => sanitize_env_value(&v),
+                    (None, Some(d)) => sanitize_env_value(d),
                     (None, None) => {
                         return Err(ResolveError::MissingKey {
                             key: key.to_string(),
@@ -237,6 +259,47 @@ mod tests {
         let resolver = PropertiesResolver::new();
         let result = resolver.resolve("{{env:}}");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolves_env_var_replacing_newlines() {
+        unsafe {
+            env::set_var(
+                "TEST_CONFIG_INJECTION",
+                "safe_value\ninjected_key: malicious",
+            );
+        }
+        let resolver = PropertiesResolver::new();
+        let result = resolver.resolve("{{env:TEST_CONFIG_INJECTION}}").unwrap();
+        unsafe {
+            env::remove_var("TEST_CONFIG_INJECTION");
+        }
+        assert!(
+            !result.contains('\n'),
+            "interpolated value must not contain newlines"
+        );
+        // Newline replaced with SPACE (not deleted)
+        assert!(
+            result.contains("safe_value injected_key"),
+            "newline must be replaced with space, not removed"
+        );
+    }
+
+    #[test]
+    fn resolves_env_var_replacing_all_control_chars() {
+        // \0 cannot be set via env::set_var (C string terminator).
+        // Test sanitize_env_value directly for all 5 chars including \0.
+        let input = "a\rb\nb\0c\u{2028}d\u{2029}e";
+        let sanitized = sanitize_env_value(input);
+        assert!(!sanitized.contains('\r'), "CR must be replaced");
+        assert!(!sanitized.contains('\n'), "LF must be replaced");
+        assert!(!sanitized.contains('\0'), "NUL must be replaced");
+        assert!(!sanitized.contains('\u{2028}'), "LS must be replaced");
+        assert!(!sanitized.contains('\u{2029}'), "PS must be replaced");
+        assert!(
+            sanitized.contains("a b b c d e"),
+            "all control chars must be replaced with space"
+        );
     }
 
     #[test]

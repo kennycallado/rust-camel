@@ -47,14 +47,16 @@ impl Service<Exchange> for LogProcessor {
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let msg = self.message.clone();
         let exchange_id = exchange.correlation_id.clone();
-        let body_preview = exchange
-            .input
-            .body
-            .as_text()
-            .unwrap_or("")
-            .chars()
-            .take(64)
-            .collect::<String>();
+        let body_preview = sanitize_preview(
+            &exchange
+                .input
+                .body
+                .as_text()
+                .unwrap_or("")
+                .chars()
+                .take(64)
+                .collect::<String>(),
+        );
         debug!(exchange_id = %exchange_id, body_preview = %body_preview, "LogProcessor processing exchange");
         match self.level {
             LogLevel::Trace => trace!(exchange_id = %exchange_id, "{}", msg),
@@ -117,6 +119,15 @@ where
     }
 }
 
+/// Strip control characters that could enable log injection.
+/// Replaces control chars with U+FFFD (replacement char) to preserve
+/// alignment while making injection visible.
+fn sanitize_preview(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +181,29 @@ mod tests {
         assert_eq!(
             result.input.header("CamelTimerCounter"),
             Some(&Value::Number(42.into()))
+        );
+    }
+
+    #[test]
+    fn body_preview_strips_control_chars() {
+        let body_with_injection = "no\ttab\nnl\rcr\0null\u{1B}esc";
+        let preview: String = body_with_injection.chars().take(64).collect();
+        let sanitized = sanitize_preview(&preview);
+        assert!(!sanitized.contains('\n'), "newlines must be replaced");
+        assert!(
+            !sanitized.contains('\r'),
+            "carriage returns must be replaced"
+        );
+        assert!(!sanitized.contains('\t'), "tabs must be replaced");
+        assert!(!sanitized.contains('\0'), "null must be replaced");
+        assert!(
+            !sanitized.contains('\u{1B}'),
+            "ESC (ANSI injection) must be replaced"
+        );
+        // U+FFFD replacement char must appear (replacement, not deletion)
+        assert!(
+            sanitized.contains('\u{FFFD}'),
+            "control chars must be replaced with U+FFFD, not deleted"
         );
     }
 }

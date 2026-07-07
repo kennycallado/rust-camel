@@ -368,6 +368,7 @@ mod tests {
 
     /// Helper: OutcomePipeline body that always returns `Completed(exchange)`.
     #[derive(Clone)]
+    #[allow(dead_code)]
     struct CompletedBody;
     impl camel_api::OutcomePipeline for CompletedBody {
         fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
@@ -383,6 +384,7 @@ mod tests {
 
     /// Helper: OutcomePipeline body that always returns `Stopped(exchange)`.
     #[derive(Clone)]
+    #[allow(dead_code)]
     struct StopBody;
     impl camel_api::OutcomePipeline for StopBody {
         fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
@@ -942,7 +944,7 @@ mod tests {
             }
             fn run<'a>(
                 &'a mut self,
-                exchange: Exchange,
+                _exchange: Exchange,
             ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
                 let count = self.counter.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move {

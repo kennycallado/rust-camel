@@ -12,9 +12,8 @@ const JSON_MALFORMED: &str = r#"{"routes": [{"id": "", "from": "timer:tick"}]}"#
 
 #[test]
 fn yaml_error_names_yaml_format() {
-    let err = parse_yaml_to_declarative(YAML_MALFORMED)
-        .err()
-        .expect("YAML malformed route should error");
+    let err =
+        parse_yaml_to_declarative(YAML_MALFORMED).expect_err("YAML malformed route should error");
     let msg = err.to_string();
     assert!(
         msg.contains("YAML DSL error:"),
@@ -28,9 +27,8 @@ fn yaml_error_names_yaml_format() {
 
 #[test]
 fn json_error_names_json_format() {
-    let err = parse_json_to_declarative(JSON_MALFORMED)
-        .err()
-        .expect("JSON malformed route should error");
+    let err =
+        parse_json_to_declarative(JSON_MALFORMED).expect_err("JSON malformed route should error");
     let msg = err.to_string();
     assert!(
         msg.contains("JSON DSL error:"),
@@ -44,12 +42,10 @@ fn json_error_names_json_format() {
 
 #[test]
 fn both_formats_share_underlying_semantic_message() {
-    let yaml_err = parse_yaml_to_declarative(YAML_MALFORMED)
-        .err()
-        .expect("YAML malformed route should error");
-    let json_err = parse_json_to_declarative(JSON_MALFORMED)
-        .err()
-        .expect("JSON malformed route should error");
+    let yaml_err =
+        parse_yaml_to_declarative(YAML_MALFORMED).expect_err("YAML malformed route should error");
+    let json_err =
+        parse_json_to_declarative(JSON_MALFORMED).expect_err("JSON malformed route should error");
     // Both must surface the same underlying semantic content.
     assert!(
         yaml_err

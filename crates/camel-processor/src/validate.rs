@@ -102,7 +102,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_predicate_evaluates_body() {
         let mut svc = ValidateService::new(
-            |ex: &Exchange| ex.input.body.as_text().map_or(false, |s| s.len() > 3),
+            |ex: &Exchange| ex.input.body.as_text().is_some_and(|s| s.len() > 3),
             "body length > 3",
         );
         let short = Exchange::new(Message::new("ab"));

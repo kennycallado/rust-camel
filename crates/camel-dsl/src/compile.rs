@@ -4010,9 +4010,7 @@ mod tests {
                 uri: "log:info".into(),
             })],
         };
-        let err = compile_declarative_route_to_canonical(route, false)
-            .err()
-            .expect("expected error");
+        let err = compile_declarative_route_to_canonical(route, false).expect_err("expected error");
         assert!(err.to_string().contains("error_handler"));
     }
 
@@ -4035,9 +4033,7 @@ mod tests {
                 uri: "log:info".into(),
             })],
         };
-        let err = compile_declarative_route_to_canonical(route, false)
-            .err()
-            .expect("expected error");
+        let err = compile_declarative_route_to_canonical(route, false).expect_err("expected error");
         assert!(err.to_string().contains("unit_of_work"));
     }
 

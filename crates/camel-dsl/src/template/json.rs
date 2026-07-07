@@ -265,7 +265,7 @@ mod tests {
                     "id": "num-route",
                     "from": "timer:tick",
                     "count": 42,
-                    "ratio": 3.14,
+                    "ratio": 3.5,
                     "enabled": true,
                     "nothing": null
                 }
@@ -275,7 +275,7 @@ mod tests {
 }"#;
         let specs = parse_json_templates(json).unwrap();
         assert_eq!(specs[0].routes[0]["count"], 42);
-        assert_eq!(specs[0].routes[0]["ratio"], 3.14);
+        assert_eq!(specs[0].routes[0]["ratio"], 3.5);
         assert_eq!(specs[0].routes[0]["enabled"], true);
         assert_eq!(specs[0].routes[0]["nothing"], serde_json::Value::Null);
     }

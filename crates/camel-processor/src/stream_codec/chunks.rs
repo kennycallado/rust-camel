@@ -297,11 +297,11 @@ mod tests {
             .unwrap()
             .expect("ok");
         assert!(
-            ex.input.headers.get("Content-Type").is_none(),
+            !ex.input.headers.contains_key("Content-Type"),
             "Content-Type should be excluded"
         );
         assert!(
-            ex.input.headers.get("Content-Length").is_none(),
+            !ex.input.headers.contains_key("Content-Length"),
             "Content-Length should be excluded"
         );
         assert_eq!(

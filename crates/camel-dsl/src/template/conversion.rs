@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn converts_f64_number() {
-        let n = serde_yml::Value::Number(serde_yml::Number::from(3.14f64));
+        let n = serde_yml::Value::Number(serde_yml::Number::from(5.0f64));
         let result = convert(n).unwrap();
         assert!(result.as_f64().unwrap() > 3.0);
     }

@@ -273,7 +273,6 @@ impl tower::Service<Exchange> for DoTryService {
 /// Compilable segment for a `doCatch` clause within a `DoTrySegment`.
 ///
 /// `disposition` controls outcome when the catch body completes:
-
 #[cfg(test)]
 mod tests {
     use super::*;

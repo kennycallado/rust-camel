@@ -75,6 +75,36 @@ pub enum DiscoveryError {
     TemplateSpec { path: String, error: String },
 }
 
+/// Maximum size for individual route files (YAML/JSON) during discovery.
+/// Prevents OOM from abnormally large files.
+const MAX_ROUTE_FILE_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Read a file with a size cap. Stats first, rejects if too large.
+fn read_file_capped(path: &Path) -> Result<String, DiscoveryError> {
+    let metadata = fs::metadata(path).map_err(|e| DiscoveryError::Io {
+        path: path.to_string_lossy().to_string(),
+        source: e,
+    })?;
+    if metadata.len() > MAX_ROUTE_FILE_SIZE {
+        return Err(DiscoveryError::Io {
+            path: path.to_string_lossy().to_string(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Route file `{}` is {} bytes, exceeds max {} bytes",
+                    path.display(),
+                    metadata.len(),
+                    MAX_ROUTE_FILE_SIZE
+                ),
+            ),
+        });
+    }
+    fs::read_to_string(path).map_err(|e| DiscoveryError::Io {
+        path: path.to_string_lossy().to_string(),
+        source: e,
+    })
+}
+
 /// Returns true if the glob pattern explicitly targets `.json` files.
 ///
 /// Only patterns whose **file target extension** is `.json` (case-insensitive) return true.
@@ -189,10 +219,7 @@ fn discover_routes_inner(
             }
 
             // Read file content (only reached for accepted extensions)
-            let raw_content = fs::read_to_string(&path).map_err(|e| DiscoveryError::Io {
-                path: path_str.clone(),
-                source: e,
-            })?;
+            let raw_content = read_file_capped(&path)?;
 
             // Source hash is based on raw content before env interpolation
             let mut hasher = DefaultHasher::new();
@@ -1004,8 +1031,7 @@ templated_routes:
         let file_path = dir.path().join("two-instances.yaml");
         fs::write(
             &file_path,
-            format!(
-                r#"
+            r#"
 routes: []
 templates:
   - id: shared-tpl
@@ -1016,12 +1042,11 @@ templates:
 templated_routes:
   - route_template_ref: shared-tpl
     route_id: "inst-a"
-    parameters: {{}}
+    parameters: {}
   - route_template_ref: shared-tpl
     route_id: "inst-b"
-    parameters: {{}}
+    parameters: {}
 "#,
-            ),
         )
         .unwrap();
 

@@ -5,6 +5,7 @@ use crate::compile::compile_canonical_route;
 
 pub fn parse_canonical_json(json: &str) -> Result<Vec<RouteDefinition>, CamelError> {
     #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct CanonicalRoutes {
         routes: Vec<CanonicalRouteSpec>,
     }

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslRoutes {
     /// Optional JSON Schema URL (ignored by the parser; consumed by SDKs/editors).
     #[serde(default, skip_serializing, rename = "$schema")]
@@ -24,6 +25,7 @@ pub struct RouteDslRoutes {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslRoute {
     pub id: String,
     pub from: String,
@@ -51,6 +53,7 @@ pub struct RouteDslRoute {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslSecurityPolicy {
     #[serde(default)]
     pub roles: Option<Vec<String>>,
@@ -77,6 +80,7 @@ pub struct RouteDslSecurityPolicy {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslPermissionPolicy {
     pub policy: String,
     #[serde(default)]
@@ -95,6 +99,7 @@ pub struct RouteDslPermissionPolicy {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslPermissionValueSource {
     #[serde(default)]
     pub literal: Option<String>,
@@ -106,6 +111,7 @@ pub struct RouteDslPermissionValueSource {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslPermissionContext {
     #[serde(default)]
     pub headers: Vec<String>,
@@ -115,6 +121,7 @@ pub struct RouteDslPermissionContext {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslErrorHandler {
     #[serde(default)]
     pub dead_letter_channel: Option<String>,
@@ -128,6 +135,7 @@ pub struct RouteDslErrorHandler {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslOnException {
     #[serde(default)]
     pub kind: Option<String>,
@@ -145,6 +153,7 @@ pub struct RouteDslOnException {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslRedeliveryPolicy {
     pub max_attempts: u32,
     #[serde(default = "default_initial_delay_ms")]
@@ -161,6 +170,7 @@ pub struct RouteDslRedeliveryPolicy {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslCircuitBreaker {
     #[serde(default = "default_failure_threshold")]
     pub failure_threshold: u32,
@@ -202,6 +212,7 @@ fn default_open_duration_ms() -> u64 {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct DelayStep {
     pub delay: DelayBody,
 }
@@ -226,6 +237,7 @@ pub struct DelayFullConfig {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct LoopStep {
     #[serde(rename = "loop")]
     pub loop_data: LoopData,
@@ -337,18 +349,21 @@ pub struct FunctionData {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ToStep {
     pub to: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SetHeaderStep {
     pub set_header: SetHeaderData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SetPropertyStep {
     pub set_property: SetPropertyData,
 }
@@ -397,6 +412,7 @@ pub struct SetPropertyData {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SetBodyStep {
     pub set_body: SetBodyData,
 }
@@ -404,6 +420,7 @@ pub struct SetBodyStep {
 /// `transform:` step — alias for `set_body:`, reuses all SetBodyData types.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct TransformStep {
     pub transform: SetBodyData,
 }
@@ -493,12 +510,14 @@ pub struct LogMessageExpr {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct LogStep {
     pub log: LogBody,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct FilterStep {
     pub filter: PredicateBlock,
 }
@@ -525,6 +544,7 @@ pub struct PredicateBlock {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ChoiceStep {
     pub choice: ChoiceData,
 }
@@ -541,6 +561,7 @@ pub struct ChoiceData {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct DoTryStep {
     pub do_try: DoTryData,
 }
@@ -582,6 +603,7 @@ fn default_handled_disposition() -> camel_api::error_handler::ExceptionDispositi
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SplitStep {
     pub split: SplitData,
 }
@@ -655,6 +677,7 @@ fn default_split_aggregation() -> String {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct AggregateStep {
     pub aggregate: AggregateData,
 }
@@ -690,12 +713,14 @@ fn default_aggregate_strategy() -> String {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct WireTapStep {
     pub wire_tap: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct MulticastStep {
     pub multicast: MulticastData,
 }
@@ -724,6 +749,7 @@ fn default_multicast_aggregation() -> String {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ScatterGatherStep {
     pub scatter_gather: ScatterGatherData,
 }
@@ -744,12 +770,14 @@ pub struct ScatterGatherData {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct StopStep {
     pub stop: bool,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct StreamCacheStep {
     pub stream_cache: StreamCacheBody,
 }
@@ -773,18 +801,21 @@ pub struct StreamCacheConfig {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ScriptStep {
     pub script: ScriptData,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ConvertBodyToStep {
     pub convert_body_to: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct MarshalStep {
     pub marshal: String,
 }
@@ -805,6 +836,7 @@ pub struct UnmarshalStep {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ValidateStep {
     pub validate: String,
 }
@@ -834,6 +866,7 @@ pub struct ClaimCheckBody {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SamplingStep {
     pub sampling: SamplingBody,
 }
@@ -879,6 +912,7 @@ pub struct SortBody {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct IdempotentConsumerStep {
     pub idempotent_consumer: IdempotentConsumerBody,
 }
@@ -999,6 +1033,7 @@ fn default_lb_strategy() -> String {
 
 /// A reusable route template declared in YAML/JSON.
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslTemplate {
     pub id: String,
     #[serde(default)]
@@ -1010,6 +1045,7 @@ pub struct RouteDslTemplate {
 /// A single parameter that a route template accepts.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslTemplateParameter {
     /// The parameter name (used inside `{{name}}` placeholders).
     pub name: String,
@@ -1024,6 +1060,7 @@ pub struct RouteDslTemplateParameter {
 /// A request to instantiate a template with concrete parameter values.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDslTemplatedRoute {
     pub route_template_ref: String,
     /// Optional explicit route id for the resulting instance.
@@ -1713,6 +1750,19 @@ rest:
     }
 
     #[test]
+    fn circuit_breaker_rejects_typo_field() {
+        let yaml = r#"
+failure_threshhold: 5
+open_duration_ms: 10000
+"#;
+        let result: Result<RouteDslCircuitBreaker, _> = serde_yml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "typo 'failure_threshhold' must be rejected by deny_unknown_fields"
+        );
+    }
+
+    #[test]
     fn parse_rest_multiple_verbs_in_one_block() {
         let yaml = r#"
 rest:
@@ -1859,6 +1909,7 @@ pub struct BeanStepData {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ResequenceStep {
     pub resequence: ResequenceData,
 }

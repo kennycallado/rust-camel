@@ -1750,12 +1750,14 @@ fn parse_language_expression(
     )))
 }
 
+use crate::util::read_route_file_capped;
+
 pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
     info!(path = %path.display(), "loading routes from file");
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    let content = read_route_file_capped(path).map_err(|e| {
         // log-policy: system-broken
         error!(path = %path.display(), error = %e, "failed to load routes from file");
-        CamelError::Io(format!("Failed to read {}: {e}", path.display()))
+        e
     })?;
     let annotated = annotate_format(InputFormat::Yaml, parse_yaml_inner(&content));
     annotated.map_err(|e| match e {
@@ -1769,6 +1771,7 @@ pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
 
     #[test]
     fn test_parse_valid_yaml() {
@@ -3763,13 +3766,13 @@ templates:
     routes:
       - id: num-route
         count: 42
-        ratio: 3.14
+        ratio: 3.5
         enabled: true
         nothing: null
 "#;
         let specs = parse_yaml_templates(yaml).unwrap();
         assert_eq!(specs[0].routes[0]["count"], 42);
-        assert_eq!(specs[0].routes[0]["ratio"], 3.14);
+        assert_eq!(specs[0].routes[0]["ratio"], 3.5);
         assert_eq!(specs[0].routes[0]["enabled"], true);
         assert_eq!(specs[0].routes[0]["nothing"], serde_json::Value::Null);
     }
@@ -4436,5 +4439,25 @@ routes:
 "#;
         let blocks = extract_rest_blocks(yaml).expect("YAML should parse");
         assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn load_from_file_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.yaml");
+        std::fs::write(&path, "routes: []").unwrap();
+        // Extend the file past the 16 MiB cap (sparse file, no actual disk usage)
+        let file = File::create(&path).unwrap();
+        file.set_len(16 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+
+        let err = match load_from_file(&path) {
+            Ok(_) => panic!("expected oversized file error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("exceeds max"),
+            "expected size cap error, got: {err}"
+        );
     }
 }
