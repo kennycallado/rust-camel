@@ -75,6 +75,27 @@ impl Default for TlsConfig {
     }
 }
 
+/// Server-side TLS configuration for HTTP consumer endpoints.
+///
+/// When present, the HTTP server binds with TLS via `axum_server::from_tcp_rustls`.
+/// When absent, the server binds plain HTTP via `axum::serve`.
+#[derive(Clone)]
+pub struct ServerTlsConfig {
+    /// Path to the PEM-encoded server certificate chain.
+    pub cert_path: String,
+    /// Path to the PEM-encoded server private key.
+    pub key_path: String,
+}
+
+impl std::fmt::Debug for ServerTlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerTlsConfig")
+            .field("cert_path", &"[REDACTED]")
+            .field("key_path", &"[REDACTED]")
+            .finish()
+    }
+}
+
 fn default_connect_timeout_ms() -> u64 {
     5_000
 }
@@ -324,5 +345,19 @@ mod tests {
             ..HttpConfig::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn server_tls_config_debug_redacts_paths() {
+        let cfg = super::ServerTlsConfig {
+            cert_path: "/secret/cert.pem".to_string(),
+            key_path: "/secret/key.pem".to_string(),
+        };
+        let debug = format!("{:?}", cfg);
+        assert!(
+            !debug.contains("/secret"),
+            "paths must be redacted: {debug}"
+        );
+        assert!(debug.contains("REDACTED"), "must show REDACTED: {debug}");
     }
 }

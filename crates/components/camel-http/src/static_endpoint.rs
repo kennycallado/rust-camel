@@ -169,6 +169,7 @@ impl Consumer for HttpStaticConsumer {
                 1024,             // max_inflight_requests
                 self.runtime.clone(),
                 ctx.route_id().to_string(),
+                None,
             )
             .await?;
 
@@ -356,6 +357,7 @@ mod tests {
                 1024,
                 test_rt(),
                 "test-static".into(),
+                None,
             )
             .await
             .unwrap();
@@ -407,6 +409,7 @@ mod tests {
                 1024,
                 test_rt(),
                 "test-static".into(),
+                None,
             )
             .await
             .unwrap();

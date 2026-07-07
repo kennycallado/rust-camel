@@ -16,6 +16,51 @@ use camel_api::MetricsCollector;
 
 use crate::{HealthCheckRegistry, RuntimeObservability};
 
+/// TLS test helpers: generate ephemeral CA + server certs for integration tests.
+/// Uses rcgen (pure Rust, no openssl, no Docker).
+pub mod tls {
+    use std::path::PathBuf;
+
+    /// Generate a self-signed CA + server cert signed by that CA.
+    /// SANs: "localhost", "127.0.0.1", "::1".
+    /// Returns (ca_pem, server_cert_pem, server_key_pem).
+    pub fn gen_server_cert() -> (String, String, String) {
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
+        use std::net::IpAddr;
+
+        let ca_key = KeyPair::generate().expect("ca keygen");
+        let mut ca_params = CertificateParams::default();
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "Test CA");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca self-sign");
+
+        let server_key = KeyPair::generate().expect("server keygen");
+        let mut server_params = CertificateParams::default();
+        server_params.subject_alt_names = vec![
+            rcgen::SanType::DnsName("localhost".try_into().expect("localhost dns name")),
+            rcgen::SanType::IpAddress(IpAddr::V4([127, 0, 0, 1].into())),
+            rcgen::SanType::IpAddress("::1".parse().expect("::1 ip address")),
+        ];
+        let server_cert = server_params
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .expect("server cert sign");
+
+        (ca_cert.pem(), server_cert.pem(), server_key.serialize_pem())
+    }
+
+    /// Write PEM content to /tmp/camel-tls-test/{name}.
+    /// Creates parent dir if needed. Returns the path.
+    pub fn write_pem_tmp(name: &str, pem: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("camel-tls-test");
+        std::fs::create_dir_all(&dir).expect("create tmp dir");
+        let path = dir.join(name);
+        std::fs::write(&path, pem).expect("write pem");
+        path
+    }
+}
+
 /// `RuntimeObservability` stub that panics if any method is invoked.
 ///
 /// Use in test mods that exercise Endpoint trait surface but should NOT
@@ -114,5 +159,26 @@ mod tests {
         let rt = NoopRuntimeObservability;
         rt.health()
             .force_unhealthy_for_route("any-route", "any-name", "any-reason");
+    }
+
+    #[test]
+    fn tls_gen_server_cert_returns_valid_pem() {
+        let (ca, cert, key) = super::tls::gen_server_cert();
+        assert!(ca.contains("BEGIN CERTIFICATE"), "CA must be PEM cert");
+        assert!(
+            cert.contains("BEGIN CERTIFICATE"),
+            "server cert must be PEM"
+        );
+        assert!(
+            key.contains("PRIVATE KEY"),
+            "server key must be PEM private key"
+        );
+    }
+
+    #[test]
+    fn tls_write_pem_tmp_creates_readable_file() {
+        let path = super::tls::write_pem_tmp("test-write.pem", "test content");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "test content");
     }
 }

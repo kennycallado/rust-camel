@@ -444,6 +444,8 @@ impl HttpEndpointConfig {
 /// Configuration for an HTTP server (consumer) endpoint.
 #[derive(Debug, Clone)]
 pub struct HttpServerConfig {
+    /// URI scheme ("http" or "https") parsed from the endpoint URI.
+    pub scheme: String,
     /// Bind address, e.g. "0.0.0.0" or "127.0.0.1".
     pub host: String,
     /// TCP port to listen on.
@@ -463,6 +465,9 @@ pub struct HttpServerConfig {
     /// registers in the legacy path-only `api_routes` registry.
     /// Extracted from the `httpMethod=` URI param at config build time.
     pub method: Option<String>,
+    /// Server-side TLS config. Populated from `tlsCert`/`tlsKey` URI params.
+    /// `None` for plain HTTP servers.
+    pub tls_config: Option<crate::config::ServerTlsConfig>,
 }
 
 impl UriConfig for HttpServerConfig {
@@ -547,6 +552,7 @@ impl UriConfig for HttpServerConfig {
         let method = parts.params.get("httpMethod").map(|m| m.to_uppercase());
 
         Ok(Self {
+            scheme: parts.scheme,
             host,
             port,
             path,
@@ -554,6 +560,18 @@ impl UriConfig for HttpServerConfig {
             max_response_body,
             max_inflight_requests,
             method,
+            tls_config: {
+                let cert = parts.params.get("tlsCert").cloned();
+                let key = parts.params.get("tlsKey").cloned();
+                match (cert, key) {
+                    (Some(c), Some(k)) => Some(crate::config::ServerTlsConfig {
+                        cert_path: c,
+                        key_path: k,
+                    }),
+                    (None, None) => None,
+                    _ => None, // partial — enforced in create_consumer, not here
+                }
+            },
         })
     }
 }
@@ -625,6 +643,9 @@ struct ServerHandle {
     max_request_body: usize,
     max_response_body: usize,
     max_inflight_requests: usize,
+    is_tls: bool,
+    tls_cert_path: Option<String>,
+    tls_key_path: Option<String>,
 }
 
 /// Process-global registry mapping (host, port) → running Axum server handle.
@@ -653,6 +674,7 @@ impl ServerRegistry {
         max_inflight_requests: usize,
         runtime: Arc<dyn RuntimeObservability>,
         route_id: String,
+        tls_config: Option<crate::config::ServerTlsConfig>,
     ) -> Result<HttpRouteRegistry, CamelError> {
         let host_owned = host.to_string();
 
@@ -694,6 +716,27 @@ impl ServerRegistry {
             )));
         }
 
+        // TLS mode mismatch: plain vs TLS
+        if let Some(existing) = cell.get()
+            && existing.is_tls != tls_config.is_some()
+        {
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "incompatible TLS mode for shared server (host={host}, port={port}): existing is_tls={}, new has_tls={}",
+                existing.is_tls,
+                tls_config.is_some()
+            )));
+        }
+
+        // TLS cert/key mismatch: different cert on same TLS port
+        if let (Some(existing), Some(new_tls)) = (cell.get(), &tls_config)
+            && (existing.tls_cert_path.as_deref() != Some(&new_tls.cert_path)
+                || existing.tls_key_path.as_deref() != Some(&new_tls.key_path))
+        {
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "incompatible TLS cert/key for shared server (host={host}, port={port}): routes on the same TLS port must use the same cert and key"
+            )));
+        }
+
         let handle = cell
             .get_or_try_init(|| {
                 let rt = Arc::clone(&runtime);
@@ -705,15 +748,35 @@ impl ServerRegistry {
                     })?;
                     let registry = HttpRouteRegistry::new();
                     let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
-                    let task = tokio::spawn(run_axum_server(
-                        listener,
-                        registry.clone(),
-                        max_request_body,
-                        max_response_body,
-                        Arc::clone(&inflight),
-                        Arc::clone(&rt),
-                        rid.clone(),
-                    ));
+                    let task = if let Some(ref tls) = tls_config {
+                        let rustls_config = load_tls_config(&tls.cert_path, &tls.key_path)?;
+                        // Convert tokio listener to std for axum-server
+                        let std_listener = listener.into_std().map_err(|e| {
+                            CamelError::EndpointCreationFailed(format!(
+                                "TLS listener conversion: {e}"
+                            ))
+                        })?;
+                        tokio::spawn(run_axum_server_tls(
+                            std_listener,
+                            rustls_config,
+                            registry.clone(),
+                            max_request_body,
+                            max_response_body,
+                            Arc::clone(&inflight),
+                            Arc::clone(&rt),
+                            rid.clone(),
+                        ))
+                    } else {
+                        tokio::spawn(run_axum_server(
+                            listener,
+                            registry.clone(),
+                            max_request_body,
+                            max_response_body,
+                            Arc::clone(&inflight),
+                            Arc::clone(&rt),
+                            rid.clone(),
+                        ))
+                    };
                     let addr_for_monitor = format!("{host_owned}:{port}");
                     tokio::spawn(monitor_axum_task(
                         task,
@@ -726,6 +789,9 @@ impl ServerRegistry {
                         max_request_body,
                         max_response_body,
                         max_inflight_requests,
+                        is_tls: tls_config.is_some(),
+                        tls_cert_path: tls_config.as_ref().map(|t| t.cert_path.clone()),
+                        tls_key_path: tls_config.as_ref().map(|t| t.key_path.clone()),
                     })
                 }
             })
@@ -797,6 +863,40 @@ async fn run_axum_server(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_axum_server_tls(
+    listener: std::net::TcpListener,
+    rustls_config: tokio_rustls::rustls::ServerConfig,
+    registry: HttpRouteRegistry,
+    max_request_body: usize,
+    max_response_body: usize,
+    inflight: Arc<tokio::sync::Semaphore>,
+    runtime: Arc<dyn RuntimeObservability>,
+    route_id: String,
+) {
+    let state = AppState {
+        registry,
+        max_request_body,
+        max_response_body,
+        inflight,
+    };
+    let app = Router::new().fallback(dispatch_handler).with_state(state);
+
+    let tls_cfg =
+        axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(rustls_config));
+
+    axum_server::from_tcp_rustls(listener, tls_cfg)
+        .serve(app.into_make_service())
+        .await
+        .unwrap_or_else(|e| {
+            runtime
+                .metrics()
+                .increment_errors(&route_id, "e:http:accept-tls");
+            // log-policy: outside-contract
+            tracing::error!(error = %e, "Axum TLS server error");
+        });
+}
+
 /// Monitors an Axum server task and emits a structured error event if it
 /// exits unexpectedly.
 ///
@@ -826,6 +926,34 @@ async fn monitor_axum_task(
             );
         }
     }
+}
+
+/// Load a rustls ServerConfig from PEM cert/key files.
+/// Adapted from camel-ws lib.rs load_tls_config.
+fn load_tls_config(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<tokio_rustls::rustls::ServerConfig, CamelError> {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let cert_file = File::open(cert_path)
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("TLS cert file error: {e}")))?;
+    let key_file = File::open(key_path)
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("TLS key file error: {e}")))?;
+
+    let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("TLS cert parse error: {e}")))?;
+
+    let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("TLS key parse error: {e}")))?
+        .ok_or_else(|| CamelError::EndpointCreationFailed("TLS: no private key found".into()))?;
+
+    tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("TLS config error: {e}")))
 }
 
 async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl IntoResponse {
@@ -1048,6 +1176,7 @@ impl Consumer for HttpConsumer {
                 self.config.max_inflight_requests,
                 self.runtime.clone(),
                 ctx.route_id().to_string(),
+                self.config.tls_config.clone(),
             )
             .await?;
 
@@ -1538,6 +1667,21 @@ impl Endpoint for HttpEndpoint {
         &self,
         rt: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
+        // Scheme/config consistency check (spec §5) — uses parsed scheme
+        // from HttpServerConfig, not a fragile port-443 heuristic.
+        let scheme_is_https = self.server_config.scheme == "https";
+        let has_tls = self.server_config.tls_config.is_some();
+
+        if scheme_is_https && !has_tls {
+            return Err(CamelError::EndpointCreationFailed(
+                "https:// consumer requires tlsCert and tlsKey parameters".to_string(),
+            ));
+        }
+        if !scheme_is_https && has_tls {
+            return Err(CamelError::EndpointCreationFailed(
+                "http:// is incompatible with tlsCert/tlsKey — use https:// for TLS".to_string(),
+            ));
+        }
         Ok(Box::new(HttpConsumer::new(self.server_config.clone(), rt)))
     }
 
@@ -2187,13 +2331,14 @@ mod tests {
     }
 
     #[test]
-    fn test_https_endpoint_creates_consumer() {
+    fn test_https_endpoint_creates_consumer_errors_without_tls() {
         let component = HttpsComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component
             .create_endpoint("https://0.0.0.0:8443/test", &ctx)
             .unwrap();
-        assert!(endpoint.create_consumer(rt()).is_ok());
+        // https:// without tlsCert/tlsKey must fail (scheme enforcement)
+        assert!(endpoint.create_consumer(rt()).is_err());
     }
 
     #[test]
@@ -3279,6 +3424,7 @@ mod tests {
                         1024,
                         test_rt(),
                         "test-route".into(),
+                        None,
                     )
                     .await
                     .unwrap();
@@ -3318,6 +3464,7 @@ mod tests {
                     1024,
                     test_rt(),
                     "test-route-1".into(),
+                    None,
                 )
                 .await;
             let d2 = registry
@@ -3329,6 +3476,7 @@ mod tests {
                     1024,
                     test_rt(),
                     "test-route-2".into(),
+                    None,
                 )
                 .await;
             assert!(d1.is_ok());
@@ -3352,6 +3500,7 @@ mod tests {
                 1024,
                 test_rt(),
                 "test-route".into(),
+                None,
             )
             .await;
         assert!(d1.is_ok());
@@ -3367,6 +3516,7 @@ mod tests {
                 1024,
                 test_rt(),
                 "test-route-2".into(),
+                None,
             )
             .await;
         assert!(d2.is_err());
@@ -3393,6 +3543,7 @@ mod tests {
                     1024,
                     test_rt(),
                     "test-route".into(),
+                    None,
                 )
                 .await;
             assert!(d1.is_ok());
@@ -3413,6 +3564,44 @@ mod tests {
                 guard.len()
             );
         });
+    }
+
+    #[tokio::test]
+    async fn registry_rejects_tls_on_plain_port() {
+        ServerRegistry::reset();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+
+        // First route: plain HTTP
+        let _r1 = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                0,
+                1024,
+                1024,
+                16,
+                Arc::clone(&rt),
+                "route-1".into(),
+                None, // plain
+            )
+            .await;
+
+        // Second route: TLS on same port → must fail
+        let result = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                0,
+                1024,
+                1024,
+                16,
+                Arc::clone(&rt),
+                "route-2".into(),
+                Some(crate::config::ServerTlsConfig {
+                    cert_path: "/x.pem".into(),
+                    key_path: "/y.pem".into(),
+                }),
+            )
+            .await;
+        assert!(result.is_err(), "must reject TLS on plain port");
     }
 
     // -----------------------------------------------------------------------
@@ -3458,6 +3647,7 @@ mod tests {
         drop(listener); // Release port — ServerRegistry will rebind it
 
         let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
             host: "127.0.0.1".to_string(),
             port,
             path: "/ping".to_string(),
@@ -3465,6 +3655,7 @@ mod tests {
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
             method: None,
+            tls_config: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3512,6 +3703,7 @@ mod tests {
         drop(listener);
 
         let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
             host: "127.0.0.1".to_string(),
             port,
             path: "/saturation".to_string(),
@@ -3519,6 +3711,7 @@ mod tests {
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1,
             method: None,
+            tls_config: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3590,6 +3783,7 @@ mod tests {
         drop(listener);
 
         let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
             host: "127.0.0.1".to_string(),
             port,
             path: "/limit-bytes".to_string(),
@@ -3597,6 +3791,7 @@ mod tests {
             max_response_body: 16,
             max_inflight_requests: 1024,
             method: None,
+            tls_config: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3639,6 +3834,7 @@ mod tests {
         drop(listener);
 
         let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
             host: "127.0.0.1".to_string(),
             port,
             path: "/limit-json".to_string(),
@@ -3646,6 +3842,7 @@ mod tests {
             max_response_body: 16,
             max_inflight_requests: 1024,
             method: None,
+            tls_config: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3689,6 +3886,7 @@ mod tests {
         drop(listener);
 
         let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
             host: "127.0.0.1".to_string(),
             port,
             path: "/limit-xml".to_string(),
@@ -3696,6 +3894,7 @@ mod tests {
             max_response_body: 16,
             max_inflight_requests: 1024,
             method: None,
+            tls_config: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3742,6 +3941,7 @@ mod tests {
         drop(listener);
 
         let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
             host: "0.0.0.0".to_string(),
             port,
             path: "/limit-stream".to_string(),
@@ -3749,6 +3949,7 @@ mod tests {
             max_response_body: 16,
             max_inflight_requests: 1024,
             method: None,
+            tls_config: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -3985,6 +4186,7 @@ mod tests {
         use camel_component_api::ConcurrencyModel;
 
         let config = HttpServerConfig {
+            scheme: "http".to_string(),
             host: "127.0.0.1".to_string(),
             port: 19999,
             path: "/test".to_string(),
@@ -3992,12 +4194,29 @@ mod tests {
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
             method: None,
+            tls_config: None,
         };
         let consumer = HttpConsumer::new(config, test_rt());
         assert_eq!(
             consumer.concurrency_model(),
             ConcurrencyModel::Concurrent { max: None }
         );
+    }
+
+    #[test]
+    fn server_config_parses_tls_cert_and_key() {
+        let cfg = HttpServerConfig::from_uri(
+            "https://0.0.0.0:8443/api?tlsCert=/a/cert.pem&tlsKey=/a/key.pem",
+        )
+        .unwrap();
+        assert_eq!(cfg.tls_config.as_ref().unwrap().cert_path, "/a/cert.pem");
+        assert_eq!(cfg.tls_config.as_ref().unwrap().key_path, "/a/key.pem");
+    }
+
+    #[test]
+    fn server_config_no_tls_when_params_absent() {
+        let cfg = HttpServerConfig::from_uri("http://0.0.0.0:8080/api").unwrap();
+        assert!(cfg.tls_config.is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -4631,6 +4850,7 @@ mod tests {
         drop(listener);
 
         let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
             host: "127.0.0.1".to_string(),
             port,
             path: path.to_string(),
@@ -4638,6 +4858,7 @@ mod tests {
             max_response_body: 10 * 1024 * 1024,
             max_inflight_requests: 1024,
             method: None,
+            tls_config: None,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
 
@@ -5809,5 +6030,221 @@ mod tests {
         assert!(body.contains("\"error\""));
         assert!(body.contains("validation_error"));
         assert!(body.contains("body does not match schema"));
+    }
+
+    #[test]
+    fn https_consumer_without_tls_cert_errors() {
+        let endpoint = HttpEndpoint {
+            uri: "https://0.0.0.0:8443/api".to_string(),
+            config: HttpEndpointConfig::from_uri("https://0.0.0.0:8443/api").unwrap(),
+            server_config: HttpServerConfig::from_uri("https://0.0.0.0:8443/api").unwrap(),
+            client: reqwest::Client::new(),
+            http_config: HttpConfig::default(),
+        };
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let result = endpoint.create_consumer(rt);
+        assert!(result.is_err(), "expected error for https without tls cert");
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(msg.contains("tlsCert"), "error must mention tlsCert: {msg}");
+        }
+    }
+
+    #[test]
+    fn http_consumer_with_tls_config_errors() {
+        let endpoint = HttpEndpoint {
+            uri: "http://0.0.0.0:8080/api".to_string(),
+            config: HttpEndpointConfig::from_uri("http://0.0.0.0:8080/api").unwrap(),
+            server_config: HttpServerConfig::from_uri(
+                "http://0.0.0.0:8080/api?tlsCert=/x.pem&tlsKey=/y.pem",
+            )
+            .unwrap(),
+            client: reqwest::Client::new(),
+            http_config: HttpConfig::default(),
+        };
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let result = endpoint.create_consumer(rt);
+        assert!(result.is_err(), "expected error for http with tls config");
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(msg.contains("https"), "error must mention https: {msg}");
+        }
+    }
+
+    #[test]
+    fn https_consumer_with_partial_tls_cert_only_errors() {
+        // tlsCert without tlsKey → tls_config is None at parse time
+        // → create_consumer sees https:// + no TLS → must error
+        let server_config =
+            HttpServerConfig::from_uri("https://0.0.0.0:8443/api?tlsCert=/x.pem").unwrap();
+        assert!(
+            server_config.tls_config.is_none(),
+            "partial tlsCert must not create ServerTlsConfig"
+        );
+        let endpoint = HttpEndpoint {
+            uri: "https://0.0.0.0:8443/api?tlsCert=/x.pem".to_string(),
+            config: HttpEndpointConfig::from_uri("https://0.0.0.0:8443/api?tlsCert=/x.pem")
+                .unwrap(),
+            server_config,
+            client: reqwest::Client::new(),
+            http_config: HttpConfig::default(),
+        };
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let result = endpoint.create_consumer(rt);
+        assert!(
+            result.is_err(),
+            "must error: https:// requires both tlsCert and tlsKey"
+        );
+    }
+
+    #[test]
+    fn load_tls_config_parses_valid_pem() {
+        // Install rustls crypto provider (aws-lc-rs — matches reqwest/hyper-rustls tree)
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use camel_component_api::test_support::tls;
+        let (_, cert_pem, key_pem) = tls::gen_server_cert();
+        let cert_path = tls::write_pem_tmp("http-load-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("http-load-key.pem", &key_pem);
+
+        let config = load_tls_config(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
+        assert!(config.is_ok(), "must parse valid PEM: {:?}", config.err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consumer_tls_handshake_roundtrip() {
+        use camel_component_api::test_support::tls;
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        // Install rustls crypto provider (aws-lc-rs)
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Serialize against global ServerRegistry singleton
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+
+        // Generate CA + server cert
+        let (ca_pem, cert_pem, key_pem) = tls::gen_server_cert();
+        let cert_path = tls::write_pem_tmp("http-tls-handshake-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("http-tls-handshake-key.pem", &key_pem);
+        let ca_path = tls::write_pem_tmp("http-tls-handshake-ca.pem", &ca_pem);
+
+        // Get ephemeral port
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        ServerRegistry::reset();
+
+        // Create real HttpComponent + endpoint with TLS URI
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let uri = format!(
+            "https://127.0.0.1:{port}/test?tlsCert={}&tlsKey={}",
+            cert_path.to_string_lossy(),
+            key_path.to_string_lossy(),
+        );
+        let endpoint = component
+            .create_endpoint(&uri, &endpoint_ctx)
+            .expect("create TLS endpoint");
+        let mut consumer = endpoint.create_consumer(rt()).expect("create consumer");
+
+        // Start consumer — this calls get_or_spawn with tls_config
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "tls-handshake-test".to_string());
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+
+        // Give server time to start
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Client with CA cert — REAL verification (no danger_accept_invalid)
+        let ca_bytes = std::fs::read(&ca_path).unwrap();
+        let client = reqwest::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(&ca_bytes).unwrap())
+            .build()
+            .unwrap();
+
+        let send_fut = client
+            .post(format!("https://localhost:{port}/test"))
+            .body("ping")
+            .send();
+
+        // Handler: receive envelope, reply 200 with "pong" body
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body = camel_component_api::Body::Text("pong".to_string());
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.expect("TLS handshake + request must succeed");
+
+        assert_eq!(resp.status().as_u16(), 200, "must get 200 through TLS");
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "pong");
+
+        token.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consumer_tls_rejects_client_without_ca() {
+        use camel_component_api::test_support::tls;
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Serialize against global ServerRegistry singleton
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+
+        let (_, cert_pem, key_pem) = tls::gen_server_cert();
+        let cert_path = tls::write_pem_tmp("http-neg-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("http-neg-key.pem", &key_pem);
+
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        ServerRegistry::reset();
+
+        // Spawn TLS server via real HttpComponent path
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let uri = format!(
+            "https://127.0.0.1:{port}/test?tlsCert={}&tlsKey={}",
+            cert_path.to_string_lossy(),
+            key_path.to_string_lossy(),
+        );
+        let endpoint = component.create_endpoint(&uri, &endpoint_ctx).unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "tls-neg-test".to_string());
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Client WITHOUT CA cert — must fail TLS verification
+        let client = reqwest::Client::builder().build().unwrap();
+
+        let result = client
+            .get(format!("https://localhost:{port}/test"))
+            .send()
+            .await;
+
+        assert!(
+            result.is_err(),
+            "must reject without CA — proves real verification"
+        );
+
+        token.cancel();
+    }
+
+    #[test]
+    fn server_config_partial_tls_cert_without_key() {
+        // Parse URI with only tlsCert (no tlsKey)
+        let cfg = HttpServerConfig::from_uri("https://0.0.0.0:8443/api?tlsCert=/x.pem").unwrap();
+        // Partial params → tls_config must be None
+        assert!(cfg.tls_config.is_none());
     }
 }
