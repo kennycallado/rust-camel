@@ -101,6 +101,45 @@ impl std::str::FromStr for SaslAuthType {
     }
 }
 
+/// Returns an error message if the protocol requires rdkafka features that
+/// aren't compiled in. Returns `None` when the feature gate passes.
+fn check_feature_gates(protocol: SecurityProtocol) -> Option<&'static str> {
+    match protocol {
+        SecurityProtocol::Ssl => {
+            if !cfg!(feature = "ssl") && !cfg!(feature = "ssl-vendored") {
+                Some(
+                    "security_protocol=SSL requires camel-kafka to be compiled with 'ssl' or 'ssl-vendored' feature",
+                )
+            } else {
+                None
+            }
+        }
+        SecurityProtocol::SaslSsl => {
+            if !cfg!(feature = "ssl") && !cfg!(feature = "ssl-vendored") {
+                Some(
+                    "security_protocol=SASL_SSL requires camel-kafka to be compiled with 'ssl' or 'ssl-vendored' feature",
+                )
+            } else if !cfg!(feature = "sasl") {
+                Some(
+                    "security_protocol=SASL_SSL requires camel-kafka to be compiled with 'sasl' feature",
+                )
+            } else {
+                None
+            }
+        }
+        SecurityProtocol::SaslPlaintext => {
+            if !cfg!(feature = "sasl") {
+                Some(
+                    "security_protocol=SASL_PLAINTEXT requires camel-kafka to be compiled with 'sasl' feature",
+                )
+            } else {
+                None
+            }
+        }
+        SecurityProtocol::Plaintext => None,
+    }
+}
+
 // --- KafkaConfig (global defaults) ---
 
 /// Global Kafka configuration defaults.
@@ -236,6 +275,12 @@ impl KafkaConfig {
                     self.security_protocol
                 ))
             })?;
+
+        // Feature gate — reject SSL/SASL protocols when rdkafka hasn't
+        // been compiled with the required features.
+        if let Some(msg) = check_feature_gates(parsed_protocol) {
+            return Err(CamelError::Config(msg.into()));
+        }
 
         match parsed_protocol {
             SecurityProtocol::Plaintext | SecurityProtocol::SaslPlaintext => {
@@ -896,6 +941,14 @@ impl KafkaEndpointConfig {
             )));
         }
 
+        let security_protocol = cfg.security_protocol.unwrap_or(SecurityProtocol::Plaintext);
+
+        // Feature gate — reject SSL/SASL protocols when rdkafka hasn't
+        // been compiled with the required features.
+        if let Some(msg) = check_feature_gates(security_protocol) {
+            return Err(CamelError::Config(msg.into()));
+        }
+
         Ok(ResolvedKafkaEndpointConfig {
             topic: cfg.topic,
             brokers,
@@ -907,7 +960,7 @@ impl KafkaEndpointConfig {
             max_poll_records: cfg.max_poll_records,
             acks: cfg.acks,
             request_timeout_ms,
-            security_protocol: cfg.security_protocol.unwrap_or(SecurityProtocol::Plaintext),
+            security_protocol,
             sasl_auth_type: cfg.sasl_auth_type,
             sasl_username: cfg.sasl_username,
             sasl_password: cfg.sasl_password,
@@ -1413,6 +1466,59 @@ mod tests {
         let resolved = c.resolve().unwrap();
         assert!(resolved.rdkafka_config.is_empty());
     }
+
+    // --- Feature gate error-path tests (KAFKA-SSL) ---
+
+    #[test]
+    fn test_resolve_rejects_ssl_without_feature() {
+        let cfg = KafkaEndpointConfig::from_uri(
+            "kafka:orders?brokers=localhost:9092&groupId=test-group&securityProtocol=SSL",
+        )
+        .unwrap();
+        let err = cfg.resolve().unwrap_err().to_string();
+        assert!(
+            err.contains("ssl"),
+            "resolve should reject SSL without feature: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_rejects_sasl_ssl_without_feature() {
+        let cfg = KafkaEndpointConfig::from_uri(
+            "kafka:orders?brokers=localhost:9092&groupId=test-group\
+             &securityProtocol=SASL_SSL&saslAuthType=PLAIN\
+             &saslUsername=user&saslPassword=pass",
+        )
+        .unwrap();
+        let err = cfg.resolve().unwrap_err().to_string();
+        assert!(
+            err.contains("ssl"),
+            "resolve should reject SASL_SSL without feature: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_rejects_sasl_plaintext_without_sasl_feature() {
+        let cfg = KafkaEndpointConfig::from_uri(
+            "kafka:orders?brokers=localhost:9092&groupId=test-group\
+             &securityProtocol=SASL_PLAINTEXT&saslAuthType=PLAIN\
+             &saslUsername=user&saslPassword=pass",
+        )
+        .unwrap();
+        let err = cfg.resolve().unwrap_err().to_string();
+        assert!(
+            err.contains("sasl"),
+            "resolve should reject SASL_PLAINTEXT without sasl feature: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_accepts_plaintext_without_features() {
+        let cfg =
+            KafkaEndpointConfig::from_uri("kafka:orders?brokers=localhost:9092&groupId=test-group")
+                .unwrap();
+        assert!(cfg.resolve().is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -1420,6 +1526,7 @@ mod security_config_tests {
     use super::*;
     use rdkafka::config::ClientConfig;
 
+    #[cfg(any(feature = "ssl", feature = "ssl-vendored"))]
     #[test]
     fn test_apply_sasl_ssl_sets_required_keys() {
         let config = KafkaEndpointConfig::from_uri(
@@ -1435,6 +1542,22 @@ mod security_config_tests {
         // Does not panic — rdkafka stores values internally; just verify no crash
     }
 
+    #[cfg(not(any(feature = "ssl", feature = "ssl-vendored")))]
+    #[test]
+    fn test_apply_sasl_ssl_fails_without_ssl_feature() {
+        let result = KafkaEndpointConfig::from_uri(
+            "kafka:t?brokers=localhost:9092&groupId=g\
+             &securityProtocol=SASL_SSL&saslAuthType=SCRAM_SHA_512\
+             &saslUsername=user&saslPassword=pass",
+        )
+        .unwrap()
+        .resolve();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("ssl"), "should mention 'ssl': {msg}");
+    }
+
+    #[cfg(any(feature = "ssl", feature = "ssl-vendored"))]
     #[test]
     fn test_apply_ssl_only_does_not_set_sasl_mechanism() {
         let config = KafkaEndpointConfig::from_uri(
@@ -1447,6 +1570,21 @@ mod security_config_tests {
         .unwrap();
         let mut cc = ClientConfig::new();
         apply_security_config(&config, &mut cc); // must not panic
+    }
+
+    #[cfg(not(any(feature = "ssl", feature = "ssl-vendored")))]
+    #[test]
+    fn test_apply_ssl_only_fails_without_ssl_feature() {
+        let result = KafkaEndpointConfig::from_uri(
+            "kafka:t?brokers=localhost:9092&groupId=g\
+             &securityProtocol=SSL\
+             &sslKeystoreLocation=/k&sslKeystorePassword=ks",
+        )
+        .unwrap()
+        .resolve();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("ssl"), "should mention 'ssl': {msg}");
     }
 
     #[test]
@@ -1908,7 +2046,7 @@ mod kafka_config_tests {
     fn test_resolved_config_debug_masks_passwords() {
         let cfg = KafkaEndpointConfig::from_uri(
             "kafka:orders?brokers=localhost:9092&groupId=test-group\
-              &securityProtocol=SASL_SSL&saslAuthType=PLAIN\
+              &saslAuthType=PLAIN\
               &saslUsername=user&saslPassword=secret123",
         )
         .unwrap();
@@ -2117,6 +2255,7 @@ mod kafka_config_tests {
         assert!(logs_contain("cleartext protocol"));
     }
 
+    #[cfg(feature = "sasl")]
     #[tracing_test::traced_test]
     #[test]
     fn kafka_sasl_plaintext_config_validates() {
@@ -2126,5 +2265,46 @@ mod kafka_config_tests {
         };
         assert!(config.validate().is_ok());
         assert!(logs_contain("cleartext protocol"));
+    }
+
+    #[cfg(not(feature = "sasl"))]
+    #[test]
+    fn kafka_sasl_plaintext_config_rejected_without_sasl() {
+        let config = KafkaConfig {
+            security_protocol: "sasl_plaintext".to_string(),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    // --- Feature gate error-path tests (KAFKA-SSL) ---
+
+    #[test]
+    fn test_kafka_config_rejects_ssl_without_feature() {
+        let cfg = KafkaConfig {
+            security_protocol: "SSL".into(),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("ssl"), "error should mention 'ssl': {err}");
+    }
+
+    #[test]
+    fn test_kafka_config_rejects_sasl_ssl_without_feature() {
+        let cfg = KafkaConfig {
+            security_protocol: "SASL_SSL".into(),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("ssl"), "error should mention 'ssl': {err}");
+    }
+
+    #[test]
+    fn test_kafka_config_accepts_plaintext_without_features() {
+        let cfg = KafkaConfig {
+            security_protocol: "PLAINTEXT".into(),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 }

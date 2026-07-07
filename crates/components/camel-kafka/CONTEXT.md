@@ -63,6 +63,18 @@ review time.
 
 ## Batch 6 — Security hardening
 
+### SSL/SASL feature gates
+
+SSL and SASL protocols are gated behind cargo features to control OpenSSL linkage:
+
+- `ssl` — enables `security_protocol=SSL` via system OpenSSL (requires `libssl-dev` / `openssl-devel`)
+- `ssl-vendored` — same as `ssl` but bundles OpenSSL statically (no system deps, larger binary)
+- `sasl` — enables `SASL_PLAINTEXT` and `SASL_SSL` protocols (implies `ssl`)
+
+Validation in `check_feature_gates()` (config.rs) enforces that `ssl` or `ssl-vendored` is active
+when `security_protocol` is `SSL` or `SASL_SSL`, and that `sasl` is active for `SASL_PLAINTEXT`
+or `SASL_SSL`. Missing features produce a clear startup error with the required `cargo add` command.
+
 ### Plaintext protocol warning
 
 The `validate()` method (config.rs:240-248) emits `tracing::warn!` when `security_protocol` is

@@ -34,6 +34,9 @@ tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [features]
 otel = ["dep:camel-otel"]
+ssl = ["rdkafka/ssl"]
+ssl-vendored = ["rdkafka/ssl-vendored"]
+sasl = ["rdkafka/sasl"]
 cmake-build = ["rdkafka/cmake-build"]
 dynamic-linking = ["rdkafka/dynamic-linking"]
 

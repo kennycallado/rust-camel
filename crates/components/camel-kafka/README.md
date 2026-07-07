@@ -56,6 +56,10 @@ kafka:topic[?param=value&...]
 
 ## Security
 
+> **Note:** SSL and SASL protocols require cargo features at build time:
+> `cargo add camel-component-kafka --features ssl,sasl`
+> Use `ssl-vendored` instead of `ssl` to bundle OpenSSL (no system deps).
+
 ```
 # SASL/SCRAM over TLS
 kafka:orders?securityProtocol=SASL_SSL&saslAuthType=SCRAM_SHA_512&saslUsername=user&saslPassword=pass
