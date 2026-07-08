@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bindings::Plugin;
 use crate::bindings::camel::plugin::types::WasmExchange;
 use crate::error::WasmError;
+use crate::return_stream::{DrainReceiver, spawn_return_drain, take_stream_handoff_sender};
 
 pub struct WasmHostState {
     pub table: ResourceTable,
@@ -46,6 +47,16 @@ pub struct WasmRuntime {
     config: crate::config::WasmConfig,
     #[allow(dead_code)]
     epoch_ticker: crate::epoch::EpochTicker,
+}
+
+/// Result of [`WasmRuntime::process_streaming_exchange`].
+///
+/// Carries the guest's [`WasmExchange`] and an optional drain receiver
+/// that, when `Some`, holds the guest-to-host streaming return channel
+/// that the caller must re-attach as the output [`Body::Stream`].
+pub struct StreamingResult {
+    pub exchange: WasmExchange,
+    pub(crate) drain_rx: Option<DrainReceiver>,
 }
 
 impl WasmRuntime {
@@ -256,6 +267,12 @@ impl WasmRuntime {
     ///
     /// On success returns the guest's [`WasmExchange`] (same shape as
     /// `call_process`) so callers can apply [`crate::serde_bridge::wasm_to_exchange`].
+    ///
+    /// **Spawn + rendezvous (Task 6):** the Store+Plugin+permit move into a
+    /// spawned drain task. A oneshot hands the exchange out fast (right after
+    /// the guest returns, before the drain completes). The drain task races
+    /// the drain against `receiver_gone.notified()` (cancel-on-drop, spec §5)
+    /// and wraps the long-lived `run_concurrent` with `drive_with_watchdog`.
     #[allow(clippy::too_many_arguments)] // mirrors call_process + 3 streaming knobs
     pub async fn process_streaming_exchange(
         &self,
@@ -263,10 +280,11 @@ impl WasmRuntime {
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
         exchange: Exchange,
+        pending_permit: tokio::sync::OwnedSemaphorePermit,
         cancel: CancellationToken,
         max_bytes: u64,
         no_progress_timeout: Duration,
-    ) -> Result<WasmExchange, WasmError> {
+    ) -> Result<StreamingResult, WasmError> {
         let host_state = Self::create_host_state(
             registry,
             properties,
@@ -302,60 +320,124 @@ impl WasmRuntime {
             }
         };
 
-        // Shared progress heartbeat: the producer pings it per shipped chunk;
-        // the watchdog below consumes it to reset its no-progress window.
-        let progress_notify = Arc::new(Notify::new());
+        // Rendezvous: fires (exchange, drain_rx) out of the spawned task as soon
+        // as the guest returns; the task keeps draining afterward (F1).
+        // Carries `Result` so errors can propagate through the handoff too (not just
+        // success path).
+        // NEW-B: classify_error is `&self`; the spawned task can't borrow &self.
+        // Capture BOTH config + module_path (runtime.rs:143 → config.rs:161):
+        let classify_config = self.config.clone(); // WasmConfig: Clone
+        let classify_module_path = self.module_path.clone(); // PathBuf → Clone
 
-        // Drive the guest under run_concurrent. The stream body is assembled
-        // INSIDE the closure because assemble_stream_body needs the &Accessor
-        // that only exists there.
-        let processing = async {
-            let run_result = store
-                .as_context_mut()
-                .run_concurrent(async |accessor| {
-                    let wasm_exchange = if let Some((stream_opt, metadata)) = stream_parts.take() {
-                        let body = match stream_opt {
-                            Some(stream) => crate::stream_bridge::assemble_stream_body(
-                                accessor,
-                                stream,
-                                &metadata,
-                                cancel.clone(),
-                                max_bytes,
-                                progress_notify.clone(),
-                            )?,
-                            None => {
-                                return Err(wasmtime::Error::msg(
-                                    "wasm: stream body already consumed before guest invocation",
-                                ));
+        let (exchange_out, drain_rx) = spawn_return_drain(
+            Some(pending_permit),
+            cancel,
+            no_progress_timeout,
+            None, // drain_completion_notify: production plugin path doesn't install it
+            // Plugin make_drive closure — mirrors bean.rs (keep in sync; the shared
+            // spawn_return_drain scaffold is identical, only the binding differs).
+            move |handoff_shared, dtx, drx, cancel_drain, progress, rx_gone| async move {
+                // NEW-7: convert the camel_api Exchange → binding WasmExchange (mirrors
+                // runtime.rs:330-336). For non-stream inputs, we can convert now.
+                // For stream inputs, the conversion happens inside run_concurrent
+                // (needs the &Accessor to assemble the stream body).
+                let wx = crate::serde_bridge::exchange_to_wasm(&exchange)
+                    .expect("exchange_to_wasm for stream-return path"); // allow-unwrap
+
+                let handoff_drive = handoff_shared.clone();
+
+                let result: Result<(), WasmError> = async {
+                    let nested = store
+                        .as_context_mut()
+                        .run_concurrent(async |accessor| {
+                            let wasm_exchange = if let Some((stream_opt, metadata)) = stream_parts.take()
+                            {
+                                let body = match stream_opt {
+                                    Some(stream) => crate::stream_bridge::assemble_stream_body(
+                                        accessor,
+                                        stream,
+                                        &metadata,
+                                        cancel_drain.clone(),
+                                        max_bytes,
+                                        progress.clone(),
+                                    )?,
+                                    None => {
+                                        return Err(wasmtime::Error::msg(
+                                            "wasm: stream body already consumed before guest invocation",
+                                        ));
+                                    }
+                                };
+                                crate::serde_bridge::exchange_to_wasm_with_body(&exchange, body)
+                                    .map_err(|e| wasmtime::Error::msg(e.to_string()))?
+                            } else {
+                                wx
+                            };
+                            let wasm_exchange_result = plugin.call_process(accessor, wasm_exchange).await?;
+                            let mut wasm_exchange = match wasm_exchange_result {
+                                Ok(exchange) => exchange,
+                                Err(e) => {
+                                    return Err(wasmtime::Error::msg(format!("{e}")));
+                                }
+                            };
+                            use crate::return_stream::StreamReturnable;
+                            match wasm_exchange.take_stream() {
+                                Some((reader, terminal)) => {
+                                    if let Some(tx) = take_stream_handoff_sender(&handoff_drive) {
+                                        let _ = tx.send(Ok((wasm_exchange, Some(drx)))); // drx moves out (F1)
+                                    }
+                                    // Cancel-on-drop select! (F2, spec §5): race drain against
+                                    // receiver_gone (ChannelConsumer fires it on poll_reserve Err).
+                                    tokio::select! {
+                                        _ = crate::return_stream::drain_guest_stream(
+                                            accessor, reader, terminal, dtx,
+                                            cancel_drain.clone(), progress.clone(), rx_gone.clone(),
+                                        ) => {}
+                                        _ = rx_gone.notified() => { cancel_drain.cancel(); }
+                                    }
+                                }
+                                None => {
+                                    if let Some(tx) = take_stream_handoff_sender(&handoff_drive) {
+                                        let _ = tx.send(Ok((wasm_exchange, None)));
+                                    }
+                                    drop(drx);
+                                    drop(dtx); // unused channel
+                                }
                             }
-                        };
-                        crate::serde_bridge::exchange_to_wasm_with_body(&exchange, body)
-                            .map_err(|e| wasmtime::Error::msg(e.to_string()))?
-                    } else {
-                        crate::serde_bridge::exchange_to_wasm(&exchange)
-                            .map_err(|e| wasmtime::Error::msg(e.to_string()))?
-                    };
-                    plugin.call_process(accessor, wasm_exchange).await
-                })
+                            Ok(())
+                        })
+                        .await;
+                    // NEW-A: peel_concurrent takes 3 args (error.rs:221) — nested result +
+                    // map_outer (wasmtime::Error → WasmError via hoisted classify_error) +
+                    // map_inner (binding WasmError → crate WasmError). Mirror bean.rs:71-73.
+                    crate::error::peel_concurrent(
+                        nested,
+                        |e| {
+                            crate::config::classify_error(&classify_config, &classify_module_path, e)
+                        },
+                        |e| WasmError::GuestPanic(format!("plugin process trapped: {e}")),
+                    )
+                }
                 .await;
 
-            let peeled: Result<WasmExchange, crate::bindings::camel::plugin::types::WasmError> =
-                crate::error::peel_concurrent(
-                    run_result,
-                    |e| self.classify_error(e),
-                    |e| self.classify_error(e),
-                )?;
+                // If the inner async returned an error AND we haven't sent through handoff yet,
+                // send the error now.
+                match &result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if let Some(tx) = take_stream_handoff_sender(&handoff_drive) {
+                            let _ = tx.send(Err(e.clone()));
+                        }
+                    }
+                }
+                result
+            },
+        )
+        .await?;
 
-            peeled.map_err(crate::error::map_plugin_error)
-        };
-
-        let result =
-            WasmRuntime::drive_with_watchdog(processing, &progress_notify, no_progress_timeout)
-                .await;
-        if result.is_err() {
-            cancel.cancel();
-        }
-        result
+        Ok(StreamingResult {
+            exchange: exchange_out,
+            drain_rx,
+        })
     }
 
     /// No-progress watchdog: drive `run_fut` to completion, but fail with a

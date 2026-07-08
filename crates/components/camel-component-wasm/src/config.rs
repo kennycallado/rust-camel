@@ -163,26 +163,39 @@ impl WasmConfig {
         plugin_path: &Path,
         e: wasmtime::Error,
     ) -> crate::error::WasmError {
-        use crate::error::{TrapReason, WasmError};
-        let name = plugin_path.display().to_string();
-        if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
-            match WasmError::classify_trap(trap) {
-                TrapReason::Timeout => WasmError::Timeout {
-                    plugin: name,
-                    timeout_secs: self.timeout_secs,
-                },
-                TrapReason::OutOfMemory => WasmError::OutOfMemory {
-                    plugin: name,
-                    max_memory_bytes: self.max_memory_bytes,
-                },
-                other => WasmError::Trap {
-                    plugin: name,
-                    reason: other,
-                },
-            }
-        } else {
-            WasmError::GuestPanic(e.to_string())
+        classify_error(self, plugin_path, e)
+    }
+}
+
+/// Hoisted free-function form of [`WasmConfig::classify_error`] so spawned
+/// tasks (which cannot borrow `&self`) can classify wasmtime errors.
+///
+/// Captures `config` + `plugin_path` by value/clone at spawn site; the
+/// wasmtime error is consumed.
+pub fn classify_error(
+    config: &WasmConfig,
+    plugin_path: &Path,
+    e: wasmtime::Error,
+) -> crate::error::WasmError {
+    use crate::error::{TrapReason, WasmError};
+    let name = plugin_path.display().to_string();
+    if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
+        match WasmError::classify_trap(trap) {
+            TrapReason::Timeout => WasmError::Timeout {
+                plugin: name,
+                timeout_secs: config.timeout_secs,
+            },
+            TrapReason::OutOfMemory => WasmError::OutOfMemory {
+                plugin: name,
+                max_memory_bytes: config.max_memory_bytes,
+            },
+            other => WasmError::Trap {
+                plugin: name,
+                reason: other,
+            },
         }
+    } else {
+        WasmError::GuestPanic(e.to_string())
     }
 }
 

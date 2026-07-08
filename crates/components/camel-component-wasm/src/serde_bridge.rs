@@ -267,14 +267,13 @@ fn wasm_to_body(body: WasmBody) -> Body {
             .map(Body::Json)
             .unwrap_or(Body::Text(s)),
         WasmBody::Xml(s) => Body::Xml(s),
-        // Unreachable in Phase 1: body_to_wasm rejects Body::Stream before
-        // conversion. The host→guest direction uses
-        // assemble_stream_body inside run_concurrent; this arm exists for
-        // exhaustiveness. If reached, the stream body is silently dropped.
-        // Guest→host streaming is Phase 2.
+        // Unreachable after producer unification: all plugin paths now go
+        // through `process_streaming_exchange`, which extracts the stream via
+        // `take_stream` before `wasm_to_exchange` is called. Kept as a
+        // defensive guard (warn + Empty) for release safety — if somehow
+        // reached, it drops instead of panics.
         WasmBody::Stream(_) => {
-            debug_assert!(false, "WasmBody::Stream should not reach wasm_to_body");
-            tracing::warn!("stream body unsupported in wasm_to_body — data dropped");
+            tracing::warn!("stream body on undrained sync plugin-return path — data dropped");
             Body::Empty
         }
     }

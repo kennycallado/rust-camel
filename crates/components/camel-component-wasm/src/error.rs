@@ -44,7 +44,7 @@ impl std::fmt::Display for TrapReason {
 /// Errors that can occur during WASM plugin execution.
 // TODO(WASM-005): WasmError may conflict with WIT-generated types in bindings.
 // If WIT adds an error resource named WasmError, rename this to CamelWasmError.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum WasmError {
     #[error("WASM module not found: {0}")]
     ModuleNotFound(String),
@@ -162,6 +162,18 @@ impl From<WasmError> for CamelError {
     }
 }
 
+impl From<crate::bindings::camel::plugin::types::WasmError> for CamelError {
+    fn from(err: crate::bindings::camel::plugin::types::WasmError) -> Self {
+        map_plugin_error(err).into()
+    }
+}
+
+impl From<crate::bean_bindings::camel::plugin::types::WasmError> for CamelError {
+    fn from(err: crate::bean_bindings::camel::plugin::types::WasmError) -> Self {
+        map_bean_error(err).into()
+    }
+}
+
 /// Map a WIT bindings [`plugin::WasmError`] to the canonical crate-level [`WasmError`].
 ///
 /// Both the `call_process` and `process_streaming_exchange` paths encounter
@@ -176,6 +188,21 @@ pub fn map_plugin_error(wasm_err: crate::bindings::camel::plugin::types::WasmErr
         PluginWasmError::TypeConversion(s) => WasmError::TypeConversion(s),
         PluginWasmError::Io(s) => WasmError::Io(s),
         PluginWasmError::Timeout => WasmError::GuestPanic("guest timeout".into()),
+    }
+}
+
+/// Map a bean-world WIT `WasmError` to the canonical crate-level [`WasmError`].
+///
+/// Mirrors [`map_plugin_error`] for the bean binding namespace.
+pub fn map_bean_error(
+    wasm_err: crate::bean_bindings::camel::plugin::types::WasmError,
+) -> WasmError {
+    use crate::bean_bindings::camel::plugin::types::WasmError as BeanWasmError;
+    match wasm_err {
+        BeanWasmError::ProcessorError(s) => WasmError::GuestPanic(s),
+        BeanWasmError::TypeConversion(s) => WasmError::TypeConversion(s),
+        BeanWasmError::Io(s) => WasmError::Io(s),
+        BeanWasmError::Timeout => WasmError::GuestPanic("guest timeout".into()),
     }
 }
 

@@ -65,17 +65,21 @@ async fn process_streaming(
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
     let state_store = StateStore::new();
     let properties: HashMap<String, serde_json::Value> = HashMap::new();
+    let sem = Arc::new(tokio::sync::Semaphore::new(1));
+    let pending_permit = sem.try_acquire_owned().expect("semaphore just created"); // allow-unwrap
     runtime
         .process_streaming_exchange(
             registry,
             properties,
             state_store,
             exchange,
+            pending_permit,
             cancel,
             max_bytes,
             no_progress_timeout,
         )
         .await
+        .map(|sr| sr.exchange)
 }
 
 /// Extract the byte count from a `"streamed {n} bytes"` output body.

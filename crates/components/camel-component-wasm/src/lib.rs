@@ -27,6 +27,7 @@ pub mod error;
 pub mod health;
 pub mod host_functions;
 pub mod producer;
+mod return_stream;
 pub mod runtime;
 pub mod security_policy;
 pub mod security_policy_bindings;

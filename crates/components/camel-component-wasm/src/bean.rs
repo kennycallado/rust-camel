@@ -4,10 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use wasmtime::AsContextMut;
-use wasmtime::Store;
 
 use camel_api::{Body, CamelError, Exchange};
 use camel_bean::BeanProcessor;
@@ -18,18 +16,6 @@ use crate::error::WasmError;
 use crate::serde_bridge;
 use crate::wasm_plugin_context::WasmPluginContext;
 
-/// Result of driving a bean `invoke` through the streaming host bridge:
-/// the outer layer is a host-side [`WasmError`] (instantiation, peel,
-/// watchdog); the inner is the guest's own WIT `result<exchange, wasm-error>`,
-/// matched by the caller to produce a [`CamelError`].
-type BeanStreamingResult = Result<
-    Result<
-        crate::bean_bindings::camel::plugin::types::WasmExchange,
-        crate::bean_bindings::camel::plugin::types::WasmError,
-    >,
-    WasmError,
->;
-
 pub struct WasmBean {
     ctx: WasmPluginContext,
     methods: Vec<String>,
@@ -37,6 +23,10 @@ pub struct WasmBean {
     max_bytes: u64,
     /// No-progress watchdog window forwarded to the streaming host bridge.
     no_progress_timeout: Duration,
+    /// Drain-completion lifecycle hook: fires when the streaming drain task
+    /// ends (Store freed). Useful for metrics, readiness probes, and test
+    /// assertions about cancel-on-drop / drain timing.
+    drain_completion_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl WasmBean {
@@ -53,6 +43,7 @@ impl WasmBean {
             methods,
             max_bytes: crate::producer::DEFAULT_STREAM_MAX_BYTES,
             no_progress_timeout: crate::producer::DEFAULT_NO_PROGRESS_TIMEOUT,
+            drain_completion_notify: None,
         })
     }
 
@@ -62,6 +53,16 @@ impl WasmBean {
     pub fn with_streaming_knobs(mut self, max_bytes: u64, no_progress_timeout: Duration) -> Self {
         self.max_bytes = max_bytes;
         self.no_progress_timeout = no_progress_timeout;
+        self
+    }
+
+    /// Install a drain-completion lifecycle hook: the supplied `Notify` fires
+    /// once when the streaming drain task ends (Store freed). Production uses
+    /// include metrics (drain latency histograms), readiness probes (await
+    /// drain before shutdown), and integration tests (assert cancel-on-drop
+    /// timing deterministically, without sleep).
+    pub fn with_drain_completion_notify(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
+        self.drain_completion_notify = Some(notify);
         self
     }
 }
@@ -90,152 +91,190 @@ impl BeanProcessor for WasmBean {
         // asynchronously; anything else stays on the materialised
         // exchange_to_wasm path. Before this branch existed, a streaming
         // body reached exchange_to_wasm and was rejected (rc-2lge).
-        let result: Result<
-            crate::bean_bindings::camel::plugin::types::WasmExchange,
-            crate::bean_bindings::camel::plugin::types::WasmError,
-        > = if crate::producer::is_streaming(&exchange.input.body) {
-            self.invoke_streaming(&mut store, &plugin, method_owned, exchange)
-                .await?
-        } else {
-            let wasm_exchange = serde_bridge::exchange_to_wasm(exchange)?;
-            let bean_exchange = wasm_exchange.into();
-            // 2-layer peel (see error::peel_concurrent). The outer and middle
-            // wasmtime::Error layers are mapped to WasmError uniformly; the
-            // innermost bean::WasmError is matched below to produce a
-            // CamelError.
-            crate::error::peel_concurrent(
-                store
-                    .as_context_mut()
-                    .run_concurrent(async |accessor| {
-                        plugin
-                            .call_invoke(accessor, method_owned, bean_exchange)
-                            .await
-                    })
-                    .await,
-                |e| self.ctx.classify_error(e),
-                |e| WasmError::GuestPanic(format!("bean method '{method}' trapped: {e}")),
-            )?
+        //
+        // NEW-E (Task 7): the cross-binding `From` macro treats `Stream` as
+        // unreachable and SILENTLY DROPS it. So we must extract the output
+        // stream from the bean `WasmExchange` BEFORE the `.into()` cross-binding
+        // conversion. The drain runs via `spawn_return_drain` (shared helper).
+        let taken_body = std::mem::replace(&mut exchange.input.body, Body::Empty);
+        let mut stream_parts = match taken_body {
+            Body::Stream(stream_body) => {
+                let (stream, metadata) =
+                    crate::stream_bridge::extract_stream_body(stream_body).await;
+                Some((stream, metadata))
+            }
+            other => {
+                exchange.input.body = other;
+                None
+            }
         };
 
-        match result {
-            Ok(bean_result) => {
-                let wasm_result =
-                    crate::bindings::camel::plugin::types::WasmExchange::from(bean_result);
-                serde_bridge::wasm_to_exchange(wasm_result, exchange);
-                Ok(())
-            }
-            Err(wasm_err) => Err(WasmError::GuestPanic(format!(
-                "bean method '{method}' failed: {wasm_err:?}"
-            ))
-            .into()),
+        // Convert to bean WasmExchange (owned, can move into spawn).
+        // For stream inputs, the body is assembled inside run_concurrent
+        // (needs the &Accessor); for non-stream inputs, convert now.
+        let bean_exchange_in: crate::bean_bindings::camel::plugin::types::WasmExchange =
+            crate::serde_bridge::exchange_to_wasm(exchange)
+                .map_err(|e| WasmError::TypeConversion(e.to_string()))?
+                .into();
+
+        let classify_config = self.ctx.config.clone();
+        let classify_module_path = self.ctx.module_path.clone();
+        let method_for_drain = method_owned.clone();
+        let max_bytes = self.max_bytes;
+        let no_progress_timeout = self.no_progress_timeout;
+        let drain_completion_notify = self.drain_completion_notify.clone();
+
+        // Use the shared spawn_return_drain helper. Bean has no concurrency
+        // limiter, so pass None for the permit (unlike the plugin path).
+        // The closure builds the drive future that runs the guest invocation
+        // + output stream drain.
+        let (bean_exchange_out, drain_rx) = crate::return_stream::spawn_return_drain(
+            None,
+            CancellationToken::new(),
+            no_progress_timeout,
+            drain_completion_notify,
+            // Bean make_drive closure — mirrors runtime.rs process_streaming_exchange
+            // (keep in sync; the shared spawn_return_drain scaffold is identical,
+            // only the binding + input/output field differ).
+            move |handoff_shared, dtx, drx, cancel_drain, progress, rx_gone| async move {
+                let handoff_drive = handoff_shared.clone();
+
+                // ONE run_concurrent block: branch on stream_parts inside to
+                // assemble the input body (the only real difference between
+                // streaming and non-streaming input paths).
+                let result: Result<(), WasmError> = async {
+                    let method_for_peel = method_for_drain.clone();
+                    let nested = store
+                        .as_context_mut()
+                        .run_concurrent(async |accessor| {
+                            // Assemble the input body: streaming input gets the
+                            // stream body assembled here; non-streaming uses the
+                            // materialised exchange.
+                            let bean_exchange = if let Some((stream_opt, metadata)) =
+                                stream_parts.take()
+                            {
+                                let mut wx = bean_exchange_in;
+                                wx.input.body = match stream_opt {
+                                    Some(stream) => {
+                                        crate::stream_bridge::assemble_stream_body_bean(
+                                            accessor,
+                                            stream,
+                                            &metadata,
+                                            cancel_drain.clone(),
+                                            max_bytes,
+                                            progress.clone(),
+                                        )?
+                                    }
+                                    None => {
+                                        return Err(wasmtime::Error::msg(
+                                            "wasm: stream body already consumed before bean invocation",
+                                        ));
+                                    }
+                                };
+                                wx
+                            } else {
+                                bean_exchange_in
+                            };
+
+                            let bean_result = plugin
+                                .call_invoke(accessor, method_for_drain, bean_exchange)
+                                .await?;
+                            let mut bean_exchange = match bean_result {
+                                Ok(exchange) => exchange,
+                                Err(e) => {
+                                    return Err(wasmtime::Error::msg(format!("{e}")));
+                                }
+                            };
+
+                            // NEW-E: extract the output stream BEFORE cross-binding
+                            use crate::return_stream::StreamReturnable;
+                            match bean_exchange.take_stream() {
+                                Some((reader, terminal)) => {
+                                    if let Some(tx) =
+                                        crate::return_stream::take_stream_handoff_sender(
+                                            &handoff_drive,
+                                        )
+                                    {
+                                        let _ = tx.send(Ok((bean_exchange, Some(drx))));
+                                    }
+                                    // Cancel-on-drop select! (F2, spec §5)
+                                    tokio::select! {
+                                        _ = crate::return_stream::drain_guest_stream(
+                                            accessor, reader, terminal, dtx,
+                                            cancel_drain.clone(), progress.clone(), rx_gone.clone(),
+                                        ) => {}
+                                        _ = rx_gone.notified() => { cancel_drain.cancel(); }
+                                    }
+                                }
+                                None => {
+                                    if let Some(tx) =
+                                        crate::return_stream::take_stream_handoff_sender(
+                                            &handoff_drive,
+                                        )
+                                    {
+                                        let _ = tx.send(Ok((bean_exchange, None)));
+                                    }
+                                    drop(drx);
+                                    drop(dtx);
+                                }
+                            }
+                            Ok(())
+                        })
+                        .await;
+
+                    crate::error::peel_concurrent(
+                        nested,
+                        |e| {
+                            crate::config::classify_error(
+                                &classify_config,
+                                &classify_module_path,
+                                e,
+                            )
+                        },
+                        |e| WasmError::GuestPanic(format!("bean method '{method_for_peel}' trapped: {e}")),
+                    )
+                }
+                .await;
+
+                // If the inner async returned an error AND we haven't sent through handoff yet,
+                // send the error now.
+                match &result {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if let Some(tx) =
+                            crate::return_stream::take_stream_handoff_sender(&handoff_shared)
+                        {
+                            let _ = tx.send(Err(e.clone()));
+                        }
+                    }
+                }
+                result
+            },
+        )
+        .await?;
+
+        // Cross-bind the (now Empty-body) exchange
+        let wasm_result =
+            crate::bindings::camel::plugin::types::WasmExchange::from(bean_exchange_out);
+        serde_bridge::wasm_to_exchange(wasm_result, exchange);
+
+        // Reattach Body::Stream if present. Bean convention: the guest
+        // transforms input.body in place, so the drained stream goes back
+        // to input.body (not output.body like the plugin path).
+        if let Some(drain_rx) = drain_rx {
+            exchange.input.body = Body::Stream(camel_api::StreamBody {
+                stream: Arc::new(tokio::sync::Mutex::new(Some(
+                    crate::return_stream::receiver_to_body_stream(drain_rx),
+                ))),
+                metadata: camel_api::StreamMetadata::default(),
+            });
         }
+
+        Ok(())
     }
 
     fn methods(&self) -> Vec<String> {
         self.methods.clone()
-    }
-}
-
-impl WasmBean {
-    /// Drive a bean `invoke` whose input body is a `Body::Stream` through the
-    /// streaming host bridge.
-    ///
-    /// Structure follows [`crate::runtime::WasmRuntime::process_streaming_exchange`]:
-    /// the byte stream is drained out of its `Arc<tokio::sync::Mutex<..>>`
-    /// **before** `run_concurrent` (that mutex cannot lock from the
-    /// concurrent-runtime thread), then re-attached as a guest-readable
-    /// `stream<u8>` via [`crate::stream_bridge::assemble_stream_body_bean`]
-    /// **inside** the closure (it needs the `&Accessor`). A no-progress
-    /// watchdog cancels a stalled guest. The error peel mirrors the bean's
-    /// own non-stream branch (`classify_error` + `GuestPanic`), not the
-    /// producer's `map_plugin_error`.
-    #[allow(clippy::too_many_arguments)]
-    async fn invoke_streaming(
-        &self,
-        store: &mut Store<crate::runtime::WasmHostState>,
-        plugin: &BeanGuest,
-        method: String,
-        exchange: &mut Exchange,
-    ) -> BeanStreamingResult {
-        // Take the body out so the stream can be extracted before
-        // run_concurrent. The caller gates on is_streaming, but defend
-        // anyway: restore the body and fail rather than abort the host.
-        let taken_body = std::mem::replace(&mut exchange.input.body, Body::Empty);
-        let stream_body = match taken_body {
-            Body::Stream(sb) => sb,
-            other => {
-                exchange.input.body = other;
-                return Err(WasmError::GuestPanic(
-                    "invoke_streaming called with non-stream body".into(),
-                ));
-            }
-        };
-        let (stream, metadata) = crate::stream_bridge::extract_stream_body(stream_body).await;
-        let mut stream_parts = Some((stream, metadata));
-
-        let progress_notify = Arc::new(Notify::new());
-        let cancel = CancellationToken::new();
-        let max_bytes = self.max_bytes;
-        let no_progress_timeout = self.no_progress_timeout;
-
-        let processing = async {
-            let run_result = store
-                .as_context_mut()
-                .run_concurrent(async |accessor| {
-                    let (stream_opt, metadata) = stream_parts
-                        .take()
-                        .expect("stream_parts consumed once");
-                    // Build the bean exchange with body=Empty via the
-                    // cross-binding `From` (safe for non-stream variants),
-                    // then attach the stream handle directly in the
-                    // `bean_bindings` namespace. The cross-binding `From`
-                    // cannot carry a `Stream` variant (the live
-                    // StreamReader/FutureReader handle is not re-wrappable),
-                    // so assemble_stream_body_bean builds it natively as a
-                    // bean_bindings::WasmBody.
-                    let mut bean_exchange: crate::bean_bindings::camel::plugin::types::WasmExchange =
-                        crate::serde_bridge::exchange_to_wasm(exchange)
-                            .map_err(|e| wasmtime::Error::msg(e.to_string()))?
-                            .into();
-                    bean_exchange.input.body = match stream_opt {
-                        Some(stream) => crate::stream_bridge::assemble_stream_body_bean(
-                            accessor,
-                            stream,
-                            &metadata,
-                            cancel.clone(),
-                            max_bytes,
-                            progress_notify.clone(),
-                        )?,
-                        None => {
-                            return Err(wasmtime::Error::msg(
-                                "wasm: stream body already consumed before bean invocation",
-                            ));
-                        }
-                    };
-                    plugin.call_invoke(accessor, method, bean_exchange).await
-                })
-                .await;
-
-            crate::error::peel_concurrent(
-                run_result,
-                |e| self.ctx.classify_error(e),
-                |e| WasmError::GuestPanic(format!("bean method trapped: {e}")),
-            )
-        };
-
-        let result = crate::runtime::WasmRuntime::drive_with_watchdog(
-            processing,
-            &progress_notify,
-            no_progress_timeout,
-        )
-        .await;
-        // Mirror the producer: on timeout/guest-trap, signal the
-        // BoxStreamProducer to release the upstream stream promptly
-        // (drive_with_watchdog only races the future; it does not cancel it).
-        if result.is_err() {
-            cancel.cancel();
-        }
-        result
     }
 }
 

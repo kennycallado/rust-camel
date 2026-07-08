@@ -13,7 +13,7 @@ use tower::Service;
 use tracing::{debug, warn};
 
 use camel_api::body::DEFAULT_MATERIALIZE_LIMIT;
-use camel_api::{Body, CamelError, Exchange};
+use camel_api::{Body, CamelError, Exchange, StreamBody, StreamMetadata};
 use camel_core::Registry;
 
 fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
@@ -23,8 +23,10 @@ fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
 /// Returns `true` when the body is a streaming body that requires the
 /// asynchronous streaming host bridge (`process_streaming_exchange`).
 ///
-/// Non-stream variants (`Empty`, `Text`, `Bytes`, `Json`, `Xml`) route to
-/// the synchronous `call_process` path instead.
+/// Non-stream variants (`Empty`, `Text`, `Bytes`, `Json`, `Xml`) are handled
+/// by `process_streaming_exchange`'s internal stream extraction (the `else`
+/// branch in its `make_drive` closure).
+#[cfg(test)]
 pub(crate) fn is_streaming(body: &Body) -> bool {
     matches!(body, Body::Stream(_))
 }
@@ -71,7 +73,7 @@ async fn ensure_runtime_fn(
 }
 
 use crate::runtime::WasmRuntime;
-use crate::serde_bridge::{exchange_to_wasm, wasm_to_exchange};
+use crate::serde_bridge::wasm_to_exchange;
 
 type AcquireFut =
     Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>>;
@@ -208,7 +210,6 @@ impl Service<Exchange> for WasmProducer {
         let no_progress_timeout = self.no_progress_timeout;
         Box::pin(async move {
             tracing::debug!(component = "wasm", "wasm call started");
-            let _permit = permit;
             let runtime = match ensure_runtime_fn(
                 module_path.clone(),
                 config,
@@ -233,84 +234,58 @@ impl Service<Exchange> for WasmProducer {
                 }
             };
 
-            // Route on body shape: a Stream body must traverse the streaming
-            // host bridge (run_concurrent + BoxStreamProducer) because the
-            // guest reads bytes asynchronously; anything else stays on the
-            // synchronous call_process path.
-            let is_stream = is_streaming(&exchange.input.body);
+            let pending_permit = permit.expect("poll_ready gates Some"); // allow-unwrap
 
-            if is_stream {
-                // `process_streaming_exchange` takes the Exchange by value and
-                // extracts the stream internally, so clone first to preserve
-                // the non-body fields (extensions, otel_context, correlation_id)
-                // that `wasm_to_exchange` does not overwrite. The clone shares
-                // the stream's Arc handle, but its body is discarded by the
-                // merge anyway.
-                let mut out = exchange.clone();
-                let cancel = cancel_root.child_token();
-                let result = runtime
-                    .process_streaming_exchange(
-                        registry2,
-                        exchange.properties.clone(),
-                        state_store2,
-                        exchange,
-                        cancel,
-                        max_bytes,
-                        no_progress_timeout,
-                    )
-                    .await;
+            // All plugin calls go through `process_streaming_exchange`, which
+            // handles both stream and non-stream inputs (its `make_drive`
+            // closure extracts the stream if present, otherwise uses the
+            // pre-converted non-stream body) AND drains return streams via
+            // `take_stream`. This closes the hole where a non-stream-input
+            // plugin returning a `WasmBody::Stream` was dropped by
+            // `wasm_to_body`'s Stream arm.
+            let mut out = exchange.clone();
+            let cancel = cancel_root.child_token();
+            let result = runtime
+                .process_streaming_exchange(
+                    registry2,
+                    exchange.properties.clone(),
+                    state_store2,
+                    exchange,
+                    pending_permit,
+                    cancel,
+                    max_bytes,
+                    no_progress_timeout,
+                )
+                .await;
 
-                match result {
-                    Ok(wasm_result) => {
-                        wasm_to_exchange(wasm_result, &mut out);
-                        debug!(
-                            module = %module_path.display(),
-                            "WASM streaming producer completed successfully"
-                        );
-                        Ok(out)
+            match result {
+                Ok(streaming_result) => {
+                    wasm_to_exchange(streaming_result.exchange, &mut out);
+                    if let Some(drain_rx) = streaming_result.drain_rx {
+                        out.output
+                            .as_mut()
+                            .expect("output present") // allow-unwrap
+                            .body = Body::Stream(StreamBody {
+                            stream: Arc::new(tokio::sync::Mutex::new(Some(
+                                crate::return_stream::receiver_to_body_stream(drain_rx),
+                            ))),
+                            metadata: StreamMetadata::default(),
+                        });
                     }
-                    Err(e) => {
-                        // log-policy: handler-owned
-                        warn!(
-                            component = "wasm",
-                            error = %e,
-                            "wasm streaming call failed"
-                        );
-                        Err(e.into())
-                    }
+                    debug!(
+                        module = %module_path.display(),
+                        "WASM producer completed successfully"
+                    );
+                    Ok(out)
                 }
-            } else {
-                let wasm_exchange = exchange_to_wasm(&exchange)?;
-
-                let result = runtime
-                    .call_process(
-                        registry2,
-                        exchange.properties.clone(),
-                        state_store2,
-                        wasm_exchange,
-                    )
-                    .await;
-
-                match result {
-                    Ok(wasm_result) => {
-                        let mut out = exchange;
-                        wasm_to_exchange(wasm_result, &mut out);
-                        debug!(
-                            module = %module_path.display(),
-                            "WASM producer completed successfully"
-                        );
-                        Ok(out)
-                    }
-                    Err(e) => {
-                        // log-policy: handler-owned
-                        warn!(component = "wasm", error = %e, "wasm call failed");
-                        warn!(
-                            module = %module_path.display(),
-                            error = %e,
-                            "WASM guest error"
-                        );
-                        Err(e.into())
-                    }
+                Err(e) => {
+                    // log-policy: handler-owned
+                    warn!(
+                        component = "wasm",
+                        error = %e,
+                        "wasm call failed"
+                    );
+                    Err(e.into())
                 }
             }
         })
