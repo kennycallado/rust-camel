@@ -356,6 +356,49 @@ The WASM component supports `Body::Stream` — streaming bodies cross the WASM b
 4. A terminal `future<result<_, wasm-error>>` signals completion or error
 5. A no-progress watchdog aborts stalled streams after a configurable timeout
 
+### Return-path streaming (guest → host)
+
+A guest can also **return** a `Body::Stream` in its response — the host drains it
+lazily into the pipeline (a spawned drain task owns the moved `Store`, drives the
+guest's `StreamReader` via `pipe`, and backpressures through a bounded channel
+with cancel-on-drop + a no-progress watchdog). No host configuration is needed;
+returning a `WasmBody::Stream` from an exported `process`/`invoke` is sufficient.
+
+> **Critical guest pattern — `spawn_local` (avoid deadlock).** The component-model
+> `stream<u8>` is a **rendezvous channel with no buffer**: `write_all().await`
+> completes only when the host reads. The host registers its stream consumer
+> *after* your exported function returns (it needs `&mut Store` inside
+> `run_concurrent`). Writing inline before returning **deadlocks** — the write
+> waits for the host to read, the host waits for the function to return, the
+> function waits for the write. You MUST spawn the writer concurrently and return
+> the reader immediately. Enable the `async-spawn` cargo feature on the guest
+> crate.
+
+```rust
+async fn my_handler(exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
+    let (mut writer, reader) = bindings::wit_stream::new::<u8>();
+    let (future_writer, future_reader) =
+        bindings::wit_future::new::<Result<(), WasmError>>(|| Ok(()));
+
+    wit_bindgen::spawn_local(async move {
+        writer.write_all(my_bytes().to_vec()).await.ok();
+        drop(writer);                                 // EOF — drop writer FIRST
+        let _ = future_writer.write(Ok(())).await;    // terminal resolves LAST (else truncation)
+    });
+
+    // Return the reader ends now; the spawned task's writes rendezvous with the
+    // host's reads after this function returns.
+    Ok(exchange_with_stream_body(reader, future_reader))
+}
+```
+
+Ordering is load-bearing: resolve the terminal future **after** dropping the
+writer, or the host may truncate the stream. To signal a terminal error instead
+of clean EOF, write `Err(WasmError::...)` to the future writer after the bytes.
+
+See `examples/wasm-bean-example/guest/src/lib.rs` (`emit_stream_body`) for the
+canonical reference.
+
 ### Resource limits
 
 - `max_bytes`: per-stream byte limit. Overflow → terminal error + stream drop.

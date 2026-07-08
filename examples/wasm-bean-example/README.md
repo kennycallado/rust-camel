@@ -1,6 +1,6 @@
 # wasm-bean-example
 
-Fully runnable example: a WASM bean plugin (`text-utils`) with three methods and persistent state across two concurrent routes.
+Fully runnable example: a WASM bean plugin (`text-utils`) with text-transform methods, persistent state across two concurrent routes, and **streaming return bodies** (guest → host `Body::Stream`).
 
 ## Running
 
@@ -82,12 +82,29 @@ cp target/wasm32-wasip2/release/text_utils_bean.wasm ../fixtures/text_utils.wasm
 
 ## Bean plugin API
 
-The guest implements three methods:
+The guest implements these methods:
 
 | Method | Input | Output | Side effect |
 |--------|-------|--------|-------------|
 | `upper` | Text body | Uppercased text | Saves to `host_store("last_result")` |
 | `reverse` | Text body | Reversed text | Saves to `host_store("last_result")` |
 | `last` | (ignored) | Last saved result from store | None |
+| `emit_stream` | (ignored) | **Streaming body** (`data\n` × 5) | Demonstrates return-path streaming |
+| `emit_stream_fail` | (ignored) | Partial stream (`partial`) + terminal error | Error propagation through a stream |
+| `emit_stream_slow` | (ignored) | 20 small chunks (slow emit) | Backpressure / cancel-mid-stream behavior |
 
-Only `upper` is used in this example, but `reverse` is available for route configurations.
+Only `upper` is used in the demo routes, but the others are available — notably
+the `emit_stream*` methods demonstrate **return-path streaming** (a guest that
+returns a `Body::Stream`).
+
+## Streaming return bodies
+
+The `emit_stream*` methods show how a WASM guest returns a **streaming body**
+(the host drains it lazily into the pipeline instead of materializing it).
+Because the component-model `stream<u8>` is a rendezvous channel with no buffer,
+the guest must write concurrently via `wit_bindgen::spawn_local` and return the
+reader ends immediately — writing inline before returning **deadlocks**. See the
+component README §"Return-path streaming" for the full pattern + rationale, and
+`guest/src/lib.rs` (`emit_stream_body`) for the canonical reference
+implementation, including the load-bearing ordering (drop the writer for EOF
+*before* resolving the terminal future).
