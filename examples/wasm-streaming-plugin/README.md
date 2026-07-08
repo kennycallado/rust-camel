@@ -1,6 +1,6 @@
 # wasm-streaming-plugin
 
-Fully runnable example: a pre-built streaming byte-counter plugin that reads incoming `stream<u8>` incrementally in 4 KiB chunks without materializing the whole stream in WASM linear memory.
+Fully runnable example: a pre-built streaming byte-counter plugin that reads incoming `stream<u8>` incrementally in 4 KiB chunks without materializing the whole stream in WASM linear memory. (For the inverse — a guest that *returns* a streaming body — see `examples/wasm-bean-example/`'s `emit_stream` method and the component README §"Return-path streaming".)
 
 ## Running
 
