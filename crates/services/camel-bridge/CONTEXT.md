@@ -1,6 +1,7 @@
 # camel-bridge
 
 Cross-language bridge service that spawns and manages subprocesses (JMS, XML, CXF bridges).
+Communication uses mutual TLS (mTLS) with ephemeral rcgen-generated certificates.
 
 ## ADR-0012 log-policy annotations
 

@@ -1,6 +1,6 @@
 # Bridges
 
-Language-specific bridge processes for Apache Camel components that require non-Rust runtimes. Each bridge communicates with the Rust runtime via gRPC (protobuf over Unix socket or TCP).
+Language-specific bridge processes for Apache Camel components that require non-Rust runtimes. Each bridge communicates with the Rust runtime via mTLS gRPC (protobuf over HTTPS with mutual certificate authentication on localhost).
 
 ## Available Bridges
 
