@@ -121,7 +121,7 @@ echo ""
 # Inject musl/static args here so application.yml stays platform-neutral.
 export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="-H:+AllowVMInspection,--static,--libc=musl"
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
-    build -x test -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
+    build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
     -Pversion="${VERSION}" --no-daemon
 
 # Locate the native runner (resilient to Quarkus naming changes)
