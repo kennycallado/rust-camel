@@ -18,7 +18,7 @@ public class PortAnnouncer {
   @Inject SecurityProfileStore profileStore;
 
   void onStart(@Observes StartupEvent ev) {
-    if (serverCertPath != null && serverCertPath.contains("placeholder-")) {
+    if (sslPort > 0 && serverCertPath != null && serverCertPath.contains("placeholder-")) {
       throw new RuntimeException(
           "Bridge started with placeholder TLS certs — runtime env vars not set. Aborting.");
     }
