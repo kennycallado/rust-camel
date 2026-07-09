@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use camel_bridge::channel::connect_channel;
 use camel_bridge::download::ensure_binary_for_spec;
 use camel_bridge::health::wait_for_health;
 use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, CxfProfileEnvVars, Redacted};
@@ -16,41 +15,10 @@ use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
 use camel_component_api::NetworkRetryPolicy;
-use camel_component_api::retry_async;
 
 use crate::config::{CxfPoolConfig, validate_profile_name};
 use crate::error::CxfError;
 use crate::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
-
-/// Classify a CxfError as transient (retryable) or permanent (fail-fast).
-///
-/// - **Transient**: `Transport` (network/connectivity), `Timeout`
-/// - **Permanent**: `Fault`, `Security`, `Bridge`, `Config`, `StreamClosed`,
-///   `StreamBody` — these indicate configuration, protocol, or logic errors
-///   that will never succeed on retry.
-fn is_retryable_cxf_error(err: &CxfError) -> bool {
-    matches!(err, CxfError::Transport { .. } | CxfError::Timeout { .. })
-}
-
-// Uses retry_async<CxfError> with is_retryable_cxf_error classifier
-// (migrated from manual loop in rc-4s9).
-async fn connect_with_retry(port: u16, policy: &NetworkRetryPolicy) -> Result<Channel, CxfError> {
-    retry_async(
-        policy,
-        Some("cxf"),
-        || async {
-            connect_channel(port)
-                .await
-                .map_err(|e| CxfError::Transport {
-                    message: e.to_string(),
-                    endpoint: format!("grpc://127.0.0.1:{port}"),
-                    source: None,
-                })
-        },
-        is_retryable_cxf_error,
-    )
-    .await
-}
 
 // ── BridgeState ──────────────────────────────────────────────────────────────
 
@@ -224,14 +192,9 @@ impl CxfBridgePool {
             }
         };
 
-        let start_result = Self::start_bridge_inner(
-            &slot,
-            &bridge_version,
-            &bridge_cache_dir,
-            start_timeout_ms,
-            &self.reconnect,
-        )
-        .await;
+        let start_result =
+            Self::start_bridge_inner(&slot, &bridge_version, &bridge_cache_dir, start_timeout_ms)
+                .await;
 
         match start_result {
             Ok((process, channel)) => {
@@ -261,7 +224,6 @@ impl CxfBridgePool {
         bridge_version: &str,
         bridge_cache_dir: &Path,
         start_timeout_ms: u64,
-        reconnect: &NetworkRetryPolicy,
     ) -> Result<(BridgeProcess, Channel), CxfError> {
         tracing::trace!(
             key = %slot.key,
@@ -318,16 +280,14 @@ impl CxfBridgePool {
                 "starting CXF bridge process with env vars"
             );
 
-            let process = BridgeProcess::start(&config)
-                .await
-                .map_err(|e| CxfError::Bridge {
-                    message: e.to_string(),
-                    slot_key: slot.key.clone(),
-                    source: None,
-                })?;
-
-            let port = process.grpc_port();
-            let channel = connect_with_retry(port, reconnect).await?;
+            let (process, channel) =
+                BridgeProcess::start_and_connect(&config)
+                    .await
+                    .map_err(|e| CxfError::Bridge {
+                        message: e.to_string(),
+                        slot_key: slot.key.clone(),
+                        source: None,
+                    })?;
 
             wait_for_health(&channel, Duration::from_secs(10), |ch| {
                 let mut client = CxfBridgeClient::new(ch);
@@ -541,15 +501,13 @@ impl CxfBridgePool {
                                     .push(("CXF_ADDRESS".to_string(), addr.clone()));
                             }
 
-                            let process = BridgeProcess::start(&config).await.map_err(|e| {
-                                CxfError::Bridge {
+                            let (process, channel) = BridgeProcess::start_and_connect(&config)
+                                .await
+                                .map_err(|e| CxfError::Bridge {
                                     message: e.to_string(),
                                     slot_key: monitor_slot.key.clone(),
                                     source: None,
-                                }
-                            })?;
-                            let port = process.grpc_port();
-                            let channel = connect_with_retry(port, &pool.reconnect).await?;
+                                })?;
 
                             wait_for_health(&channel, Duration::from_secs(10), |ch| {
                                 let mut client = CxfBridgeClient::new(ch);
@@ -624,10 +582,16 @@ impl CxfBridgePool {
             source: None,
         })?;
 
+        // Lock is held during connect() (TLS handshake + retries) — widened from
+        // the old grpc_port() read. Bounded: localhost TLS (~10ms typical), per-slot
+        // lock. Acceptable trade-off vs exposing pub(crate) TLS material.
         let guard = slot.process.lock().await;
         if let Some(process) = guard.as_ref() {
-            let port = process.grpc_port();
-            let channel = connect_with_retry(port, &self.reconnect).await?;
+            let channel = process.connect().await.map_err(|e| CxfError::Transport {
+                message: e.to_string(),
+                endpoint: format!("grpc://127.0.0.1:{}", process.grpc_port()),
+                source: None,
+            })?;
             let _ = slot.state_tx.send(BridgeState::Ready { channel });
         }
         Ok(())
@@ -904,91 +868,6 @@ mod tests {
         assert!(
             err.unwrap_err().to_string().contains("max_bridges"),
             "error should mention max_bridges"
-        );
-    }
-
-    /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
-    /// Replicates the exact retry loop used in `connect_with_retry`.
-    #[test]
-    fn is_retryable_cxf_error_classifies_variants_correctly() {
-        // Transient
-        assert!(is_retryable_cxf_error(&CxfError::Transport {
-            message: "connection refused".to_string(),
-            endpoint: "grpc://127.0.0.1:50051".to_string(),
-            source: None,
-        }));
-        assert!(is_retryable_cxf_error(&CxfError::Timeout {
-            operation: "sayHello".to_string(),
-            endpoint: "http://localhost:8080".to_string(),
-        }));
-
-        // Permanent
-        assert!(!is_retryable_cxf_error(&CxfError::Fault {
-            code: "soap:Server".to_string(),
-            message: "Internal error".to_string(),
-            endpoint: "http://localhost:8080".to_string(),
-        }));
-        assert!(!is_retryable_cxf_error(&CxfError::Security {
-            message: "token expired".to_string(),
-            operation: "sayHello".to_string(),
-        }));
-        assert!(!is_retryable_cxf_error(&CxfError::Bridge {
-            message: "process crashed".to_string(),
-            slot_key: "cxf".to_string(),
-            source: None,
-        }));
-        assert!(!is_retryable_cxf_error(&CxfError::Config(
-            "missing wsdl_path".to_string()
-        )));
-        assert!(!is_retryable_cxf_error(&CxfError::StreamClosed {
-            endpoint: "http://localhost:8080".to_string(),
-        }));
-        assert!(!is_retryable_cxf_error(&CxfError::StreamBody {
-            endpoint: "http://localhost:8080".to_string(),
-        }));
-    }
-
-    #[tokio::test]
-    async fn retry_loop_invokes_operation_exactly_max_attempts_times() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        let policy = NetworkRetryPolicy {
-            max_attempts: 3,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(1),
-            multiplier: 1.0,
-            ..NetworkRetryPolicy::default()
-        };
-
-        let calls = Arc::new(AtomicU32::new(0));
-        let calls_clone = Arc::clone(&calls);
-
-        // Drive retry_async directly with is_retryable_cxf_error — adapts
-        // the pre-rc-4s9 manual-loop-mirror test to the migrated code path.
-        let result: Result<(), CxfError> = retry_async(
-            &policy,
-            Some("cxf"),
-            || {
-                let c = Arc::clone(&calls_clone);
-                async move {
-                    c.fetch_add(1, Ordering::SeqCst);
-                    Err(CxfError::Transport {
-                        message: "always fails".to_string(),
-                        endpoint: "grpc://127.0.0.1:1".to_string(),
-                        source: None,
-                    })
-                }
-            },
-            is_retryable_cxf_error,
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            3,
-            "max_attempts=3 must yield exactly 3 invocations"
         );
     }
 }

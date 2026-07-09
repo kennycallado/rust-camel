@@ -80,6 +80,10 @@ tower-http.workspace = true
 flate2 = { workspace = true }
 bytes.workspace = true
 zip.workspace = true
+camel-bridge.workspace = true
+rcgen = { workspace = true }
+tonic = { workspace = true }
+rustls = { version = "0.23", features = ["ring"] }
 
 [features]
 integration-tests = [

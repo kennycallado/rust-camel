@@ -16,6 +16,7 @@ dependencies {
     implementation(enforcedPlatform("io.quarkus.platform:quarkus-bom:$quarkusVersion"))
     implementation("io.quarkus:quarkus-grpc")
     implementation("io.quarkus:quarkus-arc")
+    implementation("io.quarkus:quarkus-config-yaml")
 
     // ActiveMQ Classic (OpenWire)
     implementation("org.apache.activemq:activemq-client:5.18.3")

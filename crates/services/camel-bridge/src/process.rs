@@ -280,6 +280,7 @@ impl BridgeProcessConfig {
 pub struct BridgeProcess {
     child: tokio::process::Child,
     grpc_port: u16,
+    tls: crate::tls::BridgeTlsMaterial,
     token: CancellationToken,
     handle: Option<JoinHandle<()>>,
 }
@@ -289,17 +290,35 @@ impl BridgeProcess {
         self.grpc_port
     }
 
-    /// Spawn the bridge process. Reads the gRPC port from stdout JSON line:
+    /// Connect a mTLS tonic channel to this bridge process.
+    pub async fn connect(&self) -> Result<tonic::transport::Channel, BridgeError> {
+        crate::channel::connect_channel(self.grpc_port, &self.tls).await
+    }
+
+    /// Start the bridge process and connect a mTLS channel in one step.
+    pub async fn start_and_connect(
+        config: &BridgeProcessConfig,
+    ) -> Result<(Self, tonic::transport::Channel), BridgeError> {
+        let process = Self::start(config).await?;
+        let channel = process.connect().await?;
+        Ok((process, channel))
+    }
+
+    /// Spawn the bridge process. Reads the SSL port from stdout JSON line:
     ///   {"status":"ready","port":PORT}
     ///
-    /// Picks a free OS port and passes it to the bridge via `QUARKUS_GRPC_SERVER_PORT`
+    /// Picks a free OS port and passes it to the bridge via `QUARKUS_HTTP_SSL_PORT`
     /// so Quarkus binds exactly to that port and PortAnnouncer can echo it back.
+    /// Build-time TLS props are in application.yml; only runtime cert paths
+    /// and the SSL port are passed via env vars.
     pub async fn start(config: &BridgeProcessConfig) -> Result<Self, BridgeError> {
         use tokio::io::AsyncBufReadExt;
         use tokio::process::Command;
         use tokio::time::{Duration, timeout};
 
         config.validate().map_err(BridgeError::Config)?;
+
+        let tls = crate::tls::BridgeTlsMaterial::generate()?;
 
         // Bind :0 to let the OS pick a free port, then release so the bridge can use it.
         let free_port = {
@@ -338,10 +357,16 @@ impl BridgeProcess {
 
         let mut command = Command::new(&config.binary_path);
         command
-            .env("QUARKUS_GRPC_SERVER_PORT", free_port.to_string())
-            // Let the OS pick a random HTTP port — we only use gRPC.
-            // Without this, Quarkus binds HTTP on 8080 and fails if occupied.
-            .env("QUARKUS_HTTP_PORT", "0")
+            .env("QUARKUS_HTTP_SSL_PORT", free_port.to_string())
+            .env(
+                "QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_CERT",
+                &tls.server_pem_path,
+            )
+            .env(
+                "QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_KEY",
+                &tls.server_key_path,
+            )
+            .env("QUARKUS_TLS_BRIDGE_TRUST_STORE_PEM_CERTS", &tls.ca_pem_path)
             .stdout(std::process::Stdio::piped())
             .stderr(stderr_stdio);
 
@@ -403,6 +428,7 @@ impl BridgeProcess {
         Ok(BridgeProcess {
             child,
             grpc_port: port,
+            tls,
             token,
             handle: Some(handle),
         })
@@ -769,6 +795,7 @@ mod tests {
         let bridge = BridgeProcess {
             child,
             grpc_port: 0,
+            tls: crate::tls::BridgeTlsMaterial::generate().expect("test tls"),
             token: CancellationToken::new(),
             handle: None,
         };

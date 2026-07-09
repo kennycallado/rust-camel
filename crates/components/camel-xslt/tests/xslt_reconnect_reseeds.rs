@@ -55,7 +55,7 @@ impl XsltTransformBackend for MockBackend {
 
     async fn recompile_all(
         &self,
-        _port: u16,
+        _channel: &Channel,
         stylesheets: Vec<(StylesheetId, Vec<u8>)>,
     ) -> Result<(), XsltError> {
         let mut guard = self.reseed_calls.lock().unwrap();
@@ -101,7 +101,9 @@ async fn reconnect_reseeds_registered_stylesheets() {
     let _ = client.compile(b"<xsl:stylesheet id='one'/>".to_vec()).await;
     let _ = client.compile(b"<xsl:stylesheet id='two'/>".to_vec()).await;
 
-    client.on_reconnect(9999).unwrap();
+    client
+        .on_reconnect(&Endpoint::from_static("http://127.0.0.1:50051").connect_lazy())
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let calls = backend.reseed_calls.lock().unwrap();

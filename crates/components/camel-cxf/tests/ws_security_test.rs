@@ -48,7 +48,9 @@ async fn test_producer_with_profile_invokes_successfully() {
         reconnect: NetworkRetryPolicy::default(),
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("pool should build"));
-    let channel = camel_bridge::channel::connect_channel(port)
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("valid endpoint")
+        .connect()
         .await
         .expect("channel should connect");
     prepare_ready_slot(&pool, channel).await;
@@ -102,7 +104,9 @@ async fn test_producer_handles_empty_security_profile() {
         reconnect: NetworkRetryPolicy::default(),
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("pool should build"));
-    let channel = camel_bridge::channel::connect_channel(port)
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("valid endpoint")
+        .connect()
         .await
         .expect("channel should connect");
     prepare_ready_slot(&pool, channel).await;

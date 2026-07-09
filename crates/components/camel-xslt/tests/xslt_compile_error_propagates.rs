@@ -42,7 +42,7 @@ impl XsltTransformBackend for CompileFailBackend {
 
     async fn recompile_all(
         &self,
-        _port: u16,
+        _channel: &Channel,
         _stylesheets: Vec<(StylesheetId, Vec<u8>)>,
     ) -> Result<(), XsltError> {
         Ok(())

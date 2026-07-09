@@ -3,6 +3,7 @@
 mod support;
 
 use camel_api::{Body, Exchange, Message};
+use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, CxfProfileEnvVars};
 use camel_component_cxf::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -18,8 +19,6 @@ use support::bridge_bg_rt;
 use support::cxf::require_cxf_bridge_binary;
 use support::send_to_direct;
 use support::wait::wait_until;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::OnceCell;
 
 /// Shared bridge pool for producer-only tests.
@@ -320,61 +319,51 @@ async fn cxf_native_health_check_responds_within_5s() {
 
     let wsdl_path = cxf_wsdl_path();
 
-    let mut child = Command::new(binary)
-        .env("CXF_PROFILES", "test")
-        .env("CXF_PROFILE_TEST_WSDL_PATH", &wsdl_path)
-        .env(
-            "CXF_PROFILE_TEST_SERVICE_NAME",
-            "{http://example.com/hello}HelloService",
-        )
-        .env(
-            "CXF_PROFILE_TEST_PORT_NAME",
-            "{http://example.com/hello}HelloPort",
-        )
-        .env("QUARKUS_HTTP_PORT", "0")
-        .env("QUARKUS_GRPC_SERVER_PORT", "0")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .unwrap();
+    let profiles = vec![CxfProfileEnvVars {
+        name: "test".to_string(),
+        wsdl_path: wsdl_path.to_string_lossy().to_string(),
+        service_name: "{http://example.com/hello}HelloService".to_string(),
+        port_name: "{http://example.com/hello}HelloPort".to_string(),
+        address: None,
+        keystore_path: None,
+        keystore_password: None,
+        truststore_path: None,
+        truststore_password: None,
+        sig_username: None,
+        sig_password: None,
+        enc_username: None,
+        security_actions_out: None,
+        security_actions_in: None,
+        signature_algorithm: None,
+        signature_digest_algorithm: None,
+        signature_c14n_algorithm: None,
+        signature_parts: None,
+    }];
 
-    let stdout = child.stdout.take().unwrap();
-    let mut lines = BufReader::new(stdout).lines();
-    let grpc_port = tokio::time::timeout(Duration::from_secs(5), async {
-        while let Some(line) = lines.next_line().await.unwrap() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
-                && v.get("status").and_then(|s| s.as_str()) == Some("ready")
-            {
-                return v.get("port").and_then(|p| p.as_u64()).map(|p| p as u16);
-            }
-        }
-        None
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    let config = BridgeProcessConfig::cxf_profiles(binary, &profiles, 5_000);
+    let (process, channel) = BridgeProcess::start_and_connect(&config).await.unwrap();
 
     wait_until(
         "cxf native health check",
         Duration::from_secs(5),
         Duration::from_millis(100),
-        || async {
-            let mut client = CxfBridgeClient::connect(format!("http://127.0.0.1:{grpc_port}"))
-                .await
-                .map_err(|e| e.to_string())?;
-            let health = client
-                .health(HealthRequest {})
-                .await
-                .map_err(|e| e.to_string())?
-                .into_inner();
-            Ok(health.healthy)
+        || {
+            let channel = channel.clone();
+            async move {
+                let mut client = CxfBridgeClient::new(channel);
+                let health = client
+                    .health(HealthRequest {})
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_inner();
+                Ok(health.healthy)
+            }
         },
     )
     .await
     .unwrap();
 
-    let _ = child.start_kill();
-    let _ = child.wait().await;
+    process.stop().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

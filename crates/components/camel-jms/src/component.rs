@@ -8,7 +8,6 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use camel_bridge::{
-    channel::connect_channel,
     download::ensure_binary,
     health::wait_for_health,
     process::{BridgeProcess, BridgeProcessConfig, BrokerType},
@@ -299,7 +298,11 @@ impl JmsBridgePool {
                 CamelError::ProcessorError(format!("Unknown JMS broker '{}'", broker_name))
             })?;
 
-        let port = {
+        // Lock is held during connect() (TLS handshake + retries) — widened from
+        // the old grpc_port() read. Bounded: localhost TLS (~10ms typical), per-slot
+        // lock (only blocks same-broker operations). Acceptable trade-off vs exposing
+        // pub(crate) TLS material to component crates.
+        let channel = {
             let guard = slot.process.lock().await;
             let process = guard.as_ref().ok_or_else(|| {
                 CamelError::ProcessorError(format!(
@@ -307,15 +310,13 @@ impl JmsBridgePool {
                     broker_name
                 ))
             })?;
-            process.grpc_port()
+            process.connect().await.map_err(|e| {
+                CamelError::ProcessorError(format!(
+                    "JMS broker '{}' channel refresh failed: {}",
+                    broker_name, e
+                ))
+            })?
         };
-
-        let channel = connect_channel(port).await.map_err(|e| {
-            CamelError::ProcessorError(format!(
-                "JMS broker '{}' channel refresh failed: {}",
-                broker_name, e
-            ))
-        })?;
 
         let _ = slot.state_tx.send(BridgeState::Ready { channel });
         Ok(())
@@ -565,14 +566,9 @@ impl JmsBridgePool {
 
         let total_timeout = Duration::from_millis(start_timeout_ms);
         let result = tokio::time::timeout(total_timeout, async {
-            let process = BridgeProcess::start(&process_config)
+            let (process, channel) = BridgeProcess::start_and_connect(&process_config)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("JMS bridge start failed: {e}")))?;
-
-            let port = process.grpc_port();
-            let channel = connect_channel(port).await.map_err(|e| {
-                CamelError::ProcessorError(format!("JMS bridge channel connect failed: {e}"))
-            })?;
 
             wait_for_health(&channel, Duration::from_secs(10), |ch| {
                 let mut client = BridgeServiceClient::new(ch);

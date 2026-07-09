@@ -2,9 +2,10 @@
 //!
 //! Main modules: `channel`, `download`, `health`, `process`, `reconnect`, `spec`.
 
-pub mod channel;
+pub(crate) mod channel;
 pub mod download;
 pub mod health;
 pub mod process;
 pub mod reconnect;
 pub mod spec;
+pub(crate) mod tls;

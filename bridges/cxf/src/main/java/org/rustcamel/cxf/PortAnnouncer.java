@@ -9,13 +9,20 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 @ApplicationScoped
 public class PortAnnouncer {
 
-  @ConfigProperty(name = "quarkus.grpc.server.port", defaultValue = "9090")
-  int grpcPort;
+  @ConfigProperty(name = "quarkus.http.ssl-port", defaultValue = "8443")
+  int sslPort;
+
+  @ConfigProperty(name = "quarkus.tls.bridge.key-store.pem.0.cert")
+  String serverCertPath;
 
   @Inject SecurityProfileStore profileStore;
 
   void onStart(@Observes StartupEvent ev) {
-    System.out.println("{\"status\":\"ready\",\"port\":" + grpcPort + "}");
+    if (serverCertPath != null && serverCertPath.contains("placeholder-")) {
+      throw new RuntimeException(
+          "Bridge started with placeholder TLS certs — runtime env vars not set. Aborting.");
+    }
+    System.out.println("{\"status\":\"ready\",\"port\":" + sslPort + "}");
     System.out.flush();
     if (!profileStore.isEmpty()) {
       System.out.println(

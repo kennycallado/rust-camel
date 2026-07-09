@@ -3,9 +3,32 @@ quarkus:
     server:
       port: 9090
       max-inbound-message-size: 16777216
+      use-separate-server: false
+      plain-text: false
   http:
     port: -1
+    ssl-port: ${QUARKUS_HTTP_SSL_PORT:8443}
+    insecure-requests: disabled
+    ssl:
+      client-auth: REQUIRED
+    tls-configuration-name: bridge
+  tls:
+    bridge:
+      key-store:
+        pem:
+          "0":
+            cert: ${QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_CERT:tls/placeholder-server.pem}
+            key: ${QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_KEY:tls/placeholder-server.key}
+      trust-store:
+        pem:
+          certs: ${QUARKUS_TLS_BRIDGE_TRUST_STORE_PEM_CERTS:tls/placeholder-ca.pem}
   native:
+    resources:
+      includes:
+        - application.yml
+        - tls/placeholder-ca.pem
+        - tls/placeholder-server.pem
+        - tls/placeholder-server.key
     additional-build-args:
       - "-H:+AllowVMInspection"
       - "-Djdk.xml.entityExpansionLimit=64"

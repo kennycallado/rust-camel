@@ -3,7 +3,6 @@ use crate::endpoint::XjEndpoint;
 use crate::error::XjError;
 use crate::identity::{JSON_TO_XML_XSLT, XML_TO_JSON_XSLT};
 use camel_bridge::{
-    channel::connect_channel,
     download::ensure_binary_for_spec,
     process::{BridgeProcess, BridgeProcessConfig},
     reconnect::BridgeReconnectHandler,
@@ -75,7 +74,7 @@ impl XjBridgeRuntime {
             return Ok(());
         }
 
-        let (process, channel, port) = self.start_bridge_process().await?;
+        let (process, channel) = self.start_bridge_process().await?;
         {
             let mut process_guard = self.process.lock().await;
             *process_guard = Some(process);
@@ -83,7 +82,7 @@ impl XjBridgeRuntime {
         let _ = self.state_tx.send(BridgeState::Ready {
             channel: channel.clone(),
         });
-        reconnect_handler.on_reconnect(port).map_err(|e| {
+        reconnect_handler.on_reconnect(&channel).map_err(|e| {
             XjError::Xslt(camel_xslt::XsltError::Bridge(format!(
                 "xml-bridge reconnect handler failed: {e}"
             )))
@@ -107,7 +106,7 @@ impl XjBridgeRuntime {
             let _ = process.stop().await;
         }
 
-        let (process, channel, port) = self.start_bridge_process().await?;
+        let (process, channel) = self.start_bridge_process().await?;
         {
             let mut process_guard = self.process.lock().await;
             *process_guard = Some(process);
@@ -115,7 +114,7 @@ impl XjBridgeRuntime {
         let _ = self.state_tx.send(BridgeState::Ready {
             channel: channel.clone(),
         });
-        reconnect_handler.on_reconnect(port).map_err(|e| {
+        reconnect_handler.on_reconnect(&channel).map_err(|e| {
             XjError::Xslt(camel_xslt::XsltError::Bridge(format!(
                 "xml-bridge reconnect handler failed: {e}"
             )))
@@ -241,7 +240,7 @@ impl XjBridgeRuntime {
 
     async fn start_bridge_process(
         &self,
-    ) -> Result<(BridgeProcess, tonic::transport::Channel, u16), XjError> {
+    ) -> Result<(BridgeProcess, tonic::transport::Channel), XjError> {
         let binary_path = match &self.config.bridge_binary_path {
             Some(path) => path.clone(),
             None => ensure_binary_for_spec(
@@ -253,19 +252,14 @@ impl XjBridgeRuntime {
             .map_err(|e| XjError::Xslt(camel_xslt::XsltError::Bridge(e.to_string())))?,
         };
 
-        let process = BridgeProcess::start(&BridgeProcessConfig::xml(
+        let (process, channel) = BridgeProcess::start_and_connect(&BridgeProcessConfig::xml(
             binary_path,
             self.config.bridge_start_timeout_ms,
         ))
         .await
         .map_err(|e| XjError::Xslt(camel_xslt::XsltError::Bridge(e.to_string())))?;
-        let port = process.grpc_port();
 
-        let channel = connect_channel(port)
-            .await
-            .map_err(|e| XjError::Xslt(camel_xslt::XsltError::Bridge(e.to_string())))?;
-
-        Ok((process, channel, port))
+        Ok((process, channel))
     }
 }
 

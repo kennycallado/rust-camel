@@ -3,7 +3,6 @@ use crate::config::{XsltComponentConfig, XsltEndpointConfig};
 use crate::endpoint::XsltEndpoint;
 use crate::error::XsltError;
 use camel_bridge::{
-    channel::connect_channel,
     download::ensure_binary_for_spec,
     process::{BridgeProcess, BridgeProcessConfig},
     reconnect::BridgeReconnectHandler,
@@ -71,7 +70,7 @@ impl XsltBridgeRuntime {
             return Ok(());
         }
 
-        let (process, channel, port) = self.start_bridge_process().await?;
+        let (process, channel) = self.start_bridge_process().await?;
         {
             let mut process_guard = self.process.lock().await;
             *process_guard = Some(process);
@@ -80,7 +79,7 @@ impl XsltBridgeRuntime {
             channel: channel.clone(),
         });
         reconnect_handler
-            .on_reconnect(port)
+            .on_reconnect(&channel)
             .map_err(|e| XsltError::Bridge(format!("xml-bridge reconnect handler failed: {e}")))?;
 
         Ok(())
@@ -101,7 +100,7 @@ impl XsltBridgeRuntime {
             let _ = process.stop().await;
         }
 
-        let (process, channel, port) = self.start_bridge_process().await?;
+        let (process, channel) = self.start_bridge_process().await?;
         {
             let mut process_guard = self.process.lock().await;
             *process_guard = Some(process);
@@ -110,7 +109,7 @@ impl XsltBridgeRuntime {
             channel: channel.clone(),
         });
         reconnect_handler
-            .on_reconnect(port)
+            .on_reconnect(&channel)
             .map_err(|e| XsltError::Bridge(format!("xml-bridge reconnect handler failed: {e}")))?;
 
         Ok(())
@@ -183,7 +182,7 @@ impl XsltBridgeRuntime {
 
     async fn start_bridge_process(
         &self,
-    ) -> Result<(BridgeProcess, tonic::transport::Channel, u16), XsltError> {
+    ) -> Result<(BridgeProcess, tonic::transport::Channel), XsltError> {
         let binary_path = match &self.config.bridge_binary_path {
             Some(path) => path.clone(),
             None => ensure_binary_for_spec(
@@ -195,21 +194,14 @@ impl XsltBridgeRuntime {
             .map_err(|e| XsltError::Bridge(format!("failed to resolve xml-bridge binary: {e}")))?,
         };
 
-        let process = BridgeProcess::start(&BridgeProcessConfig::xml(
+        let (process, channel) = BridgeProcess::start_and_connect(&BridgeProcessConfig::xml(
             binary_path,
             self.config.bridge_start_timeout_ms,
         ))
         .await
         .map_err(|e| XsltError::Bridge(format!("failed to start xml-bridge process: {e}")))?;
-        let port = process.grpc_port();
 
-        let channel = connect_channel(port).await.map_err(|e| {
-            XsltError::Bridge(format!(
-                "failed to connect to xml-bridge on port {port}: {e}"
-            ))
-        })?;
-
-        Ok((process, channel, port))
+        Ok((process, channel))
     }
 }
 

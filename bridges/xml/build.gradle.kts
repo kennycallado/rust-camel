@@ -16,6 +16,9 @@ dependencies {
     implementation(enforcedPlatform("io.quarkus.platform:quarkus-bom:$quarkusVersion"))
     implementation("io.quarkus:quarkus-grpc")
     implementation("io.quarkus:quarkus-arc")
+    // Required for Quarkus to parse application.yml. Without this extension the
+    // YAML file is an inert resource and ALL yml-only config is silently ignored.
+    implementation("io.quarkus:quarkus-config-yaml")
 
     // XSD — Xerces-J JAXP reference impl
     implementation("xerces:xercesImpl:2.12.2")

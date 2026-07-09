@@ -119,7 +119,7 @@ pub trait XsltTransformBackend: Send + Sync + std::fmt::Debug {
 
     async fn recompile_all(
         &self,
-        port: u16,
+        channel: &Channel,
         stylesheets: Vec<(StylesheetId, Vec<u8>)>,
     ) -> Result<(), XsltError>;
 }
@@ -176,13 +176,9 @@ impl XsltTransformBackend for GrpcXsltBackend {
 
     async fn recompile_all(
         &self,
-        port: u16,
+        channel: &Channel,
         stylesheets: Vec<(StylesheetId, Vec<u8>)>,
     ) -> Result<(), XsltError> {
-        let channel = camel_bridge::channel::connect_channel(port)
-            .await
-            .map_err(|e| XsltError::Bridge(e.to_string()))?;
-
         for (stylesheet_id, stylesheet) in stylesheets {
             if let Some(err) = self
                 .compile(channel.clone(), stylesheet_id.clone(), stylesheet)
@@ -308,7 +304,8 @@ impl XsltBridgeClient {
 }
 
 impl BridgeReconnectHandler for XsltBridgeClient {
-    fn on_reconnect(&self, port: u16) -> Result<(), BridgeError> {
+    fn on_reconnect(&self, channel: &Channel) -> Result<(), BridgeError> {
+        let channel = channel.clone();
         let handle = tokio::runtime::Handle::try_current().map_err(|e| {
             BridgeError::Transport(format!("tokio runtime unavailable for reconnect: {e}"))
         })?;
@@ -322,7 +319,7 @@ impl BridgeReconnectHandler for XsltBridgeClient {
             .map(|(rt, rid)| (Arc::clone(rt), rid.clone()));
 
         handle.spawn(async move {
-            if let Err(err) = backend.recompile_all(port, stylesheets).await {
+            if let Err(err) = backend.recompile_all(&channel, stylesheets).await {
                 if let Some((rt, rid)) = observability {
                     rt.metrics()
                         .increment_errors(&rid, "e:xslt:reconnect-reseed");

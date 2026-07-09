@@ -134,7 +134,7 @@ pub struct CxfPoolConfig {
     #[serde(default)]
     pub bind_address: Option<String>,
     /// Reconnection policy for transient bridge connection failures.
-    /// Controls retry behavior when `connect_channel` fails during bridge
+    /// Controls retry behavior when bridge channel connection fails during
     /// startup, health-monitor restarts, or channel refreshes.
     /// Default: unlimited (max_attempts=0), preserving previous infinite-retry behavior.
     #[serde(default = "cxf_reconnect_default")]

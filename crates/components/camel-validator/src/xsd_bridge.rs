@@ -1,11 +1,8 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use camel_bridge::channel::connect_channel;
 use camel_bridge::download::{default_cache_dir_for_spec, ensure_binary_for_spec};
 use camel_bridge::health::wait_for_health;
 use camel_bridge::process::{BridgeError, BridgeProcess, BridgeProcessConfig};
@@ -49,9 +46,6 @@ impl std::fmt::Debug for XmlBridgeSlot {
         f.debug_struct("XmlBridgeSlot").finish()
     }
 }
-
-type ConnectFuture = Pin<Box<dyn Future<Output = Result<Channel, BridgeError>> + Send>>;
-type ConnectFn = dyn Fn(u16) -> ConnectFuture + Send + Sync;
 
 #[async_trait]
 pub trait XsdBridge: Send + Sync {
@@ -111,7 +105,6 @@ pub struct XsdBridgeBackend {
     schema_cache_max_entries: Arc<AtomicUsize>,
     slot: Arc<XmlBridgeSlot>,
     rpc: Arc<dyn XsdBridgeRpc>,
-    connect_fn: Arc<ConnectFn>,
     start_lock: Arc<Mutex<()>>,
     bridge_version: String,
     bridge_cache_dir: std::path::PathBuf,
@@ -145,7 +138,6 @@ impl XsdBridgeBackend {
             )),
             slot,
             rpc: Arc::new(GrpcXsdBridgeRpc),
-            connect_fn: Arc::new(|port| Box::pin(connect_channel(port))),
             start_lock: Arc::new(Mutex::new(())),
             bridge_version: crate::BRIDGE_VERSION.to_string(),
             bridge_cache_dir: default_cache_dir_for_spec(&XML_BRIDGE),
@@ -155,7 +147,7 @@ impl XsdBridgeBackend {
     }
 
     #[cfg(test)]
-    fn for_test(rpc: Arc<dyn XsdBridgeRpc>, connect_fn: Arc<ConnectFn>, channel: Channel) -> Self {
+    fn for_test(rpc: Arc<dyn XsdBridgeRpc>, channel: Channel) -> Self {
         let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
             channel: channel.clone(),
         });
@@ -172,7 +164,6 @@ impl XsdBridgeBackend {
             )),
             slot,
             rpc,
-            connect_fn,
             start_lock: Arc::new(Mutex::new(())),
             bridge_version: crate::BRIDGE_VERSION.to_string(),
             bridge_cache_dir: default_cache_dir_for_spec(&XML_BRIDGE),
@@ -212,7 +203,7 @@ impl XsdBridgeBackend {
         }
 
         let _ = self.slot.state_tx.send(BridgeState::Starting);
-        let (process, channel, port) = self.start_bridge_process().await?;
+        let (process, channel) = self.start_bridge_process().await?;
         {
             let mut process_guard = self.slot.process.lock().await;
             *process_guard = Some(process);
@@ -224,7 +215,7 @@ impl XsdBridgeBackend {
         let _ = self.slot.state_tx.send(BridgeState::Ready {
             channel: channel.clone(),
         });
-        self.on_reconnect(port).map_err(|e| {
+        self.on_reconnect(&channel).map_err(|e| {
             ValidatorError::transport_with_source("xml-bridge reconnect handler failed", e)
         })?;
 
@@ -247,7 +238,7 @@ impl XsdBridgeBackend {
             let _ = p.stop().await;
         }
 
-        let (process, channel, port) = self.start_bridge_process().await?;
+        let (process, channel) = self.start_bridge_process().await?;
         {
             let mut process_guard = self.slot.process.lock().await;
             *process_guard = Some(process);
@@ -257,7 +248,7 @@ impl XsdBridgeBackend {
             *ch_guard = Some(channel.clone());
         }
 
-        self.on_reconnect(port).map_err(|e| {
+        self.on_reconnect(&channel).map_err(|e| {
             ValidatorError::transport_with_source("xml-bridge reconnect handler failed", e)
         })?;
         let _ = self.slot.state_tx.send(BridgeState::Ready {
@@ -267,7 +258,7 @@ impl XsdBridgeBackend {
         Ok(channel)
     }
 
-    async fn start_bridge_process(&self) -> Result<(BridgeProcess, Channel, u16), ValidatorError> {
+    async fn start_bridge_process(&self) -> Result<(BridgeProcess, Channel), ValidatorError> {
         let binary_path =
             ensure_binary_for_spec(&XML_BRIDGE, &self.bridge_version, &self.bridge_cache_dir)
                 .await
@@ -276,13 +267,9 @@ impl XsdBridgeBackend {
                 })?;
 
         let process_config = BridgeProcessConfig::xml(binary_path, self.bridge_start_timeout_ms);
-        let process = BridgeProcess::start(&process_config)
+        let (process, channel) = BridgeProcess::start_and_connect(&process_config)
             .await
             .map_err(|e| ValidatorError::endpoint(format!("XML bridge start failed: {e}")))?;
-        let port = process.grpc_port();
-        let channel = (self.connect_fn)(port).await.map_err(|e| {
-            ValidatorError::endpoint(format!("XML bridge channel connect failed: {e}"))
-        })?;
 
         wait_for_health(&channel, Duration::from_secs(10), |ch| {
             let mut client = proto::health_client::HealthClient::new(ch);
@@ -294,7 +281,7 @@ impl XsdBridgeBackend {
         .await
         .map_err(|e| ValidatorError::endpoint(format!("XML bridge health check failed: {e}")))?;
 
-        Ok((process, channel, port))
+        Ok((process, channel))
     }
 
     fn is_transport_error(msg: &str) -> bool {
@@ -347,7 +334,7 @@ impl XsdBridgeBackend {
 }
 
 impl BridgeReconnectHandler for XsdBridgeBackend {
-    fn on_reconnect(&self, _port: u16) -> Result<(), BridgeError> {
+    fn on_reconnect(&self, _channel: &Channel) -> Result<(), BridgeError> {
         let this = self.clone();
         tokio::spawn(async move {
             let Some(channel) = this.channel.read().await.clone() else {
@@ -512,14 +499,13 @@ mod tests {
             register_calls: Arc::clone(&calls),
             validate_ok: true,
         });
-        let connector =
-            Arc::new(|_port| Box::pin(async move { Ok(lazy_channel()) }) as ConnectFuture);
-        let backend = XsdBridgeBackend::for_test(rpc, connector, lazy_channel());
+        let channel = lazy_channel();
+        let backend = XsdBridgeBackend::for_test(rpc, channel);
 
         let _id_a = backend.register(b"<xsd:a/>".to_vec()).await.unwrap();
         let _id_b = backend.register(b"<xsd:b/>".to_vec()).await.unwrap();
 
-        backend.on_reconnect(50051).unwrap();
+        backend.on_reconnect(&lazy_channel()).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         assert!(calls.load(Ordering::SeqCst) >= 4);

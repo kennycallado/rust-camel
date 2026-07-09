@@ -20,6 +20,7 @@ dependencies {
     implementation(enforcedPlatform("io.quarkus.platform:quarkus-bom:$quarkusVersion"))
     implementation("io.quarkus:quarkus-grpc")
     implementation("io.quarkus:quarkus-arc")
+    implementation("io.quarkus:quarkus-config-yaml")
 
     // Apache CXF
     implementation("org.apache.cxf:cxf-core:$cxfVersion")

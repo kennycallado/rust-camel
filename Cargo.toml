@@ -170,6 +170,7 @@ pkcs8 = { version = "0.10", features = ["pem"] }
 serde_urlencoded = "0.7"
 zeroize = "1"
 rand = "0.10"
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 sqlx = "0.8"
 sxd-document = "0.3"
 syn = "2.0"
