@@ -38,3 +38,25 @@ quarkus:
       - "--initialize-at-run-time=net.sf.saxon.functions.hof.RandomNumberGenerator"
       - "--initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl"
       - "--initialize-at-run-time=org.xmlresolver"
+
+"%test":
+  quarkus:
+    http:
+      ssl-port: -1
+      insecure-requests: enabled
+      ssl:
+        client-auth: NEVER
+    grpc:
+      server:
+        plain-text: true
+        use-separate-server: true
+    tls:
+      bridge:
+        key-store:
+          pem:
+            "0":
+              cert: tls/test-server.pem
+              key: tls/test-server.key
+        trust-store:
+          pem:
+            certs: tls/test-ca.pem
