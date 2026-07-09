@@ -21,6 +21,10 @@ pub trait MetricsCollector: Send + Sync {
     /// Record a histogram observation (e.g., cost, latency distribution).
     /// Default: no-op (backward-compatible).
     fn record_histogram(&self, _name: &str, _value: f64, _labels: &[(&str, &str)]) {}
+
+    /// Record a monotonically-increasing counter (e.g. `foo_total`).
+    /// Default: no-op (backward-compatible).
+    fn record_counter(&self, _name: &str, _value: f64, _labels: &[(&str, &str)]) {}
 }
 
 /// No-op metrics collector for default behavior

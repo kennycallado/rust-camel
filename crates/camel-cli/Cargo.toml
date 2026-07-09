@@ -68,6 +68,7 @@ camel-wit.workspace = true
 camel-auth.workspace = true
 camel-component-keycloak.workspace = true
 camel-component-surrealdb = { workspace = true, optional = true }
+camel-component-exec = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -101,6 +102,9 @@ kafka-static = ["dep:camel-component-kafka", "cmake-build"]
 mqtt = ["dep:camel-component-mqtt"]
 mqtt-tls = ["mqtt", "camel-component-mqtt/tls"]
 surrealdb = ["dep:camel-component-surrealdb"]
+# exec activates the fail-closed system command execution component.
+# Not in default — operators opt in (security-sensitive).
+exec = ["dep:camel-component-exec"]
 
 [lints]
 workspace = true

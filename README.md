@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `mqtt`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`, `llm`, `surrealdb`, `grpc`, `seda`, `keycloak`, `wasm`.
+Current components: `timer`, `log`, `direct`, `exec`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `mqtt`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`, `llm`, `surrealdb`, `grpc`, `seda`, `keycloak`, `wasm`.
 
 ## Architecture
 
@@ -253,6 +253,7 @@ runnable example with in-memory CRUD storage and static file co-hosting.
 | `camel-surrealdb`           | SurrealDB multi-model (document, graph, vector, live) with 9 operations                                                                                                                                                                                      |
 | `camel-jms`                 | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                                                                                                |
 | `camel-component-cxf`       | SOAP/Web Services via Apache CXF native-image bridge: SOAP 1.1/1.2, WSDL, WS-Security, multi-tenant profiles, PAYLOAD mode                                                                                                                                   |
+| `camel-component-exec`      | Fail-closed system command execution with profile-pinned binaries, per-element arg-policy, env sanitization, cwd confinement, timeout with process-group kill (`exec:{profile}`)                                                                             |
 | `camel-grpc`                | gRPC producer and consumer with dynamic proto resolution, unary + server/client/bidi streaming                                                                                                                                                               |
 | `camel-xslt`                | XSLT 3.0 transformation via xml-bridge (`xslt:<stylesheet>`) — [example](examples/xslt-example/README.md)                                                                                                                                                    |
 | `camel-xj`                  | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                                                                                              |

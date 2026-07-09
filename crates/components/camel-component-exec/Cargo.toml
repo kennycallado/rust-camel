@@ -1,0 +1,39 @@
+[package]
+name = "camel-component-exec"
+description = "Fail-closed system command execution component for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api = { workspace = true }
+camel-component-api = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["process", "rt", "macros", "time", "io-util", "sync"] }
+tower = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+glob = { workspace = true }
+libc = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
+camel-builder = { workspace = true }
+camel-core = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

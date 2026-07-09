@@ -1277,6 +1277,7 @@ dependencies = [
  "camel-component-controlbus",
  "camel-component-cxf",
  "camel-component-direct",
+ "camel-component-exec",
  "camel-component-file",
  "camel-component-grpc",
  "camel-component-http",
@@ -1410,6 +1411,29 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "camel-component-exec"
+version = "0.22.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-core",
+ "glob",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tower",
+ "tracing",
+ "tracing-test",
 ]
 
 [[package]]
@@ -4032,6 +4056,23 @@ dependencies = [
  "camel-component-timer",
  "camel-core",
  "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "exec-example"
+version = "0.22.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-exec",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
  "tracing-subscriber",
 ]
 

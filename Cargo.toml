@@ -95,6 +95,7 @@ camel-component-opensearch = { path = "crates/components/camel-opensearch", vers
 camel-wit = { path = "crates/camel-wit", version = "=0.22.0" }
 camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.22.0" }
 camel-component-llm = { path = "crates/components/camel-component-llm", version = "=0.22.0" }
+camel-component-exec = { path = "crates/components/camel-component-exec", version = "=0.22.0" }
 camel-component-surrealdb = { path = "crates/components/camel-component-surrealdb", version = "=0.22.0" }
 
 tokio = { version = "1", features = ["full"] }
