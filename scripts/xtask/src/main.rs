@@ -134,13 +134,7 @@ fn main() {
             }
         }
         Commands::LintUnwrap => {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = find_workspace_root_from(&manifest_dir)
-                .ok_or_else(|| "Cannot locate workspace root".to_string())
-                .unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
+            let workspace_root = workspace_root_or_exit();
             match lint_unwrap(&workspace_root) {
                 Ok(violations) if violations.is_empty() => {
                     println!("lint-unwrap: OK (no violations)");
@@ -160,13 +154,7 @@ fn main() {
             }
         }
         Commands::LintSecrets => {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = find_workspace_root_from(&manifest_dir)
-                .ok_or_else(|| "Cannot locate workspace root".to_string())
-                .unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
+            let workspace_root = workspace_root_or_exit();
             match lint_secrets(&workspace_root) {
                 Ok(violations) if violations.is_empty() => {
                     println!("lint-secrets: OK (no violations)");
@@ -187,13 +175,7 @@ fn main() {
             }
         }
         Commands::LintLogLevels => {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = find_workspace_root_from(&manifest_dir)
-                .ok_or_else(|| "Cannot locate workspace root".to_string())
-                .unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
+            let workspace_root = workspace_root_or_exit();
             match lint_log_levels(&workspace_root) {
                 Ok(violations) if violations.is_empty() => {
                     println!("lint-log-levels: OK (strict mode — 0 violations)");
@@ -217,26 +199,14 @@ fn main() {
             }
         }
         Commands::PublishOrder { shell } => {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = find_workspace_root_from(&manifest_dir)
-                .ok_or_else(|| "Cannot locate workspace root".to_string())
-                .unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
+            let workspace_root = workspace_root_or_exit();
             if let Err(e) = publish_order(&workspace_root, shell) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
         }
         Commands::Publish { dry_run } => {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let workspace_root = find_workspace_root_from(&manifest_dir)
-                .ok_or_else(|| "Cannot locate workspace root".to_string())
-                .unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
+            let workspace_root = workspace_root_or_exit();
             if let Err(e) = publish_crates(&workspace_root, dry_run) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
@@ -280,11 +250,7 @@ fn build_bridge(
     }
 
     // 1. Locate workspace root
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = find_workspace_root_from(&manifest_dir)
-        .ok_or_else(|| {
-            "Cannot locate workspace root with bridges/ — are you running from the rust-camel workspace?".to_string()
-        })?;
+    let workspace_root = workspace_root()?;
 
     let bridge_dir = workspace_root.join("bridges").join(bridge_dir_name);
 
@@ -459,9 +425,7 @@ fn build_bridge_native(bridge: &str, version: Option<&str>, target: &str) -> Res
         ));
     }
 
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = find_workspace_root_from(&manifest_dir)
-        .ok_or_else(|| "Cannot locate workspace root".to_string())?;
+    let workspace_root = workspace_root()?;
 
     let bridge_path = workspace_root.join("bridges").join(bridge_dir);
 
@@ -829,9 +793,28 @@ pub fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Locate the workspace root using the runtime CWD, not the compile-time
+/// `CARGO_MANIFEST_DIR`. The compile-time macro is baked into the binary
+/// and goes stale when a shared target dir reuses an xtask binary compiled
+/// in a different worktree.
+fn workspace_root() -> Result<PathBuf, String> {
+    let start =
+        std::env::current_dir().map_err(|e| format!("Cannot determine current directory: {e}"))?;
+    find_workspace_root_from(&start).ok_or_else(|| {
+        "Cannot locate workspace root with bridges/ — are you running from the rust-camel workspace?".to_string()
+    })
+}
+
+/// Same as `workspace_root()` but prints the error and exits on failure.
+fn workspace_root_or_exit() -> PathBuf {
+    workspace_root().unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    })
+}
+
 fn run_schema_generation(check: bool) -> Result<(), String> {
-    let workspace_root = find_workspace_root_from(&PathBuf::from(env!("CARGO_MANIFEST_DIR")))
-        .ok_or("Cannot locate workspace root")?;
+    let workspace_root = workspace_root()?;
     let schemas_dir = workspace_root.join("schemas");
     let dsl_dir = schemas_dir.join("dsl");
     let ts_dir = schemas_dir.join("ts");
