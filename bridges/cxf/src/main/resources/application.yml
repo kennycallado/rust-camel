@@ -64,7 +64,7 @@ cxf:
       ssl-port: -1
       insecure-requests: enabled
       ssl:
-        client-auth: NEVER
+        client-auth: none
     grpc:
       server:
         plain-text: true
