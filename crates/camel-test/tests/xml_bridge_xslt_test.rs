@@ -17,7 +17,7 @@ use camel_test::CamelTestContext;
 use camel_xslt::{XsltComponent, XsltComponentConfig};
 use support::wait::wait_until;
 use support::xml_bridge::require_xml_bridge_binary;
-use support::{init_tracing, send_to_direct};
+use support::{init_tracing, install_crypto_provider, send_to_direct};
 
 fn write_xslt() -> tempfile::NamedTempFile {
     let mut xslt = tempfile::Builder::new().suffix(".xslt").tempfile().unwrap();
@@ -55,6 +55,7 @@ fn write_invalid_xslt() -> tempfile::NamedTempFile {
 #[tokio::test(flavor = "multi_thread")]
 async fn xslt_transform_produces_expected_output() {
     init_tracing();
+    install_crypto_provider();
     let binary_path = require_xml_bridge_binary();
 
     let xslt = write_xslt();
@@ -125,6 +126,7 @@ routes:
 #[tokio::test(flavor = "multi_thread")]
 async fn xslt_compile_error_surfaces_on_transform() {
     init_tracing();
+    install_crypto_provider();
     let binary_path = require_xml_bridge_binary();
 
     let xslt = write_invalid_xslt();

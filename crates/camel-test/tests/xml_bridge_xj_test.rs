@@ -13,12 +13,13 @@ use camel_api::{Exchange, Message};
 use camel_component_api::{Component, NoOpComponentContext, ProducerContext};
 use camel_xj::{XjComponent, XjComponentConfig};
 use serde_json::Value;
-use support::test_rt;
 use support::xml_bridge::require_xml_bridge_binary;
+use support::{install_crypto_provider, test_rt};
 use tower::ServiceExt;
 
 fn build_xj_component() -> XjComponent {
     let binary_path = require_xml_bridge_binary();
+    install_crypto_provider();
     XjComponent::new(XjComponentConfig {
         bridge_binary_path: Some(binary_path),
         ..XjComponentConfig::default()

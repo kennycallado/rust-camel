@@ -81,6 +81,12 @@ pub fn init_tracing() {
 }
 
 #[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+#[cfg(feature = "integration-tests")]
 fn is_direct_not_registered(err: &CamelError) -> bool {
     matches!(
         err,

@@ -17,6 +17,7 @@ use camel_test::CamelTestContext;
 use reqwest::StatusCode;
 use support::bridge_bg_rt;
 use support::cxf::require_cxf_bridge_binary;
+use support::install_crypto_provider;
 use support::send_to_direct;
 use support::wait::wait_until;
 use tokio::sync::OnceCell;
@@ -33,6 +34,7 @@ static SHARED_CXF_POOL: OnceCell<Arc<CxfBridgePool>> = OnceCell::const_new();
 async fn get_shared_cxf_pool() -> Arc<CxfBridgePool> {
     SHARED_CXF_POOL
         .get_or_init(|| async {
+            install_crypto_provider();
             let wsdl_path = cxf_wsdl_path();
             let pool = Arc::new(
                 CxfBridgePool::from_config(CxfPoolConfig {
@@ -187,6 +189,7 @@ fn reserve_local_port() -> u16 {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_producer_invokes_mock_soap_service() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let addr = start_mock_soap_service().await;
     let wsdl_path = cxf_wsdl_path();
@@ -235,6 +238,7 @@ async fn cxf_producer_invokes_mock_soap_service() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_consumer_receives_request_and_returns_response() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
     let port = reserve_local_port();
@@ -315,13 +319,14 @@ async fn cxf_consumer_receives_request_and_returns_response() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_native_health_check_responds_within_5s() {
     init_tracing();
+    install_crypto_provider();
     let binary = require_cxf_bridge_binary();
 
     let wsdl_path = cxf_wsdl_path();
 
     let profiles = vec![CxfProfileEnvVars {
         name: "test".to_string(),
-        wsdl_path: wsdl_path.to_string_lossy().to_string(),
+        wsdl_path: wsdl_path.clone(),
         service_name: "{http://example.com/hello}HelloService".to_string(),
         port_name: "{http://example.com/hello}HelloPort".to_string(),
         address: None,
@@ -369,6 +374,7 @@ async fn cxf_native_health_check_responds_within_5s() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_producer_handles_soap_fault_response() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let addr = start_mock_soap_fault_service().await;
     let wsdl_path = cxf_wsdl_path();
@@ -437,6 +443,7 @@ async fn cxf_producer_handles_soap_fault_response() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_producer_multiple_sequential_invocations() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let addr = start_mock_soap_service().await;
     let wsdl_path = cxf_wsdl_path();
@@ -493,6 +500,7 @@ async fn cxf_producer_multiple_sequential_invocations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_consumer_returns_health_check_on_get() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
     let port = reserve_local_port();
@@ -546,6 +554,7 @@ async fn cxf_consumer_returns_health_check_on_get() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_consumer_handles_malformed_soap() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
     let port = reserve_local_port();
@@ -607,6 +616,7 @@ async fn cxf_consumer_handles_malformed_soap() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_consumer_concurrent_requests() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
     let port = reserve_local_port();
@@ -798,6 +808,7 @@ async fn start_mock_soap_service_with_response(response_body: &'static str) -> S
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_multi_profile_producer_routes_to_correct_backend() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
 
     // Start two separate mock SOAP services with distinct responses
@@ -909,6 +920,7 @@ async fn cxf_multi_profile_producer_routes_to_correct_backend() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_multi_profile_rejects_uri_without_profile() {
     init_tracing();
+    install_crypto_provider();
 
     let component = multi_profile_cxf_component(9090, 9091);
     let h = CamelTestContext::builder()
@@ -942,6 +954,7 @@ async fn cxf_multi_profile_rejects_uri_without_profile() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cxf_multi_profile_rejects_unknown_profile() {
     init_tracing();
+    install_crypto_provider();
 
     let component = multi_profile_cxf_component(9090, 9091);
     let h = CamelTestContext::builder()

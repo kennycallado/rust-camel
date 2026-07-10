@@ -16,6 +16,7 @@ use std::time::Duration;
 use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_test::CamelTestContext;
+use support::install_crypto_provider;
 use support::jms::{shared_jms_activemq, shared_jms_artemis, shared_jms_artemis_auth};
 use support::wait::wait_until;
 
@@ -32,6 +33,7 @@ fn init_tracing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_producer_sends_to_activemq() {
     init_tracing();
+    install_crypto_provider();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -78,6 +80,7 @@ async fn jms_producer_sends_to_activemq() {
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_consumer_receives_from_activemq() {
     init_tracing();
+    install_crypto_provider();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -130,6 +133,7 @@ async fn jms_consumer_receives_from_activemq() {
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_consumer_receives_from_artemis() {
     init_tracing();
+    install_crypto_provider();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -182,6 +186,7 @@ async fn jms_consumer_receives_from_artemis() {
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_producer_sends_to_artemis() {
     init_tracing();
+    install_crypto_provider();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -228,6 +233,7 @@ async fn jms_producer_sends_to_artemis() {
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_headers_propagated() {
     init_tracing();
+    install_crypto_provider();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -290,6 +296,7 @@ async fn jms_headers_propagated() {
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_producer_sends_multiple_messages() {
     init_tracing();
+    install_crypto_provider();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -358,6 +365,7 @@ async fn jms_producer_sends_multiple_messages() {
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_artemis_bridge_stable_under_mandatory_auth() {
     init_tracing();
+    install_crypto_provider();
 
     let h = CamelTestContext::builder()
         .with_timer()

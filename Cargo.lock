@@ -1311,6 +1311,7 @@ dependencies = [
  "clap",
  "config",
  "include_dir",
+ "rustls",
  "serde_json",
  "tempfile",
  "tokio",
