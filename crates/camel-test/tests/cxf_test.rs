@@ -756,7 +756,7 @@ fn multi_profile_cxf_component(port_a: u16, port_b: u16) -> CxfComponent {
                 CxfProfileConfig {
                     name: "community_b".to_string(),
                     address: Some(format!("http://127.0.0.1:{port_b}/service")),
-                    wsdl_path: wsdl_path,
+                    wsdl_path,
                     service_name: "{http://example.com/hello}HelloService".to_string(),
                     port_name: "{http://example.com/hello}HelloPort".to_string(),
                     security: Default::default(),

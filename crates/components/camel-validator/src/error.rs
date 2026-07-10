@@ -28,20 +28,6 @@ pub enum ValidatorError {
     PayloadTooLarge { actual: usize, limit: usize },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transport_variant_preserves_source_chain() {
-        let inner = std::io::Error::other("socket closed");
-        let err = ValidatorError::transport_with_source("rpc failed", inner);
-        let source = std::error::Error::source(&err);
-        assert!(source.is_some());
-        assert!(source.unwrap().to_string().contains("socket closed"));
-    }
-}
-
 impl ValidatorError {
     pub fn endpoint(msg: impl Into<String>) -> Self {
         Self::Endpoint(msg.into())
@@ -89,5 +75,19 @@ impl ValidatorError {
 
     pub fn to_processor_error(&self) -> camel_component_api::CamelError {
         camel_component_api::CamelError::ProcessorError(self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_variant_preserves_source_chain() {
+        let inner = std::io::Error::other("socket closed");
+        let err = ValidatorError::transport_with_source("rpc failed", inner);
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some());
+        assert!(source.unwrap().to_string().contains("socket closed"));
     }
 }

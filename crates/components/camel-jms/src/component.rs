@@ -1829,8 +1829,8 @@ mod tests {
 
         let guard = pool.bridge_create_lock.lock().await;
         let total_count = pool.slots.len();
-        assert!(total_count >= pool.max_bridges as usize);
-        let result = if total_count >= pool.max_bridges as usize {
+        assert!(total_count >= pool.max_bridges);
+        let result = if total_count >= pool.max_bridges {
             Err(CamelError::Config(format!(
                 "JMS bridge limit reached: {total_count} bridge(s) >= max_bridges ({})",
                 pool.max_bridges

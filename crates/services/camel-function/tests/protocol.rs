@@ -46,10 +46,10 @@ impl DenoRunner {
     async fn wait_for_health(&self, timeout: Duration) {
         let start = std::time::Instant::now();
         loop {
-            if let Ok(resp) = self.client.get(self.url("/health")).send().await {
-                if resp.status().is_success() {
-                    return;
-                }
+            if let Ok(resp) = self.client.get(self.url("/health")).send().await
+                && resp.status().is_success()
+            {
+                return;
             }
             if start.elapsed() > timeout {
                 panic!("runner did not become healthy within {:?}", timeout);

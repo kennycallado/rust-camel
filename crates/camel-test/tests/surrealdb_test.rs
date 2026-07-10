@@ -854,7 +854,7 @@ async fn producer_relate_body_and_header_carry_edge_id() {
 
     let body_id = body
         .get("id")
-        .and_then(|v| id_as_string(v))
+        .and_then(id_as_string)
         .expect("body.id must be present as a RecordId");
 
     // The edge record lives in the `knows` table, never the source/target.
@@ -1125,7 +1125,7 @@ async fn consumer_live_receives_notifications() {
         .expect("define table");
 
     // The live consumer route uses ws:// protocol (validated by component).
-    let live_uri = format!("surrealdb:live?datasource=test&table=events");
+    let live_uri = "surrealdb:live?datasource=test&table=events";
 
     let h = CamelTestContext::builder()
         .with_mock()
@@ -1135,7 +1135,7 @@ async fn consumer_live_receives_notifications() {
         .build()
         .await;
 
-    let live_route = RouteBuilder::from(live_uri.as_str())
+    let live_route = RouteBuilder::from(live_uri)
         .to("mock:live-events")
         .route_id("surrealdb-live-test")
         .build()

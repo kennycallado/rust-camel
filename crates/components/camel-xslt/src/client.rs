@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_xslt_cache_does_not_grow_beyond_max() {
-        let mut cache = StylesheetCache::with_max_entries(3);
+        let cache = StylesheetCache::with_max_entries(3);
         cache.insert("a", stylesheet_a());
         cache.insert("b", stylesheet_b());
         cache.insert("c", stylesheet_c());

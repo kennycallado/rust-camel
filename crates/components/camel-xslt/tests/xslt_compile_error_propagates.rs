@@ -1,7 +1,3 @@
-use camel_component_api::test_support::PanicRuntimeObservability;
-fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-    std::sync::Arc::new(PanicRuntimeObservability)
-}
 use async_trait::async_trait;
 use camel_api::{Exchange, Message, body::Body};
 use camel_component_api::{Component, NoOpComponentContext, ProducerContext, RuntimeObservability};

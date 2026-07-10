@@ -425,7 +425,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // Fill the pipeline channel so bridge.send() will block
-        let _blocking_env = pipeline_tx.send(make_envelope("blocker")).await.unwrap();
+        pipeline_tx.send(make_envelope("blocker")).await.unwrap();
 
         let (stamp_tx, mut bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel);
 

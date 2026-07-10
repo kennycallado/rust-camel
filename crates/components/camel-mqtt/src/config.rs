@@ -276,6 +276,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn endpoint_config_rejects_manual_ack_qos1_clean_session() {
         let mut cfg = MqttEndpointConfig::default();
         cfg.broker_name = "primary".to_string();
@@ -286,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn endpoint_config_allows_manual_ack_qos1_no_clean_session() {
         let mut cfg = MqttEndpointConfig::default();
         cfg.broker_name = "primary".to_string();
@@ -296,6 +298,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn endpoint_config_rejects_keep_alive_exceeds_u16() {
         let mut cfg = MqttEndpointConfig::default();
         cfg.broker_name = "primary".to_string();
@@ -308,6 +311,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn endpoint_config_accepts_normal_keep_alive_range() {
         let mut cfg = MqttEndpointConfig::default();
         cfg.broker_name = "primary".to_string();

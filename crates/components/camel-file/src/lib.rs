@@ -2888,8 +2888,7 @@ mod tests {
         // Drain remaining chunks — the stream should produce an error after EOF
         let mut got_error = false;
         while let Some(result) = stream.next().await {
-            if result.is_err() {
-                let err = result.unwrap_err();
+            if let Err(err) = result {
                 let msg = err.to_string();
                 assert!(
                     msg.contains("file modified during read"),

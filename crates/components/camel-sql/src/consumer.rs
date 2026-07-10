@@ -1105,6 +1105,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
         tokio::spawn(async move {
+            #[allow(clippy::never_loop)]
             while let Some(env) = rx.recv().await {
                 assert!(env.exchange.error.is_some(), "exchange must carry error");
                 if let Some(reply_tx) = env.reply_tx {
@@ -1362,6 +1363,7 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<ExchangeEnvelope>(8);
         tokio::spawn(async move {
+            #[allow(clippy::never_loop)]
             while let Some(env) = mpsc_rx.recv().await {
                 if let Some(reply_tx) = env.reply_tx {
                     let _ = reply_tx.send(Ok(env.exchange.clone()));

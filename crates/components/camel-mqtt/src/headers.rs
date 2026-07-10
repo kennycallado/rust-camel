@@ -103,6 +103,6 @@ mod tests {
     fn build_exchange_no_packet_id_for_qos0() {
         let publish = make_publish(QoS::AtMostOnce, 0);
         let exchange = build_exchange(&publish, "camel-route-a1b2c3");
-        assert!(exchange.input.headers.get(CAMEL_MQTT_PACKET_ID).is_none());
+        assert!(!exchange.input.headers.contains_key(CAMEL_MQTT_PACKET_ID));
     }
 }

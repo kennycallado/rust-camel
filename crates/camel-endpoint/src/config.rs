@@ -287,6 +287,7 @@ mod derive_tests {
     #[derive(Debug, Clone, UriConfig)]
     #[uri_scheme = "booltest"]
     struct BoolCaseConfig {
+        #[allow(dead_code)]
         name: String,
         #[uri_param]
         flag: Option<bool>,
@@ -295,6 +296,7 @@ mod derive_tests {
     #[derive(Debug, Clone, UriConfig)]
     #[uri_scheme = "booltest2"]
     struct BoolDefaultConfig {
+        #[allow(dead_code)]
         name: String,
         #[uri_param(default = "false")]
         enabled: bool,

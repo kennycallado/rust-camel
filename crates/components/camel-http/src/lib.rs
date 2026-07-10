@@ -3773,6 +3773,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_http_consumer_enforces_max_response_body_for_bytes() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
@@ -3824,6 +3825,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_http_consumer_enforces_max_response_body_for_json() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
@@ -3876,6 +3878,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_http_consumer_enforces_max_response_body_for_xml() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
@@ -3928,6 +3931,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_http_consumer_does_not_enforce_max_response_body_for_stream() {
         use camel_component_api::{
             CamelError, ConsumerContext, ExchangeEnvelope, StreamBody, StreamMetadata,
@@ -3995,6 +3999,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_integration_single_consumer_round_trip() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
@@ -4055,6 +4060,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_integration_two_consumers_shared_port() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
@@ -4129,6 +4135,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_integration_unregistered_path_returns_404() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
@@ -6111,6 +6118,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::await_holding_lock)]
     async fn consumer_tls_handshake_roundtrip() {
         use camel_component_api::test_support::tls;
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
@@ -6188,6 +6196,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::await_holding_lock)]
     async fn consumer_tls_rejects_client_without_ca() {
         use camel_component_api::test_support::tls;
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};

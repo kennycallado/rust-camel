@@ -1,7 +1,3 @@
-use camel_component_api::test_support::PanicRuntimeObservability;
-fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
-    std::sync::Arc::new(PanicRuntimeObservability)
-}
 #[tokio::test(flavor = "multi_thread")]
 async fn yaml_route_validate_step_works_end_to_end() {
     use camel_component_api::{Body, Exchange, Message};

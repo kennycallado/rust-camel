@@ -307,6 +307,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn consumer_validate_accepts_valid_config() {
         let mut config = MqttEndpointConfig::default();
         config.broker_name = "local".to_string();

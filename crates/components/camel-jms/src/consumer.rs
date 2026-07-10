@@ -834,7 +834,6 @@ mod tests {
             let result: Result<(), ()> = Err(());
             match result {
                 Ok(_) => {
-                    attempt = 0;
                     break;
                 }
                 Err(_) => {

@@ -211,7 +211,7 @@ mod tests {
             CamelError::ProcessorError("x".to_string()),
             CamelError::ProcessorErrorWithSource(
                 "x".to_string(),
-                Arc::new(std::io::Error::new(std::io::ErrorKind::Other, "inner")),
+                Arc::new(std::io::Error::other("inner")),
             ),
             CamelError::TypeConversionFailed("x".to_string()),
             CamelError::InvalidUri("x".to_string()),
@@ -394,7 +394,7 @@ mod variant_name_tests {
             (
                 CamelError::ProcessorErrorWithSource(
                     "x".into(),
-                    Arc::new(std::io::Error::new(std::io::ErrorKind::Other, "y")),
+                    Arc::new(std::io::Error::other("y")),
                 ),
                 "ProcessorError", // aliased
             ),

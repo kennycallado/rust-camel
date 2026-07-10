@@ -292,7 +292,6 @@ impl Component for XsltComponent {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use camel_component_api::NetworkRetryPolicy;
     use std::time::Duration;
 

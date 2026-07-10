@@ -468,7 +468,6 @@ mod retryable_step_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BoxProcessor;
     use crate::CamelError;
     use std::time::Duration;
 

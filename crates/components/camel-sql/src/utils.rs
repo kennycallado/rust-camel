@@ -174,10 +174,7 @@ mod tests {
     #[test]
     fn is_not_retryable_tls() {
         // TLS errors are permanent (certificate issues)
-        let err = sqlx::Error::Tls(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "certificate error",
-        )));
+        let err = sqlx::Error::Tls(Box::new(std::io::Error::other("certificate error")));
         assert!(!is_retryable_sqlx_error(&err));
     }
 
@@ -224,6 +221,7 @@ mod tests {
     /// Minimal mock of sqlx's DatabaseError trait for unit-testing classification.
     struct MockDbError {
         message: String,
+        #[allow(dead_code)]
         code: Option<Box<dyn std::fmt::Display + Send + Sync>>,
     }
 

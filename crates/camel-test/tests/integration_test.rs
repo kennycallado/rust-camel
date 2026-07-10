@@ -8,13 +8,11 @@
 
 use camel_api::Value;
 use camel_api::aggregator::AggregatorConfig;
-use camel_api::body::Body;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_file::FileComponent;
 use camel_component_http::HttpComponent;
 use camel_component_log::LogComponent;
-use camel_dsl;
 use camel_test::CamelTestContext;
 
 // ---------------------------------------------------------------------------

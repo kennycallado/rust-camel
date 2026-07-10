@@ -458,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)]
     fn test_correlation_strategy_fn_clone_shares_same_arc() {
         let f: Arc<dyn Fn(&Exchange) -> Option<String> + Send + Sync> =
             Arc::new(|_| Some("shared".to_string()));
