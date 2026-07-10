@@ -29,7 +29,7 @@ pub use error::CxfError;
 pub use health::CxfHealthCheck;
 pub use pool::{BridgeSlot, BridgeState, CxfBridgePool};
 
-pub const BRIDGE_VERSION: &str = "0.3.0";
+pub const BRIDGE_VERSION: &str = "0.4.0";
 
 pub mod proto {
     tonic::include_proto!("cxf_bridge");
