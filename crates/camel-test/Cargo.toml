@@ -83,7 +83,7 @@ zip.workspace = true
 camel-bridge.workspace = true
 rcgen = { workspace = true }
 tonic = { workspace = true }
-rustls = { version = "0.23", features = ["ring"] }
+rustls.workspace = true
 
 [features]
 integration-tests = [

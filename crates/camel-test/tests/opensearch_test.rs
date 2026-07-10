@@ -9,6 +9,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::install_crypto_provider;
 
 use std::time::Duration;
 
@@ -144,6 +145,7 @@ async fn count_documents(url: &str, index: &str) -> u64 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_index_operation() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -200,6 +202,7 @@ async fn opensearch_index_operation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_search_operation() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -263,6 +266,7 @@ async fn opensearch_search_operation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_get_and_delete() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -344,6 +348,7 @@ async fn opensearch_get_and_delete() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_bulk_operation() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -400,6 +405,7 @@ async fn opensearch_bulk_operation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_update_operation() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -492,6 +498,7 @@ async fn opensearch_update_operation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_multiget_operation() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -557,6 +564,7 @@ async fn opensearch_multiget_operation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_header_operation_override_delete() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -634,6 +642,7 @@ async fn opensearch_header_operation_override_delete() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_index_without_id() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -696,6 +705,7 @@ async fn opensearch_index_without_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_invalid_operation_goes_to_error() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -734,6 +744,7 @@ async fn opensearch_invalid_operation_goes_to_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_get_missing_id_goes_to_error() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -787,6 +798,7 @@ async fn opensearch_get_missing_id_goes_to_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_delete_missing_id_goes_to_error() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -840,6 +852,7 @@ async fn opensearch_delete_missing_id_goes_to_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_invalid_host_goes_to_error() {
+    install_crypto_provider();
     let h = CamelTestContext::builder()
         .with_timer()
         .with_mock()
@@ -887,6 +900,7 @@ async fn opensearch_invalid_host_goes_to_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_auth_username_password_in_uri() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;
@@ -938,6 +952,7 @@ async fn opensearch_auth_username_password_in_uri() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_tls_scheme_goes_to_error_without_tls_server() {
+    install_crypto_provider();
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
     let url = get_opensearch_url(&container).await;

@@ -9,6 +9,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::install_crypto_provider;
 
 use camel_api::Value;
 use camel_api::error_handler::ErrorHandlerConfig;
@@ -38,6 +39,7 @@ async fn get_connection_string(container: &ContainerAsync<Redis>) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_string_commands() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
@@ -96,6 +98,7 @@ async fn redis_string_commands() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_list_commands() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
@@ -154,6 +157,7 @@ async fn redis_list_commands() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_hash_commands() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
@@ -213,6 +217,7 @@ async fn redis_hash_commands() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_set_commands() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
@@ -271,6 +276,7 @@ async fn redis_set_commands() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_pubsub_producer() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
@@ -329,6 +335,7 @@ async fn redis_pubsub_producer() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_consumer_queue_mode() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
@@ -397,6 +404,7 @@ async fn redis_consumer_queue_mode() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_consumer_blpop_reads_left_side_first() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
@@ -481,6 +489,7 @@ async fn redis_consumer_blpop_reads_left_side_first() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_consumer_brpop_reads_right_side_first() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
@@ -569,6 +578,7 @@ async fn redis_consumer_brpop_reads_right_side_first() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn redis_consumer_pubsub_mode() {
+    install_crypto_provider();
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 

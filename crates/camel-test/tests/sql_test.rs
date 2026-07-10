@@ -9,6 +9,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::install_crypto_provider;
 
 use std::io::Write;
 
@@ -89,6 +90,7 @@ async fn setup_test_table(pool: &AnyPool, table_name: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_select() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -160,6 +162,7 @@ async fn producer_select() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_insert() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -223,6 +226,7 @@ async fn producer_insert() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_update() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -290,6 +294,7 @@ async fn producer_update() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_delete() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -356,6 +361,7 @@ async fn producer_delete() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_select_one() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -418,6 +424,7 @@ async fn producer_select_one() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_batch() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -482,6 +489,7 @@ async fn producer_batch() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_noop() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -555,6 +563,7 @@ async fn producer_noop() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_polling() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -622,6 +631,7 @@ async fn consumer_polling() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_on_consume() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -685,6 +695,7 @@ async fn consumer_on_consume() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_empty_result() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -737,6 +748,7 @@ async fn consumer_empty_result() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_on_consume_failed() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -796,6 +808,7 @@ async fn consumer_on_consume_failed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_empty_result_routed() {
+    install_crypto_provider();
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -934,6 +947,7 @@ wait $PG_PID
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_ssl_connection_roundtrip() {
+    install_crypto_provider();
     let (_container, conn_str) = setup_postgres_tls_container().await;
 
     // Verify SSL handshake via direct PgPool (bypasses `any` driver)

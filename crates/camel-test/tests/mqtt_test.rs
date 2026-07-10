@@ -6,6 +6,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::install_crypto_provider;
 
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_mqtt::MqttComponent;
@@ -38,6 +39,7 @@ fn mqtt_component_for(host_port: &str) -> MqttComponent {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn mqtt_producer_publishes_without_error() {
+    install_crypto_provider();
     let (_container, host_port) = shared_mosquitto().await;
 
     let h = CamelTestContext::builder()
@@ -89,6 +91,7 @@ async fn mqtt_producer_publishes_without_error() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn mqtt_consumer_receives_published_message() {
+    install_crypto_provider();
     let (_container, host_port) = shared_mosquitto().await;
 
     let h = CamelTestContext::builder()

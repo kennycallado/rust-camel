@@ -9,6 +9,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::install_crypto_provider;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -182,6 +183,7 @@ async fn wait_for_mock_exchanges(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_create() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
     let h = setup_harness(&endpoint).await;
@@ -230,6 +232,7 @@ async fn producer_create() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_select_one() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -287,6 +290,7 @@ async fn producer_select_one() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_select_all() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -346,6 +350,7 @@ async fn producer_select_all() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_query() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -408,6 +413,7 @@ async fn producer_query() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_update() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -461,6 +467,7 @@ async fn producer_update() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_delete() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -508,6 +515,7 @@ async fn producer_delete() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_upsert() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -577,6 +585,7 @@ async fn producer_upsert() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_patch() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -640,6 +649,7 @@ async fn producer_patch() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_run() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -703,6 +713,7 @@ async fn producer_run() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_relate() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -771,6 +782,7 @@ async fn producer_relate() {
 /// or a `{"tb":..,"id":..}` object.
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_relate_body_and_header_carry_edge_id() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -873,6 +885,7 @@ async fn producer_relate_body_and_header_carry_edge_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn vector_search_via_producer() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -948,6 +961,7 @@ async fn vector_search_via_producer() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn vector_store_via_producer() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -1014,6 +1028,7 @@ async fn vector_store_via_producer() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn polling_consumer_select() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -1056,6 +1071,7 @@ async fn polling_consumer_select() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn polling_consumer_returns_none_when_empty() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -1095,6 +1111,7 @@ async fn polling_consumer_returns_none_when_empty() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_live_receives_notifications() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let db = direct_client(&endpoint).await;
 
@@ -1186,6 +1203,7 @@ async fn consumer_live_receives_notifications() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_rejects_http_scheme() {
+    install_crypto_provider();
     use std::sync::Mutex;
 
     struct HttpOnlyCatalog {
@@ -1251,6 +1269,7 @@ async fn live_rejects_http_scheme() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn datasource_health_check() {
+    install_crypto_provider();
     let (_container, endpoint) = start_surrealdb().await;
     let config = make_datasource_config(&endpoint);
 
