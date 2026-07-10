@@ -7,7 +7,7 @@ package camel:plugin;
 
 /// Host-provided capabilities for guest-driven sources.
 interface source-host {
-    use types.{wasm-exchange, wasm-error};
+    use types.{wasm-exchange, wasm-error, stream-body-handle};
 
     /// Host-owned HTTP listener handle. Created by the host when
     /// the guest requests an http-listener capability in configure().
@@ -18,7 +18,7 @@ interface source-host {
         method: string,
         path: string,
         headers: list<tuple<string, string>>,
-        body: list<u8>,
+        body: stream-body-handle,
     }
 
     /// Specification for an HTTP listener capability request.
@@ -51,16 +51,22 @@ interface source-host {
         stopped,
     }
 
-    /// Blocking accept — returns the next HTTP request, or none if cancelled.
-    accept-http: func(listener: borrow<http-listener>)
+    /// Accept the next HTTP request, or none if cancelled. Async: the guest
+    /// `await`s, yielding back to the host until a request arrives (or the run
+    /// is cancelled). The body is a `stream-body-handle` — the guest reads
+    /// incrementally via `stream<u8>.read`, removing the materialization cap.
+    accept-http: async func(listener: borrow<http-listener>)
         -> result<option<http-request>, wasm-error>;
 
-    /// Push an exchange into the pipeline. Blocks on backpressure.
-    /// Returns Stopped if the host is shutting down.
-    submit-exchange: func(exchange: wasm-exchange)
+    /// Push an exchange into the pipeline. Returns once the pipeline accepts
+    /// the envelope (before full body drain). The guest MUST keep `run` alive
+    /// while a submitted body stream is still draining; the stream's terminal
+    /// future resolves when the body finished.
+    submit-exchange: async func(exchange: wasm-exchange)
         -> result<submit-outcome, wasm-error>;
 
-    /// Check if the host has cancelled the run loop.
+    /// Check if the host has cancelled the run loop. Stays sync — a quick
+    /// peek that must not yield (called in tight guest loops).
     is-cancelled: func() -> bool;
 }
 
@@ -73,5 +79,5 @@ world source {
     export configure: func(config: list<tuple<string, string>>)
         -> result<source-plan, wasm-error>;
 
-    export run: func(listener: borrow<http-listener>) -> result<_, wasm-error>;
+    export run: async func(listener: borrow<http-listener>) -> result<_, wasm-error>;
 }

@@ -174,6 +174,12 @@ impl From<crate::bean_bindings::camel::plugin::types::WasmError> for CamelError 
     }
 }
 
+impl From<crate::source_bindings::camel::plugin::types::WasmError> for CamelError {
+    fn from(err: crate::source_bindings::camel::plugin::types::WasmError) -> Self {
+        map_source_error(err).into()
+    }
+}
+
 /// Map a WIT bindings [`plugin::WasmError`] to the canonical crate-level [`WasmError`].
 ///
 /// Both the `call_process` and `process_streaming_exchange` paths encounter
@@ -203,6 +209,23 @@ pub fn map_bean_error(
         BeanWasmError::TypeConversion(s) => WasmError::TypeConversion(s),
         BeanWasmError::Io(s) => WasmError::Io(s),
         BeanWasmError::Timeout => WasmError::GuestPanic("guest timeout".into()),
+    }
+}
+
+/// Map a source-world WIT `WasmError` to the canonical crate-level [`WasmError`].
+///
+/// Mirrors [`map_plugin_error`] for the source binding namespace. Needed so the
+/// submit-exchange drain (`drain_guest_stream`) can map the source world's
+/// terminal-future error into a `CamelError` via `E: Into<CamelError>`.
+pub fn map_source_error(
+    wasm_err: crate::source_bindings::camel::plugin::types::WasmError,
+) -> WasmError {
+    use crate::source_bindings::camel::plugin::types::WasmError as SourceWasmError;
+    match wasm_err {
+        SourceWasmError::ProcessorError(s) => WasmError::GuestPanic(s),
+        SourceWasmError::TypeConversion(s) => WasmError::TypeConversion(s),
+        SourceWasmError::Io(s) => WasmError::Io(s),
+        SourceWasmError::Timeout => WasmError::GuestPanic("guest timeout".into()),
     }
 }
 

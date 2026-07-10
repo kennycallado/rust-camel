@@ -601,11 +601,11 @@ The guest module's `init()` function receives the `[<name>.config]` pairs as sor
 
 > **Migration** — Previously the YAML form accepted a `config:` block per-route, which was silently dropped. As of ADR-0014 §4 closure (bd rc-0te), per-route `config` is rejected with a hard error. Move `config:` keys to `[security.policies.wasm.<name>.config]` in Camel.toml.
 
-## WASM Source Components
+## WASM Source Components (async)
 
 A WASM **source** is a 3rd-party component that acts as an inbound source — a webhook receiver or HTTP listener. Unlike a processor (host-driven `process()` calls), the source guest **owns its consumption loop**: it declares what it needs up front, the host grants an `http-listener` resource, and the guest then drains requests and pushes exchanges into the pipeline.
 
-The host adapter is `WasmSourceConsumer`, which implements the `Consumer` trait and bridges the guest's synchronous `run()` loop to the async pipeline via capacity-1 tokio channels.
+The host adapter is `WasmSourceConsumer`, which implements the `Consumer` trait. The guest's async `run()` export is driven under `Store::run_concurrent` on a tokio task; its async host imports (`accept-http`, `submit-exchange`) receive an `&Accessor` and use async channel ops. No dedicated OS thread or `spawn_blocking` is needed — the source runs fully on the async runtime.
 
 ### URI Format
 
@@ -633,17 +633,60 @@ The `source` world uses a negotiate-then-run handshake:
 
 1. **`configure(config) -> source-plan`** — the host passes the URI query params (plus any registered config). The guest returns a `source-plan` declaring the capability it needs and its concurrency model.
 2. **Host grants the capability** — the plan must request exactly one `http-listener` capability. The host creates an `http-listener` resource handle and binds the TCP listener.
-3. **`run(listener) -> result`** — the host hands the listener to the guest, which owns a blocking loop calling the host imports below until cancelled or stopped.
+3. **`run(listener) -> result`** — async export. The host hands the listener to the guest, which owns an async loop awaiting `accept-http` / `submit-exchange` until cancelled or stopped. Driven under `Store::run_concurrent` on a tokio task.
 
 ### Host capabilities (guest imports)
 
 | Function | Signature | Effect |
 |----------|-----------|--------|
-| `accept-http` | `(listener: borrow<http-listener>) -> result<option<http-request>, wasm-error>` | Blocking; returns the next inbound HTTP request, or `none` when cancelled (channel closed). |
-| `submit-exchange` | `(exchange: wasm-exchange) -> result<submit-outcome, wasm-error>` | Pushes an exchange into the pipeline. Blocks on backpressure; returns `stopped` if the host is shutting down. |
-| `is-cancelled` | `() -> bool` | True when the host has cancelled the run loop (e.g. route shutdown). |
+| `accept-http` | `async (listener: borrow<http-listener>) -> result<option<http-request>, wasm-error>` | Async; awaits the next inbound HTTP request, yielding back to the host event loop until one arrives (or `none` on cancel). The body is a `stream-body-handle` — the guest reads incrementally via `stream<u8>.read`, removing the old 10 MiB materialization cap. |
+| `submit-exchange` | `async (exchange: wasm-exchange) -> result<submit-outcome, wasm-error>` | Async; pushes an exchange into the pipeline. Returns **before full body drain** (fire-and-return) when the body carries a `stream<u8>`. Returns `stopped` if the host is shutting down. See below. |
+| `is-cancelled` | `() -> bool` | Sync — a quick peek that must not yield (called in tight guest loops). True when the host has cancelled the run loop. |
 
 The `http-listener` resource itself is host-owned and has no guest-callable methods — it is merely the capability handle passed to `accept-http`.
+
+### Fire-and-return `submit-exchange`
+
+When the body is a `WasmBody::Stream`, `submit-exchange` does NOT wait for the host to drain it before returning:
+
+1. The import extracts the live `StreamReader`/`FutureReader` from the guest's exchange.
+2. It builds the native `Exchange` with an empty body placeholder.
+3. It registers an `AccessorTask` (via `Accessor::spawn`) on the **same** event loop that drives `run`. This task drains the guest's stream into a bounded chunk channel concurrently with the guest fiber.
+4. It attaches a lazy `Body::Stream` (backed by the chunk channel) to the native exchange, sends it into the pipeline, and returns immediately.
+
+The pipeline receives the exchange right away; the body stream drains in the background as the downstream reads. Backpressure applies through the bounded chunk channel. If the guest's stream terminates with an error, the downstream `Body::Stream` reader observes it as a stream error.
+
+> **Why `Accessor::spawn` and not `tokio::spawn`?** The plugin/bean return path uses `spawn_return_drain` which moves the store and opens a fresh `run_concurrent`. The source world's `run` is already inside `run_concurrent` — opening a second one would panic (`check_recursive_run`). `Accessor::spawn` registers the drain on the same event loop, where it progresses alongside the guest fiber.
+
+### Guest `spawn_local` rendezvous contract
+
+The component-model `stream<u8>` is a **rendezvous channel with no buffer**: `write_all().await` completes only when the host performs a matching read. The host registers its drain (via `Accessor::spawn`) *after* `submit-exchange` returns, and the drain only progresses while `run_concurrent` polls the event loop. This creates a required guest pattern:
+
+- The guest MUST `spawn_local` the stream writer **before** calling `submit-exchange`, passing only the reader ends.
+- The guest MUST keep `run` alive while the stream drains — the event loop must keep polling so the spawned drain progresses.
+- The writer MUST drop the stream writer (EOF) **before** resolving the terminal future (same load-bearing ordering as §"Return-path streaming").
+
+Writing the stream inline and then calling `submit-exchange` **deadlocks**: the write waits for the host to read, the host waits for `submit-exchange` to return, `submit-exchange` waits for the write.
+
+```rust
+// Guest: emit streaming body, then submit-exchange
+let (mut writer, reader) = wit_stream::new::<u8>();
+let (future_writer, future_reader) = wit_future::new::<Result<(), WasmError>>(|| Ok(()));
+
+wit_bindgen::spawn_local(async move {
+    writer.write_all(data.to_vec()).await.ok();
+    drop(writer);                                // EOF first
+    let _ = future_writer.write(Ok(())).await;   // terminal last
+});
+
+source_host::submit_exchange(WasmExchange {
+    input: WasmMessage {
+        body: WasmBody::Stream(StreamBodyHandle {
+            r#stream: reader,
+            terminal: future_reader, .. }),
+        .. },
+    .. }).await?;
+```
 
 ### Concurrency model
 
@@ -652,11 +695,30 @@ The `http-listener` resource itself is host-owned and has no guest-callable meth
 - **`sequential`** — supported. The host drains the guest strictly one request at a time through capacity-1 channels.
 - **`concurrent(max)`** — **not implemented**. Rejected at `start()` with an explicit error rather than silently degraded, because degrading `concurrent(N)` to sequential would violate the guest's declared contract.
 
+### No no-progress watchdog
+
+The source `run()` loop legitimately parks in `accept-http` for arbitrary durations between requests. A fixed no-progress timeout would kill idle webhook sources. Existing safeguards cover all failure modes:
+
+- **Epoch interruption** — deadline `1` is a stop tripwire; `stop()` calls `engine.increment_epoch()` which traps a CPU-bound guest loop.
+- **Cancel-token select!** — each async import races against the cancel token, unblocking park-on-stop promptly.
+- **Route-level supervision** — catches "guest hangs forever" at the route manager level.
+
 ### Limitations
 
 - **Sequential mode only** — `concurrent(N)` plans are rejected (see above).
-- **HTTP transport only** — the single capability granted is `http-listener`; there is no Kafka/queue/gRPC source yet.
-- **Synchronous bindings (WASI 0.2)** — the guest targets `wasm32-wasip2` and its host imports block on tokio channels, so the guest `run()` loop runs on a dedicated OS thread (`spawn_blocking`), off the async runtime.
+- **HTTP transport only** — the single capability granted is `http-listener`; no Kafka/queue/gRPC source yet.
+- **Guest `spawn_local` required for streaming exchanges** — the guest must enable the `async-spawn` feature and use `wit_bindgen::spawn_local` when submitting streaming bodies.
+
+### Architecture: source vs plugin return-path streaming
+
+Both the source world and the plugin/bean return path stream data guest→host, but the mechanics differ:
+
+| Aspect | Plugin/bean return path | Source world |
+|--------|------------------------|--------------|
+| Drain model | `spawn_return_drain` — moves store, opens fresh `run_concurrent` | `Accessor::spawn` — registers on the same event loop |
+| Guest export | Sync `process()` / `invoke()` returning a `WasmBody::Stream` | Async `run()` that stays alive while the stream drains |
+| No-progress watchdog | Active (configurable timeout via `no_progress_timeout`) | None (idle sources survive indefinitely) |
+| Termination | Watchdog or cancel-token | Cancel-token + epoch tripwire |
 
 For a working end-to-end example, see [`examples/wasm-source-webhook/`](../../examples/wasm-source-webhook/).
 

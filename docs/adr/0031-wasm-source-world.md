@@ -57,6 +57,25 @@ Add a 4th WIT world `source` using the resource negotiation pattern (Approach 3)
 - `path_filter` wired but minimally tested (axum routes on it, no filter-specific integration test).
 - Guest crash variant uses config toggle (`crash=run`), not a separate .wasm artifact.
 
+## Amendment (rc-dn13, 2026-07-09)
+
+The "Sync bindings, not async" lesson above is **superseded**. rc-dn13 migrates the source
+world to async (`run`/`accept-http`/`submit-exchange` are now `async func` in WIT). The guest
+is driven via `Store::run_concurrent` + `call_run_async` on a tokio task (no `spawn_blocking`).
+Host imports use the `HostWithStore` pattern (receive `&Accessor`, `.await` outside `with`).
+See `docs/superpowers/specs/2026-07-08-wasm-source-async-stream-design.md` (local, gitignored).
+
+### Body streaming & response timing
+
+The body is no longer materialized via `to_bytes` before the response is sent. The axum
+handler now returns **202 Accepted** as soon as the request metadata is handed to the guest
+via the request channel; the body streams asynchronously afterward. This is inherent to the
+streaming shape — you cannot stream and wait for full receipt simultaneously. Mid-body
+connection drops surface as stream errors to the guest (the body channel receives an `Err`
+frame), not as HTTP-level failures to the client. A configurable
+`max_request_body_bytes` cap (default 10 MiB, matching the old `DEFAULT_MATERIALIZE_LIMIT`)
+restores the DoS backstop that the removed `to_bytes` path provided.
+
 ## References
 
 - bd `rc-g2kr` — spike ticket

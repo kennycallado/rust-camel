@@ -1,9 +1,9 @@
 //! WasmSourceConsumer — Consumer trait implementation for the `source` world.
 //!
-//! The guest IS the source: it owns a `run()` loop that calls host-provided
-//! `accept-http` / `submit-exchange`. The host bridges sync WASM calls to the
-//! async pipeline via bounded tokio channels, and uses channel close +
-//! epoch deadline for cancellation.
+//! The guest IS the source: it owns an async `run()` loop that awaits
+//! host-provided `accept-http` / `submit-exchange`. The host bridges the
+//! async guest to the pipeline via bounded tokio channels, and uses the
+//! cancel token (raced in each import) + epoch deadline for cancellation.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,14 +15,14 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{AsContextMut, Config, Engine, Store};
 
 use crate::config::WasmConfig;
 use crate::source_bindings::Source;
 use crate::source_bindings::camel::plugin::source_host::CapabilityRequest;
 use crate::source_host::{
-    HttpListenerHandle, SourceChannels, SourceHostState, add_to_linker, run_http_listener,
-    run_pipeline_bridge,
+    DEFAULT_MAX_REQUEST_BODY_BYTES, HttpListenerHandle, SourceChannels, SourceHostState,
+    add_to_linker, run_http_listener, run_pipeline_bridge,
 };
 
 /// Epoch deadline (in ticks) granted to the guest's `configure()` call.
@@ -71,10 +71,14 @@ impl WasmSourceConsumer {
 #[async_trait::async_trait]
 impl Consumer for WasmSourceConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-        // 1. Engine config: component model + async + epoch interruption
+        // 1. Engine config: component model + async + epoch interruption.
+        //    concurrency_support is REQUIRED for Store::run_concurrent /
+        //    call_run_async (async source world). Mirrors the plugin engine
+        //    (runtime.rs).
         let mut wasm_config = Config::new();
         wasm_config.wasm_component_model(true);
         wasm_config.epoch_interruption(true);
+        wasm_config.concurrency_support(true);
         let engine = Arc::new(
             Engine::new(&wasm_config)
                 .map_err(|e| CamelError::ProcessorError(format!("wasmtime engine: {e}")))?,
@@ -104,6 +108,7 @@ impl Consumer for WasmSourceConsumer {
                 request_rx: channels.request_rx,
                 exchange_tx: channels.exchange_tx,
                 cancel_token: cancel.clone(),
+                max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             },
         );
 
@@ -112,22 +117,34 @@ impl Consumer for WasmSourceConsumer {
         add_to_linker(&mut linker)
             .map_err(|e| CamelError::ProcessorError(format!("linker: {e}")))?;
 
-        // 8. Instantiate component (synchronous bindings — see source_bindings.rs)
-        let source = Source::instantiate(&mut store, &component, &linker)
+        // 7. Set a large epoch deadline before any guest code runs. With
+        // epoch_interruption(true) the store's default deadline is 0 (already
+        // expired); instantiate_async and configure both run guest WASM, so
+        // without this they trap immediately with "wasm trap: interrupt". No
+        // epoch ticker runs during setup, so a u64::MAX budget disables
+        // interruption for both calls. The run task later resets this to 1
+        // (a pure stop tripwire). Mirrors the plugin path (runtime.rs:175).
+        store.set_epoch_deadline(CONFIGURE_EPOCH_DEADLINE);
+
+        // 8. Instantiate component (async bindings — see source_bindings.rs).
+        let source = Source::instantiate_async(&mut store, &component, &linker)
+            .await
             .map_err(|e| CamelError::ProcessorError(format!("instantiate: {e}")))?;
 
         // 9. Call guest configure() → SourcePlan
         //
-        // The engine has epoch_interruption(true), so a store's default epoch
-        // deadline is 0 (expired). Any guest call — starting with the host
-        // lowering `configure`'s arguments via the guest's `cabi_realloc` —
-        // traps immediately unless a deadline is set first. configure() is a
-        // short, bounded setup call with no epoch ticker running yet, so a
-        // large fixed budget effectively disables interruption for this call.
-        store.set_epoch_deadline(CONFIGURE_EPOCH_DEADLINE);
-        let plan = source
-            .call_configure(&mut store, &self.guest_config)
-            .map_err(|e| CamelError::ProcessorError(format!("configure: {e}")))?
+        // configure() is a SYNC export (only run/accept-http/submit-exchange
+        // are async), but concurrency_support(true) forbids the sync
+        // `TypedFunc::call` path — so dispatch it via `call_async` on the
+        // underlying typed func. No async imports are needed during configure,
+        // so this stays out of run_concurrent. The large deadline set above
+        // covers it.
+        let (plan_result,) = source
+            .func_configure()
+            .call_async(&mut store, (self.guest_config.as_slice(),))
+            .await
+            .map_err(|e| CamelError::ProcessorError(format!("configure: {e}")))?;
+        let plan = plan_result
             .map_err(|e| CamelError::ProcessorError(format!("configure guest error: {e:?}")))?;
 
         // 10. Validate source-plan
@@ -201,21 +218,45 @@ impl Consumer for WasmSourceConsumer {
             }
         });
 
-        // 15. spawn_blocking for guest run() — THE CRITICAL STEP
+        // 15. Spawn the async guest run() loop on a tokio task — THE CRITICAL STEP.
         //
-        // The guest's synchronous run() loop calls host imports (accept-http,
-        // submit-exchange) that block on tokio channels via blocking_recv /
-        // blocking_send. Those calls are only legal off a tokio runtime worker.
+        // The guest's `run` export is async; its host imports (accept-http,
+        // submit-exchange) are async too. The whole thing is driven under
+        // `Store::run_concurrent`, which is what makes the accessor-based
+        // async imports dispatchable (concurrency_support(true) is required).
         //
-        // `spawn_blocking` provides exactly such a thread (the blocking pool is
-        // not part of the async scheduler). We call the SYNC `call_run`
-        // directly — no `block_on`, which would re-enter runtime context on
-        // this thread and make the blocking channel ops panic.
-        let run_handle = tokio::task::spawn_blocking(move || {
-            // Reset epoch deadline — one increment_epoch() from stop() traps the guest
+        // Epoch: deadline(1) is a pure stop tripwire. No epoch ticker runs
+        // during normal operation (each source consumer owns a private engine),
+        // so the deadline never advances until stop()'s single
+        // engine.increment_epoch(). That one increment traps a guest stuck in
+        // a CPU-bound loop; a guest parked in an import is unblocked first by
+        // the import's cancel_token select!.
+        //
+        // No watchdog: the source `run()` is an unbounded loop that
+        // legitimately parks in `accept-http` for arbitrary durations between
+        // requests. A fixed no-progress timeout would kill idle webhook
+        // sources. The existing safeguards cover all failure modes:
+        //   - Epoch interruption (deadline(1) + increment_epoch from stop())
+        //     catches CPU-bound guest loops.
+        //   - Cancel-token select! inside each import unblocks park-on-stop.
+        //   - Route-level supervision catches "guest hangs forever" at the
+        //     route manager level.
+        let run_handle = tokio::spawn(async move {
             store.set_epoch_deadline(1);
 
-            match source.call_run(&mut store, listener) {
+            // 3-layer result: run_concurrent Result< trappable Result<
+            // WIT Result > >. peel_concurrent flattens the outer two
+            // wasmtime::Error layers.
+            let result = crate::error::peel_concurrent(
+                store
+                    .as_context_mut()
+                    .run_concurrent(async |accessor| source.call_run(accessor, listener).await)
+                    .await,
+                |e| CamelError::ProcessorError(format!("guest trap: {e}")),
+                |e| CamelError::ProcessorError(format!("guest trap: {e}")),
+            );
+
+            match result {
                 Ok(Ok(())) => {
                     debug!("WASM source guest run() exited normally");
                     Ok(())
@@ -226,7 +267,7 @@ impl Consumer for WasmSourceConsumer {
                 }
                 Err(e) => {
                     warn!("WASM source guest trapped: {e}");
-                    Err(CamelError::ProcessorError(format!("guest trap: {e}")))
+                    Err(e)
                 }
             }
         });
@@ -250,16 +291,18 @@ impl Consumer for WasmSourceConsumer {
         }
 
         // The Runtime owns and monitors run_task via background_task_handle().
-        // stop() only drives cancellation; joining here races with that owner.
-        // (run_task is spawn_blocking and cannot be .abort()-ed anyway; the
-        // guest is cancelled via cancel-token channel close + epoch tick.)
-        let _ = self.run_task.take();
+        // If the Runtime has already taken the handle, run_task is None here
+        // and the Runtime is responsible for joining it. If we still own it
+        // (stop() called without background_task_handle, or a test path),
+        // join with a grace timeout and abort on timeout — dropping a
+        // JoinHandle only detaches the task (keeps it running forever).
+        let grace = std::time::Duration::from_secs(5);
+        if let Some(task) = self.run_task.take() {
+            join_or_abort(task, "source run", grace).await;
+        }
 
         // Join listener + bridge tasks. Graceful shutdown via the cancel token
-        // is raced against a timeout; on timeout we abort() the task — merely
-        // dropping a JoinHandle *detaches* it (keeps it running forever), which
-        // is not a deterministic stop. See join_or_abort.
-        let grace = std::time::Duration::from_secs(5);
+        // is raced against a timeout; on timeout we abort() the task.
         if let Some(task) = self.listener_task.take() {
             join_or_abort(task, "listener", grace).await;
         }
@@ -344,14 +387,50 @@ mod tests {
             Vec::new(),
             Arc::new(Mutex::new(camel_core::Registry::new())),
         );
-        consumer.run_task = Some(tokio::task::spawn_blocking(|| {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+        // Mirrors the real run task shape (tokio::spawn of an async future).
+        consumer.run_task = Some(tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             Ok(())
         }));
 
+        // Simulate the Runtime taking ownership of the run task handle.
+        // Once taken, stop() no longer sees run_task and must not wait for it.
+        let _runtime_owned = consumer.background_task_handle();
+
         tokio::time::timeout(std::time::Duration::from_millis(100), consumer.stop())
             .await
-            .expect("stop() must not wait for run_task; runtime owns that handle")
+            .expect("stop() must not wait for a runtime-owned run_task")
             .expect("stop() should succeed");
+    }
+
+    /// When stop() still owns the run task (Runtime hasn't taken it), it must
+    /// abort it after the grace timeout rather than detaching (leaking) it.
+    #[tokio::test]
+    async fn stop_aborts_owned_run_task_after_grace() {
+        let config = WasmConfig {
+            timeout_secs: 1,
+            ..WasmConfig::default()
+        };
+        let mut consumer = WasmSourceConsumer::new(
+            PathBuf::from("unused.wasm"),
+            config,
+            Vec::new(),
+            Arc::new(Mutex::new(camel_core::Registry::new())),
+        );
+        // A run task that never exits on its own — only abort will stop it.
+        consumer.run_task = Some(tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(())
+        }));
+
+        // stop() should abort the stuck task within the grace window (5s) +
+        // margin. Asserting 15s ceiling; the abort should fire at ~5s.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(15), consumer.stop()).await;
+        assert!(
+            result.is_ok(),
+            "stop() must abort a stuck run task within the grace window, not hang"
+        );
+        result.unwrap().expect("stop() should succeed");
     }
 }

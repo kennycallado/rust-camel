@@ -20,6 +20,8 @@ use wasmtime::component::{
 };
 
 use crate::bindings::camel::plugin::types::{StreamBodyHandle, WasmBody, WasmError};
+
+#[cfg(test)]
 use crate::runtime::WasmHostState;
 
 // ---------------------------------------------------------------------------
@@ -47,7 +49,7 @@ use crate::runtime::WasmHostState;
 ///
 /// `progress_notify` is pinged on every successfully shipped chunk so an
 /// external watchdog can observe forward progress.
-pub(crate) struct BoxStreamProducer {
+pub(crate) struct BoxStreamProducer<S> {
     /// The byte stream, taken out of the `Arc<Mutex<Option<BoxStream>>>`
     /// before construction. `None` means already exhausted.
     stream: Option<BoxStream<'static, Result<Bytes, CamelError>>>,
@@ -66,9 +68,11 @@ pub(crate) struct BoxStreamProducer {
     max_bytes: u64,
     /// Cumulative bytes produced so far.
     written: u64,
+    /// Phantom data for the host-state type parameter.
+    _marker: std::marker::PhantomData<S>,
 }
 
-impl BoxStreamProducer {
+impl<S> BoxStreamProducer<S> {
     /// Construct from the already-extracted byte stream and shared handles.
     ///
     /// `progress_notify` and `terminal_tx` are normally created by
@@ -88,6 +92,7 @@ impl BoxStreamProducer {
             cancel,
             max_bytes,
             written: 0,
+            _marker: std::marker::PhantomData,
         }
     }
 
@@ -101,14 +106,19 @@ impl BoxStreamProducer {
     }
 }
 
-impl StreamProducer<WasmHostState> for BoxStreamProducer {
+// SAFETY: Unpin is implemented unconditionally because BoxStreamProducer
+// does not perform pin-projection; all fields (including PhantomData<S>)
+// are safe to move after pinning regardless of S.
+impl<S> Unpin for BoxStreamProducer<S> {}
+
+impl<S: Send + 'static> StreamProducer<S> for BoxStreamProducer<S> {
     type Item = u8;
     type Buffer = VecBuffer<u8>;
 
     fn poll_produce<'a>(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        _store: StoreContextMut<'a, WasmHostState>,
+        _store: StoreContextMut<'a, S>,
         mut destination: Destination<'a, u8, VecBuffer<u8>>,
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
@@ -213,9 +223,15 @@ pub(crate) async fn extract_stream_body(
 /// which both readers need. Keeping the reader-creation (and its subtle
 /// terminal-error semantics around producer abandonment) in one place
 /// prevents the plugin and bean bindings from diverging.
+/// Build the wasmtime `StreamReader` + terminal `FutureReader` for a streaming
+/// body handle. Generic over the host-state type `S` and the accessor's
+/// "self" type `U` (the second `Accessor` parameter) so the same logic serves
+/// the plugin world (`Accessor<S, S>`), the bean world, and the source world
+/// (`Accessor<S, HasSelf<S>>` — async host imports receive the `HasSelf`
+/// wrapper for resource-method dispatch).
 #[allow(clippy::type_complexity)] // wasmtime reader generics are inherently nested
-fn build_stream_readers<E>(
-    accessor: &Accessor<WasmHostState>,
+fn build_stream_readers<E, S, U>(
+    accessor: &Accessor<S, U>,
     stream: BoxStream<'static, Result<Bytes, CamelError>>,
     cancel: CancellationToken,
     max_bytes: u64,
@@ -224,6 +240,8 @@ fn build_stream_readers<E>(
 ) -> wasmtime::Result<(StreamReader<u8>, FutureReader<Result<(), E>>)>
 where
     E: Send + Sync + 'static,
+    S: Send + 'static,
+    U: wasmtime::component::HasData + Send + 'static,
     E: wasmtime::component::Lower + wasmtime::component::Lift,
 {
     let (terminal_tx, terminal_rx) = oneshot::channel::<Option<String>>();
@@ -264,8 +282,8 @@ where
 /// Assemble a plugin-world [`WasmBody::Stream`] handle from an extracted byte
 /// stream. **Must be called inside `Store::run_concurrent`** — it borrows the
 /// [`Accessor`] needed to create the readers.
-pub(crate) fn assemble_stream_body(
-    accessor: &Accessor<WasmHostState>,
+pub(crate) fn assemble_stream_body<S: Send + 'static>(
+    accessor: &Accessor<S>,
     stream: BoxStream<'static, Result<Bytes, CamelError>>,
     metadata: &StreamMetadata,
     cancel: CancellationToken,
@@ -301,8 +319,8 @@ pub(crate) fn assemble_stream_body(
 /// `bean_bindings` namespace. The reader-creation logic is identical to
 /// [`assemble_stream_body`]; only the terminal-error type and the wrapper
 /// struct differ.
-pub(crate) fn assemble_stream_body_bean(
-    accessor: &Accessor<WasmHostState>,
+pub(crate) fn assemble_stream_body_bean<S: Send + 'static>(
+    accessor: &Accessor<S>,
     stream: BoxStream<'static, Result<Bytes, CamelError>>,
     metadata: &StreamMetadata,
     cancel: CancellationToken,
@@ -325,6 +343,51 @@ pub(crate) fn assemble_stream_body_bean(
         content_type: metadata.content_type.clone(),
         origin: metadata.origin.clone(),
     }))
+}
+
+/// Source-world twin of [`assemble_stream_body`].
+///
+/// The source world (`source_bindings`) is a separate `bindgen!` invocation
+/// from the plugin world, so its `StreamBodyHandle`/`WasmError` are distinct
+/// Rust types. Used by `accept_http` to mint a streaming body handle from
+/// the per-request body channel (host→guest direction).
+///
+/// Returns the `StreamBodyHandle` directly (not wrapped in `WasmBody`) because
+/// the source world's `http-request.body` field is typed `stream-body-handle`,
+/// not `wasm-body`.
+///
+/// Unlike the plugin/bean variants, the source path has no [`StreamMetadata`]
+/// (HTTP requests carry no size-hint / content-type / origin for the stream
+/// itself), so those fields are set to `None`.
+pub(crate) fn assemble_stream_body_source<S, U>(
+    accessor: &Accessor<S, U>,
+    stream: BoxStream<'static, Result<Bytes, CamelError>>,
+    cancel: CancellationToken,
+    max_bytes: u64,
+) -> wasmtime::Result<crate::source_bindings::camel::plugin::types::StreamBodyHandle>
+where
+    S: Send + 'static,
+    U: wasmtime::component::HasData + Send + 'static,
+{
+    use crate::source_bindings::camel::plugin::types::WasmError;
+    let progress_notify = Arc::new(Notify::new());
+    let (stream_reader, terminal_reader) = build_stream_readers(
+        accessor,
+        stream,
+        cancel,
+        max_bytes,
+        progress_notify,
+        WasmError::ProcessorError,
+    )?;
+    Ok(
+        crate::source_bindings::camel::plugin::types::StreamBodyHandle {
+            r#stream: stream_reader,
+            terminal: terminal_reader,
+            size_hint: None,
+            content_type: None,
+            origin: None,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -481,6 +544,7 @@ mod tests {
 
     /// Shared setup for poll_produce tests: create an Engine + Store with
     /// WasmHostState, a BoxStreamProducer, and return them plus a terminal_rx.
+    #[allow(clippy::type_complexity)]
     fn make_producer_store(
         stream: BoxStream<'static, Result<Bytes, CamelError>>,
         cancel: CancellationToken,
@@ -490,7 +554,7 @@ mod tests {
         wasmtime::Store<WasmHostState>,
         oneshot::Receiver<Option<String>>,
         Arc<Notify>,
-        BoxStreamProducer,
+        BoxStreamProducer<WasmHostState>,
     ) {
         use camel_core::Registry;
         use wasmtime::{Config, Engine, Store};

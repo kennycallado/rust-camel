@@ -27,7 +27,6 @@ use wasmtime::component::{
 };
 
 use crate::error::WasmError;
-use crate::runtime::WasmHostState;
 
 /// Default bounded-channel slot count for the drain → pipeline bridge.
 /// Bounds *in-flight chunks*, not total bytes (the watchdog bounds total bytes).
@@ -100,6 +99,28 @@ impl StreamReturnable<crate::bean_bindings::camel::plugin::types::WasmError>
     }
 }
 
+impl StreamReturnable<crate::source_bindings::camel::plugin::types::WasmError>
+    for crate::source_bindings::camel::plugin::types::WasmExchange
+{
+    fn take_stream(
+        &mut self,
+    ) -> Option<GuestStreamParts<crate::source_bindings::camel::plugin::types::WasmError>> {
+        use crate::source_bindings::camel::plugin::types::WasmBody;
+        // Source convention: the guest submits the body it wants pushed into
+        // the pipeline on input.body (matching the bean convention). The host
+        // import extracts the stream here and replaces the body with Empty.
+        let msg = &mut self.input;
+        if !matches!(msg.body, WasmBody::Stream(_)) {
+            return None;
+        }
+        if let WasmBody::Stream(handle) = std::mem::replace(&mut msg.body, WasmBody::Empty) {
+            Some((handle.r#stream, handle.terminal))
+        } else {
+            unreachable!()
+        }
+    }
+}
+
 /// Adapter turning a `mpsc::Receiver<DrainEvent>` into the inner `BoxStream`
 /// that `camel_api::StreamBody` wraps. Clean channel close = stream end;
 /// `DrainEvent::Error` = final `Err`. The caller wraps the result with
@@ -125,14 +146,15 @@ pub(crate) fn receiver_to_body_stream(
 /// successful chunk send, so a legitimately slow consumer (backpressure stall)
 /// does NOT false-trip the no-progress watchdog — only a truly wedged guest
 /// (no chunks flowing) trips it.
-pub(crate) struct ChannelConsumer {
+pub(crate) struct ChannelConsumer<S> {
     sender: PollSender<DrainEvent>,
     cancel: CancellationToken,
     progress: Arc<Notify>,
     receiver_gone: Arc<Notify>, // fired when poll_reserve sees the receiver dropped
+    _marker: std::marker::PhantomData<S>,
 }
 
-impl ChannelConsumer {
+impl<S> ChannelConsumer<S> {
     pub(crate) fn new(
         tx: mpsc::Sender<DrainEvent>,
         cancel: CancellationToken,
@@ -144,17 +166,23 @@ impl ChannelConsumer {
             cancel,
             progress,
             receiver_gone,
+            _marker: std::marker::PhantomData,
         }
     }
 }
 
-impl StreamConsumer<WasmHostState> for ChannelConsumer {
+// SAFETY: Unpin is implemented unconditionally because ChannelConsumer
+// does not perform pin-projection; all fields (including PhantomData<S>)
+// are safe to move after pinning regardless of S.
+impl<S> Unpin for ChannelConsumer<S> {}
+
+impl<S: Send + 'static> StreamConsumer<S> for ChannelConsumer<S> {
     type Item = u8;
 
     fn poll_consume(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        store: StoreContextMut<'_, WasmHostState>,
+        store: StoreContextMut<'_, S>,
         mut source: Source<'_, Self::Item>,
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
@@ -206,19 +234,21 @@ impl StreamConsumer<WasmHostState> for ChannelConsumer {
     }
 }
 
-/// Drive the guest's emitted stream to completion inside `run_concurrent`.
+/// Drive the guest's emitted stream to completion.
 /// Pipes the `StreamReader` into a [`ChannelConsumer`] and the terminal
 /// [`FutureReader`] into a [`TerminalFutureConsumer`]; on terminal `Err`,
 /// pushes `DrainEvent::Error` and closes.
 ///
-/// **Must be called inside `Store::run_concurrent`** — the reader
-/// is only drainable while the originating concurrent execution pumps.
+/// **Must be called inside `Store::run_concurrent`** (plugin/bean) **OR an
+/// `Accessor::spawn` task** (source world) — anywhere an `&Accessor` is in scope.
 ///
 /// Generic over `E` (binding-specific wasm-error) because plugin
 /// (`bindings`) and bean (`bean_bindings`) generate distinct `StreamBodyHandle`
 /// types whose cross-binding `From` omits `Stream`.
-pub(crate) async fn drain_guest_stream<E>(
-    accessor: &Accessor<WasmHostState>,
+/// Generic over `S` (host-state type) so both `WasmHostState` (plugin/bean)
+/// and `SourceHostState` (source world) can reuse this drain scaffold.
+pub(crate) async fn drain_guest_stream<E, S>(
+    accessor: &Accessor<S>,
     stream_reader: StreamReader<u8>,
     terminal: FutureReader<Result<(), E>>,
     tx: mpsc::Sender<DrainEvent>,
@@ -227,6 +257,7 @@ pub(crate) async fn drain_guest_stream<E>(
     receiver_gone: Arc<Notify>,
 ) where
     E: Into<CamelError> + Send + Sync + 'static,
+    S: Send + 'static,
     Result<(), E>: Lift,
 {
     // Oneshot channel to receive the terminal result from the concurrent
@@ -304,7 +335,7 @@ impl<E> std::fmt::Debug for TerminalFutureConsumer<E> {
     }
 }
 
-impl<E: Send + Sync + 'static> FutureConsumer<WasmHostState> for TerminalFutureConsumer<E>
+impl<E: Send + Sync + 'static, S> FutureConsumer<S> for TerminalFutureConsumer<E>
 where
     Result<(), E>: Lift,
 {
@@ -313,7 +344,7 @@ where
     fn poll_consume(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-        store: StoreContextMut<'_, WasmHostState>,
+        store: StoreContextMut<'_, S>,
         mut source: Source<'_, Self::Item>,
         _finish: bool,
     ) -> Poll<wasmtime::Result<()>> {

@@ -1,12 +1,11 @@
-// Synchronous bindings.
+// Async bindings.
 //
-// The source world's host imports (`accept-http`, `submit-exchange`) block the
-// guest thread on tokio channels via `blocking_recv`/`blocking_send`. That is
-// only sound when the guest runs on a thread that is NOT a tokio runtime
-// worker. Async exports would require driving the guest future with
-// `block_on`, which marks the thread as a runtime context and makes
-// `blocking_*` panic. Sync exports let the guest run on a plain OS thread
-// where blocking is legal, so the whole guest lifecycle is synchronous.
+// The source world's `run` export and `accept-http`/`submit-exchange` imports
+// are async. The guest runs as a tokio task driving `run` (via
+// `store.run_concurrent`); host imports receive an `&Accessor`
+// (HostWithStore) and use async channel ops (`.recv().await`/`.send().await`).
+// `is-cancelled` stays sync (a `with` peek that must not yield). See
+// docs/superpowers/specs/2026-07-08-wasm-source-async-stream-design.md.
 wasmtime::component::bindgen!({
     path: "wit",
     world: "source",

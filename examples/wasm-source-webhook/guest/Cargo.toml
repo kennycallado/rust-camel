@@ -10,4 +10,9 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.58"
+# `async-spawn` provides `wit_bindgen::spawn_local`, required to emit a
+# streaming submit-exchange body concurrently with the guest's call: the
+# component-model stream is a rendezvous with no buffer, so `write_all().await`
+# blocks until the host reads — but the host only registers its drain (via
+# `Accessor::spawn`) AFTER `submit-exchange` returns. See emit_stream_echo.
+wit-bindgen = { version = "0.58", features = ["async-spawn"] }
