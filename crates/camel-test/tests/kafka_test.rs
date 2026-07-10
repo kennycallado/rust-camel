@@ -9,6 +9,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::install_crypto_provider;
 
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_kafka::{KafkaComponent, KafkaEndpointConfig, KafkaProducer};
@@ -33,6 +34,7 @@ fn init_tracing() {
 /// Start an Apache Kafka container (KRaft, no Zookeeper) and return the bootstrap address.
 async fn start_kafka() -> (testcontainers::ContainerAsync<apache::Kafka>, String) {
     init_tracing();
+    install_crypto_provider();
     let container = apache::Kafka::default().start().await.unwrap();
     let port = container
         .get_host_port_ipv4(apache::KAFKA_PORT)

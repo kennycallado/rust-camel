@@ -145,6 +145,7 @@ regex = "1"
 redb = "4"
 redis = "1"
 rumqttc = { version = "0.33.2", package = "rumqttc-v4-next", default-features = false }
+rustls = { version = "0.23", features = ["ring"] }
 axum = { version = "0.8" }
 http = "1"
 url = "2"

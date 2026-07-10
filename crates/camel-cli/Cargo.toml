@@ -67,7 +67,7 @@ camel-function = { workspace = true }
 camel-wit.workspace = true
 camel-auth.workspace = true
 camel-component-keycloak.workspace = true
-rustls = { version = "0.23", features = ["ring"] }
+rustls.workspace = true
 camel-component-surrealdb = { workspace = true, optional = true }
 camel-component-exec = { workspace = true, optional = true }
 

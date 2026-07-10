@@ -8,6 +8,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::install_crypto_provider;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +26,7 @@ use tower::ServiceExt;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_consumer_lifecycle_start_stop_cleanup() {
+    install_crypto_provider();
     let port = find_free_port();
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -111,6 +113,7 @@ fn http_config_from_toml_custom_values() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_multiple_mounts_same_port_isolation() {
+    install_crypto_provider();
     let port = find_free_port();
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -252,6 +255,7 @@ fn http_bundle_invalid_config_returns_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_health_check_with_real_listener() {
+    install_crypto_provider();
     use camel_api::{AsyncHealthCheck, HealthStatus};
     use camel_component_http::HttpHealthCheck;
 
@@ -302,6 +306,7 @@ fn http_bearer_token_extraction() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_request_response_flow() {
+    install_crypto_provider();
     let port = find_free_port();
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -348,6 +353,7 @@ async fn http_request_response_flow() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_pipeline_error_returns_500() {
+    install_crypto_provider();
     let port = find_free_port();
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -380,6 +386,7 @@ async fn http_pipeline_error_returns_500() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_concurrent_requests() {
+    install_crypto_provider();
     let port = find_free_port();
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -437,6 +444,7 @@ async fn http_concurrent_requests() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_shutdown_deregisters_path() {
+    install_crypto_provider();
     let port = find_free_port();
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -482,6 +490,7 @@ async fn http_shutdown_deregisters_path() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_blocks_localhost_by_default() {
+    install_crypto_provider();
     let ctx = camel_component_api::ProducerContext::new();
     let component = HttpComponent::new();
     let endpoint_ctx = NoOpComponentContext;
@@ -505,6 +514,7 @@ async fn http_producer_blocks_localhost_by_default() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_allows_localhost_when_configured() {
+    install_crypto_provider();
     // Start a simple echo server
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let actual_port = listener.local_addr().unwrap().port();
@@ -552,6 +562,7 @@ async fn http_producer_allows_localhost_when_configured() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_custom_ok_status_code_range() {
+    install_crypto_provider();
     // Start a server that returns 204
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let actual_port = listener.local_addr().unwrap().port();
@@ -595,6 +606,7 @@ async fn http_custom_ok_status_code_range() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_headers_forwarded_to_exchange() {
+    install_crypto_provider();
     let port = find_free_port();
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -865,6 +877,7 @@ fn http_config_validates_proxy_url() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_route_stop_returns_204() {
+    install_crypto_provider();
     let port = find_free_port();
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -904,6 +917,7 @@ async fn http_route_stop_returns_204() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_bridge_endpoint_skips_auth() {
+    install_crypto_provider();
     // Capture the raw request to verify no auth header
     let captured: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -970,6 +984,7 @@ async fn http_producer_bridge_endpoint_skips_auth() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_connection_close_header() {
+    install_crypto_provider();
     let captured: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured_clone = captured.clone();
@@ -1040,6 +1055,7 @@ async fn http_producer_connection_close_header() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_skip_request_headers() {
+    install_crypto_provider();
     let captured: std::sync::Arc<std::sync::Mutex<String>> =
         std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let captured_clone = captured.clone();
