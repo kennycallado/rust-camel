@@ -17,7 +17,7 @@ use camel_dsl::parse_yaml;
 use camel_test::CamelTestContext;
 use support::wait::wait_until;
 use support::xml_bridge::require_xml_bridge_binary;
-use support::{init_tracing, send_to_direct};
+use support::{init_tracing, install_crypto_provider, send_to_direct};
 
 fn write_xsd() -> tempfile::NamedTempFile {
     let mut xsd = tempfile::Builder::new().suffix(".xsd").tempfile().unwrap();
@@ -41,6 +41,7 @@ fn write_xsd() -> tempfile::NamedTempFile {
 #[tokio::test(flavor = "multi_thread")]
 async fn xsd_validation_valid_document_passes() {
     init_tracing();
+    install_crypto_provider();
     // Ensures CAMEL_XML_BRIDGE_BINARY_PATH is set so ValidatorComponent finds
     // the binary without downloading from GitHub.
     let _binary = require_xml_bridge_binary();
@@ -99,6 +100,7 @@ routes:
 #[tokio::test(flavor = "multi_thread")]
 async fn xsd_validation_invalid_document_returns_error() {
     init_tracing();
+    install_crypto_provider();
     let _binary = require_xml_bridge_binary();
 
     let xsd = write_xsd();

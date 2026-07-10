@@ -79,6 +79,11 @@ enum JournalAction {
 
 #[tokio::main]
 async fn main() {
+    // Install rustls crypto provider before any TLS operations.
+    // The dep graph enables both ring and aws-lc-rs, so explicit selection
+    // is required to avoid a runtime panic.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     match cli.command {

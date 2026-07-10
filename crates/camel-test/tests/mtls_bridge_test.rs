@@ -8,15 +8,10 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use support::xml_bridge::require_xml_bridge_binary;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 
-/// Install rustls crypto provider once per process.
-fn install_crypto() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
-
 /// Positive: start_and_connect establishes mTLS and the Health RPC works.
 #[tokio::test]
 async fn start_and_connect_mtls_handshake() {
-    install_crypto();
+    support::install_crypto_provider();
     let binary = require_xml_bridge_binary();
     let config = BridgeProcessConfig::xml(binary, 30_000);
     let (process, channel) = BridgeProcess::start_and_connect(&config)
@@ -39,7 +34,7 @@ async fn start_and_connect_mtls_handshake() {
 /// ephemeral certs) and verifies that the mTLS handshake is rejected.
 #[tokio::test]
 async fn wrong_ca_handshake_rejected() {
-    install_crypto();
+    support::install_crypto_provider();
     let binary = require_xml_bridge_binary();
 
     // Start bridge (it generates its own TLS material internally)
