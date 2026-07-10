@@ -5,7 +5,7 @@ WASM plugin component for rust-camel — loads and executes WASM modules as rout
 ## Features
 
 - **WASM Component Model**: Loads WASM modules compiled for `wasm32-wasip2` target
-- **Wasmtime v31**: Latest runtime with async support and component-model features
+- **Wasmtime v46**: Latest runtime with async support, component-model-async, and streaming
 - **Host Functions**: `camel_call()`, `get_property()`, `set_property()`, `host_store()`, `host_load()` for guest-host communication
 - **URI-Based Routing**: `wasm:path/to/module.wasm` format for easy integration
 - **Path Validation**: Prevents directory traversal and escapes from project root
@@ -320,7 +320,7 @@ After a `Timeout`, `Trap`, or `OutOfMemory`, the plugin runtime is automatically
 - **WasmProducer**: Tower Service wrapping WasmRuntime, lazy initialization, error handling
 - **WasmRuntime**: Wasmtime engine, linker, component instantiation
 - **WasmHostState**: Per-request state with registry, properties, call depth guard
-- **WasmSourceConsumer**: `Consumer` impl for the `source` world; bridges the guest's blocking run loop to the async pipeline via bounded channels (see [WASM Source Components](#wasm-source-components))
+- **WasmSourceConsumer**: `Consumer` impl for the async `source` world; bridges the guest's async `run()` loop to the pipeline via bounded channels with bidirectional streaming bodies (see [WASM Source Components](#wasm-source-components))
 
 ## Host Function Internals
 
