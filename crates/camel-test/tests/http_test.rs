@@ -688,9 +688,15 @@ fn https_endpoint_created_from_uri() {
     let component = HttpsComponent::new();
     let ctx = NoOpComponentContext;
     let endpoint = component
-        .create_endpoint("https://0.0.0.0:8443/test", &ctx)
+        .create_endpoint(
+            "https://0.0.0.0:8443/test?tlsCert=/a/cert.pem&tlsKey=/a/key.pem",
+            &ctx,
+        )
         .unwrap();
-    assert_eq!(endpoint.uri(), "https://0.0.0.0:8443/test");
+    assert_eq!(
+        endpoint.uri(),
+        "https://0.0.0.0:8443/test?tlsCert=/a/cert.pem&tlsKey=/a/key.pem"
+    );
     assert!(
         endpoint
             .create_consumer(Arc::new(NoOpComponentContext))

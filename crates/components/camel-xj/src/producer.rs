@@ -122,6 +122,9 @@ mod tests {
     use tower::ServiceExt;
 
     fn make_producer(max_payload_bytes: Option<usize>) -> XjProducer {
+        // rustls 0.23 requires a process-level CryptoProvider; the bridge client
+        // touches TLS on call(), so install ring before constructing anything.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
         let state_rx = Arc::new(state_rx);
         let client = Arc::new(XsltBridgeClient::new(Arc::clone(&state_rx)));

@@ -114,7 +114,8 @@ impl AggregatorService {
     ) -> Self {
         // R3-M2: at least one memory-release bound is mandatory.
         config.validate().expect(
-            // allow-unwrap: fail-closed startup invariant (ADR-0033); a config without a bound is a programmer/operator error.
+            // allow-unwrap
+            // fail-closed startup invariant (ADR-0033); a config without a bound is a programmer/operator error.
             "AggregatorService::new: config failed validation \
              (need max_buckets, completionTimeout, or bucket_ttl)",
         );

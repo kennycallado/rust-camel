@@ -310,8 +310,9 @@ async fn producer_select_all() {
         .await;
 
     // Exercise surrealdb:select producer WITHOUT id (returns all records).
+    // R5-M1: a table-wide SELECT requires a `limit` to bound the result set.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
-        .to("surrealdb:select?datasource=test&table=user")
+        .to("surrealdb:select?datasource=test&table=user&limit=100")
         .to("mock:result")
         .route_id("surrealdb-select-all-test")
         .build()

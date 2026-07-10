@@ -3298,6 +3298,7 @@ mod tests {
                 bucket_ttl: None,
                 force_completion_on_stop: false,
                 discard_on_timeout: false,
+                max_timeout_tasks: 1024,
             })
             .build_canonical()
             .unwrap_err();
@@ -3320,6 +3321,7 @@ mod tests {
                 bucket_ttl: None,
                 force_completion_on_stop: false,
                 discard_on_timeout: false,
+                max_timeout_tasks: 1024,
             })
             .build_canonical()
             .unwrap_err();
@@ -3343,6 +3345,7 @@ mod tests {
                 bucket_ttl: None,
                 force_completion_on_stop: false,
                 discard_on_timeout: false,
+                max_timeout_tasks: 1024,
             })
             .build_canonical()
             .unwrap();
@@ -4075,6 +4078,7 @@ mod tests {
                 bucket_ttl: None,
                 force_completion_on_stop: false,
                 discard_on_timeout: false,
+                max_timeout_tasks: 1024,
             })
             .build_canonical()
             .unwrap_err();

@@ -1352,19 +1352,20 @@ fn build_from_toml_value_inner(
         let mut env_map = serde_json::Map::new();
         for var in ALLOWED_ENV_OVERRIDES {
             if let Ok(val) = env::var(var) {
-                let key = var.strip_prefix("CAMEL_").unwrap().to_lowercase();
+                let Some(key) = var.strip_prefix("CAMEL_") else {
+                    continue;
+                };
+                let key = key.to_lowercase();
                 // Handle nested keys (e.g., supervision_initial_delay_ms → supervision.initial_delay_ms)
                 let parsed = parse_env_value(&val);
-                if key.starts_with("supervision_") {
-                    let nested_key = key.strip_prefix("supervision_").unwrap();
+                if let Some(nested_key) = key.strip_prefix("supervision_") {
                     let sup = env_map
                         .entry("supervision".to_string())
                         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
                     if let serde_json::Value::Object(sup_map) = sup {
                         sup_map.insert(nested_key.to_string(), parsed);
                     }
-                } else if key.starts_with("runtime_journal_") {
-                    let nested_key = key.strip_prefix("runtime_journal_").unwrap();
+                } else if let Some(nested_key) = key.strip_prefix("runtime_journal_") {
                     let journal = env_map
                         .entry("runtime_journal".to_string())
                         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));

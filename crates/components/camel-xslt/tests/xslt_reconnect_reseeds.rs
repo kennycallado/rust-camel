@@ -66,6 +66,8 @@ impl XsltTransformBackend for MockBackend {
 
 #[tokio::test]
 async fn reconnect_reseeds_registered_stylesheets() {
+    // rustls 0.23 requires a process-level CryptoProvider.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
     let (state_tx, state_rx) = watch::channel(BridgeState::Ready { channel });
 
