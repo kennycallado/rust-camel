@@ -12,7 +12,32 @@ use camel_api::metrics::MetricsCollector;
 use opentelemetry::InstrumentationScope;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
+use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
+
+/// Normalize a dynamic metric name for OTel: prepend `camel.` if missing,
+/// convert `_` to `.` to match the dotted convention (`camel.exchanges.total`).
+fn normalize_otel_name(name: &str) -> String {
+    let dotted = name.replace('_', ".");
+    if dotted.starts_with("camel.") {
+        dotted
+    } else {
+        format!("camel.{dotted}")
+    }
+}
+
+// Must stay identical to camel-prometheus counterparts (spec D5/D10 symmetry).
+
+/// Validate a counter value for OTel: must be finite, non-negative, integer.
+fn counter_value_ok(v: f64) -> bool {
+    !v.is_nan() && v >= 0.0 && v.fract() == 0.0
+}
+
+/// Sort label pairs by key (mirrors the Prometheus path for behavioral parity).
+fn sort_label_pairs<'a>(labels: &'a [(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut pairs = labels.to_vec();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    pairs
+}
 
 mod metric_names {
     pub const EXCHANGES_TOTAL: &str = "camel.exchanges.total";
@@ -42,8 +67,17 @@ struct MetricInstruments {
 pub struct OtelMetrics {
     service_name: Arc<str>,
     instruments: OnceLock<MetricInstruments>,
+    /// Cached meter for dynamic instruments — resolved once to prevent
+    /// provider fragmentation (D5). Must use the same scope as `instruments`.
+    meter: OnceLock<opentelemetry::metrics::Meter>,
     queue_depths: std::sync::Mutex<HashMap<String, i64>>,
     cb_states: std::sync::Mutex<HashMap<String, i64>>,
+    /// Lazy cache for dynamic counters keyed by normalized name.
+    dyn_counters: dashmap::DashMap<String, Option<Counter<u64>>>,
+    /// Lazy cache for dynamic histograms keyed by normalized name.
+    dyn_histograms: dashmap::DashMap<String, Option<Histogram<f64>>>,
+    /// Names that have already emitted a `warn!` — dedup per D7.
+    warned: dashmap::DashSet<String>,
 }
 
 impl OtelMetrics {
@@ -51,16 +85,18 @@ impl OtelMetrics {
         Self {
             service_name: service_name.into().into(),
             instruments: OnceLock::new(),
+            meter: OnceLock::new(),
             queue_depths: std::sync::Mutex::new(HashMap::new()),
             cb_states: std::sync::Mutex::new(HashMap::new()),
+            dyn_counters: dashmap::DashMap::new(),
+            dyn_histograms: dashmap::DashMap::new(),
+            warned: dashmap::DashSet::new(),
         }
     }
 
     fn instruments(&self) -> &MetricInstruments {
         self.instruments.get_or_init(|| {
-            let meter = global::meter_with_scope(
-                InstrumentationScope::builder(self.service_name.to_string()).build(),
-            );
+            let meter = self.meter();
             MetricInstruments {
                 exchanges_total: meter
                     .u64_counter(metric_names::EXCHANGES_TOTAL)
@@ -88,6 +124,17 @@ impl OtelMetrics {
                     .with_unit("{state}")
                     .build(),
             }
+        })
+    }
+    /// Returns the cached meter for creating dynamic instruments.
+    /// Resolved exactly once to prevent provider fragmentation (D5).
+    /// Reuses the same InstrumentationScope as the fixed instruments so
+    /// dynamic and fixed metrics share scope (no fragmentation).
+    fn meter(&self) -> &Meter {
+        self.meter.get_or_init(|| {
+            global::meter_with_scope(
+                InstrumentationScope::builder(self.service_name.to_string()).build(),
+            )
         })
     }
 }
@@ -161,6 +208,81 @@ impl MetricsCollector for OtelMetrics {
         self.instruments()
             .circuit_breaker_state
             .add(delta, &attributes);
+    }
+
+    fn record_counter(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+        if !counter_value_ok(value) {
+            if self.warned.insert(name.to_string()) {
+                tracing::warn!(
+                    name,
+                    value,
+                    "dynamic counter value rejected (NaN/negative/non-integer); \
+                     further rejections for this name will be silent"
+                );
+            }
+            return;
+        }
+        let normalized = normalize_otel_name(name);
+        if normalized != name && self.warned.insert(format!("sanitize:{name}")) {
+            tracing::warn!(name, %normalized, "metric name sanitized for otel");
+        }
+        let sorted = sort_label_pairs(labels);
+        let value_u64 = value as u64;
+        let attributes: Vec<KeyValue> = sorted
+            .iter()
+            .map(|(k, v)| KeyValue::new((*k).to_string(), (*v).to_string()))
+            .collect();
+
+        use dashmap::mapref::entry::Entry;
+        match self.dyn_counters.entry(normalized.clone()) {
+            Entry::Occupied(o) => {
+                if let Some(counter) = o.get().as_ref() {
+                    counter.add(value_u64, &attributes);
+                }
+                // None = tombstone → skip silently
+            }
+            Entry::Vacant(v) => {
+                let counter = self.meter().u64_counter(normalized.clone()).build();
+                counter.add(value_u64, &attributes);
+                v.insert(Some(counter));
+            }
+        }
+    }
+
+    fn record_histogram(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+        if value.is_nan() {
+            if self.warned.insert(name.to_string()) {
+                tracing::warn!(
+                    name,
+                    "dynamic histogram value rejected (NaN); \
+                     further NaN for this name will be silent"
+                );
+            }
+            return;
+        }
+        let normalized = normalize_otel_name(name);
+        if normalized != name && self.warned.insert(format!("sanitize:{name}")) {
+            tracing::warn!(name, %normalized, "metric name sanitized for otel");
+        }
+        let sorted = sort_label_pairs(labels);
+        let attributes: Vec<KeyValue> = sorted
+            .iter()
+            .map(|(k, v)| KeyValue::new((*k).to_string(), (*v).to_string()))
+            .collect();
+
+        use dashmap::mapref::entry::Entry;
+        match self.dyn_histograms.entry(normalized.clone()) {
+            Entry::Occupied(o) => {
+                if let Some(histogram) = o.get().as_ref() {
+                    histogram.record(value, &attributes);
+                }
+            }
+            Entry::Vacant(v) => {
+                let histogram = self.meter().f64_histogram(normalized.clone()).build();
+                histogram.record(value, &attributes);
+                v.insert(Some(histogram));
+            }
+        }
     }
 }
 
@@ -308,5 +430,146 @@ mod tests {
         for h in handles {
             h.join().expect("thread should not panic under contention");
         }
+    }
+
+    #[test]
+    fn test_record_counter_dynamic_basic() {
+        let metrics = OtelMetrics::new("test-service");
+        // Under a no-op provider these should not panic and should record.
+        metrics.record_counter("exec_spawns_total", 1.0, &[("route", "r1")]);
+        metrics.record_counter("exec_spawns_total", 1.0, &[("route", "r2")]);
+        // Verify the cache was populated.
+        assert!(metrics.dyn_counters.contains_key("camel.exec.spawns.total"));
+    }
+
+    #[test]
+    fn test_record_counter_multi_label() {
+        let metrics = OtelMetrics::new("test-service");
+        metrics.record_counter(
+            "exec_policy_denials_total",
+            1.0,
+            &[("reason", "denied"), ("route", "r1")],
+        );
+        assert!(
+            metrics
+                .dyn_counters
+                .contains_key("camel.exec.policy.denials.total")
+        );
+    }
+
+    #[test]
+    fn test_record_counter_value_guards() {
+        let metrics = OtelMetrics::new("test-service");
+        metrics.record_counter("bad_total", f64::NAN, &[("route", "r1")]);
+        metrics.record_counter("bad_total", -1.0, &[("route", "r1")]);
+        metrics.record_counter("bad_total", 1.5, &[("route", "r1")]);
+        // Rejected values must NOT create a cache entry.
+        assert!(!metrics.dyn_counters.contains_key("camel.bad.total"));
+    }
+
+    #[test]
+    fn test_record_histogram_dynamic_basic() {
+        let metrics = OtelMetrics::new("test-service");
+        metrics.record_histogram("exec_duration_secs", 0.15, &[("route", "r1")]);
+        metrics.record_histogram("exec_duration_secs", 1.5, &[("route", "r1")]);
+        assert!(
+            metrics
+                .dyn_histograms
+                .contains_key("camel.exec.duration.secs")
+        );
+    }
+
+    #[test]
+    fn test_record_histogram_nan_rejected() {
+        let metrics = OtelMetrics::new("test-service");
+        metrics.record_histogram("nan_hist", f64::NAN, &[("route", "r1")]);
+        assert!(!metrics.dyn_histograms.contains_key("camel.nan.hist"));
+    }
+
+    #[test]
+    fn test_record_counter_trait_object_dispatch() {
+        // Retain a concrete handle to verify post-call state; Arc::downcast
+        // requires `Any` which MetricsCollector does not have.
+        let concrete = Arc::new(OtelMetrics::new("test-service"));
+        let dynref: Arc<dyn MetricsCollector> = concrete.clone();
+        dynref.record_counter("trait_total", 1.0, &[("route", "r1")]);
+        // Proves the override dispatched (the no-op default would leave the cache empty).
+        assert!(
+            concrete.dyn_counters.contains_key("camel.trait.total"),
+            "trait-object dispatch did not populate cache"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_meter_cached_in_once_lock() {
+        let metrics = OtelMetrics::new("test-service");
+        // Trigger dynamic instrument creation.
+        metrics.record_counter("cache_check_total", 1.0, &[("route", "r1")]);
+        // Verify the meter OnceLock is populated (resolved exactly once).
+        assert!(
+            metrics.meter.get().is_some(),
+            "meter should be cached in OnceLock after first dynamic instrument"
+        );
+    }
+
+    #[test]
+    fn test_record_counter_warn_dedup() {
+        let metrics = OtelMetrics::new("test-service");
+        metrics.record_counter("dedup_total", f64::NAN, &[("route", "r1")]);
+        metrics.record_counter("dedup_total", -1.0, &[("route", "r1")]);
+        metrics.record_counter("dedup_total", 1.5, &[("route", "r1")]);
+        assert!(
+            metrics.warned.contains("dedup_total"),
+            "warned set should contain the offending name"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_metrics_concurrent_no_panic() {
+        use std::thread;
+        let metrics = Arc::new(OtelMetrics::new("test-contention"));
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            let m = Arc::clone(&metrics);
+            handles.push(thread::spawn(move || {
+                let route = format!("route-{i}");
+                for _ in 0..100 {
+                    m.record_counter("concurrent_total", 1.0, &[("route", &route)]);
+                    m.record_histogram("concurrent_hist", 0.1, &[("route", &route)]);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread panicked under contention");
+        }
+        assert!(metrics.dyn_counters.contains_key("camel.concurrent.total"));
+        assert!(metrics.dyn_histograms.contains_key("camel.concurrent.hist"));
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_otel_name_prepends_camel_dot() {
+        assert_eq!(
+            normalize_otel_name("exec_spawns_total"),
+            "camel.exec.spawns.total"
+        );
+    }
+
+    #[test]
+    fn normalize_otel_name_keeps_existing_camel_prefix() {
+        assert_eq!(
+            normalize_otel_name("camel.exchanges.total"),
+            "camel.exchanges.total"
+        );
+    }
+
+    #[test]
+    fn normalize_otel_name_partial_camel_prefix() {
+        // "camel_foo_bar" → camel.foo.bar (underscore form gets converted)
+        assert_eq!(normalize_otel_name("camel_foo_bar"), "camel.foo.bar");
     }
 }
