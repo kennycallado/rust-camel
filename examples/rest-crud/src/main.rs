@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.parse::<u64>().ok()
                 });
 
-                match id.and_then(|id| if s.delete(id) { Some(id) } else { None }) {
+                match id.filter(|&id| s.delete(id)) {
                     Some(id) => {
                         // Marshal needs a non-Stream body — emit a small
                         // confirmation envelope. 204 status stays from the
