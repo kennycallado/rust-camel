@@ -32,6 +32,18 @@ use crate::error::WasmError;
 /// Bounds *in-flight chunks*, not total bytes (the watchdog bounds total bytes).
 pub(crate) const DEFAULT_DRAIN_CHANNEL_BOUND: usize = 8;
 
+/// Non-blocking terminal-result slot. Written BEFORE sender drop so the
+/// consumer observes the result after buffered chunks drain.
+pub(crate) type TerminalSlot = Arc<std::sync::Mutex<Option<Result<(), CamelError>>>>;
+
+/// Write to a TerminalSlot, recovering from poison (never panics).
+pub(crate) fn write_terminal(slot: &TerminalSlot, result: Result<(), CamelError>) {
+    match slot.lock() {
+        Ok(mut guard) => *guard = Some(result),
+        Err(poisoned) => *poisoned.into_inner() = Some(result),
+    }
+}
+
 /// What travels through the drain channel. Channel close = clean EOF.
 #[derive(Debug)]
 pub(crate) enum DrainEvent {
@@ -140,18 +152,25 @@ impl StreamReturnable<crate::source_bindings::camel::plugin::types::WasmError>
     }
 }
 
-/// Adapter turning a `mpsc::Receiver<DrainEvent>` into the inner `BoxStream`
-/// that `camel_api::StreamBody` wraps. Clean channel close = stream end;
-/// `DrainEvent::Error` = final `Err`. The caller wraps the result with
+/// Adapter turning a [`DrainReceiver`] into the inner `BoxStream` that
+/// `camel_api::StreamBody` wraps. Clean channel close = stream end (with
+/// optional terminal error from `terminal_slot`); `DrainEvent::Error` =
+/// final `Err`. The caller wraps the result with
 /// `Body::Stream(StreamBody { stream: Arc::new(Mutex::new(Some(Box::pin(s)))),
 /// metadata: StreamMetadata { .. } })` — populated from the guest's StreamBodyHandle.
 pub(crate) fn receiver_to_body_stream(
-    mut rx: mpsc::Receiver<DrainEvent>,
+    mut drain_rx: DrainReceiver,
 ) -> futures::stream::BoxStream<'static, Result<Bytes, CamelError>> {
-    Box::pin(stream::poll_fn(move |cx| match rx.poll_recv(cx) {
+    Box::pin(stream::poll_fn(move |cx| match drain_rx.rx.poll_recv(cx) {
         Poll::Ready(Some(DrainEvent::Chunk(b))) => Poll::Ready(Some(Ok(b))),
         Poll::Ready(Some(DrainEvent::Error(e))) => Poll::Ready(Some(Err(e))),
-        Poll::Ready(None) => Poll::Ready(None),
+        Poll::Ready(None) => {
+            let mut guard = drain_rx.terminal.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.take() {
+                Some(Err(e)) => Poll::Ready(Some(Err(e))),
+                _ => Poll::Ready(None),
+            }
+        }
         Poll::Pending => Poll::Pending,
     }))
 }
@@ -266,6 +285,7 @@ impl<S: Send + 'static> StreamConsumer<S> for ChannelConsumer<S> {
 /// types whose cross-binding `From` omits `Stream`.
 /// Generic over `S` (host-state type) so both `WasmHostState` (plugin/bean)
 /// and `SourceHostState` (source world) can reuse this drain scaffold.
+#[allow(clippy::too_many_arguments)] // mirrors drain scaffold signature
 pub(crate) async fn drain_guest_stream<E, S>(
     accessor: &Accessor<S>,
     stream_reader: StreamReader<u8>,
@@ -274,6 +294,7 @@ pub(crate) async fn drain_guest_stream<E, S>(
     cancel: CancellationToken,
     progress: Arc<Notify>,
     receiver_gone: Arc<Notify>,
+    terminal_slot: TerminalSlot,
 ) where
     E: Into<CamelError> + Send + Sync + 'static,
     S: Send + 'static,
@@ -315,19 +336,20 @@ pub(crate) async fn drain_guest_stream<E, S>(
         Err(_) => {
             // Terminal consumer dropped without resolving (guest protocol
             // violation or concurrent-execution teardown). Surface as a terminal
-            // error rather than panicking — symmetric with BoxStreamProducer
-            // (stream_bridge.rs tolerates sender-drop without erroring).
-            let _ = tx
-                .send(DrainEvent::Error(CamelError::ProcessorError(
+            // error via the non-blocking slot rather than a blocking send that
+            // could deadlock if the receiver is already gone.
+            write_terminal(
+                &terminal_slot,
+                Err(CamelError::ProcessorError(
                     "wasm guest terminal future dropped without resolving".into(),
-                )))
-                .await;
+                )),
+            );
             drop(tx);
             return;
         }
     };
     if let Err(e) = outcome {
-        let _ = tx.send(DrainEvent::Error(e.into())).await;
+        write_terminal(&terminal_slot, Err(e.into()));
     }
     // Dropping tx here signals EOF to the receiver (clean close).
     drop(tx);
@@ -386,7 +408,13 @@ where
 pub(crate) type StreamHandoff<W> =
     Result<(W, Option<DrainReceiver>, camel_api::StreamMetadata), WasmError>;
 pub(crate) type StreamHandoffSender<W> = oneshot::Sender<StreamHandoff<W>>;
-pub(crate) type DrainReceiver = mpsc::Receiver<DrainEvent>;
+/// Bundles the drain channel receiver with the non-blocking terminal slot.
+/// The terminal slot is written BEFORE the sender drops so the consumer
+/// observes the terminal result after buffered chunks drain.
+pub(crate) struct DrainReceiver {
+    pub(crate) rx: mpsc::Receiver<DrainEvent>,
+    pub(crate) terminal: TerminalSlot,
+}
 
 /// Take the handoff sender out of the shared mutex (one-shot).
 pub(crate) fn take_stream_handoff_sender<W>(
@@ -438,6 +466,8 @@ where
             CancellationToken,
             Arc<Notify>,
             Arc<Notify>,
+            Arc<Notify>,
+            TerminalSlot,
         ) -> Fut
         + Send
         + 'static,
@@ -448,6 +478,8 @@ where
     let cancel_child = cancel.child_token();
     let progress_notify = Arc::new(Notify::new());
     let receiver_gone = Arc::new(Notify::new());
+    let drain_started = Arc::new(Notify::new());
+    let terminal: TerminalSlot = Arc::new(std::sync::Mutex::new(None));
 
     tokio::spawn(async move {
         let _permit = pending_permit; // held for drain lifetime
@@ -455,17 +487,30 @@ where
         let progress = progress_notify.clone();
         let rx_gone = receiver_gone.clone();
         let (dtx, drx) = mpsc::channel::<DrainEvent>(DEFAULT_DRAIN_CHANNEL_BOUND);
-        let late_error_tx = dtx.clone(); // held for watchdog Err arm
         let handoff_drive = handoff_shared.clone();
 
-        let drive = make_drive(handoff_drive, dtx, drx, cancel_drain, progress, rx_gone);
+        let drive = make_drive(
+            handoff_drive,
+            dtx,
+            drx,
+            cancel_drain,
+            progress,
+            rx_gone,
+            drain_started.clone(),
+            terminal.clone(),
+        );
         let span = tracing::info_span!("wasm return-stream drain");
 
-        let drain_result = crate::runtime::WasmRuntime::drive_with_watchdog(
-            drive,
-            &progress_notify,
-            no_progress_timeout,
-        )
+        let drain_result = async {
+            tokio::select! {
+                r = crate::runtime::WasmRuntime::drive_with_drain_watchdog(
+                    drive, &progress_notify, &drain_started, no_progress_timeout,
+                ) => r,
+                _ = cancel_child.cancelled() => Err(WasmError::Cancelled(
+                    "invoke cancelled by caller drop".into(),
+                )),
+            }
+        }
         .instrument(span.clone())
         .await;
 
@@ -488,7 +533,10 @@ where
                 if let Some(tx) = take_stream_handoff_sender(&handoff_shared) {
                     let _ = tx.send(Err(e.clone()));
                 }
-                let _ = late_error_tx.send(DrainEvent::Error(e.into())).await;
+                write_terminal(&terminal, Err(e.into()));
+                // late_error_tx equivalent: terminal slot is written, drop the
+                // channel sender so the receiver observes EOF after buffered
+                // chunks drain.
             }
         }
         // store + plugin + permit drop here → Store freed
@@ -529,7 +577,10 @@ mod tests {
             .unwrap();
         drop(tx); // EOF
 
-        let mut s = receiver_to_body_stream(rx);
+        let mut s = receiver_to_body_stream(crate::return_stream::DrainReceiver {
+            rx,
+            terminal: Arc::new(std::sync::Mutex::new(None)),
+        });
         assert_eq!(
             s.next().await.unwrap().unwrap(),
             Bytes::from_static(b"hello")
@@ -552,12 +603,51 @@ mod tests {
             .unwrap();
         drop(tx);
 
-        let mut s = receiver_to_body_stream(rx);
+        let mut s = receiver_to_body_stream(crate::return_stream::DrainReceiver {
+            rx,
+            terminal: Arc::new(std::sync::Mutex::new(None)),
+        });
         assert_eq!(
             s.next().await.unwrap().unwrap(),
             Bytes::from_static(b"partial")
         );
         assert!(s.next().await.unwrap().is_err()); // terminal error
         assert!(s.next().await.is_none());
+    }
+
+    // ── write_terminal ──────────────────────────────────────────────────
+
+    #[test]
+    fn write_terminal_writes_result() {
+        let slot: TerminalSlot = Arc::new(std::sync::Mutex::new(None));
+        write_terminal(&slot, Err(CamelError::ProcessorError("boom".into())));
+        let guard = slot.lock().unwrap();
+        let stored = guard.as_ref().expect("terminal slot must be Some");
+        assert!(
+            matches!(stored, Err(CamelError::ProcessorError(msg)) if msg == "boom"),
+            "expected ProcessorError('boom'), got {stored:?}"
+        );
+    }
+
+    #[test]
+    fn write_terminal_recovers_from_poison() {
+        let slot: TerminalSlot = Arc::new(std::sync::Mutex::new(None));
+
+        // Poison the mutex by panicking while holding the lock.
+        let slot2 = slot.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = slot2.lock().unwrap();
+            panic!("intentional poison");
+        });
+        let _ = handle.join(); // catch the panic — mutex is now poisoned
+
+        // write_terminal must still succeed despite the poisoned lock.
+        write_terminal(&slot, Err(CamelError::ProcessorError("recovered".into())));
+        let guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+        let stored = guard.as_ref().expect("terminal slot must be Some");
+        assert!(
+            matches!(stored, Err(CamelError::ProcessorError(msg)) if msg == "recovered"),
+            "expected ProcessorError('recovered'), got {stored:?}"
+        );
     }
 }

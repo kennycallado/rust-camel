@@ -25,8 +25,6 @@ use camel_core::Registry;
 use futures::stream::{self, BoxStream, StreamExt};
 
 const MB: usize = 1024 * 1024;
-/// Per-stream byte cap large enough to admit any test payload.
-const GENEROUS_MAX_BYTES: u64 = 64 * MB as u64;
 
 /// Path to the prebuilt `text-utils` bean fixture (methods: upper/reverse/last/count).
 fn bean_fixture() -> PathBuf {
@@ -131,12 +129,16 @@ async fn bean_streaming_counts_chunked_stream() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: no-progress watchdog fires when the guest awaits a stream that
-//         never produces — and the cancel path is exercised (rc-2lge review).
+// Test 4: under the phase-aware watchdog (0.23+), a stalled stream read
+//         during the invoke phase does NOT trip the stream-progress
+//         watchdog — stalled inputs are bounded by epoch interruption
+//         (timeout_secs), not the per-stream watchdog. The drain-phase
+//         watchdog trip is covered by `drain_watchdog_trips_on_stalled_drain`
+//         in runtime.rs.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn bean_streaming_watchdog_fires_on_stalled_read() {
+async fn bean_streaming_watchdog_does_not_false_trip_on_stalled_read() {
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
     let bean = WasmBean::new(
         bean_fixture(),
@@ -145,25 +147,27 @@ async fn bean_streaming_watchdog_fires_on_stalled_read() {
         HashMap::new(),
     )
     .await
-    .expect("bean fixture loads")
-    // Tight watchdog: a stalled read must trip well before the default 60s.
-    .with_streaming_knobs(GENEROUS_MAX_BYTES, Duration::from_millis(200));
+    .expect("bean fixture loads");
 
-    // A stream that never yields and never closes — `count` blocks on
-    // `reader.read()` forever, so no chunk ships and progress_notify never
-    // fires → the no-progress watchdog cancels the call.
+    // A stream that never yields — `count` blocks on `reader.read()` forever.
+    // Under the phase-aware watchdog the invoke phase has no timeout, so the
+    // call hangs. We wrap in a timeout to prove the watchdog does NOT
+    // false-trip during the invoke phase.
     let stream = futures::stream::pending::<Result<Bytes, CamelError>>().boxed();
     let mut exchange = stream_exchange(stream);
 
-    let err = bean
-        .call("count", &mut exchange)
-        .await
-        .expect_err("stalled read must trip the watchdog");
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        bean.call("count", &mut exchange),
+    )
+    .await;
 
-    let msg = err.to_string();
+    // The call should still be pending after 500ms (not completed, not errored).
+    // This proves the watchdog does NOT fire during the invoke phase.
     assert!(
-        msg.contains("no-progress") || msg.contains("stalled") || msg.contains("timeout"),
-        "expected a watchdog timeout error, got: {msg}"
+        result.is_err(),
+        "call should still be pending after 500ms — \
+         watchdog must not trip during the invoke phase"
     );
 }
 
@@ -190,4 +194,39 @@ async fn bean_streaming_propagates_guest_error() {
         msg.contains("failure"),
         "expected the guest's error message to propagate, got: {msg}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: non-streaming (Body::Bytes) call with a tight watchdog timeout.
+// The `drain_started` signal is never fired (no output stream), so the
+// phase-aware watchdog never arms. The call must succeed even though the
+// configured no_progress_timeout is far shorter than the processing time.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bean_non_streaming_call_succeeds_with_tight_watchdog() {
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let bean = WasmBean::new(
+        bean_fixture(),
+        WasmConfig::default(),
+        registry,
+        HashMap::new(),
+    )
+    .await
+    .expect("bean fixture loads")
+    .with_streaming_knobs(u64::MAX, Duration::ZERO);
+
+    // Non-streaming Text input — no output stream, so drain_started is never
+    // fired. The phase-aware watchdog stays in the invoke phase (no timeout)
+    // and the call completes normally.
+    let mut exchange = Exchange::new(Message::new(Body::Text("hello world".into())));
+
+    bean.call("upper", &mut exchange)
+        .await
+        .expect("non-streaming call must not false-trip watchdog");
+
+    match &exchange.input.body {
+        Body::Text(s) => assert_eq!(s, "HELLO WORLD"),
+        other => panic!("expected Text body after upper, got {other:?}"),
+    }
 }

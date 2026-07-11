@@ -273,7 +273,7 @@ impl WasmRuntime {
     /// spawned drain task. A oneshot hands the exchange out fast (right after
     /// the guest returns, before the drain completes). The drain task races
     /// the drain against `receiver_gone.notified()` (cancel-on-drop, spec §5)
-    /// and wraps the long-lived `run_concurrent` with `drive_with_watchdog`.
+    /// and wraps the long-lived `run_concurrent` with `drive_with_drain_watchdog`.
     #[allow(clippy::too_many_arguments)] // mirrors call_process + 3 streaming knobs
     pub async fn process_streaming_exchange(
         &self,
@@ -337,7 +337,7 @@ impl WasmRuntime {
             None, // drain_completion_notify: production plugin path doesn't install it
             // Plugin make_drive closure — mirrors bean.rs (keep in sync; the shared
             // spawn_return_drain scaffold is identical, only the binding differs).
-            move |handoff_shared, dtx, drx, cancel_drain, progress, rx_gone| async move {
+            move |handoff_shared, dtx, drx, cancel_drain, progress, rx_gone, drain_started, terminal| async move {
                 // NEW-7: convert the camel_api Exchange → binding WasmExchange (mirrors
                 // runtime.rs:330-336). For non-stream inputs, we can convert now.
                 // For stream inputs, the conversion happens inside run_concurrent
@@ -382,16 +382,18 @@ impl WasmRuntime {
                             };
                             use crate::return_stream::StreamReturnable;
                             match wasm_exchange.take_stream() {
-                                Some((reader, terminal, guest_metadata)) => {
+                                Some((reader, terminal_future, guest_metadata)) => {
+                                    drain_started.notify_one();
                                     if let Some(tx) = take_stream_handoff_sender(&handoff_drive) {
-                                        let _ = tx.send(Ok((wasm_exchange, Some(drx), guest_metadata))); // drx moves out (F1)
+                                        let _ = tx.send(Ok((wasm_exchange, Some(crate::return_stream::DrainReceiver { rx: drx, terminal: terminal.clone() }), guest_metadata))); // drx moves out (F1)
                                     }
                                     // Cancel-on-drop select! (F2, spec §5): race drain against
                                     // receiver_gone (ChannelConsumer fires it on poll_reserve Err).
                                     tokio::select! {
                                         _ = crate::return_stream::drain_guest_stream(
-                                            accessor, reader, terminal, dtx,
+                                            accessor, reader, terminal_future, dtx,
                                             cancel_drain.clone(), progress.clone(), rx_gone.clone(),
+                                            terminal.clone(),
                                         ) => {}
                                         _ = rx_gone.notified() => { cancel_drain.cancel(); }
                                     }
@@ -455,6 +457,7 @@ impl WasmRuntime {
     /// On the stream path, [`crate::stream_bridge::BoxStreamProducer`] calls
     /// `notify_one()` per shipped chunk; the resulting wakeup re-arms the
     /// timer via the `continue` branch.
+    #[cfg(test)]
     pub(crate) async fn drive_with_watchdog<F, T>(
         run_fut: F,
         progress_notify: &Notify,
@@ -469,6 +472,35 @@ impl WasmRuntime {
                 r = &mut run_fut => return r,
                 _ = progress_notify.notified() => continue,
                 _ = tokio::time::sleep(max_duration) => {
+                    return Err(WasmError::GuestPanic(
+                        "wasm: no-progress timeout (stream stalled)".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Phase-aware watchdog: Phase 1 (invoke) waits for drain_started or
+    /// completion — no timeout. Phase 2 (drain) arms the progress watchdog.
+    pub(crate) async fn drive_with_drain_watchdog<F, T>(
+        run_fut: F,
+        progress_notify: &Notify,
+        drain_started: &Notify,
+        drain_timeout: Duration,
+    ) -> Result<T, WasmError>
+    where
+        F: Future<Output = Result<T, WasmError>>,
+    {
+        let mut run_fut = std::pin::pin!(run_fut);
+        tokio::select! {
+            r = &mut run_fut => return r,
+            _ = drain_started.notified() => {}
+        }
+        loop {
+            tokio::select! {
+                r = &mut run_fut => return r,
+                _ = progress_notify.notified() => continue,
+                _ = tokio::time::sleep(drain_timeout) => {
                     return Err(WasmError::GuestPanic(
                         "wasm: no-progress timeout (stream stalled)".into(),
                     ));
@@ -871,5 +903,105 @@ mod tests {
             "timeout must trigger quickly, took {:?}",
             elapsed
         );
+    }
+
+    // ── drive_with_drain_watchdog ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn drain_watchdog_trips_on_stalled_drain() {
+        let progress = Arc::new(Notify::new());
+        let drain_started = Arc::new(Notify::new());
+        let ds = drain_started.clone();
+        let drive = async move {
+            ds.notify_one();
+            std::future::pending::<()>().await;
+            Ok::<(), WasmError>(())
+        };
+        let result = WasmRuntime::drive_with_drain_watchdog(
+            drive,
+            &progress,
+            &drain_started,
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(matches!(result, Err(WasmError::GuestPanic(_))));
+    }
+
+    #[tokio::test]
+    async fn drain_watchdog_passes_when_chunks_flow() {
+        let progress = Arc::new(Notify::new());
+        let drain_started = Arc::new(Notify::new());
+        let p = progress.clone();
+        let ds = drain_started.clone();
+        let drive = async move {
+            ds.notify_one();
+            for _ in 0..5 {
+                p.notify_one();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok::<(), WasmError>(())
+        };
+        let result = WasmRuntime::drive_with_drain_watchdog(
+            drive,
+            &progress,
+            &drain_started,
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn drain_watchdog_completes_without_drain_signal() {
+        let progress = Arc::new(Notify::new());
+        let drain_started = Arc::new(Notify::new());
+        let drive = async { Ok::<i32, WasmError>(42) };
+        let result = WasmRuntime::drive_with_drain_watchdog(
+            drive,
+            &progress,
+            &drain_started,
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn cancel_completes_drive_select_without_hang() {
+        // Both cancel and drain_started fire near-simultaneously.
+        // The function (and the enclosing select! from spawn_return_drain)
+        // must complete without hanging regardless of which branch fires first.
+        let progress = Arc::new(Notify::new());
+        let drain_started = Arc::new(Notify::new());
+        let cancel = CancellationToken::new();
+
+        let ds = drain_started.clone();
+        let drive = async move {
+            ds.notify_one();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<(), WasmError>(())
+        };
+
+        // Cancel at roughly the same time the drain starts.
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            c.cancel();
+        });
+
+        // Replicate the select! from spawn_return_drain.
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                r = WasmRuntime::drive_with_drain_watchdog(
+                    drive, &progress, &drain_started, Duration::from_secs(60),
+                ) => r,
+                _ = cancel.cancelled() => Err(WasmError::Cancelled("test cancel".into())),
+            }
+        })
+        .await;
+
+        // Must complete within 1s — either via the watchdog result or the
+        // cancellation branch.
+        assert!(result.is_ok(), "select! must not hang — got timeout");
     }
 }

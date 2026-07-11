@@ -245,6 +245,7 @@ impl Service<Exchange> for WasmProducer {
             // `wasm_to_body`'s Stream arm.
             let mut out = exchange.clone();
             let cancel = cancel_root.child_token();
+            let mut guard = crate::cancel_guard::InvokeCancelGuard::new(cancel.clone());
             let result = runtime
                 .process_streaming_exchange(
                     registry2,
@@ -272,6 +273,7 @@ impl Service<Exchange> for WasmProducer {
                             metadata: streaming_result.metadata.clone(),
                         });
                     }
+                    guard.complete();
                     debug!(
                         module = %module_path.display(),
                         "WASM producer completed successfully"
@@ -285,6 +287,9 @@ impl Service<Exchange> for WasmProducer {
                         error = %e,
                         "wasm call failed"
                     );
+                    // guard drops here without complete() — fires cancel on the
+                    // child token. Benign: the work already failed, and the
+                    // drain task observes the cancel via its select! branch.
                     Err(e.into())
                 }
             }

@@ -27,6 +27,10 @@ pub struct WasmBean {
     /// ends (Store freed). Useful for metrics, readiness probes, and test
     /// assertions about cancel-on-drop / drain timing.
     drain_completion_notify: Option<Arc<tokio::sync::Notify>>,
+    /// Root cancellation token for caller-drop cancellation. A child token
+    /// is derived per `call` and wrapped in an `InvokeCancelGuard` so that
+    /// dropping the caller's future cancels the in-flight guest invocation.
+    cancel: CancellationToken,
 }
 
 impl WasmBean {
@@ -44,6 +48,7 @@ impl WasmBean {
             max_bytes: crate::producer::DEFAULT_STREAM_MAX_BYTES,
             no_progress_timeout: crate::producer::DEFAULT_NO_PROGRESS_TIMEOUT,
             drain_completion_notify: None,
+            cancel: CancellationToken::new(),
         })
     }
 
@@ -128,15 +133,17 @@ impl BeanProcessor for WasmBean {
         // limiter, so pass None for the permit (unlike the plugin path).
         // The closure builds the drive future that runs the guest invocation
         // + output stream drain.
+        let cancel = self.cancel.child_token();
+        let mut guard = crate::cancel_guard::InvokeCancelGuard::new(cancel.clone());
         let (bean_exchange_out, drain_rx, metadata_from_drain) = crate::return_stream::spawn_return_drain(
             None,
-            CancellationToken::new(),
+            cancel,
             no_progress_timeout,
             drain_completion_notify,
             // Bean make_drive closure — mirrors runtime.rs process_streaming_exchange
             // (keep in sync; the shared spawn_return_drain scaffold is identical,
             // only the binding + input/output field differ).
-            move |handoff_shared, dtx, drx, cancel_drain, progress, rx_gone| async move {
+            move |handoff_shared, dtx, drx, cancel_drain, progress, rx_gone, drain_started, terminal| async move {
                 let handoff_drive = handoff_shared.clone();
 
                 // ONE run_concurrent block: branch on stream_parts inside to
@@ -189,19 +196,21 @@ impl BeanProcessor for WasmBean {
                             // NEW-E: extract the output stream BEFORE cross-binding
                             use crate::return_stream::StreamReturnable;
                             match bean_exchange.take_stream() {
-                                Some((reader, terminal, guest_metadata)) => {
+                                Some((reader, terminal_future, guest_metadata)) => {
+                                    drain_started.notify_one();
                                     if let Some(tx) =
                                         crate::return_stream::take_stream_handoff_sender(
                                             &handoff_drive,
                                         )
                                     {
-                                        let _ = tx.send(Ok((bean_exchange, Some(drx), guest_metadata)));
+                                        let _ = tx.send(Ok((bean_exchange, Some(crate::return_stream::DrainReceiver { rx: drx, terminal: terminal.clone() }), guest_metadata)));
                                     }
                                     // Cancel-on-drop select! (F2, spec §5)
                                     tokio::select! {
                                         _ = crate::return_stream::drain_guest_stream(
-                                            accessor, reader, terminal, dtx,
+                                            accessor, reader, terminal_future, dtx,
                                             cancel_drain.clone(), progress.clone(), rx_gone.clone(),
+                                            terminal.clone(),
                                         ) => {}
                                         _ = rx_gone.notified() => { cancel_drain.cancel(); }
                                     }
@@ -270,6 +279,7 @@ impl BeanProcessor for WasmBean {
             });
         }
 
+        guard.complete();
         Ok(())
     }
 

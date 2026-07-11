@@ -58,6 +58,9 @@ pub enum WasmError {
     #[error("WASM guest panicked (trap): {0}")]
     GuestPanic(String),
 
+    #[error("WASM invoke cancelled: {0}")]
+    Cancelled(String),
+
     #[error("WASM type conversion failed: {0}")]
     TypeConversion(String),
 
@@ -126,6 +129,9 @@ impl From<WasmError> for CamelError {
     fn from(err: WasmError) -> Self {
         match &err {
             WasmError::GuestPanic(msg) => CamelError::ProcessorError(format!("wasm trap: {msg}")),
+            WasmError::Cancelled(msg) => {
+                CamelError::ProcessorError(format!("wasm invoke cancelled: {msg}"))
+            }
             WasmError::TypeConversion(msg) => CamelError::TypeConversionFailed(msg.clone()),
             WasmError::ModuleNotFound(msg) => CamelError::ComponentNotFound(msg.clone()),
             WasmError::CompilationFailed(msg) => {

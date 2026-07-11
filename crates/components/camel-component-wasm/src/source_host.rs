@@ -19,7 +19,7 @@ use camel_api::{Body, CamelError, Exchange, ExchangePattern, Message, StreamBody
 use camel_component_api::consumer::ConsumerContext;
 
 use crate::return_stream::{
-    DEFAULT_DRAIN_CHANNEL_BOUND, DrainEvent, StreamReturnable, drain_guest_stream,
+    DEFAULT_DRAIN_CHANNEL_BOUND, DrainEvent, StreamReturnable, TerminalSlot, drain_guest_stream,
     receiver_to_body_stream,
 };
 use crate::source_bindings::camel::plugin::source_host::{HttpRequest, SubmitOutcome};
@@ -284,6 +284,10 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
             // the drain onto the SAME event loop, where it progresses
             // concurrently with the guest fiber.
             let (chunk_tx, chunk_rx) = mpsc::channel::<DrainEvent>(DEFAULT_DRAIN_CHANNEL_BOUND);
+            // Non-blocking terminal slot: written BEFORE sender drop so the
+            // consumer observes the terminal result after buffered chunks drain.
+            // Created ONCE and shared between the drain task and the body stream.
+            let source_terminal: TerminalSlot = Arc::new(std::sync::Mutex::new(None));
             // ponytail: progress/receiver_gone Notify unused under source (no watchdog);
             // required by shared drain_guest_stream signature.
             let progress = Arc::new(Notify::new());
@@ -302,13 +306,17 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
                 cancel: cancel_token.clone(),
                 progress: progress.clone(),
                 receiver_gone: receiver_gone.clone(),
+                terminal_slot: source_terminal.clone(),
             });
 
             // Attach the lazy body. Downstream reads from this receiver; the
             // spawned drain feeds it from the guest's stream.
             native.input.body = Body::Stream(StreamBody {
                 stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(
-                    receiver_to_body_stream(chunk_rx),
+                    receiver_to_body_stream(crate::return_stream::DrainReceiver {
+                        rx: chunk_rx,
+                        terminal: source_terminal,
+                    }),
                 )))),
                 metadata: stream_metadata,
             });
@@ -352,6 +360,7 @@ struct SubmitExchangeDrain {
     cancel: CancellationToken,
     progress: Arc<Notify>,
     receiver_gone: Arc<Notify>,
+    terminal_slot: TerminalSlot,
 }
 
 impl AccessorTask<SourceHostState, HasSelf<SourceHostState>> for SubmitExchangeDrain {
@@ -367,6 +376,7 @@ impl AccessorTask<SourceHostState, HasSelf<SourceHostState>> for SubmitExchangeD
             self.cancel,
             self.progress,
             self.receiver_gone,
+            self.terminal_slot,
         )
         .await;
         // Terminal errors are surfaced through the chunk channel

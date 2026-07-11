@@ -305,9 +305,9 @@ async fn streaming_cancellation_cuts_stream_short() {
 
     // A slow stream: 64 KiB chunks every 20 ms, 200 chunks ≈ 12.8 MB over
     // ~4 s. We cancel the token ~120 ms in, after a handful of chunks have
-    // shipped. The producer sees `cancel.is_cancelled()` and returns
-    // `StreamResult::Dropped` with a *clean* terminal (None), so the guest
-    // completes normally with a partial count rather than erroring.
+    // shipped. The drain task's cancel_child.cancelled() select branch
+    // returns `Cancelled` when the caller cancels the token — the test
+    // verifies the cancellation path propagates as an explicit error.
     let chunk = Bytes::from(vec![b'q'; 64 * 1024]);
     let stream = stream::unfold(0u32, move |i| {
         let chunk = chunk.clone();
@@ -321,7 +321,6 @@ async fn streaming_cancellation_cuts_stream_short() {
         }
     })
     .boxed();
-    let total: u64 = 200 * 64 * 1024;
     let exchange = stream_exchange(stream);
 
     let cancel = CancellationToken::new();
@@ -348,14 +347,12 @@ async fn streaming_cancellation_cuts_stream_short() {
 
     let result = (&mut proc)
         .await
-        .expect("cancellation should yield a clean partial result, not an error");
+        .expect_err("cancellation should yield a Cancelled error, not partial data");
 
-    let n = extract_count(&result);
     assert!(
-        n < total,
-        "stream must be cut short by cancellation ({n} >= total {total})"
+        matches!(&result, WasmError::Cancelled(_)),
+        "expected Cancelled error, got: {result:?}"
     );
-    println!("cancellation: counted {n} of {total} bytes before cancel");
 }
 
 // ---------------------------------------------------------------------------
@@ -406,25 +403,30 @@ async fn streaming_progressing_survives_tight_watchdog() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 8: no-progress watchdog fires on a stalled stream
+// Test 8: under the phase-aware watchdog (0.23+), a stalled stream read
+//         during the invoke phase does NOT trip the stream-progress
+//         watchdog — stalled inputs are bounded by epoch interruption
+//         (timeout_secs), not the per-stream no-progress watchdog. The
+//         drain-phase watchdog trip is covered by
+//         `drain_watchdog_trips_on_stalled_drain` in runtime.rs.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn streaming_no_progress_watchdog_fires() {
+async fn streaming_no_progress_watchdog_does_not_false_trip() {
     let runtime = WasmRuntime::new(&streaming_plugin_path(), WasmConfig::default())
         .await
         .expect("runtime loads streaming plugin");
 
     // A stream that never yields — the producer's `poll_produce` stays
-    // `Pending`, so `progress_notify` never fires and the guest is stuck in
-    // `reader.read(..).await`. A short no-progress window trips the watchdog.
+    // `Pending`, so the guest is stuck in `reader.read(..).await` during
+    // the invoke phase, which is not watched by the no-progress timer.
     let stream = stream::pending::<Result<Bytes, CamelError>>().boxed();
     let exchange = stream_exchange(stream);
 
-    // Safety net: if the watchdog fails to fire, fail the test rather than
-    // hang the suite.
+    // Wrap in a short timeout to prove the call does NOT complete (the
+    // watchdog does NOT false-trip during the invoke phase).
     let result = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_millis(500),
         process_streaming(
             &runtime,
             exchange,
@@ -435,19 +437,11 @@ async fn streaming_no_progress_watchdog_fires() {
     )
     .await;
 
-    let err = result
-        .expect("watchdog must fire well within the 10s safety net")
-        .expect_err("stalled stream must time out");
-
-    match err {
-        WasmError::GuestPanic(msg) => {
-            assert!(
-                msg.contains("no-progress") || msg.contains("stalled"),
-                "error must be the no-progress watchdog, got: {msg}"
-            );
-        }
-        other => panic!("expected GuestPanic watchdog timeout, got {other:?}"),
-    }
+    assert!(
+        result.is_err(),
+        "call should still be pending after 500ms — \
+         watchdog must not trip during the invoke phase"
+    );
 }
 
 // ---------------------------------------------------------------------------
