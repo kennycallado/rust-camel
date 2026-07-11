@@ -205,6 +205,7 @@ pub enum BuilderStep {
         count: Option<usize>,
         while_predicate: Option<LanguageExpressionDef>,
         steps: Vec<BuilderStep>,
+        max_iterations: Option<usize>,
     },
     /// EIP-7 enrich: synchronous content enrichment via a resolved producer.
     Enrich {
@@ -414,13 +415,15 @@ impl std::fmt::Debug for BuilderStep {
                 count,
                 while_predicate,
                 steps,
+                max_iterations,
             } => {
                 write!(
                     f,
-                    "BuilderStep::DeclarativeLoop {{ count: {:?}, while: {}, steps: {} }}",
+                    "BuilderStep::DeclarativeLoop {{ count: {:?}, while: {}, steps: {}, max_iterations: {:?} }}",
                     count,
                     while_predicate.is_some(),
-                    steps.len()
+                    steps.len(),
+                    max_iterations
                 )
             }
             BuilderStep::Validate { predicate } => {

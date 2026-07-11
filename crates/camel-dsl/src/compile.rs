@@ -1206,6 +1206,7 @@ fn compile_loop_step(
         count: def.count,
         while_predicate: def.while_predicate,
         steps: sub_steps,
+        max_iterations: def.max_iterations,
     })
 }
 
@@ -1736,12 +1737,16 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
             }
         }
         DeclarativeStep::Loop(def) => {
+            if def.max_iterations.is_some_and(|m| m == 0) {
+                return Err(CamelError::Config("max_iterations must be > 0".to_string()));
+            }
             if def.count.is_some_and(|c| c == 0) {
                 return Err(CamelError::Config("loop count must be > 0".to_string()));
             }
-            if def.count.is_some_and(|c| c > MAX_LOOP_ITERATIONS) {
+            let effective = def.max_iterations.unwrap_or(MAX_LOOP_ITERATIONS);
+            if def.count.is_some_and(|c| c > effective) {
                 return Err(CamelError::Config(format!(
-                    "loop count must be <= MAX_LOOP_ITERATIONS ({MAX_LOOP_ITERATIONS})"
+                    "loop count must be <= max_iterations ({effective})"
                 )));
             }
             if def.count.is_some_and(|c| c > 0) && def.while_predicate.is_some() {
@@ -2723,7 +2728,8 @@ mod tests {
             declarative_step_name(&DeclarativeStep::Loop(LoopStepDef {
                 count: Some(3),
                 while_predicate: None,
-                steps: vec![]
+                steps: vec![],
+                max_iterations: None,
             })),
             "loop"
         );
@@ -3615,6 +3621,7 @@ mod tests {
                 count: Some(0),
                 while_predicate: None,
                 steps: vec![],
+                max_iterations: None,
             })],
         );
         assert_config_error(compile_declarative_route(route), "loop count");
@@ -3628,6 +3635,7 @@ mod tests {
                 count: Some(2),
                 while_predicate: Some(make_predicate("${header.go} == true")),
                 steps: vec![],
+                max_iterations: None,
             })],
         );
         assert_config_error(
@@ -4317,13 +4325,29 @@ mod tests {
             count: Some(MAX_LOOP_ITERATIONS + 1),
             while_predicate: None,
             steps: vec![],
+            max_iterations: None,
         });
         let result = validate_step(&step);
         let err = result.expect_err("count above MAX must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("MAX_LOOP_ITERATIONS"),
-            "error must mention MAX_LOOP_ITERATIONS, got: {msg}"
+            msg.contains("max_iterations"),
+            "error must mention max_iterations, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn loop_max_iterations_zero_rejected() {
+        let step = DeclarativeStep::Loop(LoopStepDef {
+            count: None,
+            while_predicate: Some(make_predicate("${header.go} == true")),
+            steps: vec![],
+            max_iterations: Some(0),
+        });
+        let err = validate_step(&step).expect_err("max_iterations 0 must reject");
+        assert!(
+            err.to_string().contains("max_iterations must be > 0"),
+            "error must mention max_iterations > 0, got: {err}"
         );
     }
 

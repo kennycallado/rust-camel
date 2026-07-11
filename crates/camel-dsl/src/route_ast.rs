@@ -265,6 +265,8 @@ pub struct LoopFullConfig {
     pub while_expr: Option<LoopWhileExpr>,
     #[serde(default)]
     pub steps: Vec<RouteDslStep>,
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
 }
 
 /// Expression-only predicate for loop while condition.

@@ -411,6 +411,7 @@ pub struct LoopStepDef {
     pub count: Option<usize>,
     pub while_predicate: Option<LanguageExpressionDef>,
     pub steps: Vec<DeclarativeStep>,
+    pub max_iterations: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

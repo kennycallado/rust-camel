@@ -593,9 +593,7 @@ impl RouteBuilder {
     pub fn loop_count(self, count: usize) -> LoopBuilder {
         LoopBuilder {
             parent: self,
-            config: LoopConfig {
-                mode: LoopMode::Count(count),
-            },
+            config: LoopConfig::new(LoopMode::Count(count)),
             steps: vec![],
         }
     }
@@ -607,9 +605,7 @@ impl RouteBuilder {
     {
         LoopBuilder {
             parent: self,
-            config: LoopConfig {
-                mode: LoopMode::While(std::sync::Arc::new(predicate)),
-            },
+            config: LoopConfig::new(LoopMode::While(std::sync::Arc::new(predicate))),
             steps: vec![],
         }
     }
@@ -1410,9 +1406,7 @@ impl LoopBuilder {
     pub fn loop_count(self, count: usize) -> LoopInLoopBuilder {
         LoopInLoopBuilder {
             parent: self,
-            config: LoopConfig {
-                mode: LoopMode::Count(count),
-            },
+            config: LoopConfig::new(LoopMode::Count(count)),
             steps: vec![],
         }
     }
@@ -1423,9 +1417,7 @@ impl LoopBuilder {
     {
         LoopInLoopBuilder {
             parent: self,
-            config: LoopConfig {
-                mode: LoopMode::While(std::sync::Arc::new(predicate)),
-            },
+            config: LoopConfig::new(LoopMode::While(std::sync::Arc::new(predicate))),
             steps: vec![],
         }
     }

@@ -21,11 +21,20 @@ impl std::fmt::Debug for LoopMode {
 #[derive(Clone, Debug)]
 pub struct LoopConfig {
     pub mode: LoopMode,
+    pub max_iterations: usize,
 }
 
 impl LoopConfig {
     pub fn new(mode: LoopMode) -> Self {
-        Self { mode }
+        Self {
+            mode,
+            max_iterations: MAX_LOOP_ITERATIONS,
+        }
+    }
+
+    pub fn with_max_iterations(mut self, max: usize) -> Self {
+        self.max_iterations = max;
+        self
     }
 
     pub fn mode_name(&self) -> &'static str {
@@ -89,5 +98,17 @@ mod tests {
     #[test]
     fn max_loop_iterations_value() {
         assert_eq!(MAX_LOOP_ITERATIONS, 10_000);
+    }
+
+    #[test]
+    fn loop_config_default_max_iterations() {
+        let cfg = LoopConfig::new(LoopMode::Count(5));
+        assert_eq!(cfg.max_iterations, MAX_LOOP_ITERATIONS);
+    }
+
+    #[test]
+    fn loop_config_with_max_iterations() {
+        let cfg = LoopConfig::new(LoopMode::Count(5)).with_max_iterations(500_000);
+        assert_eq!(cfg.max_iterations, 500_000);
     }
 }

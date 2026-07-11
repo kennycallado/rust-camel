@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use tower::{Service, ServiceExt};
 
-use camel_api::loop_eip::{LoopConfig, LoopMode, MAX_LOOP_ITERATIONS};
+use camel_api::loop_eip::{LoopConfig, LoopMode};
 use camel_api::{BoxProcessor, CamelError, Exchange, Value};
 
 pub const CAMEL_LOOP_INDEX: &str = "CamelLoopIndex";
@@ -41,18 +41,18 @@ impl Service<Exchange> for LoopService {
         Box::pin(async move {
             match config.mode {
                 LoopMode::Count(n) => {
-                    // D-M9 Batch 1: clamp to MAX_LOOP_ITERATIONS. The audit
-                    // finding was that Count(n) had no cap (only While did);
-                    // a `count: u32::MAX` would exhaust CPU. The clamp is
-                    // applied uniformly to Count and While. The CAMEL_LOOP_SIZE
-                    // property is set to the *clamped* count so downstream
-                    // steps observe the effective iteration count.
-                    let n_clamped = n.min(MAX_LOOP_ITERATIONS);
-                    if n > MAX_LOOP_ITERATIONS {
+                    // clamp to config.max_iterations. The audit finding was that
+                    // Count(n) had no cap (only While did); a `count: u32::MAX`
+                    // would exhaust CPU. The clamp is applied uniformly to Count
+                    // and While. The CAMEL_LOOP_SIZE property is set to the
+                    // *clamped* count so downstream steps observe the effective
+                    // iteration count.
+                    let n_clamped = n.min(config.max_iterations);
+                    if n > config.max_iterations {
                         tracing::warn!(
                             requested = n,
-                            clamped_to = MAX_LOOP_ITERATIONS,
-                            "LoopMode::Count exceeded MAX_LOOP_ITERATIONS; clamping"
+                            clamped_to = config.max_iterations,
+                            "LoopMode::Count exceeded max_iterations; clamping"
                         );
                     }
                     exchange.set_property(CAMEL_LOOP_SIZE, Value::from(n_clamped as u64));
@@ -63,7 +63,7 @@ impl Service<Exchange> for LoopService {
                 }
                 LoopMode::While(ref predicate) => {
                     exchange.set_property(CAMEL_LOOP_SIZE, Value::from(0u64));
-                    for i in 0..MAX_LOOP_ITERATIONS {
+                    for i in 0..config.max_iterations {
                         if !predicate(&exchange) {
                             break;
                         }
@@ -72,8 +72,8 @@ impl Service<Exchange> for LoopService {
                     }
                     if predicate(&exchange) {
                         tracing::warn!(
-                            "Loop while-mode hit MAX_LOOP_ITERATIONS ({}) safety guard. Predicate still true.",
-                            MAX_LOOP_ITERATIONS
+                            "Loop while-mode hit max_iterations ({}) safety guard. Predicate still true.",
+                            config.max_iterations
                         );
                     }
                 }
@@ -117,7 +117,6 @@ impl camel_api::OutcomePipeline for LoopSegment {
         &'a mut self,
         exchange: camel_api::Exchange,
     ) -> Pin<Box<dyn Future<Output = camel_api::PipelineOutcome> + Send + 'a>> {
-        use camel_api::loop_eip::MAX_LOOP_ITERATIONS;
         use camel_api::{PipelineOutcome, Value};
 
         let config = self.config.clone();
@@ -126,12 +125,12 @@ impl camel_api::OutcomePipeline for LoopSegment {
         Box::pin(async move {
             match config.mode {
                 camel_api::loop_eip::LoopMode::Count(n) => {
-                    let n_clamped = n.min(MAX_LOOP_ITERATIONS);
-                    if n > MAX_LOOP_ITERATIONS {
+                    let n_clamped = n.min(config.max_iterations);
+                    if n > config.max_iterations {
                         tracing::warn!(
                             requested = n,
-                            clamped_to = MAX_LOOP_ITERATIONS,
-                            "LoopMode::Count exceeded MAX_LOOP_ITERATIONS; clamping"
+                            clamped_to = config.max_iterations,
+                            "LoopMode::Count exceeded max_iterations; clamping"
                         );
                     }
                     let mut ex = exchange;
@@ -151,7 +150,7 @@ impl camel_api::OutcomePipeline for LoopSegment {
                     let mut ex = exchange;
                     ex.set_property(CAMEL_LOOP_SIZE, Value::from(0u64));
                     let mut i = 0u64;
-                    while i < MAX_LOOP_ITERATIONS as u64 {
+                    while i < config.max_iterations as u64 {
                         if !predicate(&ex) {
                             break;
                         }
@@ -166,8 +165,8 @@ impl camel_api::OutcomePipeline for LoopSegment {
                     }
                     if predicate(&ex) {
                         tracing::warn!(
-                            "Loop while-mode hit MAX_LOOP_ITERATIONS ({}) safety guard. Predicate still true.",
-                            MAX_LOOP_ITERATIONS
+                            "Loop while-mode hit max_iterations ({}) safety guard. Predicate still true.",
+                            config.max_iterations
                         );
                     }
                     PipelineOutcome::Completed(ex)
@@ -364,6 +363,27 @@ mod tests {
                 .and_then(|v| v.as_u64()),
             Some(MAX_LOOP_ITERATIONS as u64)
         );
+    }
+
+    #[tokio::test]
+    async fn test_loop_count_with_custom_max_iterations() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let config = LoopConfig::new(LoopMode::Count(15_000)).with_max_iterations(15_000);
+        let mut service = LoopService::new(config, counter_pipeline(Arc::clone(&counter)));
+        let exchange = Exchange::new(Message::new("test"));
+        let _ = service.ready().await.unwrap().call(exchange).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 15_000);
+    }
+
+    #[tokio::test]
+    async fn test_loop_while_with_custom_max_iterations() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let predicate: Arc<dyn Fn(&Exchange) -> bool + Send + Sync> = Arc::new(|_| true);
+        let config = LoopConfig::new(LoopMode::While(predicate)).with_max_iterations(50);
+        let mut service = LoopService::new(config, counter_pipeline(Arc::clone(&counter)));
+        let exchange = Exchange::new(Message::new("test"));
+        let _ = service.ready().await.unwrap().call(exchange).await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 50);
     }
 
     #[tokio::test]

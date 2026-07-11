@@ -24,7 +24,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `filter` | Filter | conditional routing | `src/lib.rs:15` |
 | `load_balancer` | LoadBalancer | load balancing / failover | `src/lib.rs:16` |
 | `log` | Log / DynamicLog | observability | `src/lib.rs:17` |
-| `loop_eip` | Loop | repeated routing | `src/lib.rs:18` (Count(n) clamped to MAX_LOOP_ITERATIONS=10_000 — Batch 1 D-M9) |
+| `loop_eip` | Loop | repeated routing | `src/lib.rs:18` (Count(n) clamped to config.max_iterations, default MAX_LOOP_ITERATIONS=10_000 — configurable per-step per ADR-0039) |
 | `map_body` | MapBody | transformation | `src/lib.rs:19` |
 | `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:20` |
 | `multicast` | Multicast | fan-out routing | `src/lib.rs:21` |

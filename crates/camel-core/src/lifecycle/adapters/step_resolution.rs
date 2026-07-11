@@ -406,6 +406,7 @@ mod tests {
                     source: "${header.k} == 'v'".into(),
                 }),
                 steps: vec![],
+                max_iterations: None,
             }],
             &producer_ctx,
             Arc::clone(&rt),
@@ -435,6 +436,7 @@ mod tests {
                 count: None,
                 while_predicate: None,
                 steps: vec![],
+                max_iterations: None,
             }],
             &producer_ctx,
             Arc::clone(&rt),
@@ -556,6 +558,7 @@ mod tests {
                 count: Some(1),
                 while_predicate: None,
                 steps: vec![BuilderStep::Stop],
+                max_iterations: None,
             },
             BuilderStep::Log {
                 level: camel_processor::LogLevel::Info,

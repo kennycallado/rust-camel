@@ -10,4 +10,4 @@ count: number | null,
 /**
  * While condition — expression-only (no nested steps).
  */
-while: LoopWhileExpr | null, steps: Array<RouteDslStep>, };
+while: LoopWhileExpr | null, steps: Array<RouteDslStep>, max_iterations: number | null, };

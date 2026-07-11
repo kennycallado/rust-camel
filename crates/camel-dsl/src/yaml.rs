@@ -1160,8 +1160,8 @@ pub(crate) fn route_step_to_declarative_step(
             }))
         }
         RouteDslStep::Loop(LoopStep { loop_data }) => {
-            let (count, while_predicate, steps) = match loop_data {
-                LoopData::Count(n) => (Some(n), None, vec![]),
+            let (count, while_predicate, steps, max_iterations) = match loop_data {
+                LoopData::Count(n) => (Some(n), None, vec![], None),
                 LoopData::Full(cfg) => {
                     let predicate = match &cfg.while_expr {
                         Some(expr) => Some(parse_loop_while_expr(expr, "loop.while")?),
@@ -1172,13 +1172,14 @@ pub(crate) fn route_step_to_declarative_step(
                         .into_iter()
                         .map(route_step_to_declarative_step)
                         .collect::<Result<Vec<_>, _>>()?;
-                    (cfg.count, predicate, sub_steps)
+                    (cfg.count, predicate, sub_steps, cfg.max_iterations)
                 }
             };
             Ok(DeclarativeStep::Loop(LoopStepDef {
                 count,
                 while_predicate,
                 steps,
+                max_iterations,
             }))
         }
         RouteDslStep::Validate(ValidateStep { validate }) => {

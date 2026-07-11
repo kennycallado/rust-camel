@@ -49,6 +49,7 @@ impl StepCompiler for ControlFlowCompiler {
                 count,
                 while_predicate,
                 steps,
+                max_iterations,
             } => {
                 let mode = match (count, while_predicate) {
                     (Some(n), None) => LoopMode::Count(n),
@@ -76,7 +77,10 @@ impl StepCompiler for ControlFlowCompiler {
                         Err(e) => return StepCompileResult::Matched(Err(e)),
                     };
                 let body = compose_outcome_segment(sub_segments);
-                let config = LoopConfig { mode };
+                let mut config = LoopConfig::new(mode);
+                if let Some(mi) = max_iterations {
+                    config = config.with_max_iterations(mi);
+                }
                 let loop_segment = camel_processor::LoopSegment { config, body };
                 StepCompileResult::Matched(Ok(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(loop_segment)),
