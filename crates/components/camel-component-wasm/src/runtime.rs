@@ -337,7 +337,7 @@ impl WasmRuntime {
             None, // drain_completion_notify: production plugin path doesn't install it
             // Plugin make_drive closure — mirrors bean.rs (keep in sync; the shared
             // spawn_return_drain scaffold is identical, only the binding differs).
-            move |handoff_shared, dtx, drx, cancel_drain, progress, rx_gone, drain_started, terminal| async move {
+            move |handoff_shared, dtx, drx, drain_started, coord| async move {
                 // NEW-7: convert the camel_api Exchange → binding WasmExchange (mirrors
                 // runtime.rs:330-336). For non-stream inputs, we can convert now.
                 // For stream inputs, the conversion happens inside run_concurrent
@@ -358,9 +358,9 @@ impl WasmRuntime {
                                         accessor,
                                         stream,
                                         &metadata,
-                                        cancel_drain.clone(),
+                                        coord.cancel.clone(),
                                         max_bytes,
-                                        progress.clone(),
+                                        coord.progress.clone(),
                                     )?,
                                     None => {
                                         return Err(wasmtime::Error::msg(
@@ -385,17 +385,16 @@ impl WasmRuntime {
                                 Some((reader, terminal_future, guest_metadata)) => {
                                     drain_started.notify_one();
                                     if let Some(tx) = take_stream_handoff_sender(&handoff_drive) {
-                                        let _ = tx.send(Ok((wasm_exchange, Some(crate::return_stream::DrainReceiver { rx: drx, terminal: terminal.clone() }), guest_metadata))); // drx moves out (F1)
+                                        let _ = tx.send(Ok((wasm_exchange, Some(crate::return_stream::DrainReceiver { rx: drx, terminal: coord.terminal_slot.clone() }), guest_metadata))); // drx moves out (F1)
                                     }
                                     // Cancel-on-drop select! (F2, spec §5): race drain against
                                     // receiver_gone (ChannelConsumer fires it on poll_reserve Err).
                                     tokio::select! {
                                         _ = crate::return_stream::drain_guest_stream(
                                             accessor, reader, terminal_future, dtx,
-                                            cancel_drain.clone(), progress.clone(), rx_gone.clone(),
-                                            terminal.clone(),
+                                            coord.clone(),
                                         ) => {}
-                                        _ = rx_gone.notified() => { cancel_drain.cancel(); }
+                                        _ = coord.receiver_gone.notified() => { coord.cancel.cancel(); }
                                     }
                                 }
                                 None => {
@@ -442,42 +441,6 @@ impl WasmRuntime {
             drain_rx,
             metadata,
         })
-    }
-
-    /// No-progress watchdog: drive `run_fut` to completion, but fail with a
-    /// [`WasmError::GuestPanic`] timeout if `max_duration` elapses without
-    /// `progress_notify` firing.
-    ///
-    /// Each notification resets the no-progress window. This guards against
-    /// guests (or upstream producers) that stall indefinitely without ever
-    /// producing another chunk — the epoch deadline alone does not cover that
-    /// case, because the guest may be cooperatively awaiting the stream
-    /// rather than burning cycles.
-    ///
-    /// On the stream path, [`crate::stream_bridge::BoxStreamProducer`] calls
-    /// `notify_one()` per shipped chunk; the resulting wakeup re-arms the
-    /// timer via the `continue` branch.
-    #[cfg(test)]
-    pub(crate) async fn drive_with_watchdog<F, T>(
-        run_fut: F,
-        progress_notify: &Notify,
-        max_duration: Duration,
-    ) -> Result<T, WasmError>
-    where
-        F: Future<Output = Result<T, WasmError>>,
-    {
-        let mut run_fut = std::pin::pin!(run_fut);
-        loop {
-            tokio::select! {
-                r = &mut run_fut => return r,
-                _ = progress_notify.notified() => continue,
-                _ = tokio::time::sleep(max_duration) => {
-                    return Err(WasmError::GuestPanic(
-                        "wasm: no-progress timeout (stream stalled)".into(),
-                    ));
-                }
-            }
-        }
     }
 
     /// Phase-aware watchdog: Phase 1 (invoke) waits for drain_started or
@@ -734,84 +697,6 @@ mod tests {
         );
     }
 
-    // ── drive_with_watchdog (no-progress watchdog) ───────────────────────
-
-    #[tokio::test]
-    async fn watchdog_times_out_on_stalled_future() {
-        // A future that never resolves and never reports progress must trip
-        // the no-progress timeout.
-        use std::future::pending;
-
-        let notify = Arc::new(Notify::new());
-        let result: Result<(), WasmError> =
-            WasmRuntime::drive_with_watchdog(pending(), &notify, Duration::from_millis(50)).await;
-        let err = result.expect_err("stalled future must time out");
-        assert!(
-            err.to_string().contains("no-progress"),
-            "expected no-progress timeout, got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn watchdog_passes_through_immediate_completion() {
-        // A future that resolves right away must return its value untouched,
-        // even with a long watchdog window still pending.
-        let notify = Arc::new(Notify::new());
-        let result: Result<i32, WasmError> =
-            WasmRuntime::drive_with_watchdog(async { Ok(42) }, &notify, Duration::from_secs(60))
-                .await;
-        assert_eq!(result.unwrap(), 42);
-    }
-
-    #[tokio::test]
-    async fn watchdog_passes_through_guest_error() {
-        // A future that resolves with an error must surface that error, not a
-        // timeout — the watchdog only fires on NO progress.
-        let notify = Arc::new(Notify::new());
-        let result: Result<(), WasmError> = WasmRuntime::drive_with_watchdog(
-            async { Err(WasmError::GuestPanic("boom".into())) },
-            &notify,
-            Duration::from_secs(60),
-        )
-        .await;
-        let err = result.expect_err("guest error must propagate");
-        assert!(err.to_string().contains("boom"));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn watchdog_resets_on_progress_avoids_timeout() {
-        // A slow future (longer than the watchdog window) that receives
-        // periodic progress pings must NOT time out — each ping resets the
-        // no-progress timer.
-        let notify = Arc::new(Notify::new());
-        let pinger_notify = notify.clone();
-
-        // Pinger: fire 4 progress notifications 25ms apart, then stop. The
-        // future completes at 120ms; without resets the 40ms watchdog would
-        // fire at ~40ms.
-        let pinger = tokio::spawn(async move {
-            for _ in 0..4 {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                pinger_notify.notify_one();
-            }
-        });
-
-        let result: Result<(), WasmError> = WasmRuntime::drive_with_watchdog(
-            async {
-                tokio::time::sleep(Duration::from_millis(120)).await;
-                Ok(())
-            },
-            &notify,
-            Duration::from_millis(40),
-        )
-        .await;
-        pinger.await.expect("pinger joins");
-        assert!(
-            result.is_ok(),
-            "progress pings should have reset the watchdog, got: {result:?}"
-        );
-    }
-
     #[tokio::test]
     async fn timeout_kills_infinite_loop_guest() {
         // Behavioral test for the timeout half of the safety net:
@@ -964,6 +849,28 @@ mod tests {
         )
         .await;
         assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn drain_watchdog_passes_through_guest_error() {
+        // A future that resolves with an error must surface that error, not a
+        // timeout — the watchdog only fires on NO progress.
+        let progress = Arc::new(Notify::new());
+        let drain_started = Arc::new(Notify::new());
+        let ds = drain_started.clone();
+        let drive = async move {
+            ds.notify_one();
+            Err::<(), WasmError>(WasmError::GuestPanic("boom".into()))
+        };
+        let result = WasmRuntime::drive_with_drain_watchdog(
+            drive,
+            &progress,
+            &drain_started,
+            Duration::from_secs(60),
+        )
+        .await;
+        let err = result.expect_err("guest error must propagate");
+        assert!(err.to_string().contains("boom"));
     }
 
     #[tokio::test]

@@ -143,7 +143,7 @@ impl BeanProcessor for WasmBean {
             // Bean make_drive closure — mirrors runtime.rs process_streaming_exchange
             // (keep in sync; the shared spawn_return_drain scaffold is identical,
             // only the binding + input/output field differ).
-            move |handoff_shared, dtx, drx, cancel_drain, progress, rx_gone, drain_started, terminal| async move {
+            move |handoff_shared, dtx, drx, drain_started, coord| async move {
                 let handoff_drive = handoff_shared.clone();
 
                 // ONE run_concurrent block: branch on stream_parts inside to
@@ -167,9 +167,9 @@ impl BeanProcessor for WasmBean {
                                             accessor,
                                             stream,
                                             &metadata,
-                                            cancel_drain.clone(),
+                                            coord.cancel.clone(),
                                             max_bytes,
-                                            progress.clone(),
+                                            coord.progress.clone(),
                                         )?
                                     }
                                     None => {
@@ -203,16 +203,15 @@ impl BeanProcessor for WasmBean {
                                             &handoff_drive,
                                         )
                                     {
-                                        let _ = tx.send(Ok((bean_exchange, Some(crate::return_stream::DrainReceiver { rx: drx, terminal: terminal.clone() }), guest_metadata)));
+                                        let _ = tx.send(Ok((bean_exchange, Some(crate::return_stream::DrainReceiver { rx: drx, terminal: coord.terminal_slot.clone() }), guest_metadata)));
                                     }
                                     // Cancel-on-drop select! (F2, spec §5)
                                     tokio::select! {
                                         _ = crate::return_stream::drain_guest_stream(
                                             accessor, reader, terminal_future, dtx,
-                                            cancel_drain.clone(), progress.clone(), rx_gone.clone(),
-                                            terminal.clone(),
+                                            coord.clone(),
                                         ) => {}
-                                        _ = rx_gone.notified() => { cancel_drain.cancel(); }
+                                        _ = coord.receiver_gone.notified() => { coord.cancel.cancel(); }
                                     }
                                 }
                                 None => {

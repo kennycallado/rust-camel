@@ -44,6 +44,17 @@ pub(crate) fn write_terminal(slot: &TerminalSlot, result: Result<(), CamelError>
     }
 }
 
+/// Drain coordination primitives shared between the drain task and the
+/// channel consumer. Bundled to keep `drain_guest_stream` and `make_drive`
+/// closures under clippy's argument limit.
+#[derive(Clone)]
+pub(crate) struct DrainCoord {
+    pub(crate) cancel: CancellationToken,
+    pub(crate) progress: Arc<Notify>,
+    pub(crate) receiver_gone: Arc<Notify>,
+    pub(crate) terminal_slot: TerminalSlot,
+}
+
 /// What travels through the drain channel. Channel close = clean EOF.
 #[derive(Debug)]
 pub(crate) enum DrainEvent {
@@ -285,16 +296,12 @@ impl<S: Send + 'static> StreamConsumer<S> for ChannelConsumer<S> {
 /// types whose cross-binding `From` omits `Stream`.
 /// Generic over `S` (host-state type) so both `WasmHostState` (plugin/bean)
 /// and `SourceHostState` (source world) can reuse this drain scaffold.
-#[allow(clippy::too_many_arguments)] // mirrors drain scaffold signature
 pub(crate) async fn drain_guest_stream<E, S>(
     accessor: &Accessor<S>,
     stream_reader: StreamReader<u8>,
     terminal: FutureReader<Result<(), E>>,
     tx: mpsc::Sender<DrainEvent>,
-    cancel: CancellationToken,
-    progress: Arc<Notify>,
-    receiver_gone: Arc<Notify>,
-    terminal_slot: TerminalSlot,
+    coord: DrainCoord,
 ) where
     E: Into<CamelError> + Send + Sync + 'static,
     S: Send + 'static,
@@ -312,9 +319,9 @@ pub(crate) async fn drain_guest_stream<E, S>(
                 &mut access,
                 ChannelConsumer::new(
                     tx.clone(),
-                    cancel.clone(),
-                    progress.clone(),
-                    receiver_gone.clone(),
+                    coord.cancel.clone(),
+                    coord.progress.clone(),
+                    coord.receiver_gone.clone(),
                 ),
             )
             .expect("pipe registration"); // allow-unwrap
@@ -339,7 +346,7 @@ pub(crate) async fn drain_guest_stream<E, S>(
             // error via the non-blocking slot rather than a blocking send that
             // could deadlock if the receiver is already gone.
             write_terminal(
-                &terminal_slot,
+                &coord.terminal_slot,
                 Err(CamelError::ProcessorError(
                     "wasm guest terminal future dropped without resolving".into(),
                 )),
@@ -349,7 +356,7 @@ pub(crate) async fn drain_guest_stream<E, S>(
         }
     };
     if let Err(e) = outcome {
-        write_terminal(&terminal_slot, Err(e.into()));
+        write_terminal(&coord.terminal_slot, Err(e.into()));
     }
     // Dropping tx here signals EOF to the receiver (clean close).
     drop(tx);
@@ -445,7 +452,7 @@ pub(crate) fn take_stream_handoff_sender<W>(
 /// The helper:
 /// 1. Creates the drain channel and handoff oneshot.
 /// 2. Spawns a task that runs `make_drive(...)` wrapped in
-///    `drive_with_watchdog`.
+///    `drive_with_drain_watchdog`.
 /// 3. On watchdog error, sends the error through the handoff and the
 ///    drain channel (best-effort).
 /// 4. Awaits the handoff and returns the exchange + optional drain
@@ -463,11 +470,8 @@ where
             Arc<std::sync::Mutex<Option<StreamHandoffSender<W>>>>,
             mpsc::Sender<DrainEvent>,
             mpsc::Receiver<DrainEvent>,
-            CancellationToken,
             Arc<Notify>,
-            Arc<Notify>,
-            Arc<Notify>,
-            TerminalSlot,
+            DrainCoord,
         ) -> Fut
         + Send
         + 'static,
@@ -483,22 +487,17 @@ where
 
     tokio::spawn(async move {
         let _permit = pending_permit; // held for drain lifetime
-        let cancel_drain = cancel_child.clone();
-        let progress = progress_notify.clone();
-        let rx_gone = receiver_gone.clone();
         let (dtx, drx) = mpsc::channel::<DrainEvent>(DEFAULT_DRAIN_CHANNEL_BOUND);
         let handoff_drive = handoff_shared.clone();
 
-        let drive = make_drive(
-            handoff_drive,
-            dtx,
-            drx,
-            cancel_drain,
-            progress,
-            rx_gone,
-            drain_started.clone(),
-            terminal.clone(),
-        );
+        let coord = DrainCoord {
+            cancel: cancel_child.clone(),
+            progress: progress_notify.clone(),
+            receiver_gone: receiver_gone.clone(),
+            terminal_slot: terminal.clone(),
+        };
+
+        let drive = make_drive(handoff_drive, dtx, drx, drain_started.clone(), coord);
         let span = tracing::info_span!("wasm return-stream drain");
 
         let drain_result = async {

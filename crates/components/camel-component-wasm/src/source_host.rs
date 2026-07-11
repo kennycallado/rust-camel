@@ -19,8 +19,8 @@ use camel_api::{Body, CamelError, Exchange, ExchangePattern, Message, StreamBody
 use camel_component_api::consumer::ConsumerContext;
 
 use crate::return_stream::{
-    DEFAULT_DRAIN_CHANNEL_BOUND, DrainEvent, StreamReturnable, TerminalSlot, drain_guest_stream,
-    receiver_to_body_stream,
+    DEFAULT_DRAIN_CHANNEL_BOUND, DrainCoord, DrainEvent, StreamReturnable, TerminalSlot,
+    drain_guest_stream, receiver_to_body_stream,
 };
 use crate::source_bindings::camel::plugin::source_host::{HttpRequest, SubmitOutcome};
 use crate::source_bindings::camel::plugin::types::{
@@ -288,10 +288,14 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
             // consumer observes the terminal result after buffered chunks drain.
             // Created ONCE and shared between the drain task and the body stream.
             let source_terminal: TerminalSlot = Arc::new(std::sync::Mutex::new(None));
-            // ponytail: progress/receiver_gone Notify unused under source (no watchdog);
+            // progress/receiver_gone unused under source (no watchdog);
             // required by shared drain_guest_stream signature.
-            let progress = Arc::new(Notify::new());
-            let receiver_gone = Arc::new(Notify::new());
+            let coord = DrainCoord {
+                cancel: cancel_token.clone(),
+                progress: Arc::new(Notify::new()),
+                receiver_gone: Arc::new(Notify::new()),
+                terminal_slot: source_terminal.clone(),
+            };
 
             // Register the drain BEFORE sending the exchange. Ordering is
             // load-bearing: the chunk-channel receiver only gets a consumer
@@ -303,10 +307,7 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
                 stream_reader,
                 terminal,
                 chunk_tx,
-                cancel: cancel_token.clone(),
-                progress: progress.clone(),
-                receiver_gone: receiver_gone.clone(),
-                terminal_slot: source_terminal.clone(),
+                coord,
             });
 
             // Attach the lazy body. Downstream reads from this receiver; the
@@ -357,10 +358,7 @@ struct SubmitExchangeDrain {
     stream_reader: wasmtime::component::StreamReader<u8>,
     terminal: wasmtime::component::FutureReader<Result<(), SourceWasmError>>,
     chunk_tx: mpsc::Sender<DrainEvent>,
-    cancel: CancellationToken,
-    progress: Arc<Notify>,
-    receiver_gone: Arc<Notify>,
-    terminal_slot: TerminalSlot,
+    coord: DrainCoord,
 }
 
 impl AccessorTask<SourceHostState, HasSelf<SourceHostState>> for SubmitExchangeDrain {
@@ -373,10 +371,7 @@ impl AccessorTask<SourceHostState, HasSelf<SourceHostState>> for SubmitExchangeD
             self.stream_reader,
             self.terminal,
             self.chunk_tx,
-            self.cancel,
-            self.progress,
-            self.receiver_gone,
-            self.terminal_slot,
+            self.coord,
         )
         .await;
         // Terminal errors are surfaced through the chunk channel
