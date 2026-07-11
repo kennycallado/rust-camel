@@ -2359,10 +2359,12 @@ name = "camel-xj"
 version = "0.23.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "camel-api",
  "camel-bridge",
  "camel-component-api",
  "camel-xslt",
+ "futures",
  "rustls",
  "serde_json",
  "thiserror 2.0.18",

@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{debug, warn};
 
-use camel_api::body::DEFAULT_MATERIALIZE_LIMIT;
 use camel_api::{Body, CamelError, Exchange, StreamBody};
 use camel_core::Registry;
 
@@ -30,11 +29,6 @@ fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
 pub(crate) fn is_streaming(body: &Body) -> bool {
     matches!(body, Body::Stream(_))
 }
-
-/// Default per-stream byte cap passed to `process_streaming_exchange`.
-/// Mirrors `camel_api::DEFAULT_MATERIALIZE_LIMIT`; re-stated as `u64` because
-/// the streaming host bridge takes bytes as `u64`.
-pub(crate) const DEFAULT_STREAM_MAX_BYTES: u64 = DEFAULT_MATERIALIZE_LIMIT as u64;
 
 /// Default watchdog window: if the guest makes no progress shipping/receiving
 /// stream chunks for this duration, the call is cancelled.
@@ -134,6 +128,7 @@ impl WasmProducer {
         observability: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
         let max_concurrent_calls = config.max_concurrent_calls;
+        let max_stream_bytes = config.max_stream_bytes;
         Self {
             module_path,
             registry,
@@ -146,7 +141,7 @@ impl WasmProducer {
             acquire_fut: None,
             observability,
             cancel: CancellationToken::new(),
-            max_bytes: DEFAULT_STREAM_MAX_BYTES,
+            max_bytes: max_stream_bytes,
             no_progress_timeout: DEFAULT_NO_PROGRESS_TIMEOUT,
         }
     }
@@ -397,13 +392,17 @@ mod tests {
 
     #[test]
     fn test_streaming_defaults_set_on_construction() {
+        let config = WasmConfig {
+            max_stream_bytes: 52_428_800,
+            ..WasmConfig::default()
+        };
         let producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
             Arc::new(std::sync::Mutex::new(Registry::new())),
-            WasmConfig::default(),
+            config.clone(),
             test_rt(),
         );
-        assert_eq!(producer.max_bytes, DEFAULT_STREAM_MAX_BYTES);
+        assert_eq!(producer.max_bytes, config.max_stream_bytes);
         assert_eq!(producer.no_progress_timeout, DEFAULT_NO_PROGRESS_TIMEOUT);
         // Root token is not yet cancelled; a child must also be live.
         assert!(!producer.cancel.is_cancelled());

@@ -65,6 +65,9 @@ pub struct XsltEndpointConfig {
     /// is empty (no XML payload). When `false` (default), an empty body is
     /// forwarded to the bridge as-is.
     pub fail_on_null_body: bool,
+    /// Maximum payload size in bytes accepted from the incoming exchange body.
+    /// `None` uses the global default (`DEFAULT_MATERIALIZE_LIMIT`). `Some(0)` is rejected.
+    pub max_payload_bytes: Option<usize>,
 }
 
 impl XsltEndpointConfig {
@@ -103,6 +106,7 @@ impl XsltEndpointConfig {
         let mut output_method = None;
         let mut transformer_cache_size = None;
         let mut fail_on_null_body = false;
+        let mut max_payload_bytes = None;
 
         if let Some(q) = query {
             for (key, value) in url::form_urlencoded::parse(q.as_bytes()) {
@@ -128,6 +132,23 @@ impl XsltEndpointConfig {
                     continue;
                 }
 
+                if key == "maxPayloadBytes" {
+                    match value.parse::<usize>() {
+                        Ok(0) => {
+                            return Err(CamelError::EndpointCreationFailed(
+                                "maxPayloadBytes must be greater than 0".to_string(),
+                            ));
+                        }
+                        Ok(n) => max_payload_bytes = Some(n),
+                        Err(_) => {
+                            return Err(CamelError::EndpointCreationFailed(format!(
+                                "invalid maxPayloadBytes value: {value}"
+                            )));
+                        }
+                    }
+                    continue;
+                }
+
                 if let Some(param_key) = key.strip_prefix("param.")
                     && !param_key.is_empty()
                 {
@@ -142,6 +163,7 @@ impl XsltEndpointConfig {
             output_method,
             transformer_cache_size,
             fail_on_null_body,
+            max_payload_bytes,
         })
     }
 }
@@ -201,6 +223,38 @@ mod tests {
     fn fail_on_null_body_defaults_false() {
         let cfg = XsltEndpointConfig::from_uri("xslt:/tmp/a.xslt").unwrap();
         assert!(!cfg.fail_on_null_body);
+    }
+
+    #[test]
+    fn parses_max_payload_bytes() {
+        let cfg = XsltEndpointConfig::from_uri("xslt:/tmp/a.xslt?maxPayloadBytes=2048").unwrap();
+        assert_eq!(cfg.max_payload_bytes, Some(2048));
+    }
+
+    #[test]
+    fn max_payload_bytes_defaults_none() {
+        let cfg = XsltEndpointConfig::from_uri("xslt:/tmp/a.xslt").unwrap();
+        assert_eq!(cfg.max_payload_bytes, None);
+    }
+
+    #[test]
+    fn rejects_zero_max_payload_bytes() {
+        let err = XsltEndpointConfig::from_uri("xslt:/tmp/a.xslt?maxPayloadBytes=0").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("maxPayloadBytes"),
+            "expected maxPayloadBytes error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_max_payload_bytes() {
+        let err = XsltEndpointConfig::from_uri("xslt:/tmp/a.xslt?maxPayloadBytes=abc").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("maxPayloadBytes"),
+            "expected maxPayloadBytes error, got: {msg}"
+        );
     }
 
     #[test]

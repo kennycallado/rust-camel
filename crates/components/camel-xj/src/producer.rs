@@ -1,5 +1,6 @@
 use crate::component::XjBridgeRuntime;
 use crate::config::Direction;
+use camel_api::body::DEFAULT_MATERIALIZE_LIMIT;
 use camel_component_api::{Body, CamelError, Exchange};
 use camel_xslt::{StylesheetId, XsltBridgeClient};
 use std::future::Future;
@@ -66,21 +67,12 @@ impl Service<Exchange> for XjProducer {
 
         Box::pin(async move {
             let input_body = std::mem::take(&mut exchange.input.body);
+            let effective = max_payload_bytes.unwrap_or(DEFAULT_MATERIALIZE_LIMIT);
             let raw = input_body
-                .materialize()
+                .into_bytes(effective)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("XJ input body error: {e}")))?
                 .to_vec();
-
-            // Reject oversized payloads before sending to the bridge process.
-            if let Some(limit) = max_payload_bytes
-                && raw.len() > limit
-            {
-                return Err(CamelError::ProcessorError(format!(
-                    "payload too large: {} bytes (limit: {limit} bytes)",
-                    raw.len()
-                )));
-            }
 
             // For json2xml the input is JSON, not XML. Saxon cannot parse JSON as a SAXSource.
             // Pass the JSON as the XSLT parameter `jsonInput` and send a minimal XML document.
@@ -156,16 +148,12 @@ mod tests {
         let err = result.expect_err("should reject oversized payload");
         let msg = err.to_string();
         assert!(
-            msg.contains("payload too large"),
-            "expected payload-too-large error, got: {msg}"
+            msg.contains("XJ input body error"),
+            "expected XJ input body error, got: {msg}"
         );
         assert!(
-            msg.contains("200 bytes"),
-            "expected actual size in message, got: {msg}"
-        );
-        assert!(
-            msg.contains("limit: 100 bytes"),
-            "expected limit in message, got: {msg}"
+            msg.contains("Stream size exceeded limit"),
+            "expected stream-limit message, got: {msg}"
         );
     }
 
@@ -181,7 +169,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            !err_msg.contains("payload too large"),
+            !err_msg.contains("Stream size exceeded limit"),
             "should NOT reject within-limit payload, got: {err_msg}"
         );
     }
@@ -196,7 +184,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            !err_msg.contains("payload too large"),
+            !err_msg.contains("Stream size exceeded limit"),
             "no limit means no payload rejection, got: {err_msg}"
         );
     }
@@ -213,7 +201,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            !err_msg.contains("payload too large"),
+            !err_msg.contains("Stream size exceeded limit"),
             "empty body should not trigger payload rejection, got: {err_msg}"
         );
     }
@@ -228,8 +216,42 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            !err_msg.contains("payload too large"),
+            !err_msg.contains("Stream size exceeded limit"),
             "JSON body should materialize without payload rejection, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rejects_oversized_stream_incrementally() {
+        use bytes::Bytes;
+        use camel_api::StreamBody;
+        use futures::stream;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let mut producer = make_producer(Some(100));
+        // Create a stream with chunks that total >100 bytes
+        let chunks = vec![
+            Ok(Bytes::from("x".repeat(60))),
+            Ok(Bytes::from("y".repeat(60))),
+        ];
+        let stream = stream::iter(chunks);
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+            metadata: Default::default(),
+        });
+        let exchange = Exchange::new(Message::new(body));
+
+        let result = producer.ready().await.unwrap().call(exchange).await;
+        let err = result.expect_err("should reject oversized stream");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("XJ input body error"),
+            "expected XJ input body error, got: {msg}"
+        );
+        assert!(
+            msg.contains("Stream size exceeded limit"),
+            "expected stream-limit message, got: {msg}"
         );
     }
 }

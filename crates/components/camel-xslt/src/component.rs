@@ -284,6 +284,7 @@ impl Component for XsltComponent {
             endpoint_config.params,
             endpoint_config.output_method,
             endpoint_config.fail_on_null_body,
+            endpoint_config.max_payload_bytes,
             Arc::clone(&self.client),
             Arc::clone(&self.runtime),
         )))

@@ -56,6 +56,11 @@ pub struct WasmLimitsConfig {
     /// Ignored for AuthorizationPolicy/SecurityPolicy worlds (always denied).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_call_schemes: Option<String>,
+
+    /// Maximum bytes for streaming body bridge between host and guest.
+    /// Maps to `WasmConfig::max_stream_bytes` when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_stream_bytes: Option<u64>,
 }
 
 #[cfg(test)]
@@ -70,6 +75,7 @@ mod tests {
         assert_eq!(cfg.max_concurrent_calls, None);
         assert_eq!(cfg.max_wasm_size, None);
         assert_eq!(cfg.allow_call_schemes, None);
+        assert_eq!(cfg.max_stream_bytes, None);
     }
 
     #[test]
@@ -80,6 +86,7 @@ mod tests {
             max-concurrent-calls = 2
             max-wasm-size = 20971520i64
             allow-call-schemes = "log,direct"
+            max-stream-bytes = 52428800i64
         };
         let cfg: WasmLimitsConfig = toml.try_into().expect("deserialize");
         assert_eq!(cfg.timeout_secs, Some(600));
@@ -87,6 +94,7 @@ mod tests {
         assert_eq!(cfg.max_concurrent_calls, Some(2));
         assert_eq!(cfg.max_wasm_size, Some(20_971_520));
         assert_eq!(cfg.allow_call_schemes.as_deref(), Some("log,direct"));
+        assert_eq!(cfg.max_stream_bytes, Some(52_428_800));
     }
 
     #[test]
@@ -100,6 +108,7 @@ mod tests {
         assert_eq!(cfg.max_concurrent_calls, None);
         assert_eq!(cfg.max_wasm_size, None);
         assert_eq!(cfg.allow_call_schemes, None);
+        assert_eq!(cfg.max_stream_bytes, None);
     }
 
     #[test]
@@ -149,5 +158,18 @@ mod tests {
         assert!(!s.contains("max-concurrent-calls"));
         assert!(!s.contains("max-wasm-size"));
         assert!(!s.contains("allow-call-schemes"));
+        assert!(!s.contains("max-stream-bytes"));
+    }
+
+    #[test]
+    fn max_stream_bytes_round_trip() {
+        let cfg = WasmLimitsConfig {
+            max_stream_bytes: Some(52_428_800),
+            ..WasmLimitsConfig::default()
+        };
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        assert!(serialized.contains("max-stream-bytes"));
+        let back: WasmLimitsConfig = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(back.max_stream_bytes, Some(52_428_800));
     }
 }

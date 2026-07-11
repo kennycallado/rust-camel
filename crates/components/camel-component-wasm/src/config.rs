@@ -11,6 +11,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use camel_api::body::DEFAULT_MATERIALIZE_LIMIT;
+
 /// Default execution timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
@@ -22,6 +24,9 @@ const DEFAULT_MAX_CONCURRENT_CALLS: usize = 4;
 
 /// Default maximum .wasm file size in bytes (10 MB).
 const DEFAULT_MAX_WASM_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Default maximum bytes for the streaming body bridge.
+pub(crate) const DEFAULT_MAX_STREAM_BYTES: u64 = DEFAULT_MATERIALIZE_LIMIT as u64;
 
 /// Epoch tick interval in milliseconds (same as Surrealism).
 const EPOCH_INTERVAL_MILLIS: u64 = 10;
@@ -51,6 +56,9 @@ pub struct WasmConfig {
     /// Empty string = deny all (fail-closed). Example: "log,direct,file".
     /// Ignored for AuthorizationPolicy/SecurityPolicy worlds (always denied).
     pub allow_call_schemes: String,
+
+    /// Maximum bytes for the streaming body bridge.
+    pub max_stream_bytes: u64,
 }
 
 impl Default for WasmConfig {
@@ -61,6 +69,7 @@ impl Default for WasmConfig {
             max_concurrent_calls: DEFAULT_MAX_CONCURRENT_CALLS,
             max_wasm_size_bytes: DEFAULT_MAX_WASM_SIZE_BYTES,
             allow_call_schemes: String::new(),
+            max_stream_bytes: DEFAULT_MAX_STREAM_BYTES,
         }
     }
 }
@@ -80,6 +89,7 @@ impl WasmConfig {
                 .unwrap_or(DEFAULT_MAX_CONCURRENT_CALLS),
             max_wasm_size_bytes: limits.max_wasm_size.unwrap_or(DEFAULT_MAX_WASM_SIZE_BYTES),
             allow_call_schemes: limits.allow_call_schemes.clone().unwrap_or_default(),
+            max_stream_bytes: limits.max_stream_bytes.unwrap_or(DEFAULT_MAX_STREAM_BYTES),
         }
     }
 
@@ -131,6 +141,13 @@ impl WasmConfig {
                         }
                         "allow-call" => {
                             config.allow_call_schemes = value.to_string();
+                        }
+                        "max-stream-bytes" => {
+                            if let Ok(bytes) = value.parse::<u64>()
+                                && bytes > 0
+                            {
+                                config.max_stream_bytes = bytes;
+                            }
                         }
                         _ => {} // ignore unknown params
                     }
@@ -396,5 +413,40 @@ mod tests {
     fn test_validate_wasm_size_errors_on_missing_file() {
         let err = validate_wasm_size(std::path::Path::new("/nonexistent.wasm"), 1000).unwrap_err();
         assert!(err.contains("cannot stat"));
+    }
+
+    #[test]
+    fn wasm_config_default_max_stream_bytes() {
+        let cfg = WasmConfig::default();
+        assert_eq!(cfg.max_stream_bytes, DEFAULT_MATERIALIZE_LIMIT as u64);
+    }
+
+    #[test]
+    fn wasm_config_from_uri_max_stream_bytes() {
+        let (_, cfg) = WasmConfig::from_uri("test.wasm?max-stream-bytes=52428800");
+        assert_eq!(cfg.max_stream_bytes, 52_428_800);
+    }
+
+    #[test]
+    fn wasm_config_from_uri_max_stream_bytes_ignores_zero() {
+        let (_, cfg) = WasmConfig::from_uri("test.wasm?max-stream-bytes=0");
+        assert_eq!(cfg.max_stream_bytes, DEFAULT_MAX_STREAM_BYTES);
+    }
+
+    #[test]
+    fn wasm_config_from_limits_max_stream_bytes() {
+        let limits = camel_config::WasmLimitsConfig {
+            max_stream_bytes: Some(52_428_800),
+            ..camel_config::WasmLimitsConfig::default()
+        };
+        let cfg = WasmConfig::from_limits(&limits);
+        assert_eq!(cfg.max_stream_bytes, 52_428_800);
+    }
+
+    #[test]
+    fn wasm_config_from_limits_max_stream_bytes_default() {
+        let limits = camel_config::WasmLimitsConfig::default();
+        let cfg = WasmConfig::from_limits(&limits);
+        assert_eq!(cfg.max_stream_bytes, DEFAULT_MAX_STREAM_BYTES);
     }
 }

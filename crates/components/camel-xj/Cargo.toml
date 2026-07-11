@@ -24,6 +24,8 @@ camel-component-api = { workspace = true, features = ["test-support"] }
 tonic = { workspace = true }
 serde_json = { workspace = true }
 rustls = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
 
 [lints]
 workspace = true

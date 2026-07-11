@@ -40,12 +40,13 @@ impl WasmBean {
         registry: Arc<std::sync::Mutex<Registry>>,
         bean_config: HashMap<String, String>,
     ) -> Result<Self, WasmError> {
+        let max_stream_bytes = wasm_config.max_stream_bytes;
         let (ctx, methods) =
             WasmPluginContext::new_bean(module_path, wasm_config, registry, bean_config).await?;
         Ok(Self {
             ctx,
             methods,
-            max_bytes: crate::producer::DEFAULT_STREAM_MAX_BYTES,
+            max_bytes: max_stream_bytes,
             no_progress_timeout: crate::producer::DEFAULT_NO_PROGRESS_TIMEOUT,
             drain_completion_notify: None,
             cancel: CancellationToken::new(),

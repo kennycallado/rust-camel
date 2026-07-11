@@ -1,5 +1,6 @@
 use crate::client::{BridgeState, StylesheetId, XsltBridgeClient};
 use crate::component::XsltBridgeRuntime;
+use camel_api::body::DEFAULT_MATERIALIZE_LIMIT;
 use camel_component_api::{Body, CamelError, Exchange};
 use std::future::Future;
 use std::pin::Pin;
@@ -40,17 +41,20 @@ pub struct XsltProducer {
     params: Vec<(String, String)>,
     output_method: Option<String>,
     fail_on_null_body: bool,
+    max_payload_bytes: Option<usize>,
     client: Arc<XsltBridgeClient>,
     runtime: Arc<XsltBridgeRuntime>,
 }
 
 impl XsltProducer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stylesheet_bytes: Vec<u8>,
         compiled: Arc<OnceCell<StylesheetId>>,
         params: Vec<(String, String)>,
         output_method: Option<String>,
         fail_on_null_body: bool,
+        max_payload_bytes: Option<usize>,
         client: Arc<XsltBridgeClient>,
         runtime: Arc<XsltBridgeRuntime>,
     ) -> Self {
@@ -60,6 +64,7 @@ impl XsltProducer {
             params,
             output_method,
             fail_on_null_body,
+            max_payload_bytes,
             client,
             runtime,
         }
@@ -128,6 +133,7 @@ impl Service<Exchange> for XsltProducer {
         let params = self.params.clone();
         let output_method = self.output_method.clone();
         let fail_on_null_body = self.fail_on_null_body;
+        let max_payload_bytes = self.max_payload_bytes;
         let client = Arc::clone(&self.client);
         let runtime = Arc::clone(&self.runtime);
 
@@ -164,8 +170,9 @@ impl Service<Exchange> for XsltProducer {
                 ));
             }
 
+            let effective = max_payload_bytes.unwrap_or(DEFAULT_MATERIALIZE_LIMIT);
             let document = input_body
-                .materialize()
+                .into_bytes(effective)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("XSLT input body error: {e}")))?
                 .to_vec();
@@ -191,9 +198,11 @@ mod tests {
     use super::*;
     use crate::component::XsltBridgeRuntime;
     use crate::config::XsltComponentConfig;
+    use camel_api::Message;
     use std::sync::Arc;
     use std::task::{RawWaker, RawWakerVTable, Waker};
     use tokio::sync::{Mutex, watch};
+    use tower::ServiceExt;
 
     fn noop_waker() -> Waker {
         const VTABLE: RawWakerVTable = RawWakerVTable::new(
@@ -205,7 +214,10 @@ mod tests {
         unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
     }
 
-    fn make_producer_with_state(initial_state: BridgeState) -> XsltProducer {
+    fn make_producer_with_state(
+        initial_state: BridgeState,
+        max_payload_bytes: Option<usize>,
+    ) -> XsltProducer {
         let (state_tx, state_rx) = watch::channel(initial_state);
         let state_rx_arc = Arc::new(state_rx);
         let client = Arc::new(XsltBridgeClient::new(Arc::clone(&state_rx_arc)));
@@ -221,6 +233,7 @@ mod tests {
             vec![],
             None,
             false,
+            max_payload_bytes,
             client,
             runtime,
         )
@@ -228,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_poll_ready_bridge_starting() {
-        let mut producer = make_producer_with_state(BridgeState::Starting);
+        let mut producer = make_producer_with_state(BridgeState::Starting, None);
         let result = producer.poll_ready(&mut Context::from_waker(&noop_waker()));
         assert!(matches!(result, Poll::Pending));
     }
@@ -236,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn test_poll_ready_bridge_ready() {
         let channel = tonic::transport::Channel::from_static("http://[::]:0").connect_lazy();
-        let mut producer = make_producer_with_state(BridgeState::Ready { channel });
+        let mut producer = make_producer_with_state(BridgeState::Ready { channel }, None);
         let result = producer.poll_ready(&mut Context::from_waker(&noop_waker()));
         assert!(matches!(result, Poll::Ready(Ok(()))));
     }
@@ -244,15 +257,93 @@ mod tests {
     #[test]
     fn test_poll_ready_bridge_degraded() {
         let mut producer =
-            make_producer_with_state(BridgeState::Degraded("connection lost".to_string()));
+            make_producer_with_state(BridgeState::Degraded("connection lost".to_string()), None);
         let result = producer.poll_ready(&mut Context::from_waker(&noop_waker()));
         assert!(matches!(result, Poll::Ready(Err(_))));
     }
 
     #[test]
     fn test_poll_ready_bridge_stopped() {
-        let mut producer = make_producer_with_state(BridgeState::Stopped);
+        let mut producer = make_producer_with_state(BridgeState::Stopped, None);
         let result = producer.poll_ready(&mut Context::from_waker(&noop_waker()));
         assert!(matches!(result, Poll::Ready(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn test_producer_rejects_oversized_payload() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let channel = tonic::transport::Channel::from_static("http://[::]:0").connect_lazy();
+        let (state_tx, state_rx) = watch::channel(BridgeState::Ready { channel });
+        let state_rx_arc = Arc::new(state_rx);
+        let client = Arc::new(XsltBridgeClient::new(Arc::clone(&state_rx_arc)));
+        let runtime = Arc::new(XsltBridgeRuntime::new(
+            XsltComponentConfig::default(),
+            Arc::new(Mutex::new(None)),
+            state_tx,
+            state_rx_arc,
+        ));
+        let compiled = Arc::new(OnceCell::new());
+        let _ = compiled.set("test-stylesheet".to_string());
+
+        let mut producer = XsltProducer::new(
+            vec![],
+            compiled,
+            vec![],
+            None,
+            false,
+            Some(100),
+            client,
+            runtime,
+        );
+
+        let big_body = "x".repeat(200).into_bytes();
+        let exchange = Exchange::new(Message::new(Body::from(big_body)));
+
+        let result = producer.ready().await.unwrap().call(exchange).await;
+        let err = result.expect_err("should reject oversized payload");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Stream size exceeded limit"),
+            "expected stream-limit message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_producer_allows_within_limit() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let channel = tonic::transport::Channel::from_static("http://[::]:0").connect_lazy();
+        let (state_tx, state_rx) = watch::channel(BridgeState::Ready { channel });
+        let state_rx_arc = Arc::new(state_rx);
+        let client = Arc::new(XsltBridgeClient::new(Arc::clone(&state_rx_arc)));
+        let runtime = Arc::new(XsltBridgeRuntime::new(
+            XsltComponentConfig::default(),
+            Arc::new(Mutex::new(None)),
+            state_tx,
+            state_rx_arc,
+        ));
+        let compiled = Arc::new(OnceCell::new());
+        let _ = compiled.set("test-stylesheet".to_string());
+
+        let mut producer = XsltProducer::new(
+            vec![],
+            compiled,
+            vec![],
+            None,
+            false,
+            Some(1000),
+            client,
+            runtime,
+        );
+
+        let body = "x".repeat(500).into_bytes();
+        let exchange = Exchange::new(Message::new(Body::from(body)));
+
+        let result = producer.ready().await.unwrap().call(exchange).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            !err_msg.contains("Stream size exceeded limit"),
+            "should NOT reject within-limit payload, got: {err_msg}"
+        );
     }
 }

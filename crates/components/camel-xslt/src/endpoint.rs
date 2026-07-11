@@ -14,17 +14,20 @@ pub struct XsltEndpoint {
     params: Vec<(String, String)>,
     output_method: Option<String>,
     fail_on_null_body: bool,
+    max_payload_bytes: Option<usize>,
     client: Arc<XsltBridgeClient>,
     runtime: Arc<XsltBridgeRuntime>,
 }
 
 impl XsltEndpoint {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         uri: String,
         stylesheet_bytes: Vec<u8>,
         params: Vec<(String, String)>,
         output_method: Option<String>,
         fail_on_null_body: bool,
+        max_payload_bytes: Option<usize>,
         client: Arc<XsltBridgeClient>,
         runtime: Arc<XsltBridgeRuntime>,
     ) -> Self {
@@ -35,6 +38,7 @@ impl XsltEndpoint {
             params,
             output_method,
             fail_on_null_body,
+            max_payload_bytes,
             client,
             runtime,
         }
@@ -70,6 +74,7 @@ impl Endpoint for XsltEndpoint {
             self.params.clone(),
             self.output_method.clone(),
             self.fail_on_null_body,
+            self.max_payload_bytes,
             Arc::clone(&self.client),
             Arc::clone(&self.runtime),
         )))
