@@ -5,6 +5,7 @@ use std::time::Duration;
 pub struct ExecAuditEvent<'a> {
     pub route_id: &'a str,
     pub profile: &'a str,
+    /// Startup-pinned path, NOT symlink-resolved (CONTEXT.md "Canonical executable / pin").
     pub canonical_executable: &'a str,
     pub args: &'a [String],
     pub env_keys: Vec<&'a str>, // keys only, never values

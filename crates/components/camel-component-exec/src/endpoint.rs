@@ -43,6 +43,9 @@ impl Endpoint for ExecEndpoint {
         &self,
         _rt: Arc<dyn RuntimeObservability>,
     ) -> Result<Box<dyn Consumer>, CamelError> {
+        // CamelError has no UnsupportedOperation variant; InvalidUri is the
+        // closest classification for a producer-only component. The message
+        // "producer-only" is asserted by endpoint_is_producer_only test.
         Err(CamelError::InvalidUri(
             "exec component is producer-only".into(),
         ))
@@ -66,7 +69,8 @@ impl Endpoint for ExecEndpoint {
 
         let route_id = ctx.route_id().unwrap_or("unknown").to_string();
         let semaphore = Arc::new(Semaphore::new(profile.concurrency));
-        let host_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let host_env =
+            Arc::new(std::env::vars().collect::<std::collections::HashMap<String, String>>());
 
         let producer = ExecProducer {
             profile: Arc::new(profile),

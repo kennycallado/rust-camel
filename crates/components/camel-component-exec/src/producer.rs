@@ -25,7 +25,7 @@ pub struct ExecProducer {
     pub(crate) profile: Arc<ExecProfile>,
     pub(crate) global: Arc<ExecGlobalConfig>,
     pub(crate) route_id: String,
-    pub(crate) host_env: HashMap<String, String>,
+    pub(crate) host_env: Arc<HashMap<String, String>>,
     pub(crate) semaphore: Arc<Semaphore>,
     pub(crate) rt: Option<Arc<dyn RuntimeObservability>>,
 }
@@ -36,7 +36,7 @@ impl Clone for ExecProducer {
             profile: Arc::clone(&self.profile),
             global: Arc::clone(&self.global),
             route_id: self.route_id.clone(),
-            host_env: self.host_env.clone(),
+            host_env: Arc::clone(&self.host_env),
             semaphore: Arc::clone(&self.semaphore),
             rt: self.rt.clone(),
         }
@@ -77,7 +77,7 @@ impl ExecProducer {
             profile,
             global,
             route_id,
-            host_env,
+            host_env: Arc::new(host_env),
             semaphore,
             rt,
         }
@@ -191,6 +191,9 @@ impl ExecProducer {
             CAMEL_EXEC_STDERR_TRUNCATED.to_string(),
             serde_json::Value::from(raw.stderr_truncated),
         );
+        // Header CAMEL_EXEC_STDERR carries lossy-UTF8 for route predicates
+        // (log:, choice()); body ExecResult.stderr carries byte-exact base64.
+        // Dual repr is intentional.
         h.insert(
             CAMEL_EXEC_STDERR.to_string(),
             serde_json::Value::String(String::from_utf8_lossy(&raw.stderr).into_owned()),
@@ -447,7 +450,7 @@ mod tests {
             profile: Arc::new(profile),
             global: make_global(),
             route_id: "test".into(),
-            host_env: HashMap::new(),
+            host_env: Arc::new(HashMap::new()),
             semaphore: Arc::new(Semaphore::new(1)),
             rt: None,
         }
@@ -567,5 +570,46 @@ mod tests {
             Some(&serde_json::Value::Bool(true)),
             "exit 2 in accepted_exit_codes=[2]"
         );
+    }
+
+    #[test]
+    fn clone_shares_host_env() {
+        let producer = make_producer(make_profile("echo", ArgPolicy::Any, vec![0], 30));
+        let cloned = producer.clone();
+        assert!(
+            Arc::ptr_eq(&producer.host_env, &cloned.host_env),
+            "clone must share host_env Arc, not deep-copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_with_cap_stores_prefix_on_overflow() {
+        // &[u8] delivers all 100 bytes in a single read (tmp buf is 8192),
+        // so this exercises the n > space branch (store space, flip truncated).
+        let data: &[u8] = &[b'x'; 100];
+        let (buf, truncated) = process::drain_with_cap(data, 50).await;
+        assert_eq!(buf.len(), 50, "buf must contain exactly cap bytes");
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn drain_with_cap_multi_read_boundary() {
+        // Chain two slices to force two reads: 30 bytes then 30 bytes.
+        // First read fits (buf=30), second read overflows (space=20 → store 20, flip).
+        use tokio::io::AsyncReadExt;
+        let r1: &[u8] = &[b'x'; 30];
+        let r2: &[u8] = &[b'y'; 30];
+        let chained = r1.chain(r2);
+        let (buf, truncated) = process::drain_with_cap(chained, 50).await;
+        assert_eq!(buf.len(), 50);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn drain_with_cap_exact_fit_not_truncated() {
+        let data: &[u8] = &[b'x'; 50];
+        let (buf, truncated) = process::drain_with_cap(data, 50).await;
+        assert_eq!(buf.len(), 50);
+        assert!(!truncated);
     }
 }

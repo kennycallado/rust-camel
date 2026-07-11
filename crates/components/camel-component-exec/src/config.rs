@@ -94,7 +94,11 @@ pub struct ExecProfile {
     #[serde(default)]
     pub output_mode: OutputMode,
 
-    // Resolved at startup pinning (not deserialized):
+    /// Startup-pinned executable path (NOT deserialized, NOT symlink-resolved).
+    ///
+    /// Resolved once via `which()` at validate-time. Stored as-is (no
+    /// `fs::canonicalize()`) to preserve argv[0] for multi-call binary
+    /// compat (BusyBox/uutils). See CONTEXT.md "Canonical executable / pin".
     #[serde(skip)]
     pub canonical_executable: Option<PathBuf>,
 }
@@ -210,20 +214,23 @@ impl ExecGlobalConfig {
     }
 }
 
-/// Resolve an executable to a canonical path. Name → PATH lookup; absolute → as-is.
+/// Resolve an executable to a startup-pinned path. Name → PATH lookup; absolute → as-is.
+/// Does NOT canonicalize — multi-call binary compat (BusyBox/uutils) needs argv[0] to
+/// preserve the symlink path. See CONTEXT.md "Canonical executable / pin".
 fn resolve_executable(spec: &str) -> Result<std::path::PathBuf, String> {
     let p = std::path::Path::new(spec);
     if p.is_absolute() {
         return p
-            .canonicalize()
-            .map_err(|e| format!("absolute executable unresolvable: {e}"));
+            .is_file()
+            .then(|| p.to_path_buf())
+            .ok_or_else(|| format!("absolute executable not found: {spec}"));
     }
     which(spec).ok_or_else(|| format!("executable {spec:?} not found on PATH"))
 }
 
 /// Minimal PATH lookup (avoid pulling a crate; std-only).
 ///
-/// NOTE: does NOT canonicalize — multi-call binaries (e.g. NixOS coreutils)
+/// NOTE: does NOT canonicalize — multi-call binaries (e.g. BusyBox, uutils coreutils)
 /// need argv[0] to match the symlink name, not the resolved multi-call binary
 /// path. Startup pinning stores the directory-path as-is.
 fn which(name: &str) -> Option<std::path::PathBuf> {

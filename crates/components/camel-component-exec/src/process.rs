@@ -26,14 +26,22 @@ pub async fn drain_with_cap<R: tokio::io::AsyncRead + Unpin>(r: R, cap: usize) -
         match reader.read(&mut tmp).await {
             Ok(0) => break,
             Ok(n) => {
-                if !truncated && buf.len() + n <= cap {
-                    buf.extend_from_slice(&tmp[..n]);
-                } else {
-                    // stop storing, keep draining so the child never blocks on a full pipe
-                    truncated = true;
+                if !truncated {
+                    let space = cap - buf.len();
+                    if n <= space {
+                        buf.extend_from_slice(&tmp[..n]);
+                    } else {
+                        // Store the prefix that fits, then flip truncated.
+                        // Keep draining so the child never blocks on a full pipe.
+                        buf.extend_from_slice(&tmp[..space]);
+                        truncated = true;
+                    }
                 }
             }
-            Err(_) => break,
+            Err(e) => {
+                tracing::debug!(error = %e, "drain read interrupted");
+                break;
+            }
         }
     }
     (Bytes::from(buf), truncated)

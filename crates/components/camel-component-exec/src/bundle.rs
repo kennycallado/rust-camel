@@ -45,21 +45,8 @@ impl ComponentBundle for ExecBundle {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::ExecBundle;
-    use camel_component_api::{Component, ComponentBundle, ComponentRegistrar};
-
-    #[allow(dead_code)]
-    struct TestRegistrar {
-        schemes: Vec<String>,
-    }
-
-    impl ComponentRegistrar for TestRegistrar {
-        fn register_component_dyn(&mut self, component: Arc<dyn Component>) {
-            self.schemes.push(component.scheme().to_string());
-        }
-    }
+    use camel_component_api::ComponentBundle;
 
     #[test]
     fn from_toml_fails_when_no_profiles() {
