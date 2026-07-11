@@ -9,6 +9,13 @@
 //! error propagation, the max-bytes cap, cancellation, the no-progress
 //! watchdog, and progressing-stream watchdog survival.
 //!
+//! The final test (`plugin_return_path_streams_body`) exercises the
+//! **plugin return path**: the guest emits a `WasmBody::Stream` in its
+//! output, and the host reattaches it as `Body::Stream` on the output
+//! exchange via `WasmProducer::call`. This path was previously dormant
+//! (zero coverage); the bean path has separate tests in
+//! `return_stream_integration.rs`.
+//!
 //! Run with: `cargo test -p camel-component-wasm --test streaming_integration -- --nocapture`
 
 use std::collections::HashMap;
@@ -440,5 +447,102 @@ async fn streaming_no_progress_watchdog_fires() {
             );
         }
         other => panic!("expected GuestPanic watchdog timeout, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: plugin return-path streaming (guest emits Body::Stream)
+//
+// Exercises the plugin-specific drain path: WasmProducer::call →
+// process_streaming_exchange → spawn_return_drain → out.output.body
+// reattachment. The guest's `emit-return-stream` marker triggers a
+// spawn_local writer that emits 10 deterministic chunks (80 bytes total).
+// This proves the plugin path (not just the bean path) correctly drains
+// the guest's stream and reattaches it as Body::Stream on the output.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn plugin_return_path_streams_body() {
+    use camel_component_api::test_support::PanicRuntimeObservability;
+    use camel_component_wasm::producer::WasmProducer;
+    use tower::Service;
+
+    let observability: Arc<dyn camel_component_api::RuntimeObservability> =
+        Arc::new(PanicRuntimeObservability);
+    let mut producer = WasmProducer::new(
+        streaming_plugin_path(),
+        Arc::new(std::sync::Mutex::new(Registry::new())),
+        WasmConfig::default(),
+        observability,
+    );
+
+    // Input body with the marker that triggers return-stream emission.
+    let exchange = Exchange::new(Message::new(Body::Text("emit-return-stream".into())));
+
+    // poll_ready + call (Tower Service protocol).
+    futures::future::poll_fn(|cx| producer.poll_ready(cx))
+        .await
+        .expect("poll_ready should succeed");
+
+    let out_exchange = producer
+        .call(exchange)
+        .await
+        .expect("WasmProducer::call should succeed");
+
+    // The output message must be present and its body must be Body::Stream.
+    let output_msg = out_exchange
+        .output
+        .as_ref()
+        .expect("output message must be present");
+
+    match &output_msg.body {
+        Body::Stream(stream_body) => {
+            // Lock the mutex and take the stream out of the Option.
+            let mut stream_guard = stream_body.stream.lock().await;
+            let mut stream = stream_guard
+                .take()
+                .expect("stream should be present on first consumption");
+
+            // Drain the stream under a timeout (proves no deadlock).
+            let mut collected = Vec::new();
+            let drain_result = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(chunk) => collected.push(chunk),
+                        Err(e) => panic!("stream yielded an error: {e}"),
+                    }
+                }
+            })
+            .await;
+
+            assert!(
+                drain_result.is_ok(),
+                "stream drain timed out — possible deadlock in plugin return path"
+            );
+
+            // Concatenate all chunks and assert the expected byte sequence.
+            let result: Vec<u8> = collected.into_iter().flat_map(|b| b.to_vec()).collect();
+
+            // The guest emits 10 chunks of "chunk-N\n" (8 bytes each = 80 bytes total).
+            let expected: Vec<u8> = (0..10u8)
+                .flat_map(|i| format!("chunk-{i}\n").into_bytes())
+                .collect();
+
+            assert_eq!(
+                result.len(),
+                expected.len(),
+                "expected {} bytes, got {}",
+                expected.len(),
+                result.len()
+            );
+            assert_eq!(
+                result, expected,
+                "byte sequence mismatch: expected {:?}, got {:?}",
+                expected, result
+            );
+
+            // Stream ended cleanly (EOF) — the while loop exited without error.
+        }
+        other => panic!("expected Body::Stream, got {other:?}"),
     }
 }

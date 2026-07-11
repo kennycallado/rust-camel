@@ -1,6 +1,12 @@
 # wasm-streaming-plugin
 
-Fully runnable example: a pre-built streaming byte-counter plugin that reads incoming `stream<u8>` incrementally in 4 KiB chunks without materializing the whole stream in WASM linear memory. (For the inverse — a guest that *returns* a streaming body — see `examples/wasm-bean-example/`'s `emit_stream` method and the component README §"Return-path streaming".)
+Fully runnable example: a pre-built streaming byte-counter plugin that reads incoming `stream<u8>` incrementally in 4 KiB chunks without materializing the whole stream in WASM linear memory.
+
+## Return-stream mode
+
+When the input body contains the marker `emit-return-stream`, the guest emits a deterministic streaming return body (10 chunks of `chunk-N\n`, 80 bytes total) via a `spawn_local` writer. This exercises the plugin-specific return-path drain (`call_process` → `spawn_return_drain` → `out.output.body` reattachment). The integration test `plugin_return_path_streams_body` validates this path end-to-end.
+
+(For the bean-path return-stream pattern, see `examples/wasm-bean-example/`'s `emit_stream` method and the component README §"Return-path streaming".)
 
 ## Running
 

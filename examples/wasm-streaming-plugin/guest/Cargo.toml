@@ -10,4 +10,9 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.58"
+# `async-spawn` provides `wit_bindgen::spawn_local`, required to write a
+# returned `stream<u8>` concurrently with the guest's return. Writing inline
+# before returning deadlocks: the component-model stream is a rendezvous with
+# no buffer, so `write_all().await` blocks until the host reads — but the host
+# only registers a consumer AFTER `process` returns.
+wit-bindgen = { version = "0.58", features = ["async-spawn"] }
