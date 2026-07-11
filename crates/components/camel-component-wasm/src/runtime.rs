@@ -57,6 +57,7 @@ pub struct WasmRuntime {
 pub struct StreamingResult {
     pub exchange: WasmExchange,
     pub(crate) drain_rx: Option<DrainReceiver>,
+    pub(crate) metadata: camel_api::StreamMetadata,
 }
 
 impl WasmRuntime {
@@ -329,7 +330,7 @@ impl WasmRuntime {
         let classify_config = self.config.clone(); // WasmConfig: Clone
         let classify_module_path = self.module_path.clone(); // PathBuf → Clone
 
-        let (exchange_out, drain_rx) = spawn_return_drain(
+        let (exchange_out, drain_rx, metadata) = spawn_return_drain(
             Some(pending_permit),
             cancel,
             no_progress_timeout,
@@ -381,9 +382,9 @@ impl WasmRuntime {
                             };
                             use crate::return_stream::StreamReturnable;
                             match wasm_exchange.take_stream() {
-                                Some((reader, terminal)) => {
+                                Some((reader, terminal, guest_metadata)) => {
                                     if let Some(tx) = take_stream_handoff_sender(&handoff_drive) {
-                                        let _ = tx.send(Ok((wasm_exchange, Some(drx)))); // drx moves out (F1)
+                                        let _ = tx.send(Ok((wasm_exchange, Some(drx), guest_metadata))); // drx moves out (F1)
                                     }
                                     // Cancel-on-drop select! (F2, spec §5): race drain against
                                     // receiver_gone (ChannelConsumer fires it on poll_reserve Err).
@@ -397,7 +398,7 @@ impl WasmRuntime {
                                 }
                                 None => {
                                     if let Some(tx) = take_stream_handoff_sender(&handoff_drive) {
-                                        let _ = tx.send(Ok((wasm_exchange, None)));
+                                        let _ = tx.send(Ok((wasm_exchange, None, camel_api::StreamMetadata::default())));
                                     }
                                     drop(drx);
                                     drop(dtx); // unused channel
@@ -437,6 +438,7 @@ impl WasmRuntime {
         Ok(StreamingResult {
             exchange: exchange_out,
             drain_rx,
+            metadata,
         })
     }
 

@@ -84,6 +84,23 @@ async fn return_stream_clean_eof() {
 
     match body {
         Body::Stream(stream_body) => {
+            // Guest fixture declares size_hint=25, content_type, and origin.
+            assert_eq!(
+                stream_body.metadata.size_hint,
+                Some(25),
+                "size_hint must propagate from guest StreamBodyHandle"
+            );
+            assert_eq!(
+                stream_body.metadata.content_type.as_deref(),
+                Some("application/octet-stream"),
+                "content_type must propagate from guest StreamBodyHandle"
+            );
+            assert_eq!(
+                stream_body.metadata.origin.as_deref(),
+                Some("bean://emit_stream"),
+                "origin must propagate from guest StreamBodyHandle"
+            );
+
             // Lock the mutex and take the stream out of the Option.
             let mut stream_guard = stream_body.stream.lock().await;
             let mut stream = stream_guard

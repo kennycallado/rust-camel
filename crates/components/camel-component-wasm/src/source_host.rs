@@ -15,9 +15,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, AccessorTask, HasSelf, Linker, Resource, ResourceTable};
 
-use camel_api::{
-    Body, CamelError, Exchange, ExchangePattern, Message, StreamBody, StreamMetadata, Value,
-};
+use camel_api::{Body, CamelError, Exchange, ExchangePattern, Message, StreamBody, Value};
 use camel_component_api::consumer::ConsumerContext;
 
 use crate::return_stream::{
@@ -274,7 +272,7 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
         let mut native = source_exchange_to_native(exchange);
         let (reply_tx, reply_rx) = oneshot::channel();
 
-        if let Some((stream_reader, terminal)) = stream_parts {
+        if let Some((stream_reader, terminal, stream_metadata)) = stream_parts {
             // Streaming submit-exchange: fire-and-return.
             //
             // The guest emits a `stream<u8>` body. Reading a wasmtime stream
@@ -312,7 +310,7 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
                 stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(
                     receiver_to_body_stream(chunk_rx),
                 )))),
-                metadata: StreamMetadata::default(),
+                metadata: stream_metadata,
             });
         }
 

@@ -57,7 +57,11 @@ pub(crate) trait StreamReturnable<E: 'static> {
     fn take_stream(&mut self) -> Option<GuestStreamParts<E>>;
 }
 
-pub(crate) type GuestStreamParts<E> = (StreamReader<u8>, FutureReader<Result<(), E>>);
+pub(crate) type GuestStreamParts<E> = (
+    StreamReader<u8>,
+    FutureReader<Result<(), E>>,
+    camel_api::StreamMetadata,
+);
 
 impl StreamReturnable<crate::bindings::camel::plugin::types::WasmError>
     for crate::bindings::camel::plugin::types::WasmExchange
@@ -71,7 +75,12 @@ impl StreamReturnable<crate::bindings::camel::plugin::types::WasmError>
             return None;
         }
         if let WasmBody::Stream(handle) = std::mem::replace(&mut msg.body, WasmBody::Empty) {
-            Some((handle.r#stream, handle.terminal))
+            let metadata = camel_api::StreamMetadata {
+                size_hint: handle.size_hint,
+                content_type: handle.content_type,
+                origin: handle.origin,
+            };
+            Some((handle.r#stream, handle.terminal, metadata))
         } else {
             unreachable!()
         }
@@ -92,7 +101,12 @@ impl StreamReturnable<crate::bean_bindings::camel::plugin::types::WasmError>
             return None;
         }
         if let WasmBody::Stream(handle) = std::mem::replace(&mut msg.body, WasmBody::Empty) {
-            Some((handle.r#stream, handle.terminal))
+            let metadata = camel_api::StreamMetadata {
+                size_hint: handle.size_hint,
+                content_type: handle.content_type,
+                origin: handle.origin,
+            };
+            Some((handle.r#stream, handle.terminal, metadata))
         } else {
             unreachable!()
         }
@@ -114,7 +128,12 @@ impl StreamReturnable<crate::source_bindings::camel::plugin::types::WasmError>
             return None;
         }
         if let WasmBody::Stream(handle) = std::mem::replace(&mut msg.body, WasmBody::Empty) {
-            Some((handle.r#stream, handle.terminal))
+            let metadata = camel_api::StreamMetadata {
+                size_hint: handle.size_hint,
+                content_type: handle.content_type,
+                origin: handle.origin,
+            };
+            Some((handle.r#stream, handle.terminal, metadata))
         } else {
             unreachable!()
         }
@@ -125,7 +144,7 @@ impl StreamReturnable<crate::source_bindings::camel::plugin::types::WasmError>
 /// that `camel_api::StreamBody` wraps. Clean channel close = stream end;
 /// `DrainEvent::Error` = final `Err`. The caller wraps the result with
 /// `Body::Stream(StreamBody { stream: Arc::new(Mutex::new(Some(Box::pin(s)))),
-/// metadata: StreamMetadata::default() })` — see Task 7.
+/// metadata: StreamMetadata { .. } })` — populated from the guest's StreamBodyHandle.
 pub(crate) fn receiver_to_body_stream(
     mut rx: mpsc::Receiver<DrainEvent>,
 ) -> futures::stream::BoxStream<'static, Result<Bytes, CamelError>> {
@@ -361,10 +380,11 @@ where
 }
 
 /// Rendezvous type: the spawned drain task sends the guest's exchange
-/// (plus optional drain receiver) back to the caller via a oneshot.
+/// (plus optional drain receiver and stream metadata) back to the caller via a oneshot.
 /// Generic over `W` (the binding-specific `WasmExchange` type) so both
 /// the plugin and bean paths share one scaffold.
-pub(crate) type StreamHandoff<W> = Result<(W, Option<DrainReceiver>), WasmError>;
+pub(crate) type StreamHandoff<W> =
+    Result<(W, Option<DrainReceiver>, camel_api::StreamMetadata), WasmError>;
 pub(crate) type StreamHandoffSender<W> = oneshot::Sender<StreamHandoff<W>>;
 pub(crate) type DrainReceiver = mpsc::Receiver<DrainEvent>;
 
@@ -408,7 +428,7 @@ pub(crate) async fn spawn_return_drain<W, F, Fut>(
     no_progress_timeout: Duration,
     completion_notify: Option<Arc<Notify>>,
     make_drive: F,
-) -> Result<(W, Option<DrainReceiver>), WasmError>
+) -> Result<(W, Option<DrainReceiver>, camel_api::StreamMetadata), WasmError>
 where
     W: Send + 'static,
     F: FnOnce(
@@ -480,14 +500,14 @@ where
     });
 
     // Await the rendezvous (fires fast, right after the guest returns).
-    let (exchange_out, drain_rx) = match handoff_rx.await {
-        Ok(Ok((exchange_out, drain_rx))) => (exchange_out, drain_rx),
+    let (exchange_out, drain_rx, metadata) = match handoff_rx.await {
+        Ok(Ok((exchange_out, drain_rx, metadata))) => (exchange_out, drain_rx, metadata),
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             return Err(WasmError::InstantiationFailed("drain task panicked".into()));
         }
     };
-    Ok((exchange_out, drain_rx))
+    Ok((exchange_out, drain_rx, metadata))
 }
 
 #[cfg(test)]

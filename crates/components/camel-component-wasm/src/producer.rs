@@ -13,7 +13,7 @@ use tower::Service;
 use tracing::{debug, warn};
 
 use camel_api::body::DEFAULT_MATERIALIZE_LIMIT;
-use camel_api::{Body, CamelError, Exchange, StreamBody, StreamMetadata};
+use camel_api::{Body, CamelError, Exchange, StreamBody};
 use camel_core::Registry;
 
 fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
@@ -269,7 +269,7 @@ impl Service<Exchange> for WasmProducer {
                             stream: Arc::new(tokio::sync::Mutex::new(Some(
                                 crate::return_stream::receiver_to_body_stream(drain_rx),
                             ))),
-                            metadata: StreamMetadata::default(),
+                            metadata: streaming_result.metadata.clone(),
                         });
                     }
                     debug!(

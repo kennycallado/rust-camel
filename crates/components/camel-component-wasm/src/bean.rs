@@ -128,7 +128,7 @@ impl BeanProcessor for WasmBean {
         // limiter, so pass None for the permit (unlike the plugin path).
         // The closure builds the drive future that runs the guest invocation
         // + output stream drain.
-        let (bean_exchange_out, drain_rx) = crate::return_stream::spawn_return_drain(
+        let (bean_exchange_out, drain_rx, metadata_from_drain) = crate::return_stream::spawn_return_drain(
             None,
             CancellationToken::new(),
             no_progress_timeout,
@@ -189,13 +189,13 @@ impl BeanProcessor for WasmBean {
                             // NEW-E: extract the output stream BEFORE cross-binding
                             use crate::return_stream::StreamReturnable;
                             match bean_exchange.take_stream() {
-                                Some((reader, terminal)) => {
+                                Some((reader, terminal, guest_metadata)) => {
                                     if let Some(tx) =
                                         crate::return_stream::take_stream_handoff_sender(
                                             &handoff_drive,
                                         )
                                     {
-                                        let _ = tx.send(Ok((bean_exchange, Some(drx))));
+                                        let _ = tx.send(Ok((bean_exchange, Some(drx), guest_metadata)));
                                     }
                                     // Cancel-on-drop select! (F2, spec §5)
                                     tokio::select! {
@@ -212,7 +212,7 @@ impl BeanProcessor for WasmBean {
                                             &handoff_drive,
                                         )
                                     {
-                                        let _ = tx.send(Ok((bean_exchange, None)));
+                                        let _ = tx.send(Ok((bean_exchange, None, camel_api::StreamMetadata::default())));
                                     }
                                     drop(drx);
                                     drop(dtx);
@@ -266,7 +266,7 @@ impl BeanProcessor for WasmBean {
                 stream: Arc::new(tokio::sync::Mutex::new(Some(
                     crate::return_stream::receiver_to_body_stream(drain_rx),
                 ))),
-                metadata: camel_api::StreamMetadata::default(),
+                metadata: metadata_from_drain,
             });
         }
 
