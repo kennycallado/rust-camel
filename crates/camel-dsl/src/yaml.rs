@@ -942,7 +942,7 @@ pub(crate) fn route_step_to_declarative_step(
             };
             Ok(DeclarativeStep::ConvertBodyTo(def))
         }
-        RouteDslStep::Marshal(MarshalStep { marshal }) => {
+        RouteDslStep::Marshal(MarshalStep { marshal, config }) => {
             if marshal.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "marshal: format must not be empty".into(),
@@ -951,9 +951,14 @@ pub(crate) fn route_step_to_declarative_step(
             Ok(DeclarativeStep::Marshal(DataFormatDef {
                 format: marshal,
                 schema: None,
+                config,
             }))
         }
-        RouteDslStep::Unmarshal(UnmarshalStep { unmarshal, schema }) => {
+        RouteDslStep::Unmarshal(UnmarshalStep {
+            unmarshal,
+            schema,
+            config,
+        }) => {
             if unmarshal.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "unmarshal: format must not be empty".into(),
@@ -962,6 +967,7 @@ pub(crate) fn route_step_to_declarative_step(
             Ok(DeclarativeStep::Unmarshal(DataFormatDef {
                 format: unmarshal,
                 schema,
+                config,
             }))
         }
         RouteDslStep::Bean(BeanStep {
@@ -4459,5 +4465,28 @@ routes:
             err.to_string().contains("exceeds max"),
             "expected size cap error, got: {err}"
         );
+    }
+
+    #[test]
+    fn parse_unmarshal_with_config() {
+        let yaml = r#"
+routes:
+  - id: test-config
+    from: "direct:start"
+    steps:
+      - unmarshal: json
+        config:
+          max_bytes: 67108864
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let steps = &routes[0].steps;
+        match &steps[0] {
+            DeclarativeStep::Unmarshal(def) => {
+                assert_eq!(def.format, "json");
+                assert!(def.config.is_some());
+                assert_eq!(def.config.as_ref().unwrap()["max_bytes"], 67108864);
+            }
+            _ => panic!("expected Unmarshal step"),
+        }
     }
 }

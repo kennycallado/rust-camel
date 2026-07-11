@@ -818,6 +818,8 @@ pub struct ConvertBodyToStep {
 #[serde(deny_unknown_fields)]
 pub struct MarshalStep {
     pub marshal: String,
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -832,6 +834,8 @@ pub struct UnmarshalStep {
     /// is the only format that produces JSON in v1).
     #[serde(default)]
     pub schema: Option<serde_json::Value>,
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

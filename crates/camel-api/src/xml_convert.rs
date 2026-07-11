@@ -3,8 +3,9 @@ use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 
-/// Default maximum XML nesting depth accepted by [`xml_to_json`] (R5-L3).
-const MAX_XML_DEPTH: usize = 100;
+/// Default maximum XML nesting depth accepted by [`xml_to_json`] and
+/// [`xml_to_json_with_depth_limit`] (R5-L3).
+pub const DEFAULT_MAX_XML_DEPTH: usize = 100;
 
 fn check_root_element(depth: usize, root_count: &mut usize) -> Result<(), CamelError> {
     if depth == 0 {
@@ -80,13 +81,14 @@ pub fn validate_xml(input: &str) -> Result<(), CamelError> {
 /// Returns `CamelError::TypeConversionFailed` if the input is not well-formed XML,
 /// contains multiple root elements, or is empty.
 pub fn xml_to_json(input: &str) -> Result<serde_json::Value, CamelError> {
-    xml_to_json_with_depth_limit(input, MAX_XML_DEPTH)
+    xml_to_json_with_depth_limit(input, DEFAULT_MAX_XML_DEPTH)
 }
 
 /// Convert XML to JSON with an explicit maximum nesting depth.
 ///
-/// `xml_to_json` calls this with [`MAX_XML_DEPTH`]. Kept as a separate
-/// private helper so tests can exercise the depth cap directly.
+/// `xml_to_json` calls this with [`DEFAULT_MAX_XML_DEPTH`]. This is `pub` so
+/// [`XmlDataFormat`](https://docs.rs/camel-processor/latest/camel_processor/data_format/xml/struct.XmlDataFormat.html)
+/// can call it with a configurable depth per ADR-0033.
 ///
 /// # DocType handling (R3-L3)
 ///
@@ -97,7 +99,7 @@ pub fn xml_to_json(input: &str) -> Result<serde_json::Value, CamelError> {
 /// predefined entity set (no external entity resolution, no DTD evaluation).
 /// This is intentional and not exploitable: quick-xml does not fetch external
 /// entities, and the result tree carries no DOCTYPE content.
-fn xml_to_json_with_depth_limit(
+pub fn xml_to_json_with_depth_limit(
     input: &str,
     max_depth: usize,
 ) -> Result<serde_json::Value, CamelError> {

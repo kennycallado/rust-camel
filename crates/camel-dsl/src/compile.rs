@@ -29,7 +29,7 @@ use camel_core::route::{
 };
 use camel_processor::{
     ConvertBodyTo, JsonSchemaValidateService, LogLevel, MarshalService, StreamCacheService,
-    UnmarshalService, builtin_data_format,
+    UnmarshalService, builtin_data_format_with_config,
 };
 
 use crate::model::{
@@ -768,6 +768,18 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
     )
 }
 
+/// Reject non-null config on protobuf-format steps.
+fn reject_protobuf_config(config: &Option<serde_json::Value>) -> Result<(), CamelError> {
+    if let Some(cfg) = config
+        && !cfg.is_null()
+    {
+        return Err(CamelError::RouteError(
+            "protobuf data format does not support 'config'".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn compile_declarative_step_with_threshold(
     step: DeclarativeStep,
     stream_cache_threshold: usize,
@@ -973,6 +985,7 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::Marshal(DataFormatDef {
             format: _,
             schema: Some(_),
+            ..
         }) => {
             // `schema` is meaningful only for Unmarshal — Marshal serialises a
             // body to the wire format, it never validates input. Reject
@@ -986,8 +999,10 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::Marshal(DataFormatDef {
             format,
             schema: None,
+            config,
         }) => {
             let df = if format.strip_prefix("protobuf:").is_some() {
+                reject_protobuf_config(&config)?;
                 #[cfg(feature = "protobuf")]
                 {
                     let rest = format.strip_prefix("protobuf:").expect("checked prefix"); // allow-unwrap
@@ -1000,19 +1015,22 @@ fn compile_declarative_step_with_threshold(
                     ));
                 }
             } else {
-                builtin_data_format(&format).ok_or_else(|| {
-                    CamelError::RouteError(format!(
-                        "unknown data format: '{}'. Expected: json, xml, zip, protobuf:<path>#<Message>",
-                        format
-                    ))
-                })?
+                builtin_data_format_with_config(&format, config.as_ref().unwrap_or(&serde_json::Value::Null))?
+                    .ok_or_else(|| CamelError::Config(format!(
+                        "unknown data format: '{format}'. Expected: json, xml, zip, protobuf:<path>#<Message>"
+                    )))?
             };
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
                 MarshalService::new(camel_api::IdentityProcessor, df),
             )))
         }
-        DeclarativeStep::Unmarshal(DataFormatDef { format, schema }) => {
+        DeclarativeStep::Unmarshal(DataFormatDef {
+            format,
+            schema,
+            config,
+        }) => {
             let df = if format.strip_prefix("protobuf:").is_some() {
+                reject_protobuf_config(&config)?;
                 #[cfg(feature = "protobuf")]
                 {
                     let rest = format.strip_prefix("protobuf:").expect("checked prefix"); // allow-unwrap
@@ -1025,12 +1043,10 @@ fn compile_declarative_step_with_threshold(
                     ));
                 }
             } else {
-                builtin_data_format(&format).ok_or_else(|| {
-                    CamelError::RouteError(format!(
-                        "unknown data format: '{}'. Expected: json, xml, zip, protobuf:<path>#<Message>",
-                        format
-                    ))
-                })?
+                builtin_data_format_with_config(&format, config.as_ref().unwrap_or(&serde_json::Value::Null))?
+                    .ok_or_else(|| CamelError::Config(format!(
+                        "unknown data format: '{format}'. Expected: json, xml, zip, protobuf:<path>#<Message>"
+                    )))?
             };
             // When a JSON Schema is attached (REST DSL `request_schema`),
             // wrap the unmarshal service with a JsonSchemaValidateService so
@@ -2309,6 +2325,7 @@ mod tests {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "json".to_string(),
             schema: None,
+            config: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_ok());
@@ -2320,6 +2337,7 @@ mod tests {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: "xml".to_string(),
             schema: None,
+            config: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_ok());
@@ -2331,6 +2349,7 @@ mod tests {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "avro".to_string(),
             schema: None,
+            config: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
@@ -2341,6 +2360,7 @@ mod tests {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: "protobuf".to_string(),
             schema: None,
+            config: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
@@ -2357,6 +2377,7 @@ mod tests {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: format!("protobuf:{}#helloworld.HelloRequest", proto_fixture_path()),
             schema: None,
+            config: None,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -2372,6 +2393,7 @@ mod tests {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: format!("protobuf:{}#helloworld.HelloReply", proto_fixture_path()),
             schema: None,
+            config: None,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -2387,6 +2409,7 @@ mod tests {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "protobuf:missing.proto#nonexistent".to_string(),
             schema: None,
+            config: None,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
@@ -2405,6 +2428,7 @@ mod tests {
                 "type": "object",
                 "required": ["name"]
             })),
+            config: None,
         });
         let err = compile_declarative_step(step)
             .expect_err("Marshal with schema must be rejected at compile time");
@@ -2425,6 +2449,7 @@ mod tests {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "json".to_string(),
             schema: None,
+            config: None,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -2438,6 +2463,7 @@ mod tests {
         let step = DeclarativeStep::Marshal(DataFormatDef {
             format: "json".to_string(),
             schema: None,
+            config: None,
         });
         assert_eq!(declarative_step_name(&step), "marshal");
     }
@@ -2447,6 +2473,7 @@ mod tests {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: "xml".to_string(),
             schema: None,
+            config: None,
         });
         assert_eq!(declarative_step_name(&step), "unmarshal");
     }
@@ -4297,6 +4324,108 @@ mod tests {
         assert!(
             msg.contains("MAX_LOOP_ITERATIONS"),
             "error must mention MAX_LOOP_ITERATIONS, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_unmarshal_with_json_config() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "json".into(),
+            schema: None,
+            config: Some(serde_json::json!({"max_bytes": 67108864})),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_ok(), "should compile with config: {:?}", result);
+    }
+
+    #[test]
+    fn compile_unmarshal_with_xml_config() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "xml".into(),
+            schema: None,
+            config: Some(serde_json::json!({"max_depth": 250})),
+        });
+        let result = compile_declarative_step(step);
+        assert!(
+            result.is_ok(),
+            "should compile xml with config: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn compile_unmarshal_with_csv_config() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "csv".into(),
+            schema: None,
+            config: Some(serde_json::json!({"delimiter": "|", "max_records": 5000000})),
+        });
+        let result = compile_declarative_step(step);
+        assert!(
+            result.is_ok(),
+            "should compile csv with config: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn compile_unmarshal_with_zip_config() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "zip".into(),
+            schema: None,
+            config: Some(serde_json::json!({"max_decompressed_size": 2147483648u64})),
+        });
+        let result = compile_declarative_step(step);
+        assert!(
+            result.is_ok(),
+            "should compile zip with config: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn compile_marshal_protobuf_with_config_rejected() {
+        let step = DeclarativeStep::Marshal(DataFormatDef {
+            format: "protobuf:some.proto#SomeMessage".into(),
+            schema: None,
+            config: Some(serde_json::json!({"any_key": 1})),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_err(), "protobuf marshal + config should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("does not support 'config'"),
+            "msg should mention config rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn compile_unmarshal_with_typo_in_config_fails() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "json".into(),
+            schema: None,
+            config: Some(serde_json::json!({"max_byte": 100})),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_err(), "typo should fail at compile time");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid config"), "msg: {msg}");
+    }
+
+    #[test]
+    fn compile_protobuf_with_config_rejected() {
+        // protobuf format does not support 'config' — must fail at compile time.
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "protobuf:some.proto#SomeMessage".into(),
+            schema: None,
+            config: Some(serde_json::json!({"any_key": 1})),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_err(), "protobuf + config should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("does not support 'config'"),
+            "msg should mention config rejection: {msg}"
         );
     }
 }

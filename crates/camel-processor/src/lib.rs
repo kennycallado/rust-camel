@@ -54,8 +54,9 @@ pub use claim_check::{ClaimCheckOp, ClaimCheckService, KeyExpression};
 pub use content_enricher::{EnrichService, PollEnrichService};
 pub use convert_body::ConvertBodyTo;
 pub use data_format::{
-    CAMEL_CSV_HEADER_RECORD, CsvConfig, CsvDataFormat, JsonDataFormat, QuoteMode, RecordSeparator,
-    XmlDataFormat, ZipDataFormat, builtin_data_format,
+    CAMEL_CSV_HEADER_RECORD, CsvConfig, CsvDataFormat, JsonConfig, JsonDataFormat, QuoteMode,
+    RecordSeparator, XmlConfig, XmlDataFormat, ZipConfig, ZipDataFormat, builtin_data_format,
+    builtin_data_format_with_config,
 };
 pub use delayer::DelayerService;
 pub use do_try::{CatchClause, CatchMatcher, DoTryService};

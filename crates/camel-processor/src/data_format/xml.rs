@@ -1,9 +1,42 @@
 use camel_api::body::Body;
 use camel_api::data_format::DataFormat;
 use camel_api::error::CamelError;
-use camel_api::xml_convert::{json_to_xml, xml_to_json};
+use camel_api::xml_convert::{json_to_xml, xml_to_json_with_depth_limit};
+use serde::Deserialize;
 
-pub struct XmlDataFormat;
+fn default_max_depth() -> usize {
+    camel_api::xml_convert::DEFAULT_MAX_XML_DEPTH
+}
+
+/// Configuration for [`XmlDataFormat`]. All fields have hardened defaults;
+/// setting a non-default value is the per-item explicit choice per ADR-0033.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct XmlConfig {
+    /// Maximum XML nesting depth accepted by `unmarshal` (DoS cap).
+    /// Default 100. Inert during `marshal`.
+    #[serde(default = "default_max_depth")]
+    pub max_depth: usize,
+}
+
+impl Default for XmlConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: default_max_depth(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct XmlDataFormat {
+    config: XmlConfig,
+}
+
+impl XmlDataFormat {
+    pub fn new(config: XmlConfig) -> Self {
+        Self { config }
+    }
+}
 
 impl DataFormat for XmlDataFormat {
     fn name(&self) -> &str {
@@ -34,7 +67,7 @@ impl DataFormat for XmlDataFormat {
         match body {
             Body::Json(_) => Ok(body),
             Body::Text(s) => {
-                let v = xml_to_json(&s)?;
+                let v = xml_to_json_with_depth_limit(&s, self.config.max_depth)?;
                 Ok(Body::Json(v))
             }
             Body::Bytes(b) => {
@@ -43,11 +76,11 @@ impl DataFormat for XmlDataFormat {
                         "cannot unmarshal Body::Bytes as XML: {e}"
                     ))
                 })?;
-                let v = xml_to_json(&s)?;
+                let v = xml_to_json_with_depth_limit(&s, self.config.max_depth)?;
                 Ok(Body::Json(v))
             }
             Body::Xml(s) => {
-                let v = xml_to_json(&s)?;
+                let v = xml_to_json_with_depth_limit(&s, self.config.max_depth)?;
                 Ok(Body::Json(v))
             }
             Body::Stream(_) => Err(CamelError::TypeConversionFailed(
@@ -70,13 +103,13 @@ mod tests {
 
     #[test]
     fn test_name() {
-        assert_eq!(XmlDataFormat.name(), "xml");
+        assert_eq!(XmlDataFormat::default().name(), "xml");
     }
 
     #[test]
     fn test_unmarshal_text_to_json() {
         let body = Body::Text("<root><child>value</child></root>".to_string());
-        let result = XmlDataFormat.unmarshal(body).unwrap();
+        let result = XmlDataFormat::default().unmarshal(body).unwrap();
         match result {
             Body::Json(v) => assert_eq!(v["root"]["child"], json!("value")),
             _ => panic!("expected Body::Json"),
@@ -86,7 +119,7 @@ mod tests {
     #[test]
     fn test_unmarshal_bytes_to_json() {
         let body = Body::Bytes(Bytes::from_static(b"<root/>"));
-        let result = XmlDataFormat.unmarshal(body).unwrap();
+        let result = XmlDataFormat::default().unmarshal(body).unwrap();
         match result {
             Body::Json(v) => assert_eq!(v["root"], serde_json::Value::Null),
             _ => panic!("expected Body::Json"),
@@ -96,7 +129,7 @@ mod tests {
     #[test]
     fn test_unmarshal_xml_body_to_json() {
         let body = Body::Xml("<root><a>1</a></root>".to_string());
-        let result = XmlDataFormat.unmarshal(body).unwrap();
+        let result = XmlDataFormat::default().unmarshal(body).unwrap();
         match result {
             Body::Json(v) => assert_eq!(v["root"]["a"], json!("1")),
             _ => panic!("expected Body::Json"),
@@ -106,28 +139,28 @@ mod tests {
     #[test]
     fn test_unmarshal_invalid_xml() {
         let body = Body::Text("not xml".to_string());
-        let result = XmlDataFormat.unmarshal(body);
+        let result = XmlDataFormat::default().unmarshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 
     #[test]
     fn test_unmarshal_json_noop() {
         let body = Body::Json(json!({"x": 1}));
-        let result = XmlDataFormat.unmarshal(body).unwrap();
+        let result = XmlDataFormat::default().unmarshal(body).unwrap();
         assert!(matches!(result, Body::Json(_)));
     }
 
     #[test]
     fn test_unmarshal_empty_returns_error() {
         let body = Body::Empty;
-        let result = XmlDataFormat.unmarshal(body);
+        let result = XmlDataFormat::default().unmarshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 
     #[test]
     fn test_marshal_json_to_text() {
         let body = Body::Json(json!({"root": {"name": "Alice"}}));
-        let result = XmlDataFormat.marshal(body).unwrap();
+        let result = XmlDataFormat::default().marshal(body).unwrap();
         match result {
             Body::Text(s) => {
                 assert!(s.contains("<root>"));
@@ -140,21 +173,41 @@ mod tests {
     #[test]
     fn test_marshal_text_noop() {
         let body = Body::Text("already text".to_string());
-        let result = XmlDataFormat.marshal(body).unwrap();
+        let result = XmlDataFormat::default().marshal(body).unwrap();
         assert_eq!(result, Body::Text("already text".to_string()));
     }
 
     #[test]
     fn test_marshal_empty_returns_error() {
         let body = Body::Empty;
-        let result = XmlDataFormat.marshal(body);
+        let result = XmlDataFormat::default().marshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 
     #[test]
     fn test_marshal_xml_body_rejected() {
         let body = Body::Xml("<root/>".to_string());
-        let result = XmlDataFormat.marshal(body);
+        let result = XmlDataFormat::default().marshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn test_unmarshal_with_raised_max_depth() {
+        let mut xml = String::new();
+        for _ in 0..150 {
+            xml.push_str("<a>");
+        }
+        xml.push('1');
+        for _ in 0..150 {
+            xml.push_str("</a>");
+        }
+        // Default depth (100) rejects 150 nesting; raised cap accepts it.
+        let body = Body::Text(xml);
+        let df = XmlDataFormat::new(XmlConfig { max_depth: 200 });
+        let result = df.unmarshal(body);
+        assert!(
+            result.is_ok(),
+            "should accept depth 150 under raised cap 200"
+        );
     }
 }

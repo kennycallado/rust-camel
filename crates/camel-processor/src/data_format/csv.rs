@@ -2,17 +2,20 @@ use camel_api::Exchange;
 use camel_api::body::Body;
 use camel_api::data_format::DataFormat;
 use camel_api::error::CamelError;
+use serde::Deserialize;
 
 pub const CAMEL_CSV_HEADER_RECORD: &str = "CamelCsvHeaderRecord";
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecordSeparator {
     #[default]
     Crlf,
     Lf,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum QuoteMode {
     All,
     #[default]
@@ -21,7 +24,8 @@ pub enum QuoteMode {
     None,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct CsvConfig {
     pub delimiter: char,
     pub quote: char,
@@ -1154,5 +1158,27 @@ mod tests {
             }
             other => panic!("expected JSON array, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_csv_config_deserialize_from_json() {
+        let json = serde_json::json!({
+            "delimiter": "|",
+            "quote_mode": "non_numeric",
+            "record_separator": "lf",
+            "max_records": 5000000
+        });
+        let cfg: CsvConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.delimiter, '|');
+        assert!(matches!(cfg.quote_mode, QuoteMode::NonNumeric));
+        assert!(matches!(cfg.record_separator, RecordSeparator::Lf));
+        assert_eq!(cfg.max_records, Some(5000000));
+    }
+
+    #[test]
+    fn test_csv_config_deny_unknown_fields() {
+        let json = serde_json::json!({"unknown_key": 42});
+        let result: Result<CsvConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err(), "unknown field should fail closed");
     }
 }

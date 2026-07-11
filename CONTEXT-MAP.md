@@ -59,6 +59,7 @@ are a convenience index and may lag the file.
 - [0026](./docs/adr/0026-json-canonical-route-authoring-format.md) — JSON is the canonical full-DSL authoring format for SDKs/generators; YAML is human convenience
 - [0027](./docs/adr/0027-mqtt-component-3-1-1-per-endpoint-connections.md) — MQTT component uses MQTT 3.1.1 (v1) via `rumqttc`; one connection per Consumer/Producer created lazily (route_id not available at `create_endpoint()`); MQTT 5.0 deferred to v2
 - [0028](./docs/adr/0028-claimcheck-repository-trait.md) — Separate `ClaimCheckRepository` trait (payload-bearing `set`/`get` with `Message` values; filter option for selective merge-back), distinct from key-only `IdempotentRepository` (ADR-0023); shared `NamedRegistry<T>` wiring pattern cross-referenced, not inherited
+- [0038](./docs/adr/0038-configurable-dos-caps-via-per-format-config-channel.md) — Configurable DoS caps via per-format config channel; setting a non-default cap in YAML is the ADR-0033 per-item explicit choice
 
 ## Key Terms
 

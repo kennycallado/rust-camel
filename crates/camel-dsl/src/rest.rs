@@ -300,6 +300,7 @@ fn lower_operation(
             // surface as CamelError::ValidationError → 400 Bad Request
             // (see camel-component-http `pipeline_error_to_reply`).
             schema: op.request_schema.clone(),
+            config: None,
         }));
     }
 
@@ -315,6 +316,7 @@ fn lower_operation(
     // infer that as text/plain, so we set Content-Type explicitly below.
     steps.push(RouteDslStep::Marshal(MarshalStep {
         marshal: "json".to_string(),
+        config: None,
     }));
 
     // 4. Response Content-Type: the finaliser prioritises a user-supplied

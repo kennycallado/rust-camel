@@ -2229,6 +2229,7 @@ dependencies = [
  "jsonschema",
  "rand 0.10.2",
  "regex",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

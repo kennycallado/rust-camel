@@ -71,7 +71,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `src/lib.rs:40-42` | README claims deprecation for layer/service; code has no `#[deprecated]` yet. |
 | `EnrichService`, `PollEnrichService` | stable | `src/lib.rs:43` | Enrich / pollEnrich. |
 | `ConvertBodyTo` | stable | `src/lib.rs:44` | Body conversion. |
-| `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonDataFormat`, `XmlDataFormat`, `ZipDataFormat`, `builtin_data_format` | stable | `src/lib.rs:55` | Built-in data formats. CSV added per ADR-0030. |
+| `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonConfig`, `JsonDataFormat`, `XmlConfig`, `XmlDataFormat`, `ZipConfig`, `ZipDataFormat`, `builtin_data_format`, `builtin_data_format_with_config` | stable | `src/lib.rs:55` | Built-in data formats. CSV added per ADR-0030. Configurable DoS caps per ADR-0038. |
 | `DelayerService` | stable | `src/lib.rs:46` | Delay EIP. |
 | `CatchClause`, `CatchMatcher`, `DoTryService` | stable | `src/lib.rs:47` | doTry block. |
 | `DynamicRouterService` | stable | `src/lib.rs:48` | Dynamic router. |

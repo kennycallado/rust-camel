@@ -395,6 +395,9 @@ pub struct DataFormatDef {
     /// `request_schema`). When present, the compiled UnmarshalService is
     /// wrapped with a `JsonSchemaValidateService`.
     pub schema: Option<serde_json::Value>,
+    /// Optional per-format configuration (e.g. `{ "max_bytes": 67108864 }`).
+    /// Deserialized by the config-aware factory per ADR-0038.
+    pub config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -690,6 +693,7 @@ mod tests {
         let def = DataFormatDef {
             format: "protobuf".into(),
             schema: None,
+            config: None,
         };
         assert_eq!(def.format, "protobuf");
         assert!(def.schema.is_none());

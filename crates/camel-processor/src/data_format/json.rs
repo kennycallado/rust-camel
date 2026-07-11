@@ -1,13 +1,44 @@
 use camel_api::body::Body;
 use camel_api::data_format::DataFormat;
 use camel_api::error::CamelError;
+use serde::Deserialize;
 
-/// Maximum input size accepted by `JsonDataFormat::unmarshal` (DoS cap, R3-L2).
-/// `serde_json` retains its built-in 128-level recursion limit; this cap bounds
-/// the byte volume before parsing begins.
-const MAX_JSON_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+const DEFAULT_MAX_JSON_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
-pub struct JsonDataFormat;
+fn default_max_bytes() -> usize {
+    DEFAULT_MAX_JSON_BYTES
+}
+
+/// Configuration for [`JsonDataFormat`]. All fields have hardened defaults;
+/// setting a non-default value is the per-item explicit choice per ADR-0033.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonConfig {
+    /// Maximum input size accepted by `unmarshal` (DoS cap).
+    /// Default 16 MiB. The `max_bytes` cap is inert during `marshal`
+    /// (marshal serializes; it never parses untrusted input).
+    #[serde(default = "default_max_bytes")]
+    pub max_bytes: usize,
+}
+
+impl Default for JsonConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: DEFAULT_MAX_JSON_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct JsonDataFormat {
+    config: JsonConfig,
+}
+
+impl JsonDataFormat {
+    pub fn new(config: JsonConfig) -> Self {
+        Self { config }
+    }
+}
 
 impl DataFormat for JsonDataFormat {
     fn name(&self) -> &str {
@@ -56,10 +87,11 @@ impl DataFormat for JsonDataFormat {
         match body {
             Body::Json(_) => Ok(body),
             Body::Text(s) => {
-                if s.len() > MAX_JSON_BYTES {
+                if s.len() > self.config.max_bytes {
                     return Err(CamelError::TypeConversionFailed(format!(
-                        "JSON unmarshal input {} bytes exceeds max {MAX_JSON_BYTES}",
-                        s.len()
+                        "JSON unmarshal input {} bytes exceeds max {}",
+                        s.len(),
+                        self.config.max_bytes
                     )));
                 }
                 let v = serde_json::from_str(&s).map_err(|e| {
@@ -70,10 +102,11 @@ impl DataFormat for JsonDataFormat {
                 Ok(Body::Json(v))
             }
             Body::Bytes(b) => {
-                if b.len() > MAX_JSON_BYTES {
+                if b.len() > self.config.max_bytes {
                     return Err(CamelError::TypeConversionFailed(format!(
-                        "JSON unmarshal input {} bytes exceeds max {MAX_JSON_BYTES}",
-                        b.len()
+                        "JSON unmarshal input {} bytes exceeds max {}",
+                        b.len(),
+                        self.config.max_bytes
                     )));
                 }
                 let v = serde_json::from_slice(&b).map_err(|e| {
@@ -108,13 +141,13 @@ mod tests {
 
     #[test]
     fn test_name() {
-        assert_eq!(JsonDataFormat.name(), "json");
+        assert_eq!(JsonDataFormat::default().name(), "json");
     }
 
     #[test]
     fn test_unmarshal_text_to_json() {
         let body = Body::Text(r#"{"a":1}"#.to_string());
-        let result = JsonDataFormat.unmarshal(body).unwrap();
+        let result = JsonDataFormat::default().unmarshal(body).unwrap();
         assert!(matches!(result, Body::Json(_)));
         if let Body::Json(v) = result {
             assert_eq!(v["a"], json!(1));
@@ -124,42 +157,42 @@ mod tests {
     #[test]
     fn test_unmarshal_bytes_to_json() {
         let body = Body::Bytes(Bytes::from_static(b"{\"b\":2}"));
-        let result = JsonDataFormat.unmarshal(body).unwrap();
+        let result = JsonDataFormat::default().unmarshal(body).unwrap();
         assert!(matches!(result, Body::Json(_)));
     }
 
     #[test]
     fn test_unmarshal_invalid_json() {
         let body = Body::Text("not json".to_string());
-        let result = JsonDataFormat.unmarshal(body);
+        let result = JsonDataFormat::default().unmarshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 
     #[test]
     fn test_unmarshal_json_noop() {
         let body = Body::Json(json!({"x": 1}));
-        let result = JsonDataFormat.unmarshal(body).unwrap();
+        let result = JsonDataFormat::default().unmarshal(body).unwrap();
         assert!(matches!(result, Body::Json(_)));
     }
 
     #[test]
     fn test_unmarshal_unsupported_variant() {
         let body = Body::Xml("<root/>".to_string());
-        let result = JsonDataFormat.unmarshal(body);
+        let result = JsonDataFormat::default().unmarshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 
     #[test]
     fn test_unmarshal_empty_is_noop() {
         // spec §8.1: an empty request body skips unmarshal instead of erroring.
-        let result = JsonDataFormat.unmarshal(Body::Empty).unwrap();
+        let result = JsonDataFormat::default().unmarshal(Body::Empty).unwrap();
         assert!(matches!(result, Body::Empty));
     }
 
     #[test]
     fn test_marshal_empty_is_noop() {
         // spec §8.1: an empty response body marshals to empty (e.g. 204 DELETE).
-        let result = JsonDataFormat.marshal(Body::Empty).unwrap();
+        let result = JsonDataFormat::default().marshal(Body::Empty).unwrap();
         assert!(matches!(result, Body::Empty));
     }
 
@@ -175,14 +208,14 @@ mod tests {
             stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
             metadata: StreamMetadata::default(),
         });
-        let result = JsonDataFormat.unmarshal(body);
+        let result = JsonDataFormat::default().unmarshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 
     #[test]
     fn test_marshal_json_to_text() {
         let body = Body::Json(json!({"key": "value"}));
-        let result = JsonDataFormat.marshal(body).unwrap();
+        let result = JsonDataFormat::default().marshal(body).unwrap();
         match result {
             Body::Text(s) => assert!(s.contains("\"key\"")),
             _ => panic!("expected Body::Text"),
@@ -192,21 +225,21 @@ mod tests {
     #[test]
     fn test_marshal_text_noop() {
         let body = Body::Text("already text".to_string());
-        let result = JsonDataFormat.marshal(body).unwrap();
+        let result = JsonDataFormat::default().marshal(body).unwrap();
         assert_eq!(result, Body::Text("already text".to_string()));
     }
 
     #[test]
     fn test_marshal_unsupported_variant() {
         let body = Body::Xml("<root/>".to_string());
-        let result = JsonDataFormat.marshal(body);
+        let result = JsonDataFormat::default().marshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 
     #[test]
     fn test_marshal_bytes_to_text() {
         let body = Body::Bytes(Bytes::from_static(b"{\"key\":\"val\"}"));
-        let result = JsonDataFormat.marshal(body).unwrap();
+        let result = JsonDataFormat::default().marshal(body).unwrap();
         match result {
             Body::Text(s) => assert!(s.contains("\"key\"")),
             _ => panic!("expected Body::Text"),
@@ -216,7 +249,7 @@ mod tests {
     #[test]
     fn test_marshal_invalid_bytes_returns_error() {
         let body = Body::Bytes(Bytes::from_static(b"not json"));
-        let result = JsonDataFormat.marshal(body);
+        let result = JsonDataFormat::default().marshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 
@@ -225,7 +258,7 @@ mod tests {
         // Build a valid JSON string exceeding the 16 MiB cap.
         let big = format!(r#"{{"k":"{}"}}"#, "x".repeat(16 * 1024 * 1024 + 10));
         let body = Body::Text(big);
-        let result = JsonDataFormat.unmarshal(body);
+        let result = JsonDataFormat::default().unmarshal(body);
         assert!(result.is_err(), "expected error for oversized JSON text");
         let msg = format!("{}", result.unwrap_err());
         assert!(
@@ -238,7 +271,27 @@ mod tests {
     fn test_unmarshal_bytes_size_cap() {
         let big = format!(r#"{{"k":"{}"}}"#, "x".repeat(16 * 1024 * 1024 + 10));
         let body = Body::Bytes(bytes::Bytes::from(big));
-        let result = JsonDataFormat.unmarshal(body);
+        let result = JsonDataFormat::default().unmarshal(body);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unmarshal_text_with_raised_max_bytes() {
+        let big = format!(r#"{{"k":"{}"}}"#, "x".repeat(17 * 1024 * 1024));
+        let body = Body::Text(big);
+        let df = JsonDataFormat::new(JsonConfig {
+            max_bytes: 20 * 1024 * 1024,
+        });
+        let result = df.unmarshal(body);
+        assert!(result.is_ok(), "should accept under raised cap");
+    }
+
+    #[test]
+    fn test_unmarshal_default_rejects_oversized() {
+        let big = format!(r#"{{"k":"{}"}}"#, "x".repeat(17 * 1024 * 1024));
+        let body = Body::Text(big);
+        let df = JsonDataFormat::default();
+        let result = df.unmarshal(body);
+        assert!(result.is_err(), "should reject over default 16 MiB");
     }
 }

@@ -2,6 +2,7 @@ use bytes::Bytes;
 use camel_api::body::Body;
 use camel_api::data_format::DataFormat;
 use camel_api::error::CamelError;
+use serde::Deserialize;
 use std::io::Read;
 use std::io::Write;
 use zip::ZipArchive;
@@ -13,7 +14,8 @@ const DEFAULT_MAX_DECOMPRESSED_SIZE: u64 = 1_073_741_824;
 const DEFAULT_MAX_INPUT_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 const ENTRY_NAME: &str = "payload";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ZipConfig {
     pub max_decompressed_size: u64,
     /// Maximum materialized input size accepted by `marshal` (DoS cap, R3-L1).
@@ -529,5 +531,26 @@ mod tests {
         let df = super::super::builtin_data_format("zip");
         assert!(df.is_some());
         assert_eq!(df.unwrap().name(), "zip");
+    }
+
+    #[test]
+    fn test_zip_config_deserialize_from_json() {
+        let json = serde_json::json!({
+            "max_decompressed_size": 2147483648u64,
+            "max_input_size": 134217728u64,
+            "compression_level": 6,
+            "allow_multi_entry": true
+        });
+        let cfg: ZipConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.max_decompressed_size, 2147483648);
+        assert_eq!(cfg.compression_level, Some(6));
+        assert!(cfg.allow_multi_entry);
+    }
+
+    #[test]
+    fn test_zip_config_deny_unknown_fields() {
+        let json = serde_json::json!({"unknown_key": 42});
+        let result: Result<ZipConfig, _> = serde_json::from_value(json);
+        assert!(result.is_err());
     }
 }

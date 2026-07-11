@@ -9,4 +9,4 @@ export type UnmarshalStep = { unmarshal: string,
  * Only effective when the format parses to `Body::Json` (currently `json`
  * is the only format that produces JSON in v1).
  */
-schema: JsonValue | null, };
+schema: JsonValue | null, config: JsonValue | null, };
