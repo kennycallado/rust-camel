@@ -125,7 +125,13 @@ impl UriConfig for CronConfig {
     }
 
     fn from_components(parts: camel_component_api::UriComponents) -> Result<Self, CamelError> {
-        let config = Self::parse_uri_components(parts)?;
+        let mut config = Self::parse_uri_components(parts)?;
+        // Accept `+` as space in the schedule expression (Apache Camel convention).
+        // The global URI parser treats `+` as a literal plus; cron expressions
+        // never use `+`, so this component-local normalization is safe and
+        // greatly improves URI readability:
+        //   cron:t?schedule=0+2+*+*+*  instead of  cron:t?schedule=0%202%20*%20*%20*
+        config.schedule = config.schedule.replace('+', " ");
         CronConfig::validate(&config)?;
         Ok(config)
     }
@@ -358,6 +364,14 @@ mod tests {
     fn test_cron_config_percent_encoded_spaces() {
         // URI parser should decode %20 to space
         let config = CronConfig::from_uri("cron:test?schedule=0%202%20*%20*%20*").unwrap();
+        assert_eq!(config.schedule, "0 2 * * *");
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_cron_config_plus_as_space() {
+        // Apache Camel convention: `+` as space separator in cron expressions
+        let config = CronConfig::from_uri("cron:test?schedule=0+2+*+*+*").unwrap();
         assert_eq!(config.schedule, "0 2 * * *");
         config.validate().unwrap();
     }

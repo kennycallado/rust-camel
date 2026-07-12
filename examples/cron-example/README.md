@@ -18,6 +18,7 @@ An exchange fires at the top of each minute (second 0). Watch the logs for
 cron:<name>?schedule=<5-field-expr>[&timeZone=<IANA>]
 ```
 
-- `schedule` — Unix 5-field cron: `min hour dom month dow` (percent-encode
-  spaces as `%20` in the URI)
+- `schedule` — Unix 5-field cron: `min hour dom month dow`. Use `+` as space
+  separator (e.g. `0+2+*+*+*` for "2am daily"). Percent-encoding (`%20`) also
+  works.
 - `timeZone` — IANA timezone (default: `UTC`)

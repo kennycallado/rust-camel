@@ -14,8 +14,8 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     // Fire every minute at second 0.
-    // URI spaces are percent-encoded (%20) in the cron expression.
-    let route = RouteBuilder::from("cron:tick?schedule=*%20*%20*%20*%20*")
+    // Use `+` as space separator in the cron expression (Apache Camel convention).
+    let route = RouteBuilder::from("cron:tick?schedule=*+*+*+*+*")
         .route_id("cron-demo")
         .set_body("cron-fired")
         .set_header("source", Value::String("cron".into()))
