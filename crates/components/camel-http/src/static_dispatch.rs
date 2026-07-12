@@ -34,12 +34,11 @@ pub(crate) async fn dispatch_static(
     req: Request,
     path: &str,
 ) -> axum::response::Response {
-    // Reject path traversal attempts early (string-only, no FS call)
+    // Path traversal is contained by ServeDir (tower-http 0.7.0), which
+    // canonicalizes and rejects `..` / percent-encoded sequences. The static
+    // root directory and its symlink targets must be trusted by the operator.
+    // (R4-L1: removed dead-weight string guard that missed %2e%2e.)
     let relative = path.trim_start_matches('/');
-    let has_traversal = relative.split('/').any(|seg| seg == "..");
-    if has_traversal {
-        return (StatusCode::NOT_FOUND, "Not Found").into_response();
-    }
 
     // Extract request parts once so we can rebuild for each mount attempt
     let (parts, _body) = req.into_parts();

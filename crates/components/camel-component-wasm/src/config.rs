@@ -28,6 +28,12 @@ const DEFAULT_MAX_WASM_SIZE_BYTES: u64 = 10 * 1024 * 1024;
 /// Default maximum bytes for the streaming body bridge.
 pub(crate) const DEFAULT_MAX_STREAM_BYTES: u64 = DEFAULT_MATERIALIZE_LIMIT as u64;
 
+/// Default maximum core instances per store (matches wasmtime default).
+const DEFAULT_MAX_INSTANCES: usize = 10_000;
+
+/// Default maximum tables per store (matches wasmtime default).
+const DEFAULT_MAX_TABLES: usize = 10_000;
+
 /// Epoch tick interval in milliseconds (same as Surrealism).
 const EPOCH_INTERVAL_MILLIS: u64 = 10;
 
@@ -59,6 +65,15 @@ pub struct WasmConfig {
 
     /// Maximum bytes for the streaming body bridge.
     pub max_stream_bytes: u64,
+
+    /// Maximum core instances per store. Default 10_000 (matches wasmtime).
+    pub max_instances: usize,
+
+    /// Maximum tables per store. Default 10_000 (matches wasmtime).
+    pub max_tables: usize,
+
+    /// Maximum table elements. `None` = no cap (wasmtime unlimited).
+    pub max_table_elements: Option<usize>,
 }
 
 impl Default for WasmConfig {
@@ -70,6 +85,9 @@ impl Default for WasmConfig {
             max_wasm_size_bytes: DEFAULT_MAX_WASM_SIZE_BYTES,
             allow_call_schemes: String::new(),
             max_stream_bytes: DEFAULT_MAX_STREAM_BYTES,
+            max_instances: DEFAULT_MAX_INSTANCES,
+            max_tables: DEFAULT_MAX_TABLES,
+            max_table_elements: None,
         }
     }
 }
@@ -90,6 +108,9 @@ impl WasmConfig {
             max_wasm_size_bytes: limits.max_wasm_size.unwrap_or(DEFAULT_MAX_WASM_SIZE_BYTES),
             allow_call_schemes: limits.allow_call_schemes.clone().unwrap_or_default(),
             max_stream_bytes: limits.max_stream_bytes.unwrap_or(DEFAULT_MAX_STREAM_BYTES),
+            max_instances: limits.max_instances.unwrap_or(DEFAULT_MAX_INSTANCES),
+            max_tables: limits.max_tables.unwrap_or(DEFAULT_MAX_TABLES),
+            max_table_elements: limits.max_table_elements,
         }
     }
 
@@ -147,6 +168,27 @@ impl WasmConfig {
                                 && bytes > 0
                             {
                                 config.max_stream_bytes = bytes;
+                            }
+                        }
+                        "max-instances" => {
+                            if let Ok(n) = value.parse::<usize>()
+                                && n > 0
+                            {
+                                config.max_instances = n;
+                            }
+                        }
+                        "max-tables" => {
+                            if let Ok(n) = value.parse::<usize>()
+                                && n > 0
+                            {
+                                config.max_tables = n;
+                            }
+                        }
+                        "max-table-elements" => {
+                            if let Ok(n) = value.parse::<usize>()
+                                && n > 0
+                            {
+                                config.max_table_elements = Some(n);
                             }
                         }
                         _ => {} // ignore unknown params
@@ -448,5 +490,54 @@ mod tests {
         let limits = camel_config::WasmLimitsConfig::default();
         let cfg = WasmConfig::from_limits(&limits);
         assert_eq!(cfg.max_stream_bytes, DEFAULT_MAX_STREAM_BYTES);
+    }
+
+    #[test]
+    fn wasm_config_default_instances_tables_table_elements() {
+        let cfg = WasmConfig::default();
+        assert_eq!(cfg.max_instances, 10_000);
+        assert_eq!(cfg.max_tables, 10_000);
+        assert_eq!(cfg.max_table_elements, None);
+    }
+
+    #[test]
+    fn wasm_config_from_limits_instances_tables_table_elements() {
+        let limits = camel_config::WasmLimitsConfig {
+            max_instances: Some(100),
+            max_tables: Some(50),
+            max_table_elements: Some(200),
+            ..camel_config::WasmLimitsConfig::default()
+        };
+        let cfg = WasmConfig::from_limits(&limits);
+        assert_eq!(cfg.max_instances, 100);
+        assert_eq!(cfg.max_tables, 50);
+        assert_eq!(cfg.max_table_elements, Some(200));
+    }
+
+    #[test]
+    fn wasm_config_from_limits_instances_tables_table_elements_defaults() {
+        let limits = camel_config::WasmLimitsConfig::default();
+        let cfg = WasmConfig::from_limits(&limits);
+        assert_eq!(cfg.max_instances, 10_000);
+        assert_eq!(cfg.max_tables, 10_000);
+        assert_eq!(cfg.max_table_elements, None);
+    }
+
+    #[test]
+    fn wasm_config_from_uri_max_instances() {
+        let (_, cfg) = WasmConfig::from_uri("test.wasm?max-instances=100");
+        assert_eq!(cfg.max_instances, 100);
+    }
+
+    #[test]
+    fn wasm_config_from_uri_max_tables() {
+        let (_, cfg) = WasmConfig::from_uri("test.wasm?max-tables=50");
+        assert_eq!(cfg.max_tables, 50);
+    }
+
+    #[test]
+    fn wasm_config_from_uri_max_table_elements() {
+        let (_, cfg) = WasmConfig::from_uri("test.wasm?max-table-elements=200");
+        assert_eq!(cfg.max_table_elements, Some(200));
     }
 }

@@ -19,6 +19,7 @@ tracing.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

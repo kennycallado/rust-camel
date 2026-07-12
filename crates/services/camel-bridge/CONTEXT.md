@@ -7,6 +7,9 @@ Communication uses mutual TLS (mTLS) with ephemeral rcgen-generated certificates
 
 | File | Line | Category | Reason |
 |------|------|----------|--------|
-| `src/process.rs` | 366 | `system-broken` | Subprocess startup — bridge ready message malformed |
-| `src/process.rs` | 371 | `system-broken` | Subprocess startup — stdout closed before ready message |
-| `src/process.rs` | 381 | `system-broken` | Subprocess startup — health check timeout |
+| `src/process.rs` | 314 | `degraded` | Bounded stdout drain — oversized line truncated |
+| `src/process.rs` | 324 | `normal` | Bounded stdout drain — child stdout line (debug) |
+| `src/process.rs` | 351 | `normal` | Bounded stdout drain — drop summary in rate-limit interval |
+| `src/process.rs` | 496 | `system-broken` | Subprocess startup — bridge ready message malformed |
+| `src/process.rs` | 503 | `system-broken` | Subprocess startup — stdout closed before ready message |
+| `src/process.rs` | 513 | `system-broken` | Subprocess startup — health check timeout |

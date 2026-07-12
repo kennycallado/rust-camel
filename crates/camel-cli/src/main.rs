@@ -14,7 +14,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start a Camel context from YAML route files
+    /// Start a Camel context from YAML route files.
+    ///
+    /// Trust model: `camel run` executes route scripts, WASM modules, and beans
+    /// resolved from the current working directory. Only run from a trusted directory.
     Run {
         /// Glob pattern for route YAML files (overrides Camel.toml routes config)
         #[arg(long, value_name = "GLOB")]

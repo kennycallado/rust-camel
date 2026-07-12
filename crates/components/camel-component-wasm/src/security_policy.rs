@@ -153,6 +153,9 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0,
+            10_000,
+            10_000,
+            None,
             crate::capabilities::WasmCapabilities::default(),
         );
         assert!(host_state.properties.is_empty());

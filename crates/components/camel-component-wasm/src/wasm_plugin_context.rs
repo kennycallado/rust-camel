@@ -120,6 +120,9 @@ impl WasmPluginContext {
                 HashMap::new(),
                 ctx.state_store.clone(),
                 ctx.config.max_memory_bytes,
+                ctx.config.max_instances,
+                ctx.config.max_tables,
+                ctx.config.max_table_elements,
                 ctx.capabilities.clone(),
             );
             let mut store = Store::new(&ctx.engine, host_state);
@@ -188,6 +191,9 @@ impl WasmPluginContext {
                 HashMap::new(),
                 ctx.state_store.clone(),
                 ctx.config.max_memory_bytes,
+                ctx.config.max_instances,
+                ctx.config.max_tables,
+                ctx.config.max_table_elements,
                 ctx.capabilities.clone(),
             );
             let mut store = Store::new(&ctx.engine, host_state);
@@ -246,6 +252,9 @@ impl WasmPluginContext {
             properties,
             self.state_store.clone(),
             self.config.max_memory_bytes,
+            self.config.max_instances,
+            self.config.max_tables,
+            self.config.max_table_elements,
             self.capabilities.clone(),
         );
         let mut store = Store::new(&self.engine, host_state);

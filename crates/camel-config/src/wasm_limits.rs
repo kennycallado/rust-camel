@@ -61,6 +61,23 @@ pub struct WasmLimitsConfig {
     /// Maps to `WasmConfig::max_stream_bytes` when `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_stream_bytes: Option<u64>,
+
+    /// Maximum core instances per store.
+    /// Maps to `WasmConfig::max_instances` when `Some`.
+    /// Default (when `None`): 10_000 (matches wasmtime default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_instances: Option<usize>,
+
+    /// Maximum tables per store.
+    /// Maps to `WasmConfig::max_tables` when `Some`.
+    /// Default (when `None`): 10_000 (matches wasmtime default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tables: Option<usize>,
+
+    /// Maximum table elements. `None` = no cap (wasmtime unlimited).
+    /// Maps to `WasmConfig::max_table_elements` when `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_table_elements: Option<usize>,
 }
 
 #[cfg(test)]
@@ -76,6 +93,9 @@ mod tests {
         assert_eq!(cfg.max_wasm_size, None);
         assert_eq!(cfg.allow_call_schemes, None);
         assert_eq!(cfg.max_stream_bytes, None);
+        assert_eq!(cfg.max_instances, None);
+        assert_eq!(cfg.max_tables, None);
+        assert_eq!(cfg.max_table_elements, None);
     }
 
     #[test]
@@ -87,6 +107,9 @@ mod tests {
             max-wasm-size = 20971520i64
             allow-call-schemes = "log,direct"
             max-stream-bytes = 52428800i64
+            max-instances = 100
+            max-tables = 50
+            max-table-elements = 200
         };
         let cfg: WasmLimitsConfig = toml.try_into().expect("deserialize");
         assert_eq!(cfg.timeout_secs, Some(600));
@@ -95,6 +118,9 @@ mod tests {
         assert_eq!(cfg.max_wasm_size, Some(20_971_520));
         assert_eq!(cfg.allow_call_schemes.as_deref(), Some("log,direct"));
         assert_eq!(cfg.max_stream_bytes, Some(52_428_800));
+        assert_eq!(cfg.max_instances, Some(100));
+        assert_eq!(cfg.max_tables, Some(50));
+        assert_eq!(cfg.max_table_elements, Some(200));
     }
 
     #[test]
@@ -109,6 +135,9 @@ mod tests {
         assert_eq!(cfg.max_wasm_size, None);
         assert_eq!(cfg.allow_call_schemes, None);
         assert_eq!(cfg.max_stream_bytes, None);
+        assert_eq!(cfg.max_instances, None);
+        assert_eq!(cfg.max_tables, None);
+        assert_eq!(cfg.max_table_elements, None);
     }
 
     #[test]
@@ -159,6 +188,9 @@ mod tests {
         assert!(!s.contains("max-wasm-size"));
         assert!(!s.contains("allow-call-schemes"));
         assert!(!s.contains("max-stream-bytes"));
+        assert!(!s.contains("max-instances"));
+        assert!(!s.contains("max-tables"));
+        assert!(!s.contains("max-table-elements"));
     }
 
     #[test]
@@ -171,5 +203,23 @@ mod tests {
         assert!(serialized.contains("max-stream-bytes"));
         let back: WasmLimitsConfig = toml::from_str(&serialized).expect("deserialize");
         assert_eq!(back.max_stream_bytes, Some(52_428_800));
+    }
+
+    #[test]
+    fn instances_tables_table_elements_round_trip() {
+        let cfg = WasmLimitsConfig {
+            max_instances: Some(100),
+            max_tables: Some(50),
+            max_table_elements: Some(200),
+            ..WasmLimitsConfig::default()
+        };
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        assert!(serialized.contains("max-instances"));
+        assert!(serialized.contains("max-tables"));
+        assert!(serialized.contains("max-table-elements"));
+        let back: WasmLimitsConfig = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(back.max_instances, Some(100));
+        assert_eq!(back.max_tables, Some(50));
+        assert_eq!(back.max_table_elements, Some(200));
     }
 }

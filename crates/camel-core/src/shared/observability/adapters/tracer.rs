@@ -100,7 +100,10 @@ impl Service<Exchange> for TracingProcessor {
         // Build span attributes
         let mut attributes = [
             KeyValue::new("messaging.system", "camel"),
-            KeyValue::new("correlation_id", exchange.correlation_id().to_string()),
+            KeyValue::new(
+                "correlation_id",
+                capped_correlation_id(exchange.correlation_id()).to_string(),
+            ),
             KeyValue::new("route_id", self.route_id.clone()),
             KeyValue::new("step_id", self.step_id.clone()),
             KeyValue::new("step_index", self.step_index as i64),
@@ -253,6 +256,16 @@ impl Clone for TracingProcessor {
             detail_level: self.detail_level.clone(),
             metrics: self.metrics.clone(),
         }
+    }
+}
+
+/// R4-L8: cap only the span-attr representation. Exchange.correlation_id is untouched.
+fn capped_correlation_id(id: &str) -> &str {
+    const CAP: usize = 128;
+    if id.len() > CAP {
+        "<oversized:correlation_id>"
+    } else {
+        id
     }
 }
 
@@ -501,5 +514,18 @@ mod tests {
         // Both processors should have updated the context
         // The context should be valid and propagating
         let _ = exchange2.otel_context;
+    }
+
+    #[test]
+    fn capped_correlation_id_uses_sentinel_for_oversized() {
+        assert_eq!(
+            capped_correlation_id(&"x".repeat(200)),
+            "<oversized:correlation_id>"
+        );
+        assert_eq!(
+            capped_correlation_id(&"y".repeat(300)),
+            "<oversized:correlation_id>"
+        );
+        assert_eq!(capped_correlation_id("abc-123"), "abc-123");
     }
 }

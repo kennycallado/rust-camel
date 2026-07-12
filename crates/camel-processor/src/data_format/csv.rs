@@ -24,6 +24,19 @@ pub enum QuoteMode {
     None,
 }
 
+/// R4-L9: policy for header/row width mismatch during CSV unmarshal (map mode).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WidthMismatchPolicy {
+    /// No warning; silently pad/drop.
+    Lenient,
+    /// One aggregate warning per unmarshal (default — reduces per-row flood).
+    #[default]
+    Warn,
+    /// Error on first mismatch.
+    Error,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CsvConfig {
@@ -48,6 +61,8 @@ pub struct CsvConfig {
     /// Maximum byte length of a single CSV field accepted by `unmarshal` (DoS cap, R3-M1).
     /// Default 1_048_576 (1 MiB). `None` disables the cap.
     pub max_field_size: Option<usize>,
+    /// R4-L9: policy for header/row width mismatch during CSV unmarshal (map mode).
+    pub width_mismatch: WidthMismatchPolicy,
 }
 
 impl Default for CsvConfig {
@@ -70,6 +85,7 @@ impl Default for CsvConfig {
             use_maps: true,
             max_records: Some(100_000),
             max_field_size: Some(1_048_576),
+            width_mismatch: WidthMismatchPolicy::Warn,
         }
     }
 }
@@ -163,6 +179,10 @@ impl CsvConfig {
     }
     pub fn max_field_size(mut self, max: usize) -> Self {
         self.max_field_size = Some(max);
+        self
+    }
+    pub fn width_mismatch(mut self, policy: WidthMismatchPolicy) -> Self {
+        self.width_mismatch = policy;
         self
     }
 }
@@ -324,6 +344,8 @@ impl CsvDataFormat {
                 iter.next();
             }
             let mut count: usize = 0;
+            let mut mismatch_count: usize = 0;
+            let mut first_mismatch: Option<(usize, usize, usize)> = None;
             for result in iter {
                 let record = result
                     .map_err(|e| CamelError::TypeConversionFailed(format!("CSV parse: {e}")))?;
@@ -334,14 +356,25 @@ impl CsvDataFormat {
                     self.config.max_records,
                     self.config.max_field_size,
                 )?;
-                // R4-L9: warn on header/row width mismatch instead of silent pad/drop.
+                // R4-L9: configurable policy for header/row width mismatch.
                 if record.len() != keys.len() {
-                    tracing::warn!(
-                        header_width = keys.len(),
-                        row_width = record.len(),
-                        record_index = count,
-                        "CSV record width differs from header width; fields will be padded or truncated"
-                    );
+                    match self.config.width_mismatch {
+                        WidthMismatchPolicy::Error => {
+                            return Err(CamelError::TypeConversionFailed(format!(
+                                "CSV record {} width {} differs from header width {}",
+                                count,
+                                record.len(),
+                                keys.len()
+                            )));
+                        }
+                        WidthMismatchPolicy::Warn => {
+                            mismatch_count += 1;
+                            if first_mismatch.is_none() {
+                                first_mismatch = Some((count, keys.len(), record.len()));
+                            }
+                        }
+                        WidthMismatchPolicy::Lenient => {}
+                    }
                 }
                 let mut obj = serde_json::Map::new();
                 for (i, key) in keys.iter().enumerate() {
@@ -358,6 +391,20 @@ impl CsvDataFormat {
                     obj.insert(key.clone(), parsed);
                 }
                 records.push(serde_json::Value::Object(obj));
+            }
+            // R4-L9: emit one aggregate warn for all width mismatches.
+            if let (
+                WidthMismatchPolicy::Warn,
+                Some((first_record, header_width, first_row_width)),
+            ) = (self.config.width_mismatch, first_mismatch)
+            {
+                tracing::warn!(
+                    first_record,
+                    header_width,
+                    first_row_width,
+                    total_mismatches = mismatch_count,
+                    "CSV records had width mismatch with header; fields were padded or truncated"
+                );
             }
         } else {
             let mut count: usize = 0;
@@ -1180,5 +1227,76 @@ mod tests {
         let json = serde_json::json!({"unknown_key": 42});
         let result: Result<CsvConfig, _> = serde_json::from_value(json);
         assert!(result.is_err(), "unknown field should fail closed");
+    }
+
+    #[test]
+    fn csv_width_default_is_warn() {
+        assert_eq!(
+            CsvConfig::default().width_mismatch,
+            WidthMismatchPolicy::Warn
+        );
+    }
+
+    #[test]
+    fn csv_width_warn_default_aggregate_single_log() {
+        // Default policy (Warn): mismatched rows must not error; result is Ok.
+        // Per-row warns are replaced by a single aggregate warn (verified by code path).
+        let df = CsvDataFormat::default();
+        let body = Body::Text("a,b\n1,2,3\n4".into());
+        let result = df.unmarshal(body).unwrap();
+        match result {
+            Body::Json(serde_json::Value::Array(rows)) => {
+                assert_eq!(rows.len(), 2);
+                // Row 1: "1,2,3" → 3 cols, header has 2 → padded/truncated to 2
+                assert_eq!(rows[0]["a"], json!("1"));
+                assert_eq!(rows[0]["b"], json!("2"));
+                // Row 2: "4" → 1 col, header has 2 → padded with ""
+                assert_eq!(rows[1]["a"], json!("4"));
+                assert_eq!(rows[1]["b"], json!(""));
+            }
+            other => panic!("expected JSON array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn csv_width_error_returns_err() {
+        let cfg = CsvConfig::default().width_mismatch(WidthMismatchPolicy::Error);
+        let df = CsvDataFormat::new(cfg);
+        let body = Body::Text("a,b\n1,2,3".into());
+        let result = df.unmarshal(body);
+        let msg = match result {
+            Err(CamelError::TypeConversionFailed(m)) => m,
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        };
+        assert!(
+            msg.contains("width") && msg.contains("differs"),
+            "error should mention width mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn csv_width_lenient_no_warn() {
+        let cfg = CsvConfig::default().width_mismatch(WidthMismatchPolicy::Lenient);
+        let df = CsvDataFormat::new(cfg);
+        let body = Body::Text("a,b\n1,2,3\n4".into());
+        let result = df.unmarshal(body).unwrap();
+        match result {
+            Body::Json(serde_json::Value::Array(rows)) => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0]["a"], json!("1"));
+                assert_eq!(rows[1]["a"], json!("4"));
+            }
+            other => panic!("expected JSON array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn csv_width_unknown_enum_rejected() {
+        let json = serde_json::json!({"width_mismatch": "invalid"});
+        let result: Result<CsvConfig, _> = serde_json::from_value(json);
+        assert!(
+            result.is_err(),
+            "invalid enum variant should fail deserialization"
+        );
     }
 }

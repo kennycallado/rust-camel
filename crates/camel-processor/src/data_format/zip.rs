@@ -325,8 +325,7 @@ mod tests {
         let df = ZipDataFormat::default();
         let content = b"text from text body";
         let zip_data = make_zip(content);
-        let text_body = unsafe { String::from_utf8_unchecked(zip_data) };
-        let body = Body::Text(text_body);
+        let body = Body::Bytes(Bytes::from(zip_data));
         let result = df.unmarshal(body).unwrap();
         match result {
             Body::Bytes(b) => assert_eq!(b.as_ref(), content),

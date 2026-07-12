@@ -29,6 +29,8 @@ async fn main() -> Result<(), CamelError> {
                 enabled: true,
                 host: "0.0.0.0".to_string(),
                 port: health_port,
+                handler_timeout_ms: 6000,
+                forced_ttl_ms: None,
             }),
             ..Default::default()
         },

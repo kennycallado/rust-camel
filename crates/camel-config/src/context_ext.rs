@@ -166,7 +166,18 @@ impl CamelConfig {
             builder = builder.runtime_store(store);
         }
 
-        let health_registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        let health_registry = Arc::new({
+            let mut reg = HealthCheckRegistry::new(Duration::from_secs(5));
+            if let Some(ttl_ms) = config
+                .observability
+                .health
+                .as_ref()
+                .and_then(|h| h.forced_ttl_ms)
+            {
+                reg = reg.with_forced_ttl(Duration::from_millis(ttl_ms));
+            }
+            reg
+        });
         builder = builder.health_registry(Arc::clone(&health_registry));
 
         let health_state: HealthState = Arc::new(Mutex::new(Vec::new()));
@@ -295,6 +306,11 @@ impl CamelConfig {
         if let Some(ref health_cfg) = config.observability.health
             && health_cfg.enabled
         {
+            if health_cfg.handler_timeout_ms == 0 {
+                return Err(CamelError::Config(
+                    "health.handler_timeout_ms must be > 0".to_string(),
+                ));
+            }
             let addr: std::net::SocketAddr = format!("{}:{}", health_cfg.host, health_cfg.port)
                 .parse()
                 .map_err(|_| {
@@ -305,6 +321,9 @@ impl CamelConfig {
                 })?;
             let mut health_server = camel_health::HealthServer::new(addr);
             health_server.set_health_source(Arc::clone(&health_source));
+            health_server.set_handler_timeout(std::time::Duration::from_millis(
+                health_cfg.handler_timeout_ms,
+            ));
             health_state
                 .lock()
                 .await

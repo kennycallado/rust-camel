@@ -119,23 +119,36 @@ impl WasmRuntime {
 
     /// Construct a fresh `WasmHostState` for one guest invocation.
     ///
-    /// `max_memory_bytes` is enforced via `wasmtime::StoreLimitsBuilder::memory_size`.
-    /// Pass `0` to fall back to `StoreLimits::default()` (4 GiB wasmtime ceiling);
-    /// any positive value is applied as the cap.
+    /// Always uses `wasmtime::StoreLimitsBuilder::new()` which seeds wasmtime
+    /// defaults (4 GiB memory, 10_000 instances, 10_000 tables). `max_memory_bytes`
+    /// of `0` omits the `.memory_size()` call, leaving the 4 GiB default in place.
+    /// Positive values apply the cap. `max_instances` / `max_tables` / `max_table_elements`
+    /// are always applied regardless of `max_memory_bytes` (R4-L5 fix).
+    ///
+    /// `max_instances` / `max_tables` set the per-store caps on core instances
+    /// and tables (wasmtime default: 10_000 each). `max_table_elements` caps
+    /// table elements; `None` leaves it unlimited (wasmtime default).
+    #[allow(clippy::too_many_arguments)] // 3 new R4-L5 caps + existing 5
     pub fn create_host_state(
         registry: Arc<std::sync::Mutex<Registry>>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
         max_memory_bytes: u64,
+        max_instances: usize,
+        max_tables: usize,
+        max_table_elements: Option<usize>,
         capabilities: crate::capabilities::WasmCapabilities,
     ) -> WasmHostState {
-        let limits = if max_memory_bytes == 0 {
-            wasmtime::StoreLimits::default()
-        } else {
-            wasmtime::StoreLimitsBuilder::new()
-                .memory_size(max_memory_bytes as usize)
-                .build()
-        };
+        let mut builder = wasmtime::StoreLimitsBuilder::new();
+        if max_memory_bytes > 0 {
+            builder = builder.memory_size(max_memory_bytes as usize);
+        }
+        builder = builder.instances(max_instances);
+        builder = builder.tables(max_tables);
+        if let Some(te) = max_table_elements {
+            builder = builder.table_elements(te);
+        }
+        let limits = builder.build();
         WasmHostState {
             table: ResourceTable::new(),
             wasi: WasiCtxBuilder::new().inherit_stderr().build(),
@@ -167,6 +180,9 @@ impl WasmRuntime {
             properties,
             state_store,
             self.config.max_memory_bytes,
+            self.config.max_instances,
+            self.config.max_tables,
+            self.config.max_table_elements,
             crate::capabilities::WasmCapabilities::from_scheme_list(
                 &self.config.allow_call_schemes,
             ),
@@ -215,6 +231,9 @@ impl WasmRuntime {
             properties,
             state_store,
             self.config.max_memory_bytes,
+            self.config.max_instances,
+            self.config.max_tables,
+            self.config.max_table_elements,
             crate::capabilities::WasmCapabilities::from_scheme_list(
                 &self.config.allow_call_schemes,
             ),
@@ -291,6 +310,9 @@ impl WasmRuntime {
             properties,
             state_store,
             self.config.max_memory_bytes,
+            self.config.max_instances,
+            self.config.max_tables,
+            self.config.max_table_elements,
             crate::capabilities::WasmCapabilities::from_scheme_list(
                 &self.config.allow_call_schemes,
             ),
@@ -540,9 +562,61 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0,
+            10_000,
+            10_000,
+            None,
             crate::capabilities::WasmCapabilities::default(),
         );
         let _ = host_state; // smoke test: constructor tolerates 0
+    }
+
+    #[tokio::test]
+    async fn create_host_state_zero_memory_still_applies_instance_caps() {
+        // Regression test for the R4-L5 fix: when max_memory_bytes=0, the old
+        // code path called StoreLimits::default() which dropped all non-memory
+        // caps (instances/tables/table_elements). The new builder path applies
+        // them unconditionally.
+        //
+        // Behavioral proof: max_instances=1 with max_memory_bytes=0. Creating a
+        // second core instance must fail.
+        let wat = r#"
+        (module
+          (func (export "dummy"))
+        )
+        "#;
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        let engine = Engine::new(&config).unwrap();
+        let module = wasmtime::Module::new(&engine, wat).expect("compile wat");
+
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let host_state = WasmRuntime::create_host_state(
+            registry,
+            HashMap::new(),
+            crate::state_store::StateStore::new(),
+            0, // max_memory_bytes = 0 (no memory cap)
+            1, // max_instances = 1 (tiny cap — must be applied!)
+            1, // max_tables = 1
+            None,
+            crate::capabilities::WasmCapabilities::default(),
+        );
+        let mut store = Store::new(&engine, host_state);
+        store.limiter(|state| &mut state.limits);
+
+        // First instance fits within cap=1
+        let _inst = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect("first instance must succeed");
+
+        // Second instance would exceed cap=1 — must be rejected
+        let err = wasmtime::Instance::new_async(&mut store, &module, &[])
+            .await
+            .expect_err("second instance must be rejected by instance cap");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("instance") || msg.contains("limit"),
+            "error must reference instance limit: {msg}"
+        );
     }
 
     // Per-plugin-type coverage: this test runs at the shared `create_host_state`
@@ -578,6 +652,9 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             64 * 1024, // 64 KiB cap
+            10_000,
+            10_000,
+            None,
             crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
@@ -624,6 +701,9 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             128 * 1024,
+            10_000,
+            10_000,
+            None,
             crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
@@ -651,6 +731,9 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0,
+            10_000,
+            10_000,
+            None,
             crate::capabilities::WasmCapabilities::default(),
         );
         let _limits: &wasmtime::StoreLimits = &state.limits;
@@ -668,6 +751,9 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0,
+            10_000,
+            10_000,
+            None,
             crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
@@ -690,12 +776,52 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             1024, // 1 KiB cap; threaded through create_host_state
+            10_000,
+            10_000,
+            None,
             crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);
         store.limiter(|state| &mut state.limits);
         // Verifies store.limiter accepts WasmHostState::limits after the new
         // create_host_state wires the memory cap through StoreLimitsBuilder.
+    }
+
+    #[test]
+    fn store_limits_default_no_table_elements_cap() {
+        // When max_table_elements=None, the builder does NOT call
+        // .table_elements() — wasmtime unlimited default preserved.
+        // instances/tables at 10_000 (wasmtime defaults).
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let state = WasmRuntime::create_host_state(
+            registry,
+            HashMap::new(),
+            crate::state_store::StateStore::new(),
+            50 * 1024 * 1024, // 50 MiB — exercises the builder path
+            10_000,
+            10_000,
+            None,
+            crate::capabilities::WasmCapabilities::default(),
+        );
+        // state.limits exists and did not panic — builder accepted defaults.
+        let _limits: &wasmtime::StoreLimits = &state.limits;
+    }
+
+    #[test]
+    fn store_limits_custom_table_elements_cap() {
+        // When max_table_elements=Some(n), the builder calls .table_elements(n).
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let state = WasmRuntime::create_host_state(
+            registry,
+            HashMap::new(),
+            crate::state_store::StateStore::new(),
+            50 * 1024 * 1024,
+            100,
+            50,
+            Some(200),
+            crate::capabilities::WasmCapabilities::default(),
+        );
+        let _limits: &wasmtime::StoreLimits = &state.limits;
     }
 
     // ── Non-stream passthrough (M2) ────────────────────────────────────
@@ -763,6 +889,9 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0, // no memory cap — this test is about timeout, not memory
+            10_000,
+            10_000,
+            None,
             crate::capabilities::WasmCapabilities::default(),
         );
         let mut store = Store::new(&engine, host_state);

@@ -22,6 +22,7 @@ pub struct HealthServer {
     status: Arc<AtomicU8>,
     health_source: Option<Arc<dyn HealthSource>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    handler_timeout: Duration,
 }
 
 impl HealthServer {
@@ -33,11 +34,18 @@ impl HealthServer {
             status: Arc::new(AtomicU8::new(STATUS_STOPPED)),
             health_source: None,
             shutdown_tx: None,
+            handler_timeout: crate::DEFAULT_HANDLER_TIMEOUT,
         }
     }
 
     pub fn set_health_source(&mut self, source: Arc<dyn HealthSource>) {
         self.health_source = Some(source);
+    }
+
+    /// R4-L11: set the handler-level probe timeout. Must be > 0.
+    pub fn set_handler_timeout(&mut self, timeout: Duration) {
+        assert!(!timeout.is_zero(), "health handler timeout must be > 0");
+        self.handler_timeout = timeout;
     }
 
     pub fn port(&self) -> u16 {
@@ -97,13 +105,14 @@ impl Lifecycle for HealthServer {
 
         let source = self.health_source.clone();
         let port = actual_port;
+        let handler_timeout = self.handler_timeout;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         let handle = tokio::spawn(async move {
             let source =
                 source.unwrap_or_else(|| Arc::new(DefaultHealthSource) as Arc<dyn HealthSource>);
-            let app = crate::health_router(source);
+            let app = crate::health_router_with_timeout(source, handler_timeout);
             info!("Health server listening on port {}", port);
             let server = axum::serve(listener, app);
             let shutdown_future = async move {

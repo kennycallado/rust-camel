@@ -115,6 +115,13 @@ pub fn parse_uri(uri: &str) -> Result<UriComponents, CamelError> {
         )));
     }
 
+    // R4-L2: strip fragment (#...) before parsing path/query. A literal # in
+    // a path must be %23-encoded pre-1.0.0.
+    let rest = match rest.split_once('#') {
+        Some((before, _fragment)) => before,
+        None => rest,
+    };
+
     let (path, params) = match rest.split_once('?') {
         Some((path, query)) => (path, parse_query(query)?),
         None => (rest, HashMap::new()),
@@ -617,5 +624,21 @@ mod tests {
             result.params.get("password"),
             Some(&"abc%20def".to_string())
         );
+    }
+
+    // R4-L2: fragment stripping tests
+
+    #[test]
+    fn parse_uri_strips_fragment_from_path() {
+        let uri = parse_uri("direct://a/b#frag").unwrap();
+        assert!(!uri.path.contains('#'));
+        assert!(!uri.path.contains("frag"));
+    }
+
+    #[test]
+    fn parse_uri_strips_fragment_with_query() {
+        let uri = parse_uri("https://host/path?q=1#fragment").unwrap();
+        assert!(!uri.path.contains("fragment"));
+        assert!(!uri.params.values().any(|v| v.contains("fragment")));
     }
 }

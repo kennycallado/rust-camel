@@ -268,6 +268,17 @@ pub struct HealthCamelConfig {
     pub host: String,
     #[serde(default = "default_health_port")]
     pub port: u16,
+    /// R4-L11: handler-level probe timeout in milliseconds. Default 6000 (6s).
+    /// Must be > 0. Strictly > internal 5s registry tick.
+    #[serde(default = "default_health_handler_timeout_ms")]
+    pub handler_timeout_ms: u64,
+    /// R4-L12: opt-in TTL (ms) for forced-unhealthy entries. When set, a forced
+    /// entry whose age exceeds the TTL has its reason updated to indicate the
+    /// TTL expired, but the entry is NOT cleared — TTL alone never declares
+    /// Ready. Recovery still requires both a later probe generation AND a
+    /// post-force Started marker. Default: None (disabled).
+    #[serde(default)]
+    pub forced_ttl_ms: Option<u64>,
 }
 
 impl Default for HealthCamelConfig {
@@ -276,6 +287,8 @@ impl Default for HealthCamelConfig {
             enabled: false,
             host: default_health_host(),
             port: default_health_port(),
+            handler_timeout_ms: default_health_handler_timeout_ms(),
+            forced_ttl_ms: None,
         }
     }
 }
@@ -286,6 +299,10 @@ fn default_health_host() -> String {
 
 fn default_health_port() -> u16 {
     8081
+}
+
+fn default_health_handler_timeout_ms() -> u64 {
+    6000
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1402,8 +1419,11 @@ fn build_from_toml_value_inner(
 fn resolve_string_in_place(resolver: &PropertiesResolver, value: &mut String, field: &str) {
     match resolver.resolve(value) {
         Ok(resolved) => *value = resolved,
-        Err(err) => {
-            tracing::warn!(field = field, error = %err, "Failed to resolve placeholder; keeping original");
+        Err(_err) => {
+            tracing::warn!(
+                field = field,
+                "Failed to resolve placeholder; keeping original (error detail omitted)"
+            );
         }
     }
 }

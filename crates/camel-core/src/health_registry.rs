@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use camel_api::{AsyncHealthCheck, CheckResult, HealthReport, HealthStatus, ServiceHealth};
 use chrono::Utc;
@@ -12,18 +13,24 @@ use tokio_util::sync::CancellationToken;
 struct ForcedEntry {
     name: String,
     reason: String,
+    probe_generation_at_force: u64,
+    started_after_force: bool,
+    forced_at: Option<Instant>,
+    ttl: Option<Duration>,
 }
 
 struct RouteHealth {
     active: bool,
     live: Vec<Arc<dyn AsyncHealthCheck>>,
     forced: Option<ForcedEntry>,
+    probe_generation: u64,
 }
 
 pub struct HealthCheckRegistry {
     entries: RwLock<HashMap<String, RouteHealth>>,
     default_timeout: Duration,
     cancel_token: CancellationToken,
+    forced_ttl: Option<Duration>,
 }
 
 impl HealthCheckRegistry {
@@ -32,7 +39,17 @@ impl HealthCheckRegistry {
             entries: RwLock::new(HashMap::new()),
             default_timeout,
             cancel_token: CancellationToken::new(),
+            forced_ttl: None,
         }
+    }
+
+    /// R4-L12: opt-in TTL for forced-unhealthy entries. When set, a forced entry
+    /// whose age exceeds the TTL has its reason updated (but is NOT cleared —
+    /// TTL alone never declares Ready). Recovery still requires both a later
+    /// probe generation AND a post-force Started marker.
+    pub fn with_forced_ttl(mut self, ttl: Duration) -> Self {
+        self.forced_ttl = Some(ttl);
+        self
     }
 
     pub fn register_for_route(&self, route_id: &str, check: Arc<dyn AsyncHealthCheck>) {
@@ -43,6 +60,7 @@ impl HealthCheckRegistry {
                 active: false,
                 live: Vec::new(),
                 forced: None,
+                probe_generation: 0,
             });
         let check_name = check.name();
         if let Some(existing) = route_health
@@ -54,13 +72,23 @@ impl HealthCheckRegistry {
         } else {
             route_health.live.push(check);
         }
-        route_health.forced = None;
+        // R4-L12: advancing the probe generation is one of two conditions for
+        // clearing a forced entry (the other is a post-force Started marker).
+        // We no longer eagerly clear `forced` here — that was too aggressive
+        // because any probe registration (even an old probe testing a different
+        // dependency) would clear a force targeting the dead consumer.
+        route_health.probe_generation += 1;
     }
 
     pub fn mark_route_started(&self, route_id: &str) {
         let mut entries = self.entries.write();
         if let Some(route_health) = entries.get_mut(route_id) {
             route_health.active = true;
+            // R4-L12: a post-force Started marker is one of two conditions for
+            // clearing a forced entry (the other is a later probe generation).
+            if let Some(ref mut f) = route_health.forced {
+                f.started_after_force = true;
+            }
         }
     }
 
@@ -84,11 +112,16 @@ impl HealthCheckRegistry {
                 active: false,
                 live: Vec::new(),
                 forced: None,
+                probe_generation: 0,
             });
         route_health.active = true;
         route_health.forced = Some(ForcedEntry {
             name: name.to_string(),
             reason: reason.into(),
+            probe_generation_at_force: route_health.probe_generation,
+            started_after_force: false,
+            forced_at: Some(Instant::now()),
+            ttl: self.forced_ttl,
         });
     }
 
@@ -107,6 +140,26 @@ impl HealthCheckRegistry {
                 }],
                 timestamp: Utc::now(),
             };
+        }
+
+        // R4-L12: write-locked recovery pre-pass — evaluate the fail-closed gate,
+        // clear forced on confirmed recovery (both conditions met), apply lazy
+        // TTL reason update. TTL alone NEVER declares Ready.
+        {
+            let mut entries = self.entries.write();
+            for rh in entries.values_mut() {
+                if let Some(ref mut forced) = rh.forced {
+                    let recovered = forced.started_after_force
+                        && rh.probe_generation > forced.probe_generation_at_force;
+                    if recovered {
+                        rh.forced = None;
+                    } else if let (Some(ttl), Some(at)) = (forced.ttl, forced.forced_at)
+                        && at.elapsed() >= ttl
+                    {
+                        forced.reason = "forced health expired; awaiting recovery".into();
+                    }
+                }
+            }
         }
 
         let checks: Vec<CheckTask> = {
@@ -485,9 +538,12 @@ mod tests {
 
     #[tokio::test]
     async fn force_unhealthy_then_register_replaces_with_live() {
+        // R4-L12: register alone no longer clears forced. Recovery requires
+        // both a later probe generation AND a post-force Started marker.
         let registry = HealthCheckRegistry::new(Duration::from_secs(5));
         registry.force_unhealthy_for_route("route-1", "forced", "route failed");
         registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
 
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Healthy);
@@ -677,5 +733,115 @@ mod tests {
         registry.mark_route_started("route-final");
         let report = registry.check_all().await;
         assert_ne!(report.services.len(), 0);
+    }
+
+    // ---------------------------------------------------------
+    // R4-L12: fail-closed forced-health recovery gate tests
+    // ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn forced_recovery_requires_started_and_new_generation() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        // Initial probe registration (gen 0 -> 1)
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        // Force unhealthy
+        registry.force_unhealthy_for_route("route-1", "forced", "consumer dead");
+        // Register new probe (gen 1 -> 2) but NO Started after force
+        registry.register_for_route("route-1", healthy_check("redis"));
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services[0].name, "forced");
+
+        // Now mark_started -> both conditions met -> recovery
+        registry.mark_route_started("route-1");
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert_eq!(report.services[0].name, "redis");
+    }
+
+    #[tokio::test]
+    async fn forced_recovery_started_only_stays_unhealthy() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        registry.force_unhealthy_for_route("route-1", "forced", "consumer dead");
+        // mark_started after force (sets started_after_force = true)
+        registry.mark_route_started("route-1");
+        // But no new probe registration (gen not advanced past force)
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services[0].name, "forced");
+    }
+
+    #[tokio::test]
+    async fn forced_ttl_expiry_alone_stays_unhealthy() {
+        // Use a very short TTL + sleep to test TTL expiry
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5))
+            .with_forced_ttl(Duration::from_millis(10));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        registry.force_unhealthy_for_route("route-1", "forced", "consumer dead");
+        // Sleep past TTL
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Still Unhealthy — TTL alone never declares Ready
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        // Reason updated to reflect TTL expiry
+        assert_eq!(
+            report.services[0].message.as_deref(),
+            Some("forced health expired; awaiting recovery")
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_default_disabled_no_ttl() {
+        // Default forced_ttl=None -> no TTL behavior, reason stays original
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        registry.force_unhealthy_for_route("route-1", "forced", "consumer dead");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services[0].message.as_deref(), Some("consumer dead"));
+    }
+
+    #[tokio::test]
+    async fn forced_recovery_both_orderings() {
+        // Ordering 1: probe-then-Started
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        registry.force_unhealthy_for_route("route-1", "forced", "dead");
+        registry.register_for_route("route-1", healthy_check("redis")); // gen advances
+        registry.mark_route_started("route-1"); // started_after_force = true
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+
+        // Ordering 2: Started-then-probe
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-2", healthy_check("redis"));
+        registry.mark_route_started("route-2");
+        registry.force_unhealthy_for_route("route-2", "forced", "dead");
+        registry.mark_route_started("route-2"); // started_after_force = true
+        registry.register_for_route("route-2", healthy_check("redis")); // gen advances
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn forced_recovery_register_without_started_stays_unhealthy() {
+        // register alone (no mark_started after force) -> still Unhealthy
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.mark_route_started("route-1");
+        registry.force_unhealthy_for_route("route-1", "forced", "dead");
+        // Multiple register calls advance generation but no Started
+        registry.register_for_route("route-1", healthy_check("redis"));
+        registry.register_for_route("route-1", healthy_check("redis"));
+        let report = registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services[0].name, "forced");
     }
 }

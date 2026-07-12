@@ -114,6 +114,14 @@ pub async fn run(
         std::process::exit(1);
     });
 
+    // R4-L4: CWD trust model — camel run executes route scripts/WASM/beans
+    // from the current working directory (dev-tool model, like cargo run).
+    tracing::warn!(
+        "camel run trusts the current working directory and will execute route \
+         scripts, WASM modules, and beans resolved from it; only run from a \
+         trusted directory"
+    );
+
     match camel_function::FunctionRuntimeService::with_default_container_provider(
         camel_function::FunctionConfig::default(),
     ) {
@@ -571,4 +579,41 @@ pub async fn run(
 
     tracing::info!("camel-cli: stopped");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    /// The run function must emit exactly one startup warning about the CWD trust model.
+    #[test]
+    fn startup_warning_emitted() {
+        let source = include_str!("run.rs");
+        // Build the search string from two parts so the concatenated form
+        // never appears literally in test code — only in the warn! call.
+        let a = "camel run trusts the current working directory";
+        let b = " and will execute route";
+        let msg = format!("{a}{b}");
+        let count = source.matches(&msg).count();
+        assert_eq!(
+            count, 1,
+            "expected exactly one tracing::warn! with the trust-model message in run.rs; found {count}"
+        );
+    }
+
+    /// The run command's clap help must document the trust model.
+    #[test]
+    fn clap_help_documents_trust_model() {
+        let source = include_str!("../main.rs");
+        let has_trust_doc = source
+            .contains("Trust model: `camel run` executes route scripts, WASM modules, and beans")
+            || source
+                .contains("Trust model: camel run executes route scripts, WASM modules, and beans");
+        assert!(
+            has_trust_doc,
+            "expected trust model documentation in the Run subcommand help in main.rs"
+        );
+    }
 }

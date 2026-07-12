@@ -1506,6 +1506,9 @@ mod tests {
         );
 
         health_registry.register_for_route("route-f", healthy_check("consumer"));
+        // R4-L12: recovery gate requires both a new probe generation AND a
+        // post-force Started marker.
+        health_registry.mark_route_started("route-f");
         let report = health_registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Healthy);
         assert_eq!(report.services[0].name, "consumer");

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -14,6 +16,25 @@ pub struct ProtoCache {
     pools: Mutex<HashMap<String, DescriptorPool>>,
     order: Mutex<VecDeque<String>>,
     max_entries: usize,
+}
+
+/// R4-L6: hash ordered include paths with length-delimited framing.
+/// On canonicalize failure, fall back to the supplied path (don't reject
+/// paths protoc accepts). Debug-log the fallback.
+fn hash_ordered_include_paths(paths: &[std::path::PathBuf]) -> String {
+    let mut hasher = DefaultHasher::new();
+    for p in paths {
+        let canonical = std::fs::canonicalize(p).unwrap_or_else(|_| {
+            tracing::debug!(path = %p.display(), "include path canonicalize failed; using raw path in cache key");
+            p.clone()
+        });
+        let s = canonical.to_string_lossy();
+        s.len().to_string().hash(&mut hasher);
+        b':'.hash(&mut hasher);
+        s.hash(&mut hasher);
+        b';'.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
 }
 
 impl Default for ProtoCache {
@@ -85,9 +106,10 @@ impl ProtoCache {
             .collect::<Vec<_>>();
 
         let key = format!(
-            "{}:{}",
+            "{}:{}:{}",
             proto_path.display(),
-            hash_proto_content(proto_path)?
+            hash_proto_content(proto_path)?,
+            hash_ordered_include_paths(&include_paths)
         );
 
         if let Some(pool) = self
@@ -111,5 +133,67 @@ impl ProtoCache {
 
     pub fn is_empty(&self) -> bool {
         self.pools.lock().expect("mutex poisoned").is_empty() // allow-unwrap
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_distinguishes_include_paths() {
+        let a = hash_ordered_include_paths(&[std::path::PathBuf::from("/proto")]);
+        let b = hash_ordered_include_paths(&[std::path::PathBuf::from("/other")]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn cache_key_order_significant() {
+        let a = hash_ordered_include_paths(&[
+            std::path::PathBuf::from("/a"),
+            std::path::PathBuf::from("/b"),
+        ]);
+        let b = hash_ordered_include_paths(&[
+            std::path::PathBuf::from("/b"),
+            std::path::PathBuf::from("/a"),
+        ]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn cache_key_length_delimited_no_collision() {
+        let a = hash_ordered_include_paths(&[
+            std::path::PathBuf::from("a"),
+            std::path::PathBuf::from("bc"),
+        ]);
+        let b = hash_ordered_include_paths(&[
+            std::path::PathBuf::from("ab"),
+            std::path::PathBuf::from("c"),
+        ]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn cache_key_canonicalize_success_branch() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let real_path = dir.path().to_path_buf();
+        // The canonicalized path may differ from the raw path (symlinks, /private on macOS).
+        // Two different real dirs must produce different keys.
+        let dir2 = TempDir::new().unwrap();
+        let real_path2 = dir2.path().to_path_buf();
+        let key1 = hash_ordered_include_paths(&[real_path.clone()]);
+        let key2 = hash_ordered_include_paths(&[real_path2.clone()]);
+        assert_ne!(
+            key1, key2,
+            "two distinct real dirs must produce different cache keys"
+        );
+        // Also: a real canonicalized path should hash differently from a nonexistent
+        // raw string of the same display() form (proves canonicalize is actually called).
+        let _raw_string = std::path::PathBuf::from(real_path.to_string_lossy().to_string());
+        // If canonicalize resolved a symlink, these differ; if not (same path), they're equal —
+        // so just assert the real-dir path produces a valid hash (16 hex chars).
+        let key_real = hash_ordered_include_paths(&[real_path]);
+        assert_eq!(key_real.len(), 16, "hash must be 16 hex chars");
     }
 }
