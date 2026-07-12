@@ -200,6 +200,36 @@ impl StepCompiler for CoreCompiler {
                 }
             },
 
+            // ── SetHeaderIfAbsent (declarative, internal-only) ──
+            BuilderStep::DeclarativeSetHeaderIfAbsent { key, value } => match value {
+                ValueSourceDef::Literal(value) => {
+                    let svc = camel_processor::SetHeaderIfAbsent::new(
+                        IdentityProcessor, key, value,
+                    );
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(svc),
+                        body_contract: None,
+                        lifecycle: None,
+                    }))
+                }
+                ValueSourceDef::Expression(expression) => {
+                    let expression = match compile_language_expression(ctx.languages, &expression) {
+                        Ok(e) => e,
+                        Err(e) => return StepCompileResult::Matched(Err(e)),
+                    };
+                    let svc = camel_processor::DynamicSetHeaderIfAbsent::new(
+                        IdentityProcessor,
+                        key,
+                        move |exchange: &Exchange| await_eval(&expression, exchange),
+                    );
+                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        processor: BoxProcessor::new(svc),
+                        body_contract: None,
+                        lifecycle: None,
+                    }))
+                }
+            },
+
             // ── SetProperty (declarative) ──
             BuilderStep::DeclarativeSetProperty { key, value_source } => match value_source {
                 ValueSourceDef::Literal(value) => {

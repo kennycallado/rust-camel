@@ -47,6 +47,7 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
     match step {
         RouteDslStep::To(_) => (),
         RouteDslStep::SetHeader(_) => (),
+        RouteDslStep::SetHeaderIfAbsent(_) => (),
         RouteDslStep::SetProperty(_) => (),
         RouteDslStep::SetBody(_) => (),
         RouteDslStep::Bean(_) => (),

@@ -3,6 +3,7 @@ pub enum DeclarativeStepKind {
     To,
     Log,
     SetHeader,
+    SetHeaderIfAbsent,
     SetProperty,
     SetBody,
     Filter,
@@ -88,6 +89,7 @@ pub fn is_rust_only_kind(kind: DeclarativeStepKind) -> bool {
             | DeclarativeStepKind::MapBody
             | DeclarativeStepKind::SetBodyFn
             | DeclarativeStepKind::SetHeaderFn
+            | DeclarativeStepKind::SetHeaderIfAbsent
     )
 }
 
@@ -128,6 +130,7 @@ mod tests {
         assert!(is_rust_only_kind(DeclarativeStepKind::MapBody));
         assert!(is_rust_only_kind(DeclarativeStepKind::SetBodyFn));
         assert!(is_rust_only_kind(DeclarativeStepKind::SetHeaderFn));
+        assert!(is_rust_only_kind(DeclarativeStepKind::SetHeaderIfAbsent));
     }
 
     #[test]

@@ -81,6 +81,55 @@ where
     }
 }
 
+/// A processor that sets a header using an expression closure,
+/// but ONLY if the header is not already present (if-absent semantics).
+/// The presence check happens BEFORE expression evaluation — if the
+/// header exists, the expression is never called.
+#[derive(Clone)]
+pub struct DynamicSetHeaderIfAbsent<P, F> {
+    inner: P,
+    key: String,
+    expr: F,
+}
+
+impl<P, F> DynamicSetHeaderIfAbsent<P, F>
+where
+    F: Fn(&Exchange) -> Value,
+{
+    pub fn new(inner: P, key: impl Into<String>, expr: F) -> Self {
+        Self {
+            inner,
+            key: key.into(),
+            expr,
+        }
+    }
+}
+
+impl<P, F> Service<Exchange> for DynamicSetHeaderIfAbsent<P, F>
+where
+    P: Service<Exchange, Response = Exchange, Error = CamelError> + Clone + Send + 'static,
+    P::Future: Send,
+    F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
+{
+    type Response = Exchange;
+    type Error = CamelError;
+    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut exchange: Exchange) -> Self::Future {
+        // Check BEFORE evaluating the expression.
+        if !exchange.input.headers.contains_key(&self.key) {
+            let value = (self.expr)(&exchange);
+            exchange.input.headers.insert(self.key.clone(), value);
+        }
+        let fut = self.inner.call(exchange);
+        Box::pin(fut)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use camel_api::{Exchange, IdentityProcessor, Message, Value};
@@ -147,5 +196,67 @@ mod tests {
         let exchange = Exchange::new(Message::default());
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.header("computed"), Some(&Value::Bool(true)));
+    }
+
+    // ── DynamicSetHeaderIfAbsent ──
+
+    #[tokio::test]
+    async fn test_dynamic_set_header_if_absent_adds_when_missing() {
+        let exchange = Exchange::new(Message::new("world"));
+
+        let svc = DynamicSetHeaderIfAbsent::new(IdentityProcessor, "greeting", |ex: &Exchange| {
+            Value::String(format!("hello {}", ex.input.body.as_text().unwrap_or("")))
+        });
+
+        let result = svc.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.input.header("greeting"),
+            Some(&Value::String("hello world".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_set_header_if_absent_preserves_existing() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut msg = Message::new("computed");
+        msg.set_header("key", Value::String("original".into()));
+        let exchange = Exchange::new(msg);
+
+        // Side-effect counter: expression increments this.
+        // If the header is present, the expression must NEVER be called.
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = call_count.clone();
+
+        let svc = DynamicSetHeaderIfAbsent::new(IdentityProcessor, "key", move |ex: &Exchange| {
+            cc.fetch_add(1, Ordering::SeqCst);
+            Value::String(ex.input.body.as_text().unwrap_or("").into())
+        });
+
+        let result = svc.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.input.header("key"),
+            Some(&Value::String("original".into()))
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            0,
+            "expression must NOT be evaluated when header is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_set_header_if_absent_preserves_body() {
+        let exchange = Exchange::new(Message::new("body content"));
+
+        let svc = DynamicSetHeaderIfAbsent::new(IdentityProcessor, "len", |ex: &Exchange| {
+            let len = ex.input.body.as_text().map(|t| t.len() as i64).unwrap_or(0);
+            Value::Number(len.into())
+        });
+
+        let result = svc.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.body.as_text(), Some("body content"));
+        assert_eq!(result.input.header("len"), Some(&Value::Number(12.into())));
     }
 }

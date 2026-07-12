@@ -532,6 +532,7 @@ pub struct DoTryFinallyDef {
 pub enum DeclarativeStep {
     To(ToStepDef),
     SetHeader(SetHeaderStepDef),
+    SetHeaderIfAbsent(SetHeaderStepDef),
     SetProperty(SetPropertyStepDef),
     SetBody(SetBodyStepDef),
     ConvertBodyTo(BodyTypeDef),
@@ -577,6 +578,9 @@ impl DeclarativeStep {
             DeclarativeStep::To(_) => crate::contract::DeclarativeStepKind::To,
             DeclarativeStep::Log(_) => crate::contract::DeclarativeStepKind::Log,
             DeclarativeStep::SetHeader(_) => crate::contract::DeclarativeStepKind::SetHeader,
+            DeclarativeStep::SetHeaderIfAbsent(_) => {
+                crate::contract::DeclarativeStepKind::SetHeaderIfAbsent
+            }
             DeclarativeStep::SetProperty(_) => crate::contract::DeclarativeStepKind::SetProperty,
             DeclarativeStep::SetBody(_) => crate::contract::DeclarativeStepKind::SetBody,
             DeclarativeStep::ConvertBodyTo(_) => {

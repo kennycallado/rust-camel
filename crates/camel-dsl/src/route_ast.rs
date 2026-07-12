@@ -295,6 +295,10 @@ pub struct LoopWhileExpr {
 pub enum RouteDslStep {
     To(ToStep),
     SetHeader(SetHeaderStep),
+    #[serde(skip_deserializing)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    #[cfg_attr(feature = "schema", ts(skip))]
+    SetHeaderIfAbsent(SetHeaderStep),
     SetProperty(SetPropertyStep),
     SetBody(SetBodyStep),
     Bean(BeanStep),
@@ -1794,6 +1798,17 @@ rest:
         assert_eq!(ops[1].method, "POST");
         assert_eq!(ops[2].method, "PUT");
         assert_eq!(ops[3].method, "DELETE");
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn schema_excludes_set_header_if_absent() {
+        let schema = schemars::schema_for!(RouteDslStep);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            !json.contains("set_header_if_absent"),
+            "JSON schema must NOT contain set_header_if_absent"
+        );
     }
 }
 

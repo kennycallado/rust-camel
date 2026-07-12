@@ -65,6 +65,11 @@ pub enum BuilderStep {
         key: String,
         value: ValueSourceDef,
     },
+    /// Declarative set_header_if_absent (internal-only), resolved at route-add time.
+    DeclarativeSetHeaderIfAbsent {
+        key: String,
+        value: ValueSourceDef,
+    },
     DeclarativeSetProperty {
         key: String,
         value_source: ValueSourceDef,
@@ -282,6 +287,12 @@ impl std::fmt::Debug for BuilderStep {
                 write!(
                     f,
                     "BuilderStep::DeclarativeSetHeader {{ key: {key:?}, .. }}"
+                )
+            }
+            BuilderStep::DeclarativeSetHeaderIfAbsent { key, .. } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeSetHeaderIfAbsent {{ key: {key:?}, .. }}"
                 )
             }
             BuilderStep::DeclarativeSetBody { .. } => {

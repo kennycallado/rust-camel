@@ -72,6 +72,51 @@ where
     }
 }
 
+/// A processor that sets a header on the exchange's input message,
+/// but ONLY if the header is not already present (if-absent semantics).
+#[derive(Clone)]
+pub struct SetHeaderIfAbsent<P> {
+    inner: P,
+    key: String,
+    value: Value,
+}
+
+impl<P> SetHeaderIfAbsent<P> {
+    /// Create a new SetHeaderIfAbsent processor that adds the given header
+    /// only when it is not already present.
+    pub fn new(inner: P, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        Self {
+            inner,
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl<P> Service<Exchange> for SetHeaderIfAbsent<P>
+where
+    P: Service<Exchange, Response = Exchange, Error = CamelError> + Clone + Send + 'static,
+    P::Future: Send,
+{
+    type Response = Exchange;
+    type Error = CamelError;
+    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut exchange: Exchange) -> Self::Future {
+        exchange
+            .input
+            .headers
+            .entry(self.key.clone())
+            .or_insert(self.value.clone());
+        let fut = self.inner.call(exchange);
+        Box::pin(fut)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +180,49 @@ mod tests {
             result.input.header("env"),
             Some(&Value::String("test".into()))
         );
+    }
+
+    // ── SetHeaderIfAbsent ──
+
+    #[tokio::test]
+    async fn test_set_header_if_absent_adds_when_missing() {
+        let exchange = Exchange::new(Message::default());
+
+        let processor =
+            SetHeaderIfAbsent::new(IdentityProcessor, "source", Value::String("timer".into()));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.input.header("source"),
+            Some(&Value::String("timer".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_header_if_absent_preserves_existing() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange
+            .input
+            .set_header("key", Value::String("old".into()));
+
+        let processor =
+            SetHeaderIfAbsent::new(IdentityProcessor, "key", Value::String("new".into()));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.input.header("key"),
+            Some(&Value::String("old".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_header_if_absent_preserves_body() {
+        let exchange = Exchange::new(Message::new("body content"));
+
+        let processor = SetHeaderIfAbsent::new(IdentityProcessor, "header", Value::Bool(true));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.body.as_text(), Some("body content"));
+        assert_eq!(result.input.header("header"), Some(&Value::Bool(true)));
     }
 }

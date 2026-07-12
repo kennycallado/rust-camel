@@ -1063,6 +1063,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::Stop => "stop",
         BuilderStep::Log { .. } => "log",
         BuilderStep::DeclarativeSetHeader { .. } => "set_header",
+        BuilderStep::DeclarativeSetHeaderIfAbsent { .. } => "set_header_if_absent",
         BuilderStep::DeclarativeSetBody { .. } => "set_body",
         BuilderStep::DeclarativeFilter { .. } => "filter",
         BuilderStep::DeclarativeChoice { .. } => "choice",

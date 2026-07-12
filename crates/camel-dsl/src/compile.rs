@@ -808,6 +808,9 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::SetHeader(SetHeaderStepDef { key, value }) => {
             compile_set_header_step(key, value)
         }
+        DeclarativeStep::SetHeaderIfAbsent(SetHeaderStepDef { key, value }) => {
+            compile_set_header_if_absent_step(key, value)
+        }
         DeclarativeStep::SetProperty(SetPropertyStepDef { key, value }) => {
             compile_set_property_step(key, value)
         }
@@ -1411,6 +1414,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::To(_) => "to",
         DeclarativeStep::Log(_) => "log",
         DeclarativeStep::SetHeader(_) => "set_header",
+        DeclarativeStep::SetHeaderIfAbsent(_) => "set_header_if_absent",
         DeclarativeStep::SetProperty(_) => "set_property",
         DeclarativeStep::SetBody(_) => "set_body",
         DeclarativeStep::Filter(_) => "filter",
@@ -1593,6 +1597,13 @@ fn compile_set_header_step(key: String, value: ValueSourceDef) -> Result<Builder
     Ok(BuilderStep::DeclarativeSetHeader { key, value })
 }
 
+fn compile_set_header_if_absent_step(
+    key: String,
+    value: ValueSourceDef,
+) -> Result<BuilderStep, CamelError> {
+    Ok(BuilderStep::DeclarativeSetHeaderIfAbsent { key, value })
+}
+
 fn compile_set_property_step(
     key: String,
     value: ValueSourceDef,
@@ -1664,6 +1675,13 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
             if key.trim().is_empty() {
                 return Err(CamelError::Config(
                     "set_header key must not be empty".to_string(),
+                ));
+            }
+        }
+        DeclarativeStep::SetHeaderIfAbsent(SetHeaderStepDef { key, .. }) => {
+            if key.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "set_header_if_absent key must not be empty".to_string(),
                 ));
             }
         }

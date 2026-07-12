@@ -1357,6 +1357,27 @@ pub(crate) fn route_step_to_declarative_step(
             };
             Ok(DeclarativeStep::Resequence(ResequenceStepDef { mode }))
         }
+        RouteDslStep::SetHeaderIfAbsent(SetHeaderStep { set_header }) => {
+            if set_header.key.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "set_header_if_absent: key must not be empty".into(),
+                ));
+            }
+            let value = parse_value_source(
+                set_header.value,
+                set_header.language,
+                set_header.source,
+                set_header.simple,
+                set_header.rhai,
+                set_header.jsonpath,
+                set_header.xpath,
+                "set_header_if_absent",
+            )?;
+            Ok(DeclarativeStep::SetHeaderIfAbsent(SetHeaderStepDef {
+                key: set_header.key,
+                value,
+            }))
+        }
         RouteDslStep::DoTry(DoTryStep { do_try: data }) => {
             // Spec §7.2 Rule 4: try steps must be non-empty.
             if data.steps.is_empty() {
@@ -4489,5 +4510,32 @@ routes:
             }
             _ => panic!("expected Unmarshal step"),
         }
+    }
+
+    #[test]
+    fn set_header_if_absent_not_deserializable() {
+        // A set_header-shaped input MUST deserialize to SetHeader, never
+        // SetHeaderIfAbsent. Since RouteDslStep is #[serde(untagged)] and
+        // SetHeaderIfAbsent has #[serde(skip_deserializing)], it is excluded
+        // from the candidate list — this input can only match SetHeader.
+        let yaml = "- set_header:\n    key: test\n    value: 200\n";
+        let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
+        assert!(
+            matches!(steps[0], RouteDslStep::SetHeader(_)),
+            "set_header input must deserialize to SetHeader, not SetHeaderIfAbsent"
+        );
+    }
+
+    #[test]
+    fn set_header_if_absent_yaml_key_rejected() {
+        // A YAML input using the literal key `set_header_if_absent` must
+        // fail deserialisation — the variant is skip_deserializing on an
+        // untagged enum, so no candidate matches this shape.
+        let yaml = "- set_header_if_absent:\n    name: CamelHttpResponseCode\n    value: 200\n";
+        let result: Result<Vec<RouteDslStep>, _> = serde_yml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "set_header_if_absent YAML key must be rejected at deserialization"
+        );
     }
 }

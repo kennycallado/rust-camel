@@ -59,20 +59,19 @@ rest:
 
 /// Extract the compiled `BuilderStep::Processor` (i.e. the actual Tower
 /// service) for the `unmarshal` step from the POST route. REST DSL lowering
-/// injects unmarshal as step index 1 (after the default-status
-/// SetHeader).
+/// injects unmarshal as the FIRST step; the default-status SetHeaderIfAbsent
+/// is appended as the LAST step (spec §6.2/§7.1/§9 if-absent semantics).
 fn compiled_unmarshal_processor() -> camel_api::BoxProcessor {
     let routes = parse_yaml(REST_YAML).expect("REST YAML must parse + compile");
     // Two routes? No — just one operation (POST), so one route.
     assert_eq!(routes.len(), 1, "expected exactly one route from POST");
     let steps = routes[0].steps();
-    // Layout per rest.rs lowering: [SetHeader(201), Unmarshal(json+schema), To, Marshal]
+    // Layout per rest.rs lowering: [Unmarshal(json+schema), To, Marshal, SetHeader(Content-Type), SetHeaderIfAbsent(201)]
     assert!(
-        steps.len() >= 2,
-        "route must have at least 2 steps (header + unmarshal), got: {}",
-        steps.len()
+        !steps.is_empty(),
+        "route must have at least one step (unmarshal), got: 0",
     );
-    match &steps[1] {
+    match &steps[0] {
         BuilderStep::Processor(p) => p.clone(),
         other => panic!("expected BuilderStep::Processor for unmarshal, got: {other:?}"),
     }
@@ -183,24 +182,24 @@ async fn rest_request_schema_e2e_malformed_json_returns_type_conversion_error() 
 #[test]
 fn rest_request_schema_e2e_yaml_to_compiled_step_is_wired() {
     // Lightweight wiring check (no async): the route is actually emitted,
-    // and the unmarshal step is the second step in the route. This is the
+    // and the unmarshal step is the first step in the route. This is the
     // pre-condition the async tests above depend on — it fails fast with a
     // clear message if the lowering breaks the layout the async tests
     // assume.
     let routes = parse_yaml(REST_YAML).expect("REST YAML must parse + compile");
     assert_eq!(routes.len(), 1);
     let steps = routes[0].steps();
-    // The first step is the default-status SetHeader, the second is the
-    // compiled unmarshal processor (with schema baked in).
+    // The first step is the compiled unmarshal processor (with schema
+    // baked in). The default-status step is now SetHeaderIfAbsent and
+    // appended as the last step (spec §6.2/§7.1/§9).
     assert!(
-        steps.len() >= 2,
-        "expected header + unmarshal, got {}",
-        steps.len()
+        !steps.is_empty(),
+        "expected at least one step (unmarshal), got 0"
     );
     assert!(
-        matches!(&steps[1], BuilderStep::Processor(_)),
-        "second step should be a compiled Processor, got: {:?}",
-        steps[1]
+        matches!(&steps[0], BuilderStep::Processor(_)),
+        "first step should be a compiled Processor, got: {:?}",
+        steps[0]
     );
     // Sanity: the schema variable matches the YAML we wrote, so any future
     // drift in either side of this test is caught here.

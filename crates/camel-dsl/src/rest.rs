@@ -259,37 +259,18 @@ fn lower_operation(
         verb.to_uppercase()
     );
 
-    // Default status injection — "default-if-absent" (reviewer fix I1).
+    // Default status injection — "default-if-absent" (spec §6.2/§7.1/§9).
     //
-    // The status is injected as the FIRST step so it sets the initial value
-    // of `CamelHttpResponseCode`; any later user step that sets the same
-    // header overwrites it (default-first, user-overrides-after).
-    //
-    // v1 simplification / fragility (review I3): this relies on the HTTP
-    // reply finaliser OVERRIDING the status on error paths — a pipeline
-    // error (e.g. malformed-JSON `Unmarshal` failure) routes through the
-    // error disposition and the finaliser returns 401/403/500 regardless of
-    // the default-status header. That holds today. A fully spec-compliant
-    // form would be a `set_header_if_absent` step variant that sets the
-    // default ONLY when no prior step populated the header — tracked as a
-    // future improvement (spec plan note E5). Until then, keep the default
-    // first so user steps can still override it on the success path.
+    // The status is injected as the LAST step so it only applies when no
+    // prior user step or error handler set CamelHttpResponseCode. This is
+    // spec-compliant: the default never overwrites a dynamic set_status,
+    // and it runs AFTER error handling (error paths short-circuit the
+    // pipeline before reaching this step).
     let default_status = op
         .success_status
         .unwrap_or_else(|| default_status_for_verb(&verb_lc));
 
-    let mut steps: Vec<RouteDslStep> = vec![RouteDslStep::SetHeader(SetHeaderStep {
-        set_header: SetHeaderData {
-            key: "CamelHttpResponseCode".to_string(),
-            value: Some(serde_json::Value::Number(default_status.into())),
-            language: None,
-            source: None,
-            simple: None,
-            rhai: None,
-            jsonpath: None,
-            xpath: None,
-        },
-    })];
+    let mut steps: Vec<RouteDslStep> = Vec::new();
 
     // 1. Request binding: unmarshal JSON body (only if verb has a body)
     if verb_has_body(&verb_lc) {
@@ -328,6 +309,26 @@ fn lower_operation(
         set_header: SetHeaderData {
             key: "Content-Type".to_string(),
             value: Some(serde_json::Value::String("application/json".to_string())),
+            language: None,
+            source: None,
+            simple: None,
+            rhai: None,
+            jsonpath: None,
+            xpath: None,
+        },
+    }));
+
+    // 5. Default status injection — "default-if-absent" (spec §6.2/§7.1/§9).
+    //
+    // The status is injected as the LAST step so it only applies when no
+    // prior user step or error handler set CamelHttpResponseCode. This is
+    // spec-compliant: the default never overwrites a dynamic set_status,
+    // and it runs AFTER error handling (error paths short-circuit the
+    // pipeline before reaching this step).
+    steps.push(RouteDslStep::SetHeaderIfAbsent(SetHeaderStep {
+        set_header: SetHeaderData {
+            key: "CamelHttpResponseCode".to_string(),
+            value: Some(serde_json::Value::Number(default_status.into())),
             language: None,
             source: None,
             simple: None,
@@ -482,15 +483,16 @@ mod tests {
     fn lower_post_has_201_default() {
         let rest = make_rest("createUser", "post", "/", "bean:createUser");
         let routes = lower_all_rest_to_routes(&[rest]).unwrap();
-        // The default status (201 for POST) should be injected as the FIRST step
-        // (default-first, user-overrides-after semantics — reviewer fix I1)
-        let first = routes[0].steps.first().unwrap();
-        match first {
-            RouteDslStep::SetHeader(h) => {
+        // The default status (201 for POST) is injected as the LAST step
+        // using if-absent semantics (spec §6.2/§7.1/§9) — it only applies
+        // when no prior user step or error handler set the response code.
+        let last = routes[0].steps.last().unwrap();
+        match last {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
                 assert_eq!(h.set_header.key, "CamelHttpResponseCode");
                 assert_eq!(h.set_header.value, Some(serde_json::json!(201)));
             }
-            _ => panic!("expected SetHeader as first step for default status"),
+            other => panic!("expected SetHeaderIfAbsent as last step, got {other:?}"),
         }
     }
 
@@ -498,12 +500,12 @@ mod tests {
     fn lower_get_defaults_to_200() {
         let rest = make_rest("getUser", "get", "/{id}", "bean:userService");
         let routes = lower_all_rest_to_routes(&[rest]).unwrap();
-        let first = routes[0].steps.first().unwrap();
-        match first {
-            RouteDslStep::SetHeader(h) => {
+        let last = routes[0].steps.last().unwrap();
+        match last {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
                 assert_eq!(h.set_header.value, Some(serde_json::json!(200)));
             }
-            _ => panic!("expected SetHeader first"),
+            other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
         }
     }
 
@@ -511,13 +513,101 @@ mod tests {
     fn lower_delete_defaults_to_204() {
         let rest = make_rest("deleteUser", "delete", "/{id}", "bean:deleteUser");
         let routes = lower_all_rest_to_routes(&[rest]).unwrap();
-        let first = routes[0].steps.first().unwrap();
-        match first {
-            RouteDslStep::SetHeader(h) => {
+        let last = routes[0].steps.last().unwrap();
+        match last {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
                 assert_eq!(h.set_header.value, Some(serde_json::json!(204)));
             }
-            _ => panic!("expected SetHeader first"),
+            other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lower_default_status_is_last_step_if_absent() {
+        let rest = make_rest("createUser", "post", "/", "bean:createUser");
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let last = routes[0].steps.last().unwrap();
+        match last {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
+                assert_eq!(h.set_header.key, "CamelHttpResponseCode");
+                assert_eq!(h.set_header.value, Some(serde_json::json!(201)));
+            }
+            other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_if_absent_step_compiles_through_full_chain() {
+        // Verify the SetHeaderIfAbsent variant survives the full lowering
+        // → conversion → compile chain without errors.
+        let rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+
+        // Convert each route's steps through the YAML conversion path.
+        for step in &routes[0].steps {
+            let _ = crate::yaml::route_step_to_declarative_step(step.clone())
+                .unwrap_or_else(|e| panic!("step {step:?} must convert to DeclarativeStep: {e}"));
+        }
+
+        // Verify the last step specifically converts to SetHeaderIfAbsent.
+        let last = routes[0].steps.last().unwrap();
+        let declarative = crate::yaml::route_step_to_declarative_step(last.clone()).unwrap();
+        assert!(
+            matches!(
+                declarative,
+                crate::model::DeclarativeStep::SetHeaderIfAbsent(_)
+            ),
+            "last step must convert to DeclarativeStep::SetHeaderIfAbsent"
+        );
+    }
+
+    #[test]
+    fn lower_user_set_status_preserved() {
+        // Build a REST op that uses `steps` (not `to`) so we can inject a
+        // user SetHeader in the middle of the step sequence. The default
+        // status if-absent step must still come last.
+        let rest = RouteDslRest {
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            path: "/users".to_string(),
+            operations: vec![RouteDslRestOperation {
+                method: "put".to_string(),
+                path: "/{id}".to_string(),
+                operation_id: Some("updateUser".to_string()),
+                to: None,
+                steps: vec![
+                    RouteDslStep::SetHeader(SetHeaderStep {
+                        set_header: SetHeaderData {
+                            key: "CamelHttpResponseCode".to_string(),
+                            value: Some(serde_json::json!(202)),
+                            language: None,
+                            source: None,
+                            simple: None,
+                            rhai: None,
+                            jsonpath: None,
+                            xpath: None,
+                        },
+                    }),
+                    RouteDslStep::To(ToStep {
+                        to: "bean:updateUser".into(),
+                    }),
+                ],
+                consumes: "application/json".to_string(),
+                produces: "application/json".to_string(),
+                success_status: None,
+                request_schema: None,
+                response: None,
+                description: None,
+                parameters: BTreeMap::new(),
+            }],
+        };
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        // User step in the middle, default-if-absent last.
+        let last = routes[0].steps.last().unwrap();
+        assert!(
+            matches!(last, RouteDslStep::SetHeaderIfAbsent(_)),
+            "expected SetHeaderIfAbsent last, got {last:?}"
+        );
     }
 
     #[test]
@@ -761,12 +851,18 @@ mod tests {
     #[test]
     fn lower_injects_application_json_content_type() {
         // The JSON marshal produces Body::Text (→ text/plain inference); the
-        // lowering must inject Content-Type: application/json as the final
-        // step so the HTTP finaliser advertises JSON (spec §8.1).
+        // lowering must inject Content-Type: application/json so the HTTP
+        // finaliser advertises JSON (spec §8.1). The default-status
+        // if-absent step is appended AFTER Content-Type, so we search for
+        // the Content-Type step rather than asserting it is last.
         let rest = make_rest("getUser", "get", "/{id}", "bean:svc");
         let routes = lower_all_rest_to_routes(&[rest]).unwrap();
-        let last = routes[0].steps.last().expect("steps must be non-empty");
-        match last {
+        let ct_step = routes[0]
+            .steps
+            .iter()
+            .find(|s| matches!(s, RouteDslStep::SetHeader(h) if h.set_header.key == "Content-Type"))
+            .expect("Content-Type step present");
+        match ct_step {
             RouteDslStep::SetHeader(h) => {
                 assert_eq!(h.set_header.key, "Content-Type");
                 assert_eq!(
@@ -774,7 +870,7 @@ mod tests {
                     Some(serde_json::json!("application/json"))
                 );
             }
-            other => panic!("expected SetHeader(Content-Type) last, got {other:?}"),
+            other => panic!("expected SetHeader(Content-Type) step, got {other:?}"),
         }
     }
 
@@ -815,11 +911,11 @@ mod tests {
         let rest = make_rest("createUser", "POST", "/", "bean:create");
         let routes = lower_all_rest_to_routes(&[rest]).unwrap();
         assert!(routes[0].from.contains("httpMethod=POST"));
-        let first = match routes[0].steps.first().unwrap() {
-            RouteDslStep::SetHeader(h) => h,
-            _ => panic!("expected SetHeader first"),
+        let last = match routes[0].steps.last().unwrap() {
+            RouteDslStep::SetHeaderIfAbsent(h) => h,
+            other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
         };
-        assert_eq!(first.set_header.value, Some(serde_json::json!(201)));
+        assert_eq!(last.set_header.value, Some(serde_json::json!(201)));
     }
 
     // ── Path-template param validation (review I1) ──
