@@ -461,6 +461,7 @@ pub(crate) async fn spawn_return_drain<W, F, Fut>(
     pending_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     cancel: CancellationToken,
     no_progress_timeout: Duration,
+    invoke_stall_timeout: Option<Duration>,
     completion_notify: Option<Arc<Notify>>,
     make_drive: F,
 ) -> Result<(W, Option<DrainReceiver>, camel_api::StreamMetadata), WasmError>
@@ -504,6 +505,7 @@ where
             tokio::select! {
                 r = crate::runtime::WasmRuntime::drive_with_drain_watchdog(
                     drive, &progress_notify, &drain_started, no_progress_timeout,
+                    invoke_stall_timeout,
                 ) => r,
                 _ = cancel_child.cancelled() => Err(WasmError::Cancelled(
                     "invoke cancelled by caller drop".into(),

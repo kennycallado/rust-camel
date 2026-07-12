@@ -136,10 +136,15 @@ impl BeanProcessor for WasmBean {
         // + output stream drain.
         let cancel = self.cancel.child_token();
         let mut guard = crate::cancel_guard::InvokeCancelGuard::new(cancel.clone());
+        let invoke_stall_timeout = stream_parts
+            .as_ref()
+            .map(|_| Duration::from_secs(self.ctx.config.timeout_secs));
+
         let (bean_exchange_out, drain_rx, metadata_from_drain) = crate::return_stream::spawn_return_drain(
             None,
             cancel,
             no_progress_timeout,
+            invoke_stall_timeout,
             drain_completion_notify,
             // Bean make_drive closure — mirrors runtime.rs process_streaming_exchange
             // (keep in sync; the shared spawn_return_drain scaffold is identical,

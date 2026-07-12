@@ -330,10 +330,15 @@ impl WasmRuntime {
         let classify_config = self.config.clone(); // WasmConfig: Clone
         let classify_module_path = self.module_path.clone(); // PathBuf → Clone
 
+        let invoke_stall_timeout = stream_parts
+            .as_ref()
+            .map(|_| Duration::from_secs(self.config.timeout_secs));
+
         let (exchange_out, drain_rx, metadata) = spawn_return_drain(
             Some(pending_permit),
             cancel,
             no_progress_timeout,
+            invoke_stall_timeout,
             None, // drain_completion_notify: production plugin path doesn't install it
             // Plugin make_drive closure — mirrors bean.rs (keep in sync; the shared
             // spawn_return_drain scaffold is identical, only the binding differs).
@@ -443,22 +448,45 @@ impl WasmRuntime {
         })
     }
 
-    /// Phase-aware watchdog: Phase 1 (invoke) waits for drain_started or
-    /// completion — no timeout. Phase 2 (drain) arms the progress watchdog.
+    /// Phase-aware watchdog:
+    /// - Phase 1 (invoke): waits for `drain_started` or completion. If
+    ///   `invoke_stall_timeout` is `Some`, arms a progress watchdog bound by
+    ///   that duration (used when the guest has streaming input — catches
+    ///   upstream stalls that epoch can't reach). `None` = unguarded.
+    /// - Phase 2 (drain): always arms the progress watchdog with
+    ///   `drain_timeout`.
     pub(crate) async fn drive_with_drain_watchdog<F, T>(
         run_fut: F,
         progress_notify: &Notify,
         drain_started: &Notify,
         drain_timeout: Duration,
+        invoke_stall_timeout: Option<Duration>,
     ) -> Result<T, WasmError>
     where
         F: Future<Output = Result<T, WasmError>>,
     {
         let mut run_fut = std::pin::pin!(run_fut);
-        tokio::select! {
-            r = &mut run_fut => return r,
-            _ = drain_started.notified() => {}
+        // ── Phase 1: invoke ──
+        match invoke_stall_timeout {
+            None => tokio::select! {
+                r = &mut run_fut => return r,
+                _ = drain_started.notified() => {}
+            },
+            Some(t) => loop {
+                tokio::select! {
+                    r = &mut run_fut => return r,
+                    _ = drain_started.notified() => break,
+                    _ = progress_notify.notified() => continue,
+                    _ = tokio::time::sleep(t) => {
+                        return Err(WasmError::GuestPanic(
+                            "wasm: invoke stalled — no input progress \
+                             (upstream stalled or guest deadlocked)".into(),
+                        ));
+                    }
+                }
+            },
         }
+        // ── Phase 2: drain ──
         loop {
             tokio::select! {
                 r = &mut run_fut => return r,
@@ -807,6 +835,7 @@ mod tests {
             &progress,
             &drain_started,
             Duration::from_millis(50),
+            None,
         )
         .await;
         assert!(matches!(result, Err(WasmError::GuestPanic(_))));
@@ -831,6 +860,7 @@ mod tests {
             &progress,
             &drain_started,
             Duration::from_millis(50),
+            None,
         )
         .await;
         assert!(result.is_ok());
@@ -846,6 +876,7 @@ mod tests {
             &progress,
             &drain_started,
             Duration::from_millis(50),
+            None,
         )
         .await;
         assert_eq!(result.unwrap(), 42);
@@ -853,8 +884,6 @@ mod tests {
 
     #[tokio::test]
     async fn drain_watchdog_passes_through_guest_error() {
-        // A future that resolves with an error must surface that error, not a
-        // timeout — the watchdog only fires on NO progress.
         let progress = Arc::new(Notify::new());
         let drain_started = Arc::new(Notify::new());
         let ds = drain_started.clone();
@@ -867,6 +896,7 @@ mod tests {
             &progress,
             &drain_started,
             Duration::from_secs(60),
+            None,
         )
         .await;
         let err = result.expect_err("guest error must propagate");
@@ -875,9 +905,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_completes_drive_select_without_hang() {
-        // Both cancel and drain_started fire near-simultaneously.
-        // The function (and the enclosing select! from spawn_return_drain)
-        // must complete without hanging regardless of which branch fires first.
         let progress = Arc::new(Notify::new());
         let drain_started = Arc::new(Notify::new());
         let cancel = CancellationToken::new();
@@ -889,26 +916,95 @@ mod tests {
             Ok::<(), WasmError>(())
         };
 
-        // Cancel at roughly the same time the drain starts.
         let c = cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
             c.cancel();
         });
 
-        // Replicate the select! from spawn_return_drain.
         let result = tokio::time::timeout(Duration::from_secs(1), async {
             tokio::select! {
                 r = WasmRuntime::drive_with_drain_watchdog(
-                    drive, &progress, &drain_started, Duration::from_secs(60),
+                    drive, &progress, &drain_started, Duration::from_secs(60), None,
                 ) => r,
                 _ = cancel.cancelled() => Err(WasmError::Cancelled("test cancel".into())),
             }
         })
         .await;
 
-        // Must complete within 1s — either via the watchdog result or the
-        // cancellation branch.
         assert!(result.is_ok(), "select! must not hang — got timeout");
+    }
+
+    // ── Phase 1 invoke-stall watchdog (streaming-input arming) ────────
+
+    #[tokio::test]
+    async fn invoke_stall_trips_on_no_progress() {
+        // Some(timeout): no progress, no drain_started, no completion → trip.
+        let progress = Arc::new(Notify::new());
+        let drain_started = Arc::new(Notify::new());
+        let drive = async move {
+            std::future::pending::<()>().await;
+            Ok::<(), WasmError>(())
+        };
+        let result = WasmRuntime::drive_with_drain_watchdog(
+            drive,
+            &progress,
+            &drain_started,
+            Duration::from_secs(60),
+            Some(Duration::from_millis(50)),
+        )
+        .await;
+        let err = result.expect_err("stalled invoke must time out");
+        assert!(
+            err.to_string().contains("invoke stalled"),
+            "expected invoke stall, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_stall_progress_resets_timer() {
+        // Some(timeout): periodic progress pings prevent the trip.
+        let progress = Arc::new(Notify::new());
+        let drain_started = Arc::new(Notify::new());
+        let p = progress.clone();
+        let ds = drain_started.clone();
+        let drive = async move {
+            // Pinger: 4 pings 25ms apart, then drain_started at 120ms.
+            for _ in 0..4 {
+                p.notify_one();
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            ds.notify_one();
+            Ok::<(), WasmError>(())
+        };
+        let result = WasmRuntime::drive_with_drain_watchdog(
+            drive,
+            &progress,
+            &drain_started,
+            Duration::from_secs(60),
+            Some(Duration::from_millis(40)),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "progress should have reset the stall timer, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_stall_completes_before_drain_started() {
+        // Some(timeout): run_fut resolves immediately → return value.
+        let progress = Arc::new(Notify::new());
+        let drain_started = Arc::new(Notify::new());
+        let drive = async { Ok::<i32, WasmError>(42) };
+        let result = WasmRuntime::drive_with_drain_watchdog(
+            drive,
+            &progress,
+            &drain_started,
+            Duration::from_millis(50),
+            Some(Duration::from_secs(60)),
+        )
+        .await;
+        assert_eq!(result.unwrap(), 42);
     }
 }
