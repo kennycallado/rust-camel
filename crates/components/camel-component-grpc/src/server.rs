@@ -67,6 +67,13 @@ impl GrpcServerRegistry {
                 CamelError::EndpointCreationFailed("GrpcServerRegistry lock poisoned".into())
             })?;
             let key = (host.to_string(), port);
+            // Evict dead server so a fresh one can spawn (rc-4s65).
+            if let Some(existing) = guard.get(&key)
+                && let Some(handle) = existing.get()
+                && handle._task.is_finished()
+            {
+                guard.remove(&key);
+            }
             guard
                 .entry(key)
                 .or_insert_with(|| Arc::new(OnceCell::new()))
@@ -119,6 +126,13 @@ impl GrpcServerRegistry {
                 CamelError::EndpointCreationFailed("GrpcServerRegistry lock poisoned".into())
             })?;
             let key = (host.to_string(), port);
+            // Evict dead server so a fresh one can spawn (rc-4s65).
+            if let Some(existing) = guard.get(&key)
+                && let Some(handle) = existing.get()
+                && handle._task.is_finished()
+            {
+                guard.remove(&key);
+            }
             guard
                 .entry(key)
                 .or_insert_with(|| Arc::new(OnceCell::new()))
@@ -1111,6 +1125,52 @@ mod tests {
             )
             .await;
         assert!(dispatch.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_dead_server_evicted_on_reuse() {
+        let registry = GrpcServerRegistry::global();
+        let port = 17899u16;
+
+        // Insert a dead server handle into the registry.
+        {
+            let mut guard = registry.inner.lock().unwrap();
+            let key = ("127.0.0.1".to_string(), port);
+            let dispatch: GrpcDispatchTable = Arc::new(RwLock::new(HashMap::new()));
+            let cell = Arc::new(OnceCell::new());
+            let dead_task = tokio::spawn(async {});
+            // Yield + sleep so the spawned task completes without consuming the handle.
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            assert!(dead_task.is_finished(), "task should be finished");
+            cell.set(ServerHandle {
+                dispatch,
+                _task: dead_task,
+                transport: ServerTransport::Plaintext,
+            })
+            .ok();
+            guard.insert(key, cell);
+        }
+
+        // Now spawn a real server on the same port — the dead entry
+        // must be evicted so a fresh server is created.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:17899")
+            .await
+            .unwrap();
+        let errors = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(RecordingRuntime::new(errors));
+
+        let result = registry
+            .get_or_spawn_with_listener(
+                listener,
+                "127.0.0.1",
+                port,
+                GrpcServerConfig::default(),
+                rt,
+            )
+            .await;
+
+        assert!(result.is_ok(), "dead server should be evicted");
     }
 
     #[tokio::test]
