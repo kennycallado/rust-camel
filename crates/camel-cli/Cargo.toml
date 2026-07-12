@@ -53,6 +53,7 @@ camel-component-opensearch = { workspace = true }
 camel-master = { workspace = true }
 camel-component-redis.workspace = true
 camel-component-sql.workspace = true
+camel-component-cron.workspace = true
 camel-component-timer.workspace = true
 camel-component-validator.workspace = true
 camel-component-ws.workspace = true

@@ -24,6 +24,8 @@ toml.workspace = true
 serde    = { workspace = true, features = ["derive"] }
 tracing  = { workspace = true }
 rand     = { workspace = true }
+chrono   = { workspace = true }
+chrono-tz = { workspace = true }
 rcgen    = { version = "0.13", optional = true }
 
 [features]

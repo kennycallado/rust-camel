@@ -15,6 +15,7 @@ pub mod endpoint;
 pub mod health_registry;
 pub mod runtime_observability;
 
+pub mod cron_service;
 pub mod network_retry;
 pub mod producer;
 pub mod registrar;
@@ -33,6 +34,7 @@ pub use health_registry::{
 };
 pub use runtime_observability::RuntimeObservability;
 
+pub use cron_service::{CronCallback, CronFire, CronSchedule, CronService};
 pub use network_retry::{
     NetworkRetryPolicy, is_retryable_camel_error, retry_async, retry_async_cancelable,
 };

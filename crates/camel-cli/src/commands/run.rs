@@ -272,6 +272,7 @@ pub async fn run(
 
     // Register built-in components (no config needed)
     ctx.register_component(camel_component_timer::TimerComponent::new());
+    ctx.register_component(camel_component_cron::CronComponent::new());
     ctx.register_component(camel_component_log::LogComponent::new());
     ctx.register_component(camel_component_direct::DirectComponent::new());
     ctx.register_component(camel_component_seda::SedaComponent::new());

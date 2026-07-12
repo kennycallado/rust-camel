@@ -1,0 +1,27 @@
+[package]
+name = "camel-component-cron"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Cron component for rust-camel — triggers Routes on Unix cron schedules"
+
+[lints]
+workspace = true
+
+[dependencies]
+camel-component-api = { workspace = true }
+camel-endpoint = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+cron = "0.15"
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }

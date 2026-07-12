@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `exec`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `mqtt`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`, `llm`, `surrealdb`, `grpc`, `seda`, `keycloak`, `wasm`.
+Current components: `timer`, `cron`, `log`, `direct`, `exec`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `mqtt`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`, `llm`, `surrealdb`, `grpc`, `seda`, `keycloak`, `wasm`.
 
 ## Architecture
 
@@ -237,6 +237,7 @@ runnable example with in-memory CRUD storage and static file co-hosting.
 | `camel-health`              | Health check types and endpoint support                                                                                                                                                                                                                      |
 | `camel-platform-kubernetes` | Kubernetes-native platform SPI: leader election, readiness gates, pod identity                                                                                                                                                                               |
 | `camel-timer`               | Timer source component                                                                                                                                                                                                                                       |
+| `camel-cron`                | Cron source component — calendar-triggered scheduling via Unix 5-field cron expressions, backed by `CronService` SPI                                                                                                                                        |
 | `camel-log`                 | Log sink component                                                                                                                                                                                                                                           |
 | `camel-direct`              | In-memory synchronous component                                                                                                                                                                                                                              |
 | `camel-mock`                | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`)                                                                                                                                                                   |

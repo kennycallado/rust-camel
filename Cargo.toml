@@ -96,6 +96,7 @@ camel-wit = { path = "crates/camel-wit", version = "=0.23.0" }
 camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.23.0" }
 camel-component-llm = { path = "crates/components/camel-component-llm", version = "=0.23.0" }
 camel-component-exec = { path = "crates/components/camel-component-exec", version = "=0.23.0" }
+camel-component-cron = { path = "crates/components/camel-cron", version = "=0.23.0" }
 camel-component-surrealdb = { path = "crates/components/camel-component-surrealdb", version = "=0.23.0" }
 
 tokio = { version = "1", features = ["full"] }
@@ -123,6 +124,7 @@ indexmap = "2"
 blake3 = "1"
 bollard = "0.20"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 clap = "4"
 kube = { version = "4", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.28", features = ["v1_35"] }
