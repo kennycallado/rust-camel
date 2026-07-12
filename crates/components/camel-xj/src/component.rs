@@ -141,6 +141,7 @@ impl XjBridgeRuntime {
             multiplier: 2.0,
             max_delay: Duration::from_secs(30),
             jitter_factor: 0.0,
+            max_attempts_absolute: None,
         };
         let mut attempt: u32 = 0;
         // Manual retry loop (not retry_async / retry_async_cancelable)

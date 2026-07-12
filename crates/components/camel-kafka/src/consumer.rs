@@ -128,6 +128,12 @@ impl Consumer for KafkaConsumer {
         Ok(())
     }
 
+    /// Stop the Kafka consumer gracefully.
+    ///
+    /// Shutdown sequence: token-cancel -> 10s graceful join -> abort (last resort).
+    /// The consumer task tail cleanup (assign empty, unsubscribe, commit drain)
+    /// runs on token cancellation, preserving at-least-once commit semantics.
+    /// The abort path only fires on 10s timeout, where commit loss is unavoidable.
     async fn stop(&mut self) -> Result<(), CamelError> {
         info!("Stopping Kafka consumer for topic '{}'", self.config.topic);
 

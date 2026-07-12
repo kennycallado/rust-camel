@@ -101,8 +101,13 @@ async fn process_weighted(
         return Ok(exchange);
     }
 
-    let numeric_weights: Vec<u32> = weights.iter().map(|(_, w)| *w).collect();
-    let total: u32 = numeric_weights.iter().sum();
+    let numeric_weights: Vec<u64> = weights.iter().map(|(_, w)| *w as u64).collect();
+    let total: u64 = numeric_weights
+        .iter()
+        .try_fold(0u64, |acc, w| acc.checked_add(*w))
+        .ok_or_else(|| {
+            CamelError::ProcessorError("Weighted load balancer total weight overflow".to_string())
+        })?;
 
     if total == 0 {
         return Err(CamelError::ProcessorError(
@@ -110,7 +115,7 @@ async fn process_weighted(
         ));
     }
 
-    let mut r = rand::random::<u32>() % total;
+    let mut r = rand::random::<u64>() % total;
     let mut selected_idx = 0;
     for (i, w) in numeric_weights.iter().enumerate() {
         if r < *w {
@@ -231,12 +236,17 @@ fn pick_weighted(weights: &[(String, u32)], len: usize) -> usize {
     if weights.is_empty() || len == 0 {
         return 0;
     }
-    let numeric_weights: Vec<u32> = weights.iter().map(|(_, w)| *w).collect();
-    let total: u32 = numeric_weights.iter().sum();
+    let numeric_weights: Vec<u64> = weights.iter().map(|(_, w)| *w as u64).collect();
+    let Some(total) = numeric_weights
+        .iter()
+        .try_fold(0u64, |acc, w| acc.checked_add(*w))
+    else {
+        return 0;
+    };
     if total == 0 {
         return 0;
     }
-    let mut r = rand::random::<u32>() % total;
+    let mut r = rand::random::<u64>() % total;
     for (i, w) in numeric_weights.iter().enumerate() {
         if r < *w {
             return i.min(len - 1);
@@ -547,6 +557,21 @@ mod tests {
             c3.load(Ordering::SeqCst),
             1,
             "round-robin: dest 2 call count"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_weighted_sum_does_not_overflow_u32() {
+        let ok_processor = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
+        let endpoints = vec![ok_processor.clone(), ok_processor];
+        // u32::MAX + 1 would overflow u32 sum, but u64 sum handles it.
+        let weights = vec![("a".to_string(), u32::MAX), ("b".to_string(), 1)];
+        let result =
+            process_weighted(Exchange::new(Message::new("test")), endpoints, &weights).await;
+        assert!(
+            result.is_ok(),
+            "u32::MAX + 1 must not overflow with u64 sum: {:?}",
+            result.err()
         );
     }
 

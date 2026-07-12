@@ -489,6 +489,12 @@ pub struct FileConfig {
     pub eager_max_messages_per_poll: bool,
     pub shuffle: bool,
     pub(crate) sort_spec: Option<SortSpec>,
+
+    /// If true (default), sweep stale temp files at consumer startup.
+    /// Temp files older than `4 * write_timeout` (floor 60s) matching the
+    /// configured `temp_prefix` are removed. Leftover `.tmp.*` files from
+    /// SIGKILL or crash are cleaned up automatically.
+    pub cleanup_stale_temps: bool,
 }
 
 impl UriConfig for FileConfig {
@@ -612,6 +618,7 @@ impl UriConfig for FileConfig {
                 .map(|v| v.parse::<SortSpec>())
                 .transpose()
                 .map_err(|e| CamelError::InvalidUri(format!("invalid sortBy: {e}")))?,
+            cleanup_stale_temps: parse_bool_param(params, "cleanupStaleTemps", true)?,
         };
 
         cfg.validate()
@@ -870,6 +877,24 @@ impl FileConsumer {
 impl Consumer for FileConsumer {
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
         let config = self.config.clone();
+
+        // Sweep stale temp files left by a previous crash/SIGKILL.
+        if config.cleanup_stale_temps {
+            let stale_age =
+                Duration::from_secs((config.write_timeout.as_secs()).saturating_mul(4).max(60));
+            let prefix = config
+                .temp_prefix
+                .as_deref()
+                .unwrap_or(atomic_write::DEFAULT_TEMP_PREFIX);
+            let dir = std::path::Path::new(&config.directory);
+            if let Err(e) = atomic_write::sweep_stale_temps(dir, prefix, stale_age).await {
+                warn!(
+                    directory = config.directory,
+                    error = %e,
+                    "Stale temp sweep failed at startup"
+                );
+            }
+        }
 
         if !config.initial_delay.is_zero() {
             tokio::select! {
@@ -2684,6 +2709,7 @@ mod tests {
             eager_max_messages_per_poll: true,
             shuffle: false,
             sort_spec: None,
+            cleanup_stale_temps: true,
         };
 
         let result = config.validate();
@@ -2730,6 +2756,7 @@ mod tests {
             eager_max_messages_per_poll: true,
             shuffle: false,
             sort_spec: None,
+            cleanup_stale_temps: true,
         };
         let result = config.validate();
         assert!(result.is_err(), "should reject null byte in filename");
@@ -2778,6 +2805,7 @@ mod tests {
             eager_max_messages_per_poll: true,
             shuffle: false,
             sort_spec: None,
+            cleanup_stale_temps: true,
         };
         let result = config.validate();
         assert!(result.is_err(), "should reject empty filename");

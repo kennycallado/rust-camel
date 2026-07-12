@@ -281,6 +281,106 @@ async fn retry_async_custom_error_permanent_stops_immediately() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+// ── max_attempts_absolute cap ────────────────────────────────────────
+
+#[test]
+fn should_retry_capped_by_absolute_max() {
+    let p = NetworkRetryPolicy {
+        max_attempts: 0, // unlimited by max_attempts
+        max_attempts_absolute: Some(5),
+        ..NetworkRetryPolicy::default()
+    };
+    assert!(p.should_retry(0));
+    assert!(p.should_retry(4));
+    assert!(!p.should_retry(5));
+    assert!(!p.should_retry(100));
+}
+
+#[test]
+fn should_retry_absolute_default_none_preserves_unlimited() {
+    let p = NetworkRetryPolicy {
+        max_attempts: 0,
+        max_attempts_absolute: None,
+        ..NetworkRetryPolicy::default()
+    };
+    assert!(p.should_retry(0));
+    assert!(p.should_retry(100));
+    assert!(p.should_retry(10_000));
+}
+
+#[test]
+fn should_retry_absolute_cap_respected_even_with_limited_max_attempts() {
+    // When both are set, the stricter bound wins
+    let p = NetworkRetryPolicy {
+        max_attempts: 10,
+        max_attempts_absolute: Some(3),
+        ..NetworkRetryPolicy::default()
+    };
+    assert!(p.should_retry(0));
+    assert!(p.should_retry(2));
+    assert!(!p.should_retry(3)); // absolute cap stops first
+}
+
+#[tokio::test]
+async fn retry_async_stops_at_absolute_cap() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let policy = NetworkRetryPolicy {
+        max_attempts: 0, // unlimited
+        max_attempts_absolute: Some(5),
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+        ..NetworkRetryPolicy::default()
+    };
+    let attempts = std::sync::Arc::new(AtomicU32::new(0));
+    let attempts_clone = attempts.clone();
+    let result = retry_async::<u32, _, _, _, CamelError>(
+        &policy,
+        None,
+        || {
+            let c = attempts_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(CamelError::ProcessorError("always fails".to_string()))
+            }
+        },
+        |_| true,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(attempts.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test]
+async fn retry_async_absolute_default_none_allows_unlimited_retries_up_to_max_attempts() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let policy = NetworkRetryPolicy {
+        max_attempts: 3,
+        max_attempts_absolute: None,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+        ..NetworkRetryPolicy::default()
+    };
+    let attempts = std::sync::Arc::new(AtomicU32::new(0));
+    let attempts_clone = attempts.clone();
+    let result = retry_async::<u32, _, _, _, CamelError>(
+        &policy,
+        None,
+        || {
+            let c = attempts_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(CamelError::ProcessorError("always fails".to_string()))
+            }
+        },
+        |_| true,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
 // ── is_retryable_camel_error ────────────────────────────────────────
 
 #[test]

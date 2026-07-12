@@ -3,13 +3,14 @@
 //! Extracted from a monolithic file. The command enum and handle live
 //! in [`controller_actor_commands`](super::controller_actor_commands).
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use camel_api::{MetricsCollector, RouteController, SupervisionConfig};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub(crate) use super::controller_actor_commands::RouteControllerCommand;
 pub use super::controller_actor_commands::RouteControllerHandle;
@@ -20,23 +21,142 @@ pub fn spawn_controller_actor(
     controller: DefaultRouteController,
 ) -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<RouteControllerCommand>(256);
+    // Hold a clone of tx so the spawned task can send StartRoute back through
+    // the same channel after the 100ms restart sleep, without moving the
+    // original tx (which we still need to return as RouteControllerHandle).
+    let tx_for_spawn = tx.clone();
     let handle = tokio::spawn(async move {
         let mut controller = controller;
+        // Tracks routes currently restarting via spawned off-actor tasks.
+        // Related to but separate from spawn_supervision_task's
+        // currently_restarting set (that set tracks crash-recovery restarts;
+        // this one tracks command-driven restarts).
+        let restarting: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 RouteControllerCommand::StartRoute { route_id, reply } => {
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    if restarting
+                        .lock()
+                        .expect("restarting mutex poisoned")
+                        .contains(&route_id)
+                    {
+                        let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                            "route {} is restarting",
+                            route_id
+                        ))));
+                        continue;
+                    }
                     let _ = reply.send(controller.start_route(&route_id).await);
                 }
                 RouteControllerCommand::StopRoute { route_id, reply } => {
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    if restarting
+                        .lock()
+                        .expect("restarting mutex poisoned")
+                        .contains(&route_id)
+                    {
+                        let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                            "route {} is restarting",
+                            route_id
+                        ))));
+                        continue;
+                    }
                     let _ = reply.send(controller.stop_route(&route_id).await);
                 }
                 RouteControllerCommand::RestartRoute { route_id, reply } => {
-                    let _ = reply.send(controller.restart_route(&route_id).await);
+                    // Reject if already restarting.
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    {
+                        let mut guard = restarting.lock().expect("restarting mutex poisoned");
+                        if guard.contains(&route_id) {
+                            let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                                "route {} is restarting",
+                                route_id
+                            ))));
+                            continue;
+                        }
+                        guard.insert(route_id.clone());
+                    }
+
+                    // Stop inline — actor owns the controller, so we cannot
+                    // move it into a spawned task. The 100ms sleep + start
+                    // happen off-actor by sending a StartRoute back through
+                    // the same channel.
+                    let stop_result = controller.stop_route(&route_id).await;
+                    if let Err(ref e) = stop_result {
+                        // allow-unwrap: Mutex cannot be poisoned in normal operation
+                        restarting
+                            .lock()
+                            .expect("restarting mutex poisoned")
+                            .remove(&route_id);
+                        let _ = reply.send(Err(e.clone()));
+                        continue;
+                    }
+
+                    // Spawn only the sleep + send StartRoute back through
+                    // the SAME channel. The StartRoute is processed on the
+                    // actor thread (correct ownership), and the reply moves
+                    // into the spawned task to bridge the restart caller.
+                    let tx_clone = tx_for_spawn.clone();
+                    let restarting_clone = restarting.clone();
+                    let route_id_for_start = route_id.clone();
+                    let route_id_for_cleanup = route_id.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        // Remove from `restarting` BEFORE sending StartRoute: the
+                        // actor's StartRoute arm rejects if the route is in the
+                        // restarting set, so removing first lets the actor
+                        // accept its own self-sent command.
+                        // allow-unwrap: Mutex cannot be poisoned in normal operation
+                        restarting_clone
+                            .lock()
+                            .expect("restarting mutex poisoned")
+                            .remove(&route_id_for_cleanup);
+                        if tx_clone
+                            .send(RouteControllerCommand::StartRoute {
+                                route_id: route_id_for_start,
+                                reply,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            warn!(
+                                "route {} restart: StartRoute send failed (actor shutting down)",
+                                route_id_for_cleanup
+                            );
+                        }
+                    });
+                    // Actor returns to rx.recv() immediately — HoL eliminated.
                 }
                 RouteControllerCommand::SuspendRoute { route_id, reply } => {
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    if restarting
+                        .lock()
+                        .expect("restarting mutex poisoned")
+                        .contains(&route_id)
+                    {
+                        let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                            "route {} is restarting",
+                            route_id
+                        ))));
+                        continue;
+                    }
                     let _ = reply.send(controller.suspend_route(&route_id).await);
                 }
                 RouteControllerCommand::ResumeRoute { route_id, reply } => {
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    if restarting
+                        .lock()
+                        .expect("restarting mutex poisoned")
+                        .contains(&route_id)
+                    {
+                        let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                            "route {} is restarting",
+                            route_id
+                        ))));
+                        continue;
+                    }
                     let _ = reply.send(controller.resume_route(&route_id).await);
                 }
                 RouteControllerCommand::StartAllRoutes { reply } => {
@@ -49,6 +169,18 @@ pub fn spawn_controller_actor(
                     let _ = reply.send(controller.add_route(definition).await);
                 }
                 RouteControllerCommand::RemoveRoute { route_id, reply } => {
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    if restarting
+                        .lock()
+                        .expect("restarting mutex poisoned")
+                        .contains(&route_id)
+                    {
+                        let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                            "route {} is restarting",
+                            route_id
+                        ))));
+                        continue;
+                    }
                     let _ = reply.send(controller.remove_route(&route_id).await);
                 }
                 RouteControllerCommand::SwapPipeline {
@@ -104,6 +236,18 @@ pub fn spawn_controller_actor(
                     let _ = reply.send(controller.insert_prepared_route(prepared));
                 }
                 RouteControllerCommand::RemoveRoutePreservingFunctions { route_id, reply } => {
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    if restarting
+                        .lock()
+                        .expect("restarting mutex poisoned")
+                        .contains(&route_id)
+                    {
+                        let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                            "route {} is restarting",
+                            route_id
+                        ))));
+                        continue;
+                    }
                     let _ = reply.send(
                         controller
                             .remove_route_preserving_functions(&route_id)
@@ -141,9 +285,33 @@ pub fn spawn_controller_actor(
                     let _ = reply.send(controller.get_pipeline(&route_id));
                 }
                 RouteControllerCommand::StartRouteReload { route_id, reply } => {
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    if restarting
+                        .lock()
+                        .expect("restarting mutex poisoned")
+                        .contains(&route_id)
+                    {
+                        let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                            "route {} is restarting",
+                            route_id
+                        ))));
+                        continue;
+                    }
                     let _ = reply.send(controller.start_route_reload(&route_id).await);
                 }
                 RouteControllerCommand::StopRouteReload { route_id, reply } => {
+                    // allow-unwrap: Mutex cannot be poisoned in normal operation
+                    if restarting
+                        .lock()
+                        .expect("restarting mutex poisoned")
+                        .contains(&route_id)
+                    {
+                        let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
+                            "route {} is restarting",
+                            route_id
+                        ))));
+                        continue;
+                    }
                     let _ = reply.send(controller.stop_route_reload(&route_id).await);
                 }
                 RouteControllerCommand::SetRuntimeHandle { runtime } => {
@@ -772,5 +940,96 @@ mod tests {
         assert!(matches!(result, Err(CamelError::ProcessorError(_))));
 
         rx.try_recv().expect("mailbox still has first message");
+    }
+
+    #[tokio::test]
+    async fn test_restart_does_not_block_other_routes() {
+        // D-L6: a route's restart (stop + 100ms sleep + start) must not block
+        // commands for other routes. Without the fix, start_c would wait
+        // behind restart's 100ms sleep in the actor mailbox.
+        let (handle, join_handle) = build_actor_with_components();
+        handle
+            .add_route(route_def("route-a", "timer:tick?period=100"))
+            .await
+            .expect("add route-a");
+        handle
+            .add_route(route_def("route-b", "timer:tick?period=100"))
+            .await
+            .expect("add route-b");
+        handle
+            .add_route(route_def("route-c", "timer:tick?period=100"))
+            .await
+            .expect("add route-c");
+
+        handle.start_route("route-a").await.expect("start route-a");
+        handle.start_route("route-b").await.expect("start route-b");
+
+        // Spawn restart on its own task so its RestartRoute command is
+        // guaranteed to land in the mailbox before start_c is enqueued.
+        let restart_handle = handle.clone();
+        let restart_fut =
+            tokio::spawn(async move { restart_handle.restart_route("route-a").await });
+
+        // Yield once so restart's send completes and RestartRoute is queued first.
+        tokio::task::yield_now().await;
+
+        // Now issue start_c — its StartRoute command is queued behind RestartRoute.
+        let start_c_t0 = std::time::Instant::now();
+        let start_result = handle.start_route("route-c").await;
+        let start_c_elapsed = start_c_t0.elapsed();
+
+        assert!(start_result.is_ok(), "route-c start should succeed");
+        assert!(
+            start_c_elapsed < Duration::from_millis(80),
+            "route-c start blocked by route-a restart (took {start_c_elapsed:?}); \
+             expected to complete before restart's 100ms sleep"
+        );
+
+        let restart_result = restart_fut.await.expect("restart join");
+        assert!(restart_result.is_ok(), "route-a restart should succeed");
+
+        handle.shutdown().await.expect("shutdown send");
+        join_handle.await.expect("actor join");
+    }
+
+    #[tokio::test]
+    async fn test_command_to_restarting_route_is_rejected() {
+        // D-L6: while a route is restarting, mutating commands for that route
+        // must be rejected.
+        let (handle, join_handle) = build_actor_with_components();
+        handle
+            .add_route(route_def("route-a", "timer:tick?period=100"))
+            .await
+            .expect("add route-a");
+        handle.start_route("route-a").await.expect("start route-a");
+
+        // Spawn restart on its own task so the RestartRoute command is
+        // guaranteed to land in the mailbox.
+        let restart_handle = handle.clone();
+        let restart_fut =
+            tokio::spawn(async move { restart_handle.restart_route("route-a").await });
+
+        // Give the actor time to process the Restart and enter the 100ms sleep.
+        // After the inline stop completes, the actor returns to rx.recv() and
+        // the spawned task is sleeping — route-a is in the restarting set.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // While restarting, try to stop route-a — must be rejected.
+        let stop_result = handle.stop_route("route-a").await;
+        assert!(
+            stop_result.is_err(),
+            "stop during restart should be rejected"
+        );
+        assert!(
+            stop_result.unwrap_err().to_string().contains("restarting"),
+            "error should mention restarting"
+        );
+
+        // Now the restart completes.
+        let restart_result = restart_fut.await.expect("restart join");
+        assert!(restart_result.is_ok(), "route-a restart should succeed");
+
+        handle.shutdown().await.expect("shutdown send");
+        join_handle.await.expect("actor join");
     }
 }

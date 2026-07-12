@@ -156,6 +156,7 @@ fn container_reconnect_default() -> NetworkRetryPolicy {
         multiplier: 1.0, // fixed delay (old behavior was no backoff)
         max_delay: std::time::Duration::from_secs(5),
         jitter_factor: 0.0,
+        max_attempts_absolute: None,
     }
 }
 

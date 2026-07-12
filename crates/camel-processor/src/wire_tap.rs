@@ -1,9 +1,10 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tower::{Service, ServiceExt};
 
 use camel_api::{CamelError, Exchange};
@@ -25,10 +26,26 @@ impl WireTapConfig {
     }
 }
 
-#[derive(Clone)]
 pub struct WireTapService {
     tap_endpoint: camel_api::BoxProcessor,
-    semaphore: Option<Arc<Semaphore>>,
+    semaphore: Option<std::sync::Arc<Semaphore>>,
+    in_flight: Mutex<JoinSet<()>>,
+}
+
+// Manual Clone impl: `JoinSet` is not `Clone` (it has an owned background
+// driver task), so the derive cannot be used. We hand out a brand-new
+// JoinSet per clone — the original's spawned tasks are aborted on the
+// original's Drop, not the clone's. This restores the pre-D-L1 Clone
+// contract that `camel-core`'s step compiler relies on via
+// `BoxProcessor::new`.
+impl Clone for WireTapService {
+    fn clone(&self) -> Self {
+        Self {
+            tap_endpoint: self.tap_endpoint.clone(),
+            semaphore: self.semaphore.clone(),
+            in_flight: Mutex::new(JoinSet::new()),
+        }
+    }
 }
 
 impl WireTapService {
@@ -37,6 +54,7 @@ impl WireTapService {
         Self {
             tap_endpoint,
             semaphore: None,
+            in_flight: Mutex::new(JoinSet::new()),
         }
     }
 
@@ -44,10 +62,11 @@ impl WireTapService {
     pub fn with_config(tap_endpoint: camel_api::BoxProcessor, config: WireTapConfig) -> Self {
         let semaphore = config
             .max_concurrent
-            .map(|limit| Arc::new(Semaphore::new(limit)));
+            .map(|limit| std::sync::Arc::new(Semaphore::new(limit)));
         Self {
             tap_endpoint,
             semaphore,
+            in_flight: Mutex::new(JoinSet::new()),
         }
     }
 }
@@ -66,29 +85,32 @@ impl Service<Exchange> for WireTapService {
         let tap_exchange = exchange.clone();
         let semaphore = self.semaphore.clone();
 
-        tokio::spawn(async move {
-            // Acquire semaphore permit if concurrency is bounded.
-            let _permit = match &semaphore {
-                Some(sem) => match sem.acquire().await {
-                    Ok(p) => Some(p),
-                    Err(_) => {
-                        tracing::warn!("WireTap semaphore closed, dropping tap");
-                        return;
-                    }
-                },
-                None => None,
-            };
+        // allow-unwrap: Mutex cannot be poisoned in normal operation
+        self.in_flight
+            .lock()
+            .expect("in_flight mutex poisoned")
+            .spawn(async move {
+                // Acquire semaphore permit if concurrency is bounded.
+                let _permit = match &semaphore {
+                    Some(sem) => match sem.acquire().await {
+                        Ok(p) => Some(p),
+                        Err(_) => {
+                            tracing::warn!("WireTap semaphore closed, dropping tap");
+                            return;
+                        }
+                    },
+                    None => None,
+                };
 
-            if let Err(e) = tap_endpoint.ready().await {
-                tracing::warn!("WireTap endpoint poll_ready failed: {}", e);
-                return;
-            }
-            if let Err(e) = tap_endpoint.call(tap_exchange).await {
-                // log-policy: handler-owned
-                tracing::warn!("WireTap processing error: {}", e);
-            }
-        });
-
+                if let Err(e) = tap_endpoint.ready().await {
+                    tracing::warn!("WireTap endpoint poll_ready failed: {}", e);
+                    return;
+                }
+                if let Err(e) = tap_endpoint.call(tap_exchange).await {
+                    // log-policy: handler-owned
+                    tracing::warn!("WireTap processing error: {}", e);
+                }
+            });
         Box::pin(async move { Ok(exchange) })
     }
 }
@@ -249,6 +271,60 @@ mod tests {
         assert!(
             observed_max <= 2,
             "max concurrency was {observed_max}, expected <= 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wire_tap_drop_aborts_spawned_tasks() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let task_started = Arc::new(AtomicBool::new(false));
+        let task_completed = Arc::new(AtomicBool::new(false));
+        let started_clone = task_started.clone();
+        let completed_clone = task_completed.clone();
+
+        let tap_processor = BoxProcessor::from_fn(move |_ex| {
+            let started = started_clone.clone();
+            let completed = completed_clone.clone();
+            Box::pin(async move {
+                started.store(true, Ordering::SeqCst);
+                // Simulate slow work that will be interrupted
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                completed.store(true, Ordering::SeqCst);
+                Ok(Exchange::default())
+            })
+        });
+
+        let mut service = WireTapService::new(tap_processor);
+        let _ = service
+            .ready()
+            .await
+            .unwrap()
+            .call(Exchange::default())
+            .await
+            .unwrap();
+
+        // Give the spawned task time to start
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            task_started.load(Ordering::SeqCst),
+            "tap task should be running"
+        );
+        assert!(
+            !task_completed.load(Ordering::SeqCst),
+            "task should not have completed yet"
+        );
+
+        // Drop the service — should abort spawned tasks
+        drop(service);
+
+        // Give abort time to propagate
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Task should NOT have completed (it was aborted before the 10s sleep finished)
+        assert!(
+            !task_completed.load(Ordering::SeqCst),
+            "task should have been aborted, not completed"
         );
     }
 }

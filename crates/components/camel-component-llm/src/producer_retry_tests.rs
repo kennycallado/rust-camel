@@ -36,6 +36,7 @@ async fn retry_succeeds_after_transient_failure() {
         multiplier: 1.0,
         max_delay: Duration::from_millis(5),
         jitter_factor: 0.0,
+        max_attempts_absolute: None,
     };
     let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
     let out = producer
@@ -60,6 +61,7 @@ async fn retry_honors_retry_after_over_backoff() {
         multiplier: 1.0,
         max_delay: Duration::from_millis(5),
         jitter_factor: 0.0,
+        max_attempts_absolute: None,
     };
     let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
     let start = std::time::Instant::now();
@@ -82,6 +84,7 @@ async fn no_retry_in_streaming_mode() {
         multiplier: 1.0,
         max_delay: Duration::from_millis(5),
         jitter_factor: 0.0,
+        max_attempts_absolute: None,
     };
     let mut producer = make_producer_with_retry(Arc::clone(&provider), true, Some(policy));
     let _ = producer.call(make_exchange(Body::Text("x".into()))).await;
@@ -103,6 +106,7 @@ async fn no_retry_after_content_start() {
         multiplier: 1.0,
         max_delay: Duration::from_millis(5),
         jitter_factor: 0.0,
+        max_attempts_absolute: None,
     };
     let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
     let _ = producer.call(make_exchange(Body::Text("x".into()))).await;
@@ -132,6 +136,7 @@ async fn total_timeout_fires_during_retry_backoff() {
         max_delay: Duration::from_millis(5),
         jitter_factor: 0.0,
         enabled: true,
+        max_attempts_absolute: None,
     };
     let mut producer = make_producer_with_timeout_and_retry(
         provider,
@@ -196,6 +201,7 @@ async fn permit_released_during_retry_backoff() {
         max_delay: Duration::from_millis(200),
         jitter_factor: 0.0,
         enabled: true,
+        max_attempts_absolute: None,
     };
     let producer = make_producer_with_concurrency_and_retry(provider, 1, Some(policy));
     let p = Arc::new(producer);
@@ -249,6 +255,7 @@ async fn retry_exhaustion_surfaces_last_error() {
         multiplier: 1.0,
         max_delay: Duration::from_millis(5),
         jitter_factor: 0.0,
+        max_attempts_absolute: None,
     };
     let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
     let result = producer.call(make_exchange(Body::Text("x".into()))).await;
@@ -282,6 +289,7 @@ async fn embed_retries_on_transient_failure() {
         max_delay: Duration::from_millis(5),
         jitter_factor: 0.0,
         enabled: true,
+        max_attempts_absolute: None,
     };
     let config = LlmEndpointConfig {
         operation: LlmOperation::Embed,

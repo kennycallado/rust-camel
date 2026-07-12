@@ -20,6 +20,7 @@ pub use static_endpoint::{HttpStaticComponent, HttpStaticConsumer, HttpStaticEnd
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -646,6 +647,19 @@ struct ServerHandle {
     is_tls: bool,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
+    /// AbortHandle for the axum server task. The server task itself is
+    /// moved into `monitor_axum_task` (which awaits it), so we capture an
+    /// `AbortHandle` first to be able to cancel the server on last-route
+    /// unregister even though we no longer own the JoinHandle.
+    server_task_abort: tokio::task::AbortHandle,
+    /// JoinHandle for the monitor_axum_task wrapper. Aborted alongside the
+    /// server task on last-route unregister; `is_finished()` is also used as
+    /// the dead-server eviction signal in `get_or_spawn`.
+    monitor_task: tokio::task::JoinHandle<()>,
+    /// Reference count of consumers sharing this server. Incremented on each
+    /// `get_or_spawn` call; decremented on `unregister`. When it drops to 0,
+    /// the server and monitor tasks are aborted and the registry entry is removed.
+    route_count: AtomicUsize,
 }
 
 /// Process-global registry mapping (host, port) → running Axum server handle.
@@ -683,6 +697,15 @@ impl ServerRegistry {
                 CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
             })?;
             let key = (host.to_string(), port);
+            // Evict dead server so a fresh one can spawn (matches gRPC D-L2 pattern).
+            // The monitor task awaits the server task, so monitor_task.is_finished()
+            // is a reliable proxy for the server being gone (either crashed or aborted).
+            if let Some(existing) = guard.get(&key)
+                && let Some(handle) = existing.get()
+                && handle.monitor_task.is_finished()
+            {
+                guard.remove(&key);
+            }
             guard
                 .entry(key)
                 .or_insert_with(|| Arc::new(OnceCell::new()))
@@ -748,7 +771,7 @@ impl ServerRegistry {
                     })?;
                     let registry = HttpRouteRegistry::new();
                     let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
-                    let task = if let Some(ref tls) = tls_config {
+                    let server_task = if let Some(ref tls) = tls_config {
                         let rustls_config = load_tls_config(&tls.cert_path, &tls.key_path)?;
                         // Convert tokio listener to std for axum-server
                         let std_listener = listener.into_std().map_err(|e| {
@@ -777,9 +800,14 @@ impl ServerRegistry {
                             rid.clone(),
                         ))
                     };
+                    // Capture an AbortHandle BEFORE moving the JoinHandle
+                    // into the monitor task — the monitor will own the
+                    // JoinHandle, and we still need to be able to cancel
+                    // the server on last-route unregister.
+                    let server_task_abort = server_task.abort_handle();
                     let addr_for_monitor = format!("{host_owned}:{port}");
-                    tokio::spawn(monitor_axum_task(
-                        task,
+                    let monitor_task = tokio::spawn(monitor_axum_task(
+                        server_task,
                         addr_for_monitor,
                         Arc::clone(&rt),
                         rid,
@@ -792,12 +820,68 @@ impl ServerRegistry {
                         is_tls: tls_config.is_some(),
                         tls_cert_path: tls_config.as_ref().map(|t| t.cert_path.clone()),
                         tls_key_path: tls_config.as_ref().map(|t| t.key_path.clone()),
+                        server_task_abort,
+                        monitor_task,
+                        route_count: AtomicUsize::new(0),
                     })
                 }
             })
             .await?;
 
+        // D-L10: each successful get_or_spawn counts as one consumer sharing
+        // this server. Decremented by `unregister`; reaching 0 tears the
+        // server and monitor down.
+        handle.route_count.fetch_add(1, Ordering::SeqCst);
         Ok(handle.registry.clone())
+    }
+
+    /// Unregister one consumer from a server. When the last consumer
+    /// unregisters (refcount drops to 0), the monitor task and the
+    /// underlying axum server are aborted and the registry entry is removed.
+    ///
+    /// D-L10: previously the monitor task was fire-and-forget and the
+    /// server never tore down. Now the refcount tracks shared consumers and
+    /// the last one to leave cleans up the listener and the background tasks.
+    pub async fn unregister(&self, host: &str, port: u16) {
+        let key = (host.to_string(), port);
+        let to_abort: Option<(tokio::task::AbortHandle, tokio::task::AbortHandle)> = {
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let Some(cell) = guard.get(&key) else {
+                return;
+            };
+            let Some(handle) = cell.get() else {
+                return;
+            };
+            let prev = handle.route_count.fetch_sub(1, Ordering::SeqCst);
+            if prev == 1 {
+                let server_abort = handle.server_task_abort.clone();
+                // `JoinHandle::abort_handle` takes `&self` so we can clone
+                // out without moving the JoinHandle (which is still owned
+                // by the ServerHandle until the cell is dropped).
+                let monitor_abort = handle.monitor_task.abort_handle();
+                guard.remove(&key);
+                debug!(
+                    host = host,
+                    port = port,
+                    "HTTP server tasks aborted after last route unregistered"
+                );
+                Some((server_abort, monitor_abort))
+            } else {
+                None
+            }
+        };
+        if let Some((server_abort, monitor_abort)) = to_abort {
+            // Abort the server first — the monitor task awaits the server's
+            // JoinHandle, so cancelling the server releases the monitor's
+            // await and lets the monitor body exit naturally. Then we abort
+            // the monitor as a belt-and-suspenders cleanup in case the
+            // monitor body is still in the middle of a synchronous span.
+            server_abort.abort();
+            monitor_abort.abort();
+        }
     }
 
     /// Reset the global registry — **test-only**.
@@ -1452,6 +1536,13 @@ impl Consumer for HttpConsumer {
         } else {
             registry_for_cleanup.unregister_api_route(&path).await;
         }
+
+        // D-L10: decrement the shared server's refcount. When the last
+        // consumer on this (host, port) leaves, the server + monitor tasks
+        // are aborted and the registry entry is removed.
+        ServerRegistry::global()
+            .unregister(&self.config.host, self.config.port)
+            .await;
 
         Ok(())
     }
@@ -3587,6 +3678,94 @@ mod tests {
             )
             .await;
         assert!(result.is_err(), "must reject TLS on plain port");
+    }
+
+    // -----------------------------------------------------------------------
+    // D-L10: HTTP monitor_axum_task refcounted shutdown
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_unregister_last_http_route_aborts_monitor() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+        let registry = ServerRegistry::global();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // Release — ServerRegistry will rebind
+        let rt = test_rt();
+
+        // Register 2 routes on the same (host, port) — OnceCell returns the
+        // same ServerHandle and increments route_count on each call.
+        let _r1 = registry
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                1024 * 1024,
+                10 * 1024 * 1024,
+                16,
+                rt.clone(),
+                "test-route-1".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let _r2 = registry
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                1024 * 1024,
+                10 * 1024 * 1024,
+                16,
+                rt,
+                "test-route-2".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let key = ("127.0.0.1".to_string(), port);
+        // Snapshot the cell so we can inspect the handle after the entry is
+        // removed from the registry.
+        let cell = {
+            let guard = registry.inner.lock().expect("lock");
+            guard.get(&key).expect("entry should exist").clone()
+        };
+
+        // Unregister first route -> monitor still alive (count = 1).
+        registry.unregister("127.0.0.1", port).await;
+        {
+            let handle = cell
+                .get()
+                .expect("handle should still exist after first unregister");
+            assert!(
+                !handle.monitor_task.is_finished(),
+                "monitor task should still be alive after first unregister"
+            );
+        }
+
+        // Unregister second route -> monitor aborted (count = 0).
+        registry.unregister("127.0.0.1", port).await;
+        // Give the abort a moment to take effect.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        {
+            let handle = cell
+                .get()
+                .expect("handle should still exist after second unregister");
+            assert!(
+                handle.monitor_task.is_finished(),
+                "monitor task should be aborted after last unregister"
+            );
+        }
+
+        // Verify entry was removed from registry.
+        {
+            let guard = registry.inner.lock().expect("lock");
+            assert!(
+                guard.get(&key).is_none(),
+                "entry should be removed from registry after last unregister"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

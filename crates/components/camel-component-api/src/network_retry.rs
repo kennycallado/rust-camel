@@ -114,6 +114,14 @@ pub struct NetworkRetryPolicy {
     /// Jitter factor in [0.0, 1.0]. Actual delay is `base ± (base * jitter_factor / 2)`.
     #[serde(default = "default_jitter_factor")]
     pub jitter_factor: f64,
+
+    /// Hard cap on total retry attempts regardless of `max_attempts`.
+    ///
+    /// When `Some(n)`, the policy stops retrying after `n` total attempts
+    /// (including the initial call) even if `max_attempts` is 0 (unlimited).
+    /// `None` (the default) preserves the `max_attempts` semantics unchanged.
+    #[serde(default)]
+    pub max_attempts_absolute: Option<u32>,
 }
 
 impl Default for NetworkRetryPolicy {
@@ -125,6 +133,7 @@ impl Default for NetworkRetryPolicy {
             multiplier: default_multiplier(),
             max_delay: default_max_delay(),
             jitter_factor: default_jitter_factor(),
+            max_attempts_absolute: None,
         }
     }
 }
@@ -169,9 +178,21 @@ impl NetworkRetryPolicy {
     /// Returns `true` if another retry should be attempted.
     ///
     /// `attempt` is zero-based: 0 = first attempt, 1 = first retry, etc.
+    ///
+    /// When `max_attempts_absolute` is `Some(n)`, the policy stops after `n`
+    /// total attempts regardless of `max_attempts`. When `None` (the default),
+    /// only `max_attempts` governs the limit (where 0 means unlimited).
     #[must_use]
     pub fn should_retry(&self, attempt: u32) -> bool {
-        self.enabled && (self.max_attempts == 0 || attempt < self.max_attempts)
+        if !self.enabled {
+            return false;
+        }
+        if let Some(abs_cap) = self.max_attempts_absolute
+            && attempt >= abs_cap
+        {
+            return false;
+        }
+        self.max_attempts == 0 || attempt < self.max_attempts
     }
 }
 

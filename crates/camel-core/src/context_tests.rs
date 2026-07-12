@@ -1302,6 +1302,36 @@ async fn test_start_runs_registered_config_checks() {
     // is that the runtime is single-use.
 }
 
+// D-L5: stop() must send Shutdown to the controller actor and join its
+// JoinHandle with a bounded timeout, not detach it.
+#[tokio::test]
+async fn test_stop_joins_actor_gracefully() {
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    ctx.start().await.unwrap();
+
+    // Take the actor join handle before stop consumes it
+    let actor_join = ctx.take_actor_join().expect("actor_join should be present");
+
+    let start = std::time::Instant::now();
+    ctx.stop().await.unwrap();
+    let elapsed = start.elapsed();
+
+    // Give the actor a moment to process the Shutdown command
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The actor must have exited its recv loop after receiving Shutdown
+    assert!(
+        actor_join.is_finished(),
+        "controller actor should have exited after stop()"
+    );
+
+    // And the whole stop+join should complete well under the 5s bounded timeout
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "stop() took {elapsed:?}, expected < 2s (graceful actor join)"
+    );
+}
+
 // ADR-0033: an empty startup-check list must let start() proceed normally
 // (i.e. validation is opt-in, not a hard requirement on every context).
 #[tokio::test]

@@ -43,7 +43,7 @@ pub use crate::context_builder::CamelContextBuilder;
 pub struct CamelContext {
     registry: Arc<std::sync::Mutex<Registry>>,
     route_controller: RouteControllerHandle,
-    _actor_join: tokio::task::JoinHandle<()>,
+    actor_join: Option<tokio::task::JoinHandle<()>>,
     supervision_join: Option<tokio::task::JoinHandle<()>>,
     runtime: Arc<RuntimeBus>,
     cancel_token: CancellationToken,
@@ -93,7 +93,7 @@ impl CamelContext {
         Self {
             registry: parts.registry,
             route_controller: parts.route_controller,
-            _actor_join: parts._actor_join,
+            actor_join: Some(parts._actor_join),
             supervision_join: parts.supervision_join,
             runtime: parts.runtime,
             cancel_token: parts.cancel_token,
@@ -656,6 +656,11 @@ impl CamelContext {
             }
         }
 
+        // After all routes are stopped, tell the controller actor to exit
+        // its recv loop. Must happen AFTER route stops so the actor can
+        // process any pending route-stop commands first.
+        let _ = self.route_controller.shutdown().await;
+
         self.health_registry.cancel_token().cancel();
 
         // Then stop lifecycle services in reverse insertion order (LIFO)
@@ -667,6 +672,21 @@ impl CamelContext {
                 warn!("Service {} failed to stop: {}", service.name(), e);
                 if first_error.is_none() {
                     first_error = Some(e);
+                }
+            }
+        }
+
+        // Join the controller actor task with a bounded timeout.
+        // Graceful exit via Shutdown should be near-instant; the 5s timeout
+        // is a last-resort abort for stuck actors.
+        if let Some(mut join) = self.actor_join.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut join).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Controller actor task error during stop: {e}"),
+                Err(_) => {
+                    warn!("Controller actor did not stop within 5s; aborting");
+                    join.abort();
+                    let _ = join.await;
                 }
             }
         }
@@ -688,6 +708,13 @@ impl CamelContext {
     /// Set the graceful shutdown timeout used by [`stop()`](Self::stop).
     pub fn set_shutdown_timeout(&mut self, timeout: std::time::Duration) {
         self.shutdown_timeout = timeout;
+    }
+
+    /// Test-only: take the actor join handle out of the context.
+    /// Used to verify the actor exits gracefully after stop().
+    #[cfg(test)]
+    pub(crate) fn take_actor_join(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.actor_join.take()
     }
 
     /// Immediate abort — kills all tasks without draining.

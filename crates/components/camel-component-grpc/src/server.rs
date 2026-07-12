@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
@@ -36,9 +37,9 @@ type ServerKey = (String, u16);
 
 struct ServerHandle {
     dispatch: GrpcDispatchTable,
-    #[allow(dead_code)]
-    _task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<()>,
     transport: ServerTransport,
+    route_count: AtomicUsize,
 }
 
 pub(crate) struct GrpcServerRegistry {
@@ -70,7 +71,7 @@ impl GrpcServerRegistry {
             // Evict dead server so a fresh one can spawn (rc-4s65).
             if let Some(existing) = guard.get(&key)
                 && let Some(handle) = existing.get()
-                && handle._task.is_finished()
+                && handle.task.is_finished()
             {
                 guard.remove(&key);
             }
@@ -101,13 +102,15 @@ impl GrpcServerRegistry {
                 ));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
                     dispatch,
-                    _task: task,
+                    task,
                     transport: config.transport.clone(),
+                    route_count: AtomicUsize::new(0),
                 })
             })
             .await?;
 
         validate_server_handle(handle, &config.transport, &host_owned, port)?;
+        handle.route_count.fetch_add(1, Ordering::SeqCst);
         Ok(Arc::clone(&handle.dispatch))
     }
 
@@ -129,7 +132,7 @@ impl GrpcServerRegistry {
             // Evict dead server so a fresh one can spawn (rc-4s65).
             if let Some(existing) = guard.get(&key)
                 && let Some(handle) = existing.get()
-                && handle._task.is_finished()
+                && handle.task.is_finished()
             {
                 guard.remove(&key);
             }
@@ -154,30 +157,47 @@ impl GrpcServerRegistry {
                 ));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
                     dispatch,
-                    _task: task,
+                    task,
                     transport: config.transport.clone(),
+                    route_count: AtomicUsize::new(0),
                 })
             })
             .await?;
 
         validate_server_handle(handle, &config.transport, &host_owned, port)?;
+        handle.route_count.fetch_add(1, Ordering::SeqCst);
         Ok(Arc::clone(&handle.dispatch))
     }
 
     pub(crate) async fn unregister(&self, host: &str, port: u16, path: &str) {
         let key = (host.to_string(), port);
         let dispatch = {
-            let guard = self.inner.lock().ok();
-            guard
-                .as_ref()
-                .and_then(|g| g.get(&key))
-                .and_then(|cell| cell.get())
-                .map(|handle| Arc::clone(&handle.dispatch))
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            let Some(cell) = guard.get(&key) else {
+                return;
+            };
+            let Some(handle) = cell.get() else {
+                return;
+            };
+            let dispatch = Arc::clone(&handle.dispatch);
+            // Decrement refcount; if last route, abort task and remove entry
+            let prev = handle.route_count.fetch_sub(1, Ordering::SeqCst);
+            if prev == 1 {
+                handle.task.abort();
+                guard.remove(&key);
+                debug!(
+                    host = host,
+                    port = port,
+                    "gRPC server task aborted after last route unregistered"
+                );
+            }
+            dispatch
         };
-        if let Some(dispatch) = dispatch {
-            let mut table = dispatch.write().await;
-            table.remove(path);
-        }
+        let mut table = dispatch.write().await;
+        table.remove(path);
     }
 }
 
@@ -196,7 +216,7 @@ fn validate_server_handle(
             handle.transport, requested,
         )));
     }
-    if handle._task.is_finished() {
+    if handle.task.is_finished() {
         return Err(CamelError::EndpointCreationFailed(
             "gRPC server task has terminated unexpectedly".into(),
         ));
@@ -1145,8 +1165,9 @@ mod tests {
             assert!(dead_task.is_finished(), "task should be finished");
             cell.set(ServerHandle {
                 dispatch,
-                _task: dead_task,
+                task: dead_task,
                 transport: ServerTransport::Plaintext,
+                route_count: AtomicUsize::new(0),
             })
             .ok();
             guard.insert(key, cell);
@@ -1678,8 +1699,9 @@ mod tests {
         let task = tokio::spawn(async {});
         let handle = ServerHandle {
             dispatch,
-            _task: task,
+            task,
             transport: ServerTransport::Plaintext,
+            route_count: AtomicUsize::new(0),
         };
         let _ = handle;
     }
@@ -1824,6 +1846,79 @@ mod tests {
                 );
             }
             Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unregister_last_route_aborts_server_task() {
+        let registry = GrpcServerRegistry::global();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let errors = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(RecordingRuntime::new(errors));
+
+        // Register 2 routes on same (host, port)
+        let _dispatch1 = registry
+            .get_or_spawn_with_listener(
+                listener,
+                "127.0.0.1",
+                port,
+                GrpcServerConfig::default(),
+                rt.clone(),
+            )
+            .await
+            .unwrap();
+
+        // Second route on same port (listener not used, server already spawned)
+        let dummy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _dispatch2 = registry
+            .get_or_spawn_with_listener(
+                dummy_listener,
+                "127.0.0.1",
+                port,
+                GrpcServerConfig::default(),
+                rt,
+            )
+            .await
+            .unwrap();
+
+        let key = ("127.0.0.1".to_string(), port);
+
+        // Keep a reference to the cell to check task state after removal
+        let cell = {
+            let guard = registry.inner.lock().unwrap();
+            guard.get(&key).unwrap().clone()
+        };
+
+        // Unregister route 1 -> task still alive
+        registry.unregister("127.0.0.1", port, "/route1").await;
+        {
+            let handle = cell.get().expect("handle should exist");
+            assert!(
+                !handle.task.is_finished(),
+                "task should still be alive after first unregister"
+            );
+        }
+
+        // Unregister route 2 -> task aborted
+        registry.unregister("127.0.0.1", port, "/route2").await;
+        // Give the abort a moment to take effect
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        {
+            let handle = cell.get().expect("handle should exist");
+            assert!(
+                handle.task.is_finished(),
+                "task should be aborted after last unregister"
+            );
+        }
+
+        // Verify entry was removed from registry
+        {
+            let guard = registry.inner.lock().unwrap();
+            assert!(
+                guard.get(&key).is_none(),
+                "entry should be removed from registry after last unregister"
+            );
         }
     }
 }

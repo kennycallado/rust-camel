@@ -11,6 +11,7 @@ fn xslt_reconnect_default() -> NetworkRetryPolicy {
         multiplier: 2.0,
         max_delay: Duration::from_secs(30),
         jitter_factor: 0.0,
+        max_attempts_absolute: None,
     }
 }
 

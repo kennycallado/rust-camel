@@ -57,13 +57,16 @@ pub(crate) fn spawn_consumer_task(
             }
 
             let error_msg = e.to_string();
-            if let Some(tx) = crash_notifier {
-                let _ = tx
+            if let Some(tx) = crash_notifier
+                && tx
                     .send(CrashNotification {
                         route_id: route_id.clone(),
                         error: error_msg.clone(),
                     })
-                    .await;
+                    .await
+                    .is_err()
+            {
+                warn!(route_id = %route_id, "CrashNotification channel closed; crash will not be restarted");
             }
 
             publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
@@ -86,13 +89,16 @@ pub(crate) fn spawn_consumer_task(
                             let error_msg = e.to_string();
                             // log-policy: system-broken
                             error!(route_id = %route_id, "Consumer background task failed: {error_msg}");
-                            if let Some(ref tx) = crash_notifier {
-                                let _ = tx
+                            if let Some(ref tx) = crash_notifier
+                                && tx
                                     .send(CrashNotification {
                                         route_id: route_id.clone(),
                                         error: error_msg.clone(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                            {
+                                warn!(route_id = %route_id, "CrashNotification channel closed; crash will not be restarted");
                             }
                             publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
                         }
@@ -103,13 +109,16 @@ pub(crate) fn spawn_consumer_task(
                             let error_msg = format!("Consumer task panicked: {join_err}");
                             // log-policy: system-broken
                             error!(route_id = %route_id, "{error_msg}");
-                            if let Some(ref tx) = crash_notifier {
-                                let _ = tx
+                            if let Some(ref tx) = crash_notifier
+                                && tx
                                     .send(CrashNotification {
                                         route_id: route_id.clone(),
                                         error: error_msg.clone(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                            {
+                                warn!(route_id = %route_id, "CrashNotification channel closed; crash will not be restarted");
                             }
                             publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
                         }
@@ -781,6 +790,52 @@ mod tests {
         assert!(
             pipeline_flag.load(Ordering::SeqCst),
             "pipeline task must be aborted"
+        );
+    }
+
+    // ── D-L7: CrashNotification send-error logging ──
+
+    #[tokio::test]
+    async fn test_crash_notification_warns_on_closed_channel() {
+        use tracing_subscriber::prelude::*;
+        let warn_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let warn_seen_clone = warn_seen.clone();
+
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+                if meta.level() == &tracing::Level::WARN {
+                    warn_seen_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                true
+            }));
+
+        let _guard = tracing_subscriber::registry().with(layer).set_default();
+
+        let (exchange_tx, _exchange_rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(
+            exchange_tx,
+            CancellationToken::new(),
+            "consumer-warn-test".to_string(),
+        );
+        let (crash_tx, crash_rx) = mpsc::channel::<CrashNotification>(1);
+        drop(crash_rx); // close the channel so send fails
+
+        let handle = spawn_consumer_task(
+            "route-warn".to_string(),
+            Box::new(FailingConsumer::new("start failed")),
+            ctx,
+            Some(crash_tx),
+            None,
+            false,
+        );
+
+        handle.await.expect("consumer task should join cleanly");
+
+        assert!(
+            warn_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "expected warn! log when CrashNotification send fails on closed channel — \
+             D-L7: let _ = silently drops send error, no restart triggered"
         );
     }
 }

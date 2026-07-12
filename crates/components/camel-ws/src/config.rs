@@ -106,6 +106,7 @@ impl Default for WsEndpointConfig {
                 multiplier: 2.0,
                 max_delay: Duration::from_secs(30),
                 jitter_factor: 0.0, // old behavior had no jitter
+                max_attempts_absolute: None,
             },
         }
     }
@@ -606,6 +607,7 @@ mod config_validation_tests {
             multiplier: 3.0,
             max_delay: std::time::Duration::from_secs(60),
             jitter_factor: 0.1,
+            max_attempts_absolute: None,
         };
         // This mimics how a WsConfig (or future wrapper) would layer the
         // TOML policy onto the endpoint config before create_endpoint().

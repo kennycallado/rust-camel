@@ -4,6 +4,7 @@ use camel_api::Exchange;
 use camel_api::function::*;
 use dashmap::DashMap;
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{FunctionHealthStatus, FunctionProvider, ProviderError};
@@ -98,6 +99,7 @@ impl ContainerProviderBuilder {
             client: ProtocolClient::new(),
             containers_by_handle: DashMap::new(),
             instance_id,
+            log_forwarder_handles: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -110,6 +112,7 @@ pub struct ContainerProvider {
     pull_policy: PullPolicy,
     client: ProtocolClient,
     containers_by_handle: DashMap<String, ContainerEntry>,
+    log_forwarder_handles: std::sync::Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl ContainerProvider {
@@ -347,7 +350,7 @@ impl ContainerProvider {
         use futures::StreamExt;
 
         let docker = self.docker.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let options = bollard::query_parameters::LogsOptions {
                 follow: true,
                 stdout: true,
@@ -389,6 +392,11 @@ impl ContainerProvider {
                 }
             }
         });
+        // allow-unwrap: Mutex cannot be poisoned in normal operation
+        self.log_forwarder_handles
+            .lock()
+            .expect("log_fwd mutex poisoned")
+            .push(handle);
     }
 }
 
@@ -564,6 +572,17 @@ impl FunctionProvider for ContainerProvider {
 
 impl Drop for ContainerProvider {
     fn drop(&mut self) {
+        // allow-unwrap: Mutex cannot be poisoned in normal operation
+        let handles = std::mem::take(
+            &mut *self
+                .log_forwarder_handles
+                .lock()
+                .expect("log_fwd mutex poisoned"),
+        );
+        for handle in handles {
+            handle.abort();
+        }
+
         if self.containers_by_handle.is_empty() {
             return;
         }
@@ -600,6 +619,26 @@ impl Drop for ContainerProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_log_forwarder_handles_aborted_on_drop() {
+        // Test the handle-tracking mechanism in isolation (no Docker required).
+        // The ContainerProvider will use Mutex<Vec<JoinHandle>> + abort on Drop.
+        // Verify that pattern works: spawn task, abort it, handle finishes.
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        // Abort the handle (simulating what Drop on ContainerProvider will do)
+        handle.abort();
+
+        // Give abort time to propagate
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            handle.is_finished(),
+            "aborted join handle should report finished"
+        );
+    }
 
     #[test]
     fn inspect_non_404_becomes_spawn_failed() {

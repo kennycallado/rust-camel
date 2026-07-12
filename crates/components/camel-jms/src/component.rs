@@ -596,6 +596,68 @@ impl JmsBridgePool {
     }
 }
 
+// ── Drop impl: cleanup on pool drop without explicit shutdown ─────────────────
+
+impl Drop for JmsBridgePool {
+    fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+
+        // Clone bridge slots before we lose access to self.slots.
+        let slots: Vec<(String, Arc<BridgeSlot>)> = self
+            .slots
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+
+        if slots.is_empty() {
+            return;
+        }
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // Spawn the per-bridge cleanup (same sequence as shutdown()).
+                // Dropping the JoinHandle detaches the task — it runs to completion.
+                drop(handle.spawn(async move {
+                    for (_name, slot) in slots {
+                        // Signal the health monitor to stop.
+                        let _ = slot.state_tx.send(BridgeState::Stopped);
+
+                        // Stop the bridge process.
+                        let process = {
+                            let mut guard = slot.process.lock().await;
+                            guard.take()
+                        };
+                        if let Some(p) = process {
+                            let _ = p.stop().await;
+                        }
+
+                        // Await the health monitor task with timeout; abort if needed.
+                        let monitor_handle = {
+                            let mut guard = slot.health_monitor_handle.lock().await;
+                            guard.take()
+                        };
+                        if let Some(mut h) = monitor_handle
+                            && tokio::time::timeout(Duration::from_secs(5), &mut h)
+                                .await
+                                .is_err()
+                        {
+                            h.abort();
+                            let _ = h.await;
+                            warn!(
+                                "health monitor for '{}' did not stop in 5s; aborted",
+                                slot.name
+                            );
+                        }
+                    }
+                }));
+            }
+            Err(_) => {
+                warn!("JmsBridgePool dropped outside tokio runtime; bridges not cleaned up");
+            }
+        }
+    }
+}
+
 // ── JmsComponent ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1911,6 +1973,76 @@ mod tests {
             err_msg.contains(BRIDGE_TRANSPORT_ERROR_PREFIX),
             "error must be original transport error, got: {}",
             err_msg
+        );
+    }
+
+    // ── D-L12: Drop impl cleans up slots without explicit shutdown ───────────
+
+    #[tokio::test]
+    async fn test_jms_bridge_pool_drop_cleans_up_slots() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::sync::watch;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                brokers: HashMap::from([(
+                    "default".to_string(),
+                    BrokerConfig {
+                        broker_url: "tcp://localhost:61616".to_string(),
+                        broker_type: BrokerType::ActiveMq,
+                        username: None,
+                        password: None,
+                    },
+                )]),
+                health_check_interval_ms: 50,
+                ..JmsPoolConfig::default()
+            })
+            .unwrap(),
+        );
+
+        // Create a slot with a health monitor that exits on BridgeState::Stopped.
+        let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
+            channel: tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+        });
+
+        let monitor_exited = Arc::new(AtomicBool::new(false));
+        let exited = monitor_exited.clone();
+        let rx = state_rx.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                if matches!(*rx.borrow(), BridgeState::Stopped) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            exited.store(true, Ordering::SeqCst);
+        });
+
+        let monitor_handle_ref: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        *monitor_handle_ref.lock().await = Some(handle);
+
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: monitor_handle_ref,
+        });
+        pool.slots.insert("default".to_string(), slot);
+
+        // Drop the pool WITHOUT calling shutdown() — the Drop impl must fire.
+        drop(pool);
+
+        // Give the spawned cleanup task time to send Stopped and await the monitor.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            monitor_exited.load(Ordering::SeqCst),
+            "health monitor should have exited after pool drop (Stopped signal sent by Drop)"
         );
     }
 }

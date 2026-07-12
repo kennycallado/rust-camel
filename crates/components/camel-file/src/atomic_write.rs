@@ -6,10 +6,11 @@
 //! 2026-06-20-rc-o6o-framework-contract-bugs.md` §3.3 and §4.1.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use camel_component_api::{Body, CamelError};
 use tokio::io::AsyncWriteExt;
+use tracing::{debug, warn};
 
 use crate::{TempFileGuard, write_body_with_charset};
 
@@ -142,6 +143,57 @@ async fn fsync_parent_dir(parent: &Path, write_timeout: Duration) -> Result<(), 
         .await
         .map_err(|_| CamelError::ProcessorError("Timeout fsyncing parent dir".into()))?
         .map_err(CamelError::from)?;
+    Ok(())
+}
+
+/// Remove stale temp files (matching `temp_prefix`) whose mtime is older than
+/// `stale_age`. Called at consumer startup to clean up `.tmp.*` files left
+/// behind by SIGKILL or crash. Non-fatal: errors are logged but do not prevent
+/// the consumer from starting.
+///
+/// # Safety invariants
+///
+/// - Only removes files whose name starts with `temp_prefix`.
+/// - Only removes files whose mtime is older than `stale_age` (staleness guard).
+/// - Never overwrites existing files (the `create_new(true)` invariant in
+///   `atomic_write` is preserved — this function only removes files that are
+///   clearly stale, not files that might be in use by a concurrent writer).
+pub(crate) async fn sweep_stale_temps(
+    dir: &Path,
+    temp_prefix: &str,
+    stale_age: Duration,
+) -> Result<(), CamelError> {
+    let mut entries = tokio::fs::read_dir(dir).await.map_err(|e| {
+        CamelError::ProcessorError(format!("sweep_stale_temps read_dir failed: {e}"))
+    })?;
+
+    let now = SystemTime::now();
+    let threshold = now.checked_sub(stale_age).ok_or_else(|| {
+        CamelError::ProcessorError("sweep_stale_temps: stale_age underflows SystemTime".into())
+    })?;
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| CamelError::ProcessorError(format!("sweep_stale_temps entry failed: {e}")))?
+    {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with(temp_prefix) {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata().await
+            && let Ok(mtime) = meta.modified()
+            && mtime < threshold
+        {
+            let path = entry.path();
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                warn!(path = %path.display(), error = %e, "Failed to remove stale temp");
+            } else {
+                debug!(path = %path.display(), "Removed stale temp file");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -340,6 +392,64 @@ mod tests {
         assert!(
             !temp_path.exists(),
             "temp file created by helper MUST be cleaned up when write fails after open"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_stale_temps_removes_old_preserves_fresh() {
+        use std::fs;
+        use std::time::SystemTime;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a stale temp (old mtime — 300s ago)
+        let stale = dir.path().join(".tmp.output.txt");
+        fs::write(&stale, "stale").unwrap();
+        let old_time = SystemTime::now() - Duration::from_secs(300);
+        filetime::set_file_mtime(&stale, filetime::FileTime::from_system_time(old_time)).unwrap();
+
+        // Create a fresh temp (recent mtime — just now)
+        let fresh = dir.path().join(".tmp.other.txt");
+        fs::write(&fresh, "fresh").unwrap();
+
+        // Create a non-temp file (should never be touched)
+        let normal = dir.path().join("normal.txt");
+        fs::write(&normal, "normal").unwrap();
+
+        // Run sweep with 60s staleness threshold
+        sweep_stale_temps(dir.path(), ".tmp.", Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        assert!(!stale.exists(), "stale temp should be removed");
+        assert!(fresh.exists(), "fresh temp should be preserved");
+        assert!(normal.exists(), "non-temp file should be preserved");
+    }
+
+    #[tokio::test]
+    async fn sweep_stale_temps_ignores_non_matching_prefix() {
+        use std::fs;
+        use std::time::SystemTime;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Stale file with different prefix — should NOT be removed
+        let other_prefix = dir.path().join(".bak.old.txt");
+        fs::write(&other_prefix, "keep me").unwrap();
+        let old_time = SystemTime::now() - Duration::from_secs(300);
+        filetime::set_file_mtime(
+            &other_prefix,
+            filetime::FileTime::from_system_time(old_time),
+        )
+        .unwrap();
+
+        sweep_stale_temps(dir.path(), ".tmp.", Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        assert!(
+            other_prefix.exists(),
+            "file with non-matching prefix should be preserved"
         );
     }
 
