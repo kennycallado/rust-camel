@@ -8,6 +8,7 @@ pub(crate) mod ssrf;
 pub mod static_config;
 pub mod static_dispatch;
 pub mod static_endpoint;
+pub(crate) mod tls_reload;
 use crate::config::parse_ok_status_code_range;
 pub use bundle::HttpBundle;
 pub use bundle::HttpStaticBundle;
@@ -33,6 +34,7 @@ use tracing::debug;
 use axum::body::BodyDataStream;
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
+use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
@@ -660,6 +662,10 @@ struct ServerHandle {
     /// `get_or_spawn` call; decremented on `unregister`. When it drops to 0,
     /// the server and monitor tasks are aborted and the registry entry is removed.
     route_count: AtomicUsize,
+    // Retained so the reload handler (Task 7) can call reload_from_config()
+    // to hot-swap certs without restarting the server.
+    tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
+    tls_source: Option<ServerTlsSource>,
 }
 
 /// Process-global registry mapping (host, port) → running Axum server handle.
@@ -771,8 +777,25 @@ impl ServerRegistry {
                     })?;
                     let registry = HttpRouteRegistry::new();
                     let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
+                    // Constructed once in the TLS branch so they can be retained
+                    // on ServerHandle for the reload handler (Task 7).
+                    let tls_rustls_cfg: Option<axum_server::tls_rustls::RustlsConfig>;
+                    let tls_source: Option<ServerTlsSource>;
                     let server_task = if let Some(ref tls) = tls_config {
                         let rustls_config = load_tls_config(&tls.cert_path, &tls.key_path)?;
+                        let source = ServerTlsSource {
+                            cert_path: std::path::PathBuf::from(&tls.cert_path),
+                            key_path: std::path::PathBuf::from(&tls.key_path),
+                            client_ca_path: None,
+                        };
+                        // Build the RustlsConfig once — clone() is cheap (Arc
+                        // internally) and shares the ArcSwap the reload handler
+                        // will mutate via reload_from_config().
+                        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(
+                            std::sync::Arc::new(rustls_config),
+                        );
+                        tls_rustls_cfg = Some(rustls_cfg.clone());
+                        tls_source = Some(source);
                         // Convert tokio listener to std for axum-server
                         let std_listener = listener.into_std().map_err(|e| {
                             CamelError::EndpointCreationFailed(format!(
@@ -781,7 +804,7 @@ impl ServerRegistry {
                         })?;
                         tokio::spawn(run_axum_server_tls(
                             std_listener,
-                            rustls_config,
+                            rustls_cfg,
                             registry.clone(),
                             max_request_body,
                             max_response_body,
@@ -790,6 +813,8 @@ impl ServerRegistry {
                             rid.clone(),
                         ))
                     } else {
+                        tls_rustls_cfg = None;
+                        tls_source = None;
                         tokio::spawn(run_axum_server(
                             listener,
                             registry.clone(),
@@ -812,7 +837,7 @@ impl ServerRegistry {
                         Arc::clone(&rt),
                         rid,
                     ));
-                    Ok::<ServerHandle, CamelError>(ServerHandle {
+                    let handle = ServerHandle {
                         registry,
                         max_request_body,
                         max_response_body,
@@ -823,7 +848,26 @@ impl ServerRegistry {
                         server_task_abort,
                         monitor_task,
                         route_count: AtomicUsize::new(0),
-                    })
+                        tls_config: tls_rustls_cfg,
+                        tls_source,
+                    };
+                    // Register reload handler (exactly-once: inside OnceCell init closure).
+                    // Note: HTTP servers are process-lifetime (no release/eviction path),
+                    // so handlers are never unregistered. If eviction is added later,
+                    // add TlsReloadRegistry::global().unregister() there.
+                    if let (Some(tls_cfg), Some(source)) =
+                        (handle.tls_config.as_ref(), handle.tls_source.as_ref())
+                    {
+                        let handler = Arc::new(crate::tls_reload::HttpReloadHandler::new(
+                            tls_cfg.clone(),
+                            source.clone(),
+                            host_owned.clone(),
+                            port,
+                        ));
+                        camel_component_api::tls_source::TlsReloadRegistry::global()
+                            .register(handler);
+                    }
+                    Ok::<ServerHandle, CamelError>(handle)
                 }
             })
             .await?;
@@ -950,7 +994,7 @@ async fn run_axum_server(
 #[allow(clippy::too_many_arguments)]
 async fn run_axum_server_tls(
     listener: std::net::TcpListener,
-    rustls_config: tokio_rustls::rustls::ServerConfig,
+    tls_cfg: axum_server::tls_rustls::RustlsConfig,
     registry: HttpRouteRegistry,
     max_request_body: usize,
     max_response_body: usize,
@@ -966,8 +1010,8 @@ async fn run_axum_server_tls(
     };
     let app = Router::new().fallback(dispatch_handler).with_state(state);
 
-    let tls_cfg =
-        axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(rustls_config));
+    // RustlsConfig is now constructed once in get_or_spawn and retained on
+    // ServerHandle so the reload handler can call reload_from_config() on it.
 
     axum_server::from_tcp_rustls(listener, tls_cfg)
         .serve(app.into_make_service())

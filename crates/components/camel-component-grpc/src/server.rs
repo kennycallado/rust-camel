@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
+use arc_swap::ArcSwap;
 use camel_api::CamelError;
+use camel_component_api::tls_source::ServerTlsSource;
 use futures::StreamExt;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
@@ -21,7 +23,7 @@ use tracing::{debug, error};
 use camel_component_api::RuntimeObservability;
 
 use crate::codec::RawBytesCodec;
-use crate::config::{GrpcServerConfig, ServerTransport, read_tls_file};
+use crate::config::{GrpcServerConfig, ServerTransport};
 use crate::consumer::{GrpcReply, GrpcRequestEnvelope, GrpcStreamItem};
 use crate::mode::GrpcMode;
 
@@ -35,11 +37,18 @@ pub(crate) type GrpcDispatchTable = Arc<RwLock<HashMap<String, GrpcDispatchEntry
 
 type ServerKey = (String, u16);
 
+/// Shared, atomically-swappable TLS acceptor. `None` for plaintext.
+/// Wrapping in ArcSwap lets the cert be hot-reloaded at runtime by calling
+/// `.store()` on the inner ArcSwap (see Task 5 reload handler).
+type SharedTlsAcceptor = Option<Arc<ArcSwap<TlsAcceptor>>>;
+
 struct ServerHandle {
     dispatch: GrpcDispatchTable,
     task: tokio::task::JoinHandle<()>,
     transport: ServerTransport,
     route_count: AtomicUsize,
+    tls_acceptor: SharedTlsAcceptor,
+    tls_source: Option<ServerTlsSource>,
 }
 
 pub(crate) struct GrpcServerRegistry {
@@ -84,7 +93,18 @@ impl GrpcServerRegistry {
         let handle = cell
             .get_or_try_init(|| async {
                 let route_id = format!("grpc-server:{host_owned}:{port}");
-                let acceptor = build_tls_acceptor(&config.transport, &route_id, &runtime)?;
+                let (tls_acceptor, tls_source) = match build_tls_acceptor(&config.transport) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        runtime.health().force_unhealthy_for_route(
+                            &route_id,
+                            "g:grpc:tls-read",
+                            &format!("{e}"),
+                        );
+                        error!(error = %e, "grpc TLS config build failed");
+                        return Err(e);
+                    }
+                };
                 let addr = format!("{host_owned}:{port}");
                 let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
                     CamelError::EndpointCreationFailed(format!(
@@ -97,15 +117,33 @@ impl GrpcServerRegistry {
                     listener,
                     Arc::clone(&dispatch),
                     config.clone(),
-                    acceptor,
+                    tls_acceptor.clone(),
                     rt,
                 ));
-                Ok::<ServerHandle, CamelError>(ServerHandle {
+                let handle = ServerHandle {
                     dispatch,
                     task,
                     transport: config.transport.clone(),
                     route_count: AtomicUsize::new(0),
-                })
+                    tls_acceptor,
+                    tls_source,
+                };
+                // Register reload handler (exactly-once: inside OnceCell init closure).
+                // Note: gRPC servers are process-lifetime (no release/eviction path),
+                // so handlers are never unregistered. If eviction is added later,
+                // add TlsReloadRegistry::global().unregister() there.
+                if let (Some(acceptor), Some(source)) =
+                    (handle.tls_acceptor.as_ref(), handle.tls_source.as_ref())
+                {
+                    let handler = Arc::new(crate::tls_reload::GrpcReloadHandler::new(
+                        acceptor.clone(),
+                        source.clone(),
+                        host_owned.clone(),
+                        port,
+                    ));
+                    camel_component_api::tls_source::TlsReloadRegistry::global().register(handler);
+                }
+                Ok::<ServerHandle, CamelError>(handle)
             })
             .await?;
 
@@ -145,22 +183,51 @@ impl GrpcServerRegistry {
         let handle = cell
             .get_or_try_init(|| async {
                 let route_id = format!("grpc-server:{host_owned}:{port}");
-                let acceptor = build_tls_acceptor(&config.transport, &route_id, &runtime)?;
+                let (tls_acceptor, tls_source) = match build_tls_acceptor(&config.transport) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        runtime.health().force_unhealthy_for_route(
+                            &route_id,
+                            "g:grpc:tls-read",
+                            &format!("{e}"),
+                        );
+                        error!(error = %e, "grpc TLS config build failed");
+                        return Err(e);
+                    }
+                };
                 let dispatch: GrpcDispatchTable = Arc::new(RwLock::new(HashMap::new()));
                 let rt = Arc::clone(&runtime);
                 let task = tokio::spawn(run_grpc_server(
                     listener,
                     Arc::clone(&dispatch),
                     config.clone(),
-                    acceptor,
+                    tls_acceptor.clone(),
                     rt,
                 ));
-                Ok::<ServerHandle, CamelError>(ServerHandle {
+                let handle = ServerHandle {
                     dispatch,
                     task,
                     transport: config.transport.clone(),
                     route_count: AtomicUsize::new(0),
-                })
+                    tls_acceptor,
+                    tls_source,
+                };
+                // Register reload handler (exactly-once: inside OnceCell init closure).
+                // Note: gRPC servers are process-lifetime (no release/eviction path),
+                // so handlers are never unregistered. If eviction is added later,
+                // add TlsReloadRegistry::global().unregister() there.
+                if let (Some(acceptor), Some(source)) =
+                    (handle.tls_acceptor.as_ref(), handle.tls_source.as_ref())
+                {
+                    let handler = Arc::new(crate::tls_reload::GrpcReloadHandler::new(
+                        acceptor.clone(),
+                        source.clone(),
+                        host_owned.clone(),
+                        port,
+                    ));
+                    camel_component_api::tls_source::TlsReloadRegistry::global().register(handler);
+                }
+                Ok::<ServerHandle, CamelError>(handle)
             })
             .await?;
 
@@ -224,84 +291,30 @@ fn validate_server_handle(
     Ok(())
 }
 
-/// Build a TlsAcceptor from ServerTransport (server-auth, optional mTLS, ALPN h2).
-/// Returns Ok(None) for Plaintext. Hard-errors on missing/invalid cert.
+/// Build a TlsAcceptor wrapped in ArcSwap from ServerTransport.
+/// Returns (None, None) for Plaintext. Hard-errors on missing/invalid cert.
+///
+/// The acceptor is wrapped in `Arc<ArcSwap<TlsAcceptor>>` so the cert can be
+/// hot-swapped at runtime by calling `.store()` on the ArcSwap (Task 5).
+/// ALPN `h2` is set for HTTP/2 negotiation.
 fn build_tls_acceptor(
     transport: &ServerTransport,
-    route_id: &str,
-    runtime: &Arc<dyn RuntimeObservability>,
-) -> Result<Option<TlsAcceptor>, CamelError> {
+) -> Result<(SharedTlsAcceptor, Option<ServerTlsSource>), CamelError> {
     match transport {
-        ServerTransport::Plaintext => Ok(None),
+        ServerTransport::Plaintext => Ok((None, None)),
         ServerTransport::Tls(cfg) => {
-            let cert_pem = read_tls_file(&cfg.server_cert_path, "server_cert", runtime, route_id)?;
-            let key_pem = read_tls_file(&cfg.server_key_path, "server_key", runtime, route_id)?;
-            let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_slice())
-                .collect::<Result<_, _>>()
-                .map_err(|e| {
-                    CamelError::EndpointCreationFailed(format!("invalid server cert PEM: {e}"))
-                })?;
-            let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
-                .map_err(|e| {
-                    CamelError::EndpointCreationFailed(format!("invalid server key PEM: {e}"))
-                })?
-                .ok_or_else(|| {
-                    CamelError::EndpointCreationFailed("no private key in server_key PEM".into())
-                })?;
-            // rustls 0.23: explicit ring provider via builder_with_provider —
-            // ServerConfig::builder() panics at runtime if no process-default provider.
-            let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-
-            // Optional mTLS: build client cert verifier if client_ca_path is set.
-            let client_verifier: Option<Arc<dyn rustls::server::danger::ClientCertVerifier>> =
-                match &cfg.client_ca_path {
-                    Some(ca_path) => {
-                        let ca_pem = read_tls_file(ca_path, "client_ca", runtime, route_id)?;
-                        let ca_certs: Vec<_> = rustls_pemfile::certs(&mut ca_pem.as_slice())
-                            .collect::<Result<_, _>>()
-                            .map_err(|e| {
-                                CamelError::EndpointCreationFailed(format!(
-                                    "invalid client CA PEM: {e}"
-                                ))
-                            })?;
-                        let mut roots = rustls::RootCertStore::empty();
-                        for cert in ca_certs {
-                            roots.add(cert).map_err(|e| {
-                                CamelError::EndpointCreationFailed(format!(
-                                    "client CA root add: {e}"
-                                ))
-                            })?;
-                        }
-                        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-                            Arc::new(roots),
-                            Arc::clone(&provider),
-                        )
-                        .build()
-                        .map_err(|e| {
-                            CamelError::EndpointCreationFailed(format!("client cert verifier: {e}"))
-                        })?;
-                        Some(verifier)
-                    }
-                    None => None,
-                };
-
-            let mut server_cfg = {
-                let builder = rustls::ServerConfig::builder_with_provider(provider)
-                    .with_safe_default_protocol_versions()
-                    .map_err(|e| {
-                        CamelError::EndpointCreationFailed(format!("rustls protocol versions: {e}"))
-                    })?;
-                match client_verifier {
-                    None => builder.with_no_client_auth(),
-                    Some(verifier) => builder.with_client_cert_verifier(verifier),
-                }
-                .with_single_cert(certs, key)
-                .map_err(|e| {
-                    CamelError::EndpointCreationFailed(format!("rustls ServerConfig: {e}"))
-                })?
+            let source = ServerTlsSource {
+                cert_path: std::path::PathBuf::from(&cfg.server_cert_path),
+                key_path: std::path::PathBuf::from(&cfg.server_key_path),
+                client_ca_path: cfg.client_ca_path.as_ref().map(std::path::PathBuf::from),
             };
+            let mut server_cfg = source.build_server_config()?;
             server_cfg.alpn_protocols = vec![b"h2".to_vec()];
-            Ok(Some(TlsAcceptor::from(Arc::new(server_cfg))))
+            let acceptor = TlsAcceptor::from(Arc::new(server_cfg));
+            Ok((
+                Some(Arc::new(ArcSwap::from_pointee(acceptor))),
+                Some(source),
+            ))
         }
     }
 }
@@ -331,7 +344,7 @@ async fn run_grpc_server(
     listener: tokio::net::TcpListener,
     dispatch: GrpcDispatchTable,
     config: GrpcServerConfig,
-    tls_acceptor: Option<TlsAcceptor>,
+    tls_acceptor: SharedTlsAcceptor,
     runtime: Arc<dyn RuntimeObservability>,
 ) {
     // Q-B1: route_id derived from listener local address. The accept loop runs
@@ -364,15 +377,20 @@ async fn run_grpc_server(
         tokio::spawn(async move {
             match tls_acceptor.as_ref() {
                 None => serve_h2(stream, dispatch, config).await,
-                Some(acceptor) => match acceptor.accept(stream).await {
-                    Ok(tls_stream) => serve_h2(tls_stream, dispatch, config).await,
-                    Err(e) => {
-                        rt_metrics
-                            .metrics()
-                            .increment_errors(&route_id_clone, "e:grpc:tls-accept");
-                        debug!(error = %e, "gRPC TLS handshake error");
+                Some(swap) => {
+                    // load_full() returns Arc<TlsAcceptor> — owned snapshot, await-safe.
+                    // Re-reading per connection enables atomic cert hot-swap via .store().
+                    let acceptor = swap.load_full();
+                    match acceptor.accept(stream).await {
+                        Ok(tls_stream) => serve_h2(tls_stream, dispatch, config).await,
+                        Err(e) => {
+                            rt_metrics
+                                .metrics()
+                                .increment_errors(&route_id_clone, "e:grpc:tls-accept");
+                            debug!(error = %e, "gRPC TLS handshake error");
+                        }
                     }
-                },
+                }
             }
         });
     }
@@ -1147,7 +1165,11 @@ mod tests {
         assert!(dispatch.is_ok());
     }
 
+    // Test-only: the std MutexGuard is held across yield/sleep awaits to
+    // sequence the dead-task setup atomically. No real contention is possible
+    // (fake handle), so the await-holding-lock lint is suppressed here.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_dead_server_evicted_on_reuse() {
         let registry = GrpcServerRegistry::global();
         let port = 17899u16;
@@ -1168,6 +1190,8 @@ mod tests {
                 task: dead_task,
                 transport: ServerTransport::Plaintext,
                 route_count: AtomicUsize::new(0),
+                tls_acceptor: None,
+                tls_source: None,
             })
             .ok();
             guard.insert(key, cell);
@@ -1702,6 +1726,8 @@ mod tests {
             task,
             transport: ServerTransport::Plaintext,
             route_count: AtomicUsize::new(0),
+            tls_acceptor: None,
+            tls_source: None,
         };
         let _ = handle;
     }

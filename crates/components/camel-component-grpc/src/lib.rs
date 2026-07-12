@@ -7,6 +7,7 @@ pub mod health;
 pub mod mode;
 pub mod producer;
 pub mod server;
+pub(crate) mod tls_reload;
 
 pub use bundle::GrpcBundle;
 pub use component::GrpcComponent;

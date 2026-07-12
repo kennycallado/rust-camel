@@ -1335,6 +1335,8 @@ dependencies = [
  "chrono-tz",
  "rand 0.10.2",
  "rcgen",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1486,6 +1488,7 @@ dependencies = [
 name = "camel-component-grpc"
 version = "0.23.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64",
  "bytes",
@@ -1889,6 +1892,7 @@ dependencies = [
  "dashmap",
  "futures",
  "http",
+ "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",

@@ -481,6 +481,13 @@ pub enum RuntimeCommand {
         command_id: String,
         causation_id: Option<String>,
     },
+    ReloadTlsCerts {
+        scheme: String,
+        host: String,
+        port: u16,
+        command_id: String,
+        causation_id: Option<String>,
+    },
 }
 
 impl RuntimeCommand {
@@ -493,7 +500,8 @@ impl RuntimeCommand {
             | RuntimeCommand::ResumeRoute { command_id, .. }
             | RuntimeCommand::ReloadRoute { command_id, .. }
             | RuntimeCommand::FailRoute { command_id, .. }
-            | RuntimeCommand::RemoveRoute { command_id, .. } => command_id,
+            | RuntimeCommand::RemoveRoute { command_id, .. }
+            | RuntimeCommand::ReloadTlsCerts { command_id, .. } => command_id,
         }
     }
 
@@ -506,7 +514,8 @@ impl RuntimeCommand {
             | RuntimeCommand::ResumeRoute { causation_id, .. }
             | RuntimeCommand::ReloadRoute { causation_id, .. }
             | RuntimeCommand::FailRoute { causation_id, .. }
-            | RuntimeCommand::RemoveRoute { causation_id, .. } => causation_id.as_deref(),
+            | RuntimeCommand::RemoveRoute { causation_id, .. }
+            | RuntimeCommand::ReloadTlsCerts { causation_id, .. } => causation_id.as_deref(),
         }
     }
 }
@@ -514,9 +523,21 @@ impl RuntimeCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeCommandResult {
     Accepted,
-    Duplicate { command_id: String },
-    RouteRegistered { route_id: String },
-    RouteStateChanged { route_id: String, status: String },
+    Duplicate {
+        command_id: String,
+    },
+    RouteRegistered {
+        route_id: String,
+    },
+    RouteStateChanged {
+        route_id: String,
+        status: String,
+    },
+    TlsCertsReloaded {
+        scheme: String,
+        host: String,
+        port: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,6 +618,9 @@ mod tests {
                         status: "ok".to_string(),
                     }
                 }
+                RuntimeCommand::ReloadTlsCerts {
+                    scheme, host, port, ..
+                } => RuntimeCommandResult::TlsCertsReloaded { scheme, host, port },
             })
         }
     }
@@ -822,10 +846,20 @@ mod tests {
                 command_id: "c8".into(),
                 causation_id: None,
             },
+            RuntimeCommand::ReloadTlsCerts {
+                scheme: "https".into(),
+                host: "example.com".into(),
+                port: 8443,
+                command_id: "c9".into(),
+                causation_id: None,
+            },
         ];
 
         let ids: Vec<&str> = cmds.iter().map(RuntimeCommand::command_id).collect();
-        assert_eq!(ids, vec!["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]);
+        assert_eq!(
+            ids,
+            vec!["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"]
+        );
         assert_eq!(cmds[0].causation_id(), Some("root"));
         assert_eq!(cmds[1].causation_id(), None);
     }

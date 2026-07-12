@@ -1419,3 +1419,161 @@ async fn inbound_mtls_rejects_certless_client() {
 
     shutdown_consumer(cancel_token, consumer_task, pipeline_task).await;
 }
+
+// ── TLS cert hot-reload: handler registration integration tests ───────────
+//
+// These tests verify the end-to-end *registration path*:
+//   `GrpcConsumer::start_with_listener` → `GrpcServerRegistry::get_or_spawn_with_listener`
+//   → `TlsReloadRegistry::global().register(GrpcReloadHandler)`.
+//
+// The cert-swap mechanics are unit-tested in `src/tls_reload.rs`. The
+// `RuntimeBus::execute(ReloadTlsCerts)` intercept is integration-tested in
+// `camel-core/tests/tls_reload_test.rs`.
+
+/// Helper: assert the TlsReloadRegistry has a handler for (scheme, host, port),
+/// exercise it, and clean up via unregister so tests don't pollute the global.
+async fn assert_handler_registered_and_cleanup(scheme: &str, host: &str, port: u16) {
+    use camel_component_api::tls_source::TlsReloadRegistry;
+    let handler = TlsReloadRegistry::global().find(scheme, host, port);
+    assert!(
+        handler.is_some(),
+        "TlsReloadRegistry must contain a handler for {scheme}://{host}:{port}"
+    );
+    // Reload the cert via the registered handler — verifies it's wired and
+    // functional, not just present in the registry.
+    handler
+        .unwrap()
+        .reload()
+        .await
+        .expect("registered handler reload() must succeed");
+    TlsReloadRegistry::global().unregister(scheme, host, port);
+}
+
+/// TLS-configured gRPC server registers a `GrpcReloadHandler` keyed by
+/// (`grpcs`, host, port) in the global TlsReloadRegistry. After spawning,
+/// `find()` must return the handler.
+#[tokio::test]
+async fn grpc_tls_server_registers_reload_handler() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let (_ca, server_cert_pem, server_key_pem) = tls::gen_server_cert();
+    let cert_path = tls::write_pem_tmp("grpc-reg-cert.pem", &server_cert_pem);
+    let key_path = tls::write_pem_tmp("grpc-reg-key.pem", &server_key_pem);
+
+    let server_config = GrpcServerConfig {
+        max_receive_message_len: None,
+        transport: ServerTransport::Tls(ServerTlsConfig {
+            server_cert_path: cert_path.to_str().expect("cert path").to_string(),
+            server_key_path: key_path.to_str().expect("key path").to_string(),
+            client_ca_path: None,
+        }),
+    };
+
+    let (port, cancel_token, consumer_task, pipeline_task) =
+        start_tls_consumer(server_config).await;
+
+    // Verify the handler is in the global registry keyed by grpcs://127.0.0.1:port.
+    assert_handler_registered_and_cleanup("grpcs", "127.0.0.1", port).await;
+
+    shutdown_consumer(cancel_token, consumer_task, pipeline_task).await;
+}
+
+/// mTLS server registers the reload handler the same way — the client_ca
+/// option doesn't affect the registration logic.
+#[tokio::test]
+async fn grpc_mtls_server_registers_reload_handler() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let (ca_pem, server_cert_pem, server_key_pem, _client_cert, _client_key) =
+        support::gen_mtls_certs();
+    let cert_path = tls::write_pem_tmp("grpc-mtls-reg-cert.pem", &server_cert_pem);
+    let key_path = tls::write_pem_tmp("grpc-mtls-reg-key.pem", &server_key_pem);
+    let ca_path = tls::write_pem_tmp("grpc-mtls-reg-ca.pem", &ca_pem);
+
+    let server_config = GrpcServerConfig {
+        max_receive_message_len: None,
+        transport: ServerTransport::Tls(ServerTlsConfig {
+            server_cert_path: cert_path.to_str().expect("cert path").to_string(),
+            server_key_path: key_path.to_str().expect("key path").to_string(),
+            client_ca_path: Some(ca_path.to_str().expect("ca path").to_string()),
+        }),
+    };
+
+    let (port, cancel_token, consumer_task, pipeline_task) =
+        start_tls_consumer(server_config).await;
+
+    assert_handler_registered_and_cleanup("grpcs", "127.0.0.1", port).await;
+
+    shutdown_consumer(cancel_token, consumer_task, pipeline_task).await;
+}
+
+/// Plaintext server MUST NOT register a TLS reload handler — there's no cert
+/// to reload. This guards against a regression where `get_or_spawn` registers
+/// unconditionally.
+#[tokio::test]
+async fn grpc_plaintext_server_does_not_register_reload_handler() {
+    use camel_component_api::tls_source::TlsReloadRegistry;
+
+    // Bind a fresh listener, start a plaintext consumer.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/helloworld.Greeter/SayHello".to_string(),
+        proto_path,
+        "helloworld.Greeter".to_string(),
+        "SayHello".to_string(),
+        GrpcMode::Unary,
+        test_rt(),
+        GrpcServerConfig {
+            max_receive_message_len: None,
+            transport: ServerTransport::Plaintext,
+        },
+    );
+
+    let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(
+        route_tx,
+        cancel_token.clone(),
+        "grpc-plaintext-no-reload-test".to_string(),
+    );
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("plaintext consumer start");
+    });
+
+    let pipeline_task = tokio::spawn(async move {
+        while let Some(envelope) = route_rx.recv().await {
+            let resp = Exchange::new(Message::new(Body::Json(serde_json::json!(
+                {"message": "ok"}
+            ))));
+            let _ = envelope.reply_tx.unwrap().send(Ok(resp));
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // No handler for grpcs on this port (and the "grpc" key would also be
+    // empty — the register path is skipped entirely for plaintext).
+    assert!(
+        TlsReloadRegistry::global()
+            .find("grpcs", "127.0.0.1", port)
+            .is_none(),
+        "plaintext server must not register a grpcs handler"
+    );
+    assert!(
+        TlsReloadRegistry::global()
+            .find("grpc", "127.0.0.1", port)
+            .is_none(),
+        "plaintext server must not register any handler"
+    );
+
+    shutdown_consumer(cancel_token, consumer_task, pipeline_task).await;
+}

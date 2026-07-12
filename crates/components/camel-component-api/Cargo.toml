@@ -27,6 +27,8 @@ rand     = { workspace = true }
 chrono   = { workspace = true }
 chrono-tz = { workspace = true }
 rcgen    = { version = "0.13", optional = true }
+rustls = { workspace = true }
+rustls-pemfile = "2"
 
 [features]
 default = []

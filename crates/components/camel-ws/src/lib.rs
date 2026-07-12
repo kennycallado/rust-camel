@@ -6,6 +6,7 @@
 pub mod bundle;
 pub mod config;
 pub mod health;
+pub(crate) mod tls_reload;
 
 pub use bundle::WsBundle;
 pub use config::{WsClientConfig, WsConfig, WsEndpointConfig, WsServerConfig};
@@ -22,6 +23,7 @@ use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Router, serve};
 use camel_api::security_policy::AuthorizationDecision;
+use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{
     Body as CamelBody, BoxProcessor, CamelError, Component, ConcurrencyModel, Consumer,
     ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, Message as CamelMessage,
@@ -73,6 +75,8 @@ struct ServerHandle {
     state: WsAppState,
     is_tls: bool,
     _task: JoinHandle<()>,
+    tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
+    tls_source: Option<ServerTlsSource>,
 }
 
 struct ServerRegistryInner {
@@ -117,14 +121,26 @@ impl ServerRegistry {
 
         let handle = cell
             .get_or_try_init(|| async {
-                spawn_server(
+                let handle = spawn_server(
                     &host_owned,
                     port,
                     tls_config,
                     runtime.clone(),
                     route_id.clone(),
                 )
-                .await
+                .await?;
+                // Register reload handler (exactly-once: inside OnceCell init closure).
+                if let (Some(tls_cfg), Some(source)) =
+                    (handle.tls_config.as_ref(), handle.tls_source.as_ref())
+                {
+                    let handler = Arc::new(crate::tls_reload::WsReloadHandler::new(
+                        tls_cfg.clone(),
+                        source.clone(),
+                        port,
+                    ));
+                    camel_component_api::tls_source::TlsReloadRegistry::global().register(handler);
+                }
+                Ok::<ServerHandle, CamelError>(handle)
             })
             .await?;
 
@@ -160,6 +176,11 @@ impl ServerRegistry {
                 // Abort the server task if it exists (WS-001, WS-005)
                 if let Some(handle) = entry.cell.get() {
                     handle._task.abort();
+                    // Unregister TLS reload handler (host-agnostic, pass empty host)
+                    if handle.is_tls {
+                        camel_component_api::tls_source::TlsReloadRegistry::global()
+                            .unregister("wss", "", port);
+                    }
                 }
                 guard.remove(&port);
                 tracing::info!(port, "WebSocket server registry entry removed");
@@ -193,12 +214,19 @@ async fn spawn_server(
         .fallback(dispatch_handler)
         .with_state(state.clone());
 
-    let (task, is_tls) = if let Some(ref tls) = tls_config {
+    let (task, is_tls, retained_tls_cfg, retained_source) = if let Some(ref tls) = tls_config {
         let rustls = load_tls_config(&tls.cert_path, &tls.key_path)?;
         let parsed_addr = addr.parse().map_err(|e| {
             CamelError::EndpointCreationFailed(format!("Invalid listen address {addr}: {e}"))
         })?;
         let tls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls));
+        let tls_source = ServerTlsSource {
+            cert_path: std::path::PathBuf::from(&tls.cert_path),
+            key_path: std::path::PathBuf::from(&tls.key_path),
+            client_ca_path: None,
+        };
+        // Clone for handle retention — the original moves into the spawned task
+        let retained = tls_cfg.clone();
         let error_flag = Arc::clone(&server_error);
         let rt = Arc::clone(&runtime);
         let rid = route_id.clone();
@@ -219,7 +247,7 @@ async fn spawn_server(
                 error_flag.store(true, Ordering::Relaxed);
             }
         });
-        (task, true)
+        (task, true, Some(retained), Some(tls_source))
     } else {
         let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
             CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
@@ -241,7 +269,7 @@ async fn spawn_server(
                 error_flag.store(true, Ordering::Relaxed);
             }
         });
-        (task, false)
+        (task, false, None, None)
     };
 
     tracing::info!(host, port, is_tls, "WebSocket server started");
@@ -250,6 +278,8 @@ async fn spawn_server(
         state,
         is_tls,
         _task: task,
+        tls_config: retained_tls_cfg,
+        tls_source: retained_source,
     })
 }
 
@@ -2968,5 +2998,156 @@ mod tests {
             first.contains("component=ws-producer"),
             "rc-1nm regression: expected 'component=ws-producer' in WS retry log, got: {first}"
         );
+    }
+
+    // ── TLS cert hot-reload: release/unregister integration tests ─────────
+    //
+    // These verify the WSS path: `get_or_spawn` registers a `WsReloadHandler`
+    // in `TlsReloadRegistry::global()`; `release` unregisters it when the
+    // last reference drops. The host-agnostic `matches` impl keys on
+    // (scheme="wss", port) — see `WsReloadHandler::matches`.
+
+    #[tokio::test]
+    async fn wss_release_unregisters_tls_reload_handler() {
+        use camel_component_api::test_support::tls;
+        use camel_component_api::tls_source::TlsReloadRegistry;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let (cert_pem, key_pem) = {
+            let (_ca, c, k) = tls::gen_server_cert();
+            (c, k)
+        };
+        let cert_path = tls::write_pem_tmp("ws-release-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("ws-release-key.pem", &key_pem);
+
+        let port = free_port();
+        let tls_cfg = WsTlsConfig {
+            cert_path: cert_path.to_str().expect("cert path").to_string(),
+            key_path: key_path.to_str().expect("key path").to_string(),
+        };
+
+        // Spawn a single WSS server.
+        let _state = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                Some(tls_cfg),
+                test_rt(),
+                "ws-release-test".into(),
+            )
+            .await
+            .expect("WSS server should spawn");
+
+        // Handler is registered (host-agnostic — match passes empty host).
+        let handler = TlsReloadRegistry::global().find("wss", "", port);
+        assert!(
+            handler.is_some(),
+            "WSS server must register a reload handler for wss://*:{port}"
+        );
+        // Exercise it to verify the registered handler is functional.
+        handler
+            .unwrap()
+            .reload()
+            .await
+            .expect("registered WSS handler reload() must succeed");
+
+        // Release the (only) reference — server task is aborted and the
+        // handler must be unregistered.
+        ServerRegistry::global().release(port);
+
+        assert!(
+            TlsReloadRegistry::global().find("wss", "", port).is_none(),
+            "WSS server release must unregister the reload handler"
+        );
+    }
+
+    #[tokio::test]
+    async fn wss_multiple_refs_release_does_not_unregister() {
+        use camel_component_api::test_support::tls;
+        use camel_component_api::tls_source::TlsReloadRegistry;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let (cert_pem, key_pem) = {
+            let (_ca, c, k) = tls::gen_server_cert();
+            (c, k)
+        };
+        let cert_path = tls::write_pem_tmp("ws-multiref-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("ws-multiref-key.pem", &key_pem);
+
+        let port = free_port();
+        let tls_cfg = WsTlsConfig {
+            cert_path: cert_path.to_str().expect("cert path").to_string(),
+            key_path: key_path.to_str().expect("key path").to_string(),
+        };
+
+        // Acquire TWO references to the same port.
+        let _s1 = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                Some(tls_cfg.clone()),
+                test_rt(),
+                "ws-multiref-r1".into(),
+            )
+            .await
+            .expect("WSS server should spawn (ref 1)");
+        let _s2 = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                Some(tls_cfg),
+                test_rt(),
+                "ws-multiref-r2".into(),
+            )
+            .await
+            .expect("WSS server should spawn (ref 2)");
+
+        // Handler is registered.
+        assert!(
+            TlsReloadRegistry::global().find("wss", "", port).is_some(),
+            "WSS server with refs must have a registered reload handler"
+        );
+
+        // Release the FIRST reference — ref count is still 1, handler must remain.
+        ServerRegistry::global().release(port);
+        assert!(
+            TlsReloadRegistry::global().find("wss", "", port).is_some(),
+            "handler must remain registered while ref count > 0"
+        );
+
+        // Release the LAST reference — now the server is torn down.
+        ServerRegistry::global().release(port);
+        assert!(
+            TlsReloadRegistry::global().find("wss", "", port).is_none(),
+            "handler must be unregistered after final release"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_plaintext_does_not_register_tls_reload_handler() {
+        use camel_component_api::tls_source::TlsReloadRegistry;
+
+        let port = free_port();
+        let _state = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                port,
+                None,
+                test_rt(),
+                "ws-plaintext-no-reload-test".into(),
+            )
+            .await
+            .expect("plaintext WS server should spawn");
+
+        // No handler for either wss or ws — plaintext has nothing to reload.
+        assert!(
+            TlsReloadRegistry::global().find("wss", "", port).is_none(),
+            "plaintext WS server must not register a wss handler"
+        );
+
+        // Cleanup.
+        ServerRegistry::global().release(port);
     }
 }

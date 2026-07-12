@@ -164,6 +164,32 @@ impl RuntimeBus {
 #[async_trait]
 impl RuntimeCommandBus for RuntimeBus {
     async fn execute(&self, cmd: RuntimeCommand) -> Result<RuntimeCommandResult, CamelError> {
+        // ── TLS cert reload intercept ──────────────────────────────────────
+        // Infrastructure command — bypasses journal recovery + dedup.
+        // Reloads are idempotent and NOT journaled.
+        if let RuntimeCommand::ReloadTlsCerts {
+            scheme, host, port, ..
+        } = &cmd
+        {
+            let registry = camel_component_api::tls_source::TlsReloadRegistry::global();
+            match registry.find(scheme, host, *port) {
+                Some(handler) => {
+                    handler.reload().await?;
+                    return Ok(RuntimeCommandResult::TlsCertsReloaded {
+                        scheme: scheme.clone(),
+                        host: host.clone(),
+                        port: *port,
+                    });
+                }
+                None => {
+                    return Err(CamelError::Config(format!(
+                        "no TLS server found for {scheme}://{host}:{port}"
+                    )));
+                }
+            }
+        }
+        // ── End TLS reload intercept ────────────────────────────────────────
+
         self.ensure_journal_recovered().await?;
         let command_id = cmd.command_id().to_string();
         if !self.dedup.first_seen(&command_id).await? {

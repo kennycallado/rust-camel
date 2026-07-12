@@ -21,6 +21,7 @@ pub mod producer;
 pub mod registrar;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod tls_source;
 
 pub use bundle::ComponentBundle;
 pub use component::Component;

@@ -35,6 +35,7 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 async-trait.workspace = true
 futures.workspace = true
+arc-swap = { workspace = true }
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }

@@ -59,6 +59,9 @@ pub async fn execute_command(
             route_id, error, ..
         } => handle_lifecycle(deps, route_id, RouteLifecycleCommand::Fail(error)).await,
         RuntimeCommand::RemoveRoute { route_id, .. } => handle_remove(deps, route_id).await,
+        RuntimeCommand::ReloadTlsCerts { .. } => Err(CamelError::Config(
+            "ReloadTlsCerts not handled: should be intercepted in execute()".into(),
+        )),
     }
 }
 
