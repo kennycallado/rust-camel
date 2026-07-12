@@ -339,6 +339,7 @@ async fn client_built_once_under_concurrency() {
         },
         Duration::from_secs(30),
         stub_builder,
+        SsrfPolicy::PublicHttpsOnly,
     ));
     let builds = Arc::clone(&provider.client_builds);
 
@@ -372,7 +373,12 @@ async fn build_client_rejects_ssrf_link_local_base_url() {
         base_url: Some("http://169.254.169.254/".into()),
         model: "gpt-4".into(),
     };
-    let result = build_client_from_config(&config, Duration::from_secs(30)).await;
+    let result = build_client_from_config(
+        &config,
+        Duration::from_secs(30),
+        SsrfPolicy::PublicHttpsOnly,
+    )
+    .await;
     assert!(result.is_err(), "expected Err for SSRF-blocked base_url");
     let err = result.err().expect("is_err"); // allow-unwrap
     assert!(
@@ -397,7 +403,12 @@ async fn build_client_rejects_ollama_ssrf_link_local() {
         base_url: "http://169.254.169.254/".into(),
         model: "llama3".into(),
     };
-    let result = build_client_from_config(&config, Duration::from_secs(30)).await;
+    let result = build_client_from_config(
+        &config,
+        Duration::from_secs(30),
+        SsrfPolicy::PublicHttpsOnly,
+    )
+    .await;
     assert!(result.is_err(), "expected Err for SSRF-blocked base_url");
     let err = result.err().expect("is_err"); // allow-unwrap
     assert!(

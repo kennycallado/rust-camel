@@ -41,6 +41,7 @@ fn make_ollama_component() -> LlmComponent {
     );
     LlmComponent::new(LlmGlobalConfig {
         providers,
+        allow_internal: true,
         ..Default::default()
     })
     .expect("component")

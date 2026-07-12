@@ -57,6 +57,7 @@ pub fn hardened_http_client_with_pinning(
 ) -> Result<reqwest::Client, CamelError> {
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy() // CRITICAL: env proxies bypass resolve_to_addrs
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30));
     if let Some((host, addrs)) = pinned {

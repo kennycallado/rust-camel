@@ -35,7 +35,7 @@ pub use bearer_token_layer::{BearerTokenLayer, BearerTokenService};
 pub use built_in::{RolePolicy, ScopePolicy};
 pub use claims::{ClaimPaths, ClaimsMapper, JsonPointerClaimsMapper};
 pub use credential_source::{CredentialSource, extract_token_multi, redact_query_params};
-pub use http_client::validate_https_public_uri;
+pub use http_client::{SsrfClientOptions, validate_uri};
 pub use introspection::{
     CachingTokenIntrospector, IntrospectionCacheOptions, IntrospectionResult, TokenIntrospector,
 };

@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(exchange)
             })
         })
-        .to("https://httpbin.org/get?allowPrivateIps=false")
+        .to("https://httpbin.org/get?allowInternal=false")
         .process(|exchange| {
             Box::pin(async move {
                 // Log the response - this log is exported via OTLP log bridge

@@ -51,6 +51,8 @@ use crate::provider::{
     LlmProvider, LlmUsage, ToolChoice, ToolDefinition,
 };
 
+use camel_api::SsrfPolicy;
+
 use siumai_core::builder::BuilderBase;
 use siumai_core::error::LlmError as SiumaiLlmError;
 #[cfg(test)]
@@ -104,6 +106,7 @@ struct SiumaiProvider {
     id: String,
     default_model: String,
     config: SiumaiConfig,
+    policy: SsrfPolicy,
     client: Arc<OnceCell<CachedClient>>,
     configured_timeout: Duration,
     #[cfg(test)]
@@ -118,11 +121,13 @@ impl SiumaiProvider {
         default_model: impl Into<String>,
         config: SiumaiConfig,
         configured_timeout: Duration,
+        policy: SsrfPolicy,
     ) -> Self {
         Self {
             id: id.into(),
             default_model: default_model.into(),
             config,
+            policy,
             client: Arc::new(OnceCell::new()),
             configured_timeout,
             #[cfg(test)]
@@ -140,11 +145,13 @@ impl SiumaiProvider {
         config: SiumaiConfig,
         configured_timeout: Duration,
         override_: BuildOverride,
+        policy: SsrfPolicy,
     ) -> Self {
         Self {
             id: id.into(),
             default_model: default_model.into(),
             config,
+            policy,
             client: Arc::new(OnceCell::new()),
             configured_timeout,
             client_builds: Arc::new(AtomicUsize::new(0)),
@@ -168,6 +175,7 @@ impl LlmProvider for SiumaiProvider {
         let default_model = self.default_model.clone();
         let client_cell = Arc::clone(&self.client);
         let configured_timeout = self.configured_timeout;
+        let policy = self.policy;
         #[cfg(test)]
         let builds = Arc::clone(&self.client_builds);
         #[cfg(test)]
@@ -179,6 +187,7 @@ impl LlmProvider for SiumaiProvider {
                 build_cached_client(
                     &config,
                     configured_timeout,
+                    policy,
                     #[cfg(test)] override_.as_ref(),
                     #[cfg(test)] &builds,
                 ).await
@@ -222,6 +231,7 @@ impl LlmProvider for SiumaiProvider {
     async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse, LlmError> {
         let config = self.config.clone();
         let configured_timeout = self.configured_timeout;
+        let policy = self.policy;
         #[cfg(test)]
         let builds = Arc::clone(&self.client_builds);
         #[cfg(test)]
@@ -233,6 +243,7 @@ impl LlmProvider for SiumaiProvider {
                 build_cached_client(
                     &config,
                     configured_timeout,
+                    policy,
                     #[cfg(test)]
                     override_.as_ref(),
                     #[cfg(test)]
@@ -286,6 +297,7 @@ impl LlmProvider for SiumaiProvider {
 async fn build_cached_client(
     config: &SiumaiConfig,
     configured_timeout: Duration,
+    policy: SsrfPolicy,
     #[cfg(test)] override_: Option<&BuildOverride>,
     #[cfg(test)] builds: &AtomicUsize,
 ) -> Result<CachedClient, LlmError> {
@@ -297,7 +309,7 @@ async fn build_cached_client(
             return Ok(CachedClient { chat, embed });
         }
     }
-    let (chat, embed) = build_client_from_config(config, configured_timeout).await?;
+    let (chat, embed) = build_client_from_config(config, configured_timeout, policy).await?;
     Ok(CachedClient { chat, embed })
 }
 
@@ -321,13 +333,16 @@ async fn build_cached_client(
 /// the TOCTOU window between validation and the first outbound request.
 async fn validate_base_url_ssrf(
     base_url: &str,
+    policy: SsrfPolicy,
 ) -> Result<(String, Vec<std::net::SocketAddr>), LlmError> {
     let url = base_url.to_string();
-    tokio::task::spawn_blocking(move || crate::provider_factory::validate_llm_url_pinned(&url))
-        .await
-        .map_err(|e| {
-            LlmError::InvalidRequest(format!("llm base_url SSRF validation task failed: {e}"))
-        })?
+    tokio::task::spawn_blocking(move || {
+        crate::provider_factory::validate_llm_url_pinned(&url, policy)
+    })
+    .await
+    .map_err(|e| {
+        LlmError::InvalidRequest(format!("llm base_url SSRF validation task failed: {e}"))
+    })?
 }
 
 /// Returns `true` if `url_str` parses as an HTTP(S) URL with a domain hostname
@@ -355,11 +370,12 @@ fn is_hostname_domain(url_str: &str) -> bool {
 async fn build_client_from_config(
     config: &SiumaiConfig,
     configured_timeout: Duration,
+    policy: SsrfPolicy,
 ) -> Result<(Arc<dyn ChatCapability>, Arc<dyn EmbeddingCapability>), LlmError> {
     // Phase 1: validate base_url and collect pinning data (before building client).
     // Only pin hostnames (not IP literals — reqwest connects directly to IPs,
     // no TOCTOU window exists).
-    let pinning = collect_pinning_from_config(config).await?;
+    let pinning = collect_pinning_from_config(config, policy).await?;
 
     // Phase 2: build hardened reqwest::Client with optional DNS pinning.
     // Siumai honors `BuilderBase::http_client` over its own client construction
@@ -420,6 +436,7 @@ async fn build_client_from_config(
 /// or when the host is an IP literal (no TOCTOU window).
 async fn collect_pinning_from_config(
     config: &SiumaiConfig,
+    policy: SsrfPolicy,
 ) -> Result<Option<(String, Vec<std::net::SocketAddr>)>, LlmError> {
     match config {
         #[cfg(any(feature = "openai", feature = "all-providers"))]
@@ -427,7 +444,7 @@ async fn collect_pinning_from_config(
             base_url: Some(url),
             ..
         } => {
-            let (host, addrs) = validate_base_url_ssrf(url).await?;
+            let (host, addrs) = validate_base_url_ssrf(url, policy).await?;
             if is_hostname_domain(url) {
                 Ok(Some((host, addrs)))
             } else {
@@ -438,7 +455,7 @@ async fn collect_pinning_from_config(
         SiumaiConfig::OpenAi { base_url: None, .. } => Ok(None),
         #[cfg(any(feature = "ollama", feature = "all-providers"))]
         SiumaiConfig::Ollama { base_url, .. } => {
-            let (host, addrs) = validate_base_url_ssrf(base_url).await?;
+            let (host, addrs) = validate_base_url_ssrf(base_url, policy).await?;
             if is_hostname_domain(base_url) {
                 Ok(Some((host, addrs)))
             } else {
@@ -460,6 +477,7 @@ pub fn build_openai(
     name: &str,
     config: &OpenaiProviderConfig,
     configured_timeout: Duration,
+    policy: SsrfPolicy,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let cfg = SiumaiConfig::OpenAi {
         api_key: config.api_key.clone(),
@@ -471,6 +489,7 @@ pub fn build_openai(
         &config.default_model,
         cfg,
         configured_timeout,
+        policy,
     )))
 }
 
@@ -482,6 +501,7 @@ pub fn build_ollama(
     name: &str,
     config: &OllamaProviderConfig,
     configured_timeout: Duration,
+    policy: SsrfPolicy,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let cfg = SiumaiConfig::Ollama {
         base_url: config.base_url.clone(),
@@ -492,6 +512,7 @@ pub fn build_ollama(
         &config.default_model,
         cfg,
         configured_timeout,
+        policy,
     )))
 }
 

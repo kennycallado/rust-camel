@@ -538,7 +538,7 @@ async fn http_producer_allows_localhost_when_configured() {
     let endpoint_ctx = NoOpComponentContext;
     let endpoint = component
         .create_endpoint(
-            &format!("http://127.0.0.1:{actual_port}/test?allowPrivateIps=true"),
+            &format!("http://127.0.0.1:{actual_port}/test?allowInternal=true"),
             &endpoint_ctx,
         )
         .unwrap();
@@ -586,7 +586,7 @@ async fn http_custom_ok_status_code_range() {
     let endpoint = component
         .create_endpoint(
             &format!(
-                "http://127.0.0.1:{actual_port}/test?allowPrivateIps=true&okStatusCodeRange=200-204"
+                "http://127.0.0.1:{actual_port}/test?allowInternal=true&okStatusCodeRange=200-204"
             ),
             &endpoint_ctx,
         )
@@ -958,7 +958,7 @@ async fn http_producer_bridge_endpoint_skips_auth() {
     let endpoint = component
         .create_endpoint(
             &format!(
-                "http://127.0.0.1:{actual_port}/test?allowPrivateIps=true&bridgeEndpoint=true&authMethod=Basic&authUsername=u&authPassword=p"
+                "http://127.0.0.1:{actual_port}/test?allowInternal=true&bridgeEndpoint=true&authMethod=Basic&authUsername=u&authPassword=p"
             ),
             &endpoint_ctx,
         )
@@ -1023,9 +1023,7 @@ async fn http_producer_connection_close_header() {
     let endpoint_ctx = NoOpComponentContext;
     let endpoint = component
         .create_endpoint(
-            &format!(
-                "http://127.0.0.1:{actual_port}/test?allowPrivateIps=true&connectionClose=true"
-            ),
+            &format!("http://127.0.0.1:{actual_port}/test?allowInternal=true&connectionClose=true"),
             &endpoint_ctx,
         )
         .unwrap();
@@ -1091,7 +1089,7 @@ async fn http_producer_skip_request_headers() {
     let endpoint = component
         .create_endpoint(
             &format!(
-                "http://127.0.0.1:{actual_port}/test?allowPrivateIps=true&skipRequestHeaders=X-Secret"
+                "http://127.0.0.1:{actual_port}/test?allowInternal=true&skipRequestHeaders=X-Secret"
             ),
             &endpoint_ctx,
         )

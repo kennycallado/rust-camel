@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::{CamelError, is_ssrf_blocked_ip};
+use camel_api::{CamelError, SsrfPolicy, is_ssrf_blocked_ip};
 use camel_auth::claims::ClaimPaths;
 use camel_auth::oauth2::{ClientCredentialsProvider, TokenProvider};
 use camel_auth::permission::PermissionEvaluator;
@@ -35,6 +35,7 @@ pub struct KeycloakRealmConfig {
     client_id: String,
     #[serde(skip_serializing)]
     client_secret: Option<String>,
+    allow_internal: bool,
 }
 
 impl fmt::Debug for KeycloakRealmConfig {
@@ -49,6 +50,7 @@ impl fmt::Debug for KeycloakRealmConfig {
             .field("realm", &self.realm)
             .field("client_id", &self.client_id)
             .field("client_secret", &secret_display)
+            .field("allow_internal", &self.allow_internal)
             .finish()
     }
 }
@@ -72,12 +74,31 @@ impl KeycloakRealmConfig {
             realm,
             client_id,
             client_secret: None,
+            allow_internal: false,
         }
     }
 
     pub fn with_client_secret(mut self, secret: String) -> Self {
         self.client_secret = Some(secret);
         self
+    }
+
+    pub fn with_allow_internal(mut self, allow: bool) -> Self {
+        self.allow_internal = allow;
+        self
+    }
+
+    pub fn allow_internal(&self) -> bool {
+        self.allow_internal
+    }
+
+    /// Derives the SSRF policy from `allow_internal`.
+    pub fn policy(&self) -> SsrfPolicy {
+        if self.allow_internal {
+            SsrfPolicy::AllowInternal
+        } else {
+            SsrfPolicy::PublicHttpsOnly
+        }
     }
 
     pub fn realm_url(&self) -> String {
@@ -135,11 +156,13 @@ impl KeycloakRealmConfig {
         let secret = self
             .client_secret()
             .ok_or_else(|| CamelError::Config("introspection requires client_secret".into()))?;
+        let policy = self.policy();
         let introspector = camel_auth::CachingTokenIntrospector::new(
             self.introspection_endpoint(),
             self.client_id().to_string(),
             secret.to_string(),
             options,
+            policy,
         )
         .await
         .map_err(|e| CamelError::Config(e.to_string()))?;
@@ -157,11 +180,13 @@ impl KeycloakRealmConfig {
             .client_secret
             .as_ref()
             .ok_or_else(|| AuthError::ConfigError("client_secret required for UMA".into()))?;
+        let policy = self.policy();
         let evaluator = KeycloakUmaEvaluator::new(
             self.server_url.clone(),
             self.realm.clone(),
             self.client_id.clone(),
             secret.clone(),
+            policy,
         )
         .await?;
         Ok(Arc::new(evaluator))
@@ -262,6 +287,7 @@ pub fn validate_server_url(url: &str, allow_internal: bool) -> Result<(), CamelE
 
 pub struct KeycloakComponent {
     server_url: String,
+    allow_internal: bool,
     token_provider: Arc<dyn TokenProvider>,
     http: reqwest::Client,
 }
@@ -271,6 +297,7 @@ impl KeycloakComponent {
         let secret = config.client_secret().ok_or_else(|| {
             CamelError::EndpointCreationFailed("keycloak component requires client_secret".into())
         })?;
+        let policy = config.policy();
         let token_provider = Arc::new(
             ClientCredentialsProvider::new(
                 config.token_endpoint(),
@@ -278,14 +305,27 @@ impl KeycloakComponent {
                 secret.to_string(),
                 None,
                 None,
+                policy,
             )
             .await
             .map_err(|_| CamelError::EndpointCreationFailed("token provider init failed".into()))?,
         );
+        let http = camel_auth::http_client::build_ssrf_pinned_client(
+            config.server_url(),
+            "keycloak admin/events",
+            &camel_auth::http_client::SsrfClientOptions::new(policy)
+                .with_connect_timeout(Duration::from_secs(10))
+                .with_request_timeout(Duration::from_secs(30)),
+        )
+        .await
+        .map_err(|e| {
+            CamelError::EndpointCreationFailed(format!("keycloak HTTP client build failed: {e}"))
+        })?;
         Ok(Self {
             server_url: config.server_url().to_string(),
+            allow_internal: config.allow_internal(),
             token_provider,
-            http: hardened_http_client()?,
+            http,
         })
     }
 
@@ -308,6 +348,7 @@ impl KeycloakComponent {
         ));
         Ok(Self {
             server_url: config.server_url().to_string(),
+            allow_internal: config.allow_internal(),
             token_provider,
             http: crate::hardened_http_client()?,
         })
@@ -328,6 +369,7 @@ impl Component for KeycloakComponent {
         let config = KeycloakEndpointConfig::from_uri(
             uri,
             &self.server_url,
+            self.allow_internal,
             Arc::clone(&self.token_provider),
             self.http.clone(),
         )?;
@@ -507,21 +549,21 @@ mod tests {
             "myrealm".into(),
             "myclient".into(),
         )
-        .with_client_secret("secret".into());
+        .with_client_secret("secret".into())
+        .with_allow_internal(true);
         let component = KeycloakComponent::new_for_test(&config).unwrap();
         let ctx = NoOpComponentContext;
-        // allowInternalUrls=true: the example.com host has no DNS in CI;
-        // opting in lets us exercise the rest of create_endpoint without
-        // standing up a network.
+        // allow_internal=true on the component opts past DNS for example.com
+        // in CI where the host has no network resolution.
         let endpoint = component
             .create_endpoint(
-                "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1&allowInternalUrls=true",
+                "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1",
                 &ctx,
             )
             .unwrap();
         assert_eq!(
             endpoint.uri(),
-            "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1&allowInternalUrls=true"
+            "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1"
         );
     }
 

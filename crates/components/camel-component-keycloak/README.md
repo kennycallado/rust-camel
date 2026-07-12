@@ -25,6 +25,20 @@ Derives the following endpoints automatically:
 
 `client_secret` is serialized as `REDACTED` in Debug output and excluded from Serde serialization.
 
+For local Keycloak (HTTP + loopback), add `.with_allow_internal(true)`:
+
+```rust
+let config = KeycloakRealmConfig::new(
+    "http://localhost:8080".into(),
+    "myrealm".into(),
+    "my-client".into(),
+)
+.with_client_secret("secret".into())
+.with_allow_internal(true);
+```
+
+This propagates `SsrfPolicy::AllowInternal` to all derived HTTP clients (token, introspection, JWKS, UMA). DNS pinning stays active; only private/loopback IPs and HTTP scheme are permitted.
+
 ### Admin API Producer
 
 Sends CRUD requests to the Keycloak Admin REST API. Created as a producer (outbound) from the `keycloak:admin` endpoint. Supports the following operations:

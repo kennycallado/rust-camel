@@ -367,7 +367,7 @@ rust-camel includes production-ready security features:
 ```rust
 // Block private IPs by default
 RouteBuilder::from("direct:start")
-    .to("http://api.example.com?allowPrivateIps=false")
+    .to("http://api.example.com?allowInternal=false")
     .build()?
 
 // Custom blocked hosts
@@ -671,7 +671,7 @@ log_level = "INFO"
 # Component defaults - apply to all endpoints
 [default.components.http]
 connect_timeout_ms = 5000
-allow_private_ips = false
+allow_internal = false
 
 [default.components.kafka]
 brokers = "localhost:9092"
@@ -723,7 +723,7 @@ Each component supports global defaults that apply to all endpoints. URI paramet
 
 Supported component configurations:
 
-- **`[components.http]`**: `connect_timeout_ms`, `response_timeout_ms`, `max_connections`, `max_body_size`, `max_request_body`, `allow_private_ips`
+- **`[components.http]`**: `connect_timeout_ms`, `response_timeout_ms`, `max_connections`, `max_body_size`, `max_request_body`, `allow_internal`
 - **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`, `partition_assignment_strategy`. Named clusters under `[components.kafka.brokers_named.<name>]` each with `brokers`, optional `security_protocol`, `sasl_auth_type`, `client_id`, and `rdkafka_config` escape hatch. Reference via `?brokerName=<name>` in the endpoint URI.
 - **`[components.redis]`**: `host`, `port`
 - **`[components.sql]`**: `max_connections`, `min_connections`, `idle_timeout_secs`, `max_lifetime_secs`, `ssl_mode`, `ssl_root_cert`, `ssl_cert`, `ssl_key`
@@ -804,7 +804,7 @@ Configure global defaults for all component endpoints in `Camel.toml`:
 ```toml
 [default.components.http]
 connect_timeout_ms = 5000
-allow_private_ips = false
+allow_internal = false
 
 [default.components.kafka]
 brokers = "localhost:9092"

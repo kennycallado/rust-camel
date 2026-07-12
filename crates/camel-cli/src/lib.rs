@@ -42,12 +42,13 @@ async fn keycloak_authenticator(
         keycloak.realm.clone(),
         keycloak.client_id.clone(),
     )
-    .with_client_secret(keycloak.client_secret.clone());
+    .with_client_secret(keycloak.client_secret.clone())
+    .with_allow_internal(keycloak.allow_internal);
 
     match keycloak.validation.method.as_str() {
         "local" => {
             let jwks = Arc::new(
-                camel_auth::RemoteJwksProvider::new(realm.jwks_uri())
+                camel_auth::RemoteJwksProvider::new(realm.jwks_uri(), realm.policy())
                     .await
                     .map_err(|e| CamelError::Config(e.to_string()))?,
             );
@@ -127,7 +128,8 @@ async fn register_keycloak_uma_evaluator(
             keycloak.realm.clone(),
             keycloak.client_id.clone(),
         )
-        .with_client_secret(keycloak.client_secret.clone());
+        .with_client_secret(keycloak.client_secret.clone())
+        .with_allow_internal(keycloak.allow_internal);
         let evaluator = realm
             .uma_evaluator()
             .await

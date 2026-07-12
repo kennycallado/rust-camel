@@ -27,7 +27,7 @@ async fn main() -> Result<(), CamelError> {
                 Ok(exchange)
             })
         })
-        .to("https://httpbin.org/get?source=rust-camel&allowPrivateIps=false")
+        .to("https://httpbin.org/get?source=rust-camel&allowInternal=false")
         .process(|exchange| {
             Box::pin(async move {
                 let body_str = match &exchange.input.body {

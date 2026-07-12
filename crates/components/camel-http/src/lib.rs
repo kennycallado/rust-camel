@@ -106,7 +106,7 @@ pub struct HttpEndpointConfig {
     pub ok_status_code_range: (u16, u16),
     pub response_timeout: Option<Duration>,
     pub query_params: HashMap<String, String>,
-    pub allow_private_ips: bool,
+    pub allow_internal: bool,
     pub blocked_hosts: Vec<String>,
     pub max_body_size: usize,
     pub read_timeout_ms: u64,
@@ -159,7 +159,7 @@ const HTTP_CAMEL_OPTIONS: &[&str] = &[
     "maxRedirects",
     "connectTimeout",
     "responseTimeout",
-    "allowPrivateIps",
+    "allowInternal",
     "blockedHosts",
     "maxBodySize",
     "readTimeout",
@@ -223,9 +223,9 @@ impl UriConfig for HttpEndpointConfig {
         };
 
         // SSRF protection settings
-        let allow_private_ips = match parts.params.get("allowPrivateIps") {
+        let allow_internal = match parts.params.get("allowInternal") {
             Some(v) => parse_bool_param_http(v).map_err(|e| {
-                CamelError::InvalidUri(format!("invalid value for allowPrivateIps: {e}"))
+                CamelError::InvalidUri(format!("invalid value for allowInternal: {e}"))
             })?,
             None => false, // Default: block private IPs
         };
@@ -339,7 +339,7 @@ impl UriConfig for HttpEndpointConfig {
             ok_status_code_range,
             response_timeout,
             query_params,
-            allow_private_ips,
+            allow_internal,
             blocked_hosts,
             max_body_size,
             read_timeout_ms,
@@ -406,8 +406,8 @@ impl HttpEndpointConfig {
         if endpoint.response_timeout.is_none() {
             endpoint.response_timeout = Some(Duration::from_millis(config.response_timeout_ms));
         }
-        if !parts.params.contains_key("allowPrivateIps") {
-            endpoint.allow_private_ips = config.allow_private_ips;
+        if !parts.params.contains_key("allowInternal") {
+            endpoint.allow_internal = config.allow_internal;
         }
         if !parts.params.contains_key("blockedHosts") {
             endpoint.blocked_hosts = config.blocked_hosts.clone();
@@ -1479,6 +1479,7 @@ pub(crate) fn build_client(
     resolve_override: Option<(&str, &[std::net::SocketAddr])>,
 ) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
+        .no_proxy() // CRITICAL: env proxies bypass resolve_to_addrs
         .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
         .pool_max_idle_per_host(config.pool_max_idle_per_host)
         .pool_idle_timeout(Duration::from_millis(config.pool_idle_timeout_ms));
@@ -1490,12 +1491,6 @@ pub(crate) fn build_client(
 
     if let Some((host, addrs)) = resolve_override {
         builder = builder.resolve_to_addrs(host, addrs);
-    }
-
-    if let Some(proxy_url) = &config.proxy_url
-        && let Ok(proxy) = reqwest::Proxy::all(proxy_url)
-    {
-        builder = builder.proxy(proxy);
     }
 
     if matches!(cookie_handling, CookieHandling::InMemory) {
@@ -1822,8 +1817,7 @@ impl Service<Exchange> for HttpProducer {
             // (L-H2). When the URL uses a domain name and SSRF protection is active,
             // build a per-request client with resolve_to_addrs so reqwest connects
             // directly to the validated addresses without re-resolving DNS.
-            let resolved =
-                ssrf::resolve_initial_url_for_ssrf(&url, config.allow_private_ips).await?;
+            let resolved = ssrf::resolve_initial_url_for_ssrf(&url, config.allow_internal).await?;
             let client: reqwest::Client = if let Some((ref host, ref addrs)) = resolved {
                 build_client(
                     &http_config,
@@ -2266,13 +2260,13 @@ mod tests {
     fn test_from_uri_with_defaults_applies_config_when_uri_param_absent() {
         let config = HttpConfig::default()
             .with_response_timeout_ms(999)
-            .with_allow_private_ips(true)
+            .with_allow_internal(true)
             .with_blocked_hosts(vec!["evil.com".to_string()])
             .with_max_body_size(12345);
         let endpoint =
             HttpEndpointConfig::from_uri_with_defaults("http://example.com/api", &config).unwrap();
         assert_eq!(endpoint.response_timeout, Some(Duration::from_millis(999)));
-        assert!(endpoint.allow_private_ips);
+        assert!(endpoint.allow_internal);
         assert_eq!(endpoint.blocked_hosts, vec!["evil.com".to_string()]);
         assert_eq!(endpoint.max_body_size, 12345);
     }
@@ -2281,16 +2275,16 @@ mod tests {
     fn test_from_uri_with_defaults_uri_overrides_config() {
         let config = HttpConfig::default()
             .with_response_timeout_ms(999)
-            .with_allow_private_ips(true)
+            .with_allow_internal(true)
             .with_blocked_hosts(vec!["evil.com".to_string()])
             .with_max_body_size(12345);
         let endpoint = HttpEndpointConfig::from_uri_with_defaults(
-            "http://example.com/api?responseTimeout=500&allowPrivateIps=false&blockedHosts=bad.net&maxBodySize=99",
+            "http://example.com/api?responseTimeout=500&allowInternal=false&blockedHosts=bad.net&maxBodySize=99",
             &config,
         )
         .unwrap();
         assert_eq!(endpoint.response_timeout, Some(Duration::from_millis(500)));
-        assert!(!endpoint.allow_private_ips);
+        assert!(!endpoint.allow_internal);
         assert_eq!(endpoint.blocked_hosts, vec!["bad.net".to_string()]);
         assert_eq!(endpoint.max_body_size, 99);
     }
@@ -2403,7 +2397,7 @@ mod tests {
             }
         }
 
-        let uri = format!("http://127.0.0.1:{}/api?allowPrivateIps=true", port);
+        let uri = format!("http://127.0.0.1:{}/api?allowInternal=true", port);
         let ctx = test_producer_ctx();
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
@@ -2499,10 +2493,7 @@ mod tests {
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(
-                &format!("{url}/api/test?allowPrivateIps=true"),
-                &endpoint_ctx,
-            )
+            .create_endpoint(&format!("{url}/api/test?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -2529,10 +2520,7 @@ mod tests {
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(
-                &format!("{url}/api/data?allowPrivateIps=true"),
-                &endpoint_ctx,
-            )
+            .create_endpoint(&format!("{url}/api/data?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -2557,7 +2545,7 @@ mod tests {
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
+            .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -2587,7 +2575,7 @@ mod tests {
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
             .create_endpoint(
-                &format!("{url}/api?httpMethod=PUT&allowPrivateIps=true"),
+                &format!("{url}/api?httpMethod=PUT&allowInternal=true"),
                 &endpoint_ctx,
             )
             .unwrap();
@@ -2615,7 +2603,7 @@ mod tests {
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
             .create_endpoint(
-                &format!("{url}/not-found?allowPrivateIps=true"),
+                &format!("{url}/not-found?allowInternal=true"),
                 &endpoint_ctx,
             )
             .unwrap();
@@ -2644,7 +2632,7 @@ mod tests {
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
             .create_endpoint(
-                &format!("{url}/error?throwExceptionOnFailure=false&allowPrivateIps=true"),
+                &format!("{url}/error?throwExceptionOnFailure=false&allowInternal=true"),
                 &endpoint_ctx,
             )
             .unwrap();
@@ -2672,7 +2660,7 @@ mod tests {
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
             .create_endpoint(
-                "http://localhost:1/does-not-exist?allowPrivateIps=true",
+                "http://localhost:1/does-not-exist?allowInternal=true",
                 &endpoint_ctx,
             )
             .unwrap();
@@ -2703,7 +2691,7 @@ mod tests {
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
+            .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -2769,7 +2757,7 @@ mod tests {
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
             .create_endpoint(
-                &format!("{url}?throwExceptionOnFailure=false&allowPrivateIps=true"),
+                &format!("{url}?throwExceptionOnFailure=false&allowInternal=true"),
                 &endpoint_ctx,
             )
             .unwrap();
@@ -2801,7 +2789,7 @@ mod tests {
             HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}?allowPrivateIps=true"), &endpoint_ctx)
+            .create_endpoint(&format!("{url}?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -2820,7 +2808,7 @@ mod tests {
         );
     }
 
-    /// Integration test: with allowPrivateIps=true, redirects to private IPs are followed.
+    /// Integration test: with allowInternal=true, redirects to private IPs are followed.
     /// This verifies the manual redirect loop executes correctly.
     #[tokio::test]
     async fn test_redirect_to_private_ip_is_ssrf_blocked() {
@@ -2834,17 +2822,17 @@ mod tests {
             HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}?allowPrivateIps=true"), &endpoint_ctx)
+            .create_endpoint(&format!("{url}?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await;
 
-        // With allowPrivateIps=true, the redirect should succeed
+        // With allowInternal=true, the redirect should succeed
         assert!(
             result.is_ok(),
-            "Redirect should succeed with allowPrivateIps=true, got: {:?}",
+            "Redirect should succeed with allowInternal=true, got: {:?}",
             result
         );
         let exchange = result.unwrap();
@@ -2856,7 +2844,7 @@ mod tests {
         assert_eq!(status, 200, "Should follow redirect to /final");
     }
 
-    /// With allowPrivateIps=true, redirects to private IPs should be followed.
+    /// With allowInternal=true, redirects to private IPs should be followed.
     #[tokio::test]
     async fn test_redirect_to_private_ip_allowed_when_configured() {
         use tower::ServiceExt;
@@ -2869,7 +2857,7 @@ mod tests {
             HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}?allowPrivateIps=true"), &endpoint_ctx)
+            .create_endpoint(&format!("{url}?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -2883,11 +2871,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             status, 200,
-            "Should follow redirect to private IP when allowPrivateIps=true"
+            "Should follow redirect to private IP when allowInternal=true"
         );
     }
 
-    /// Integration test: with allowPrivateIps=false (default), a redirect to a
+    /// Integration test: with allowInternal=false (default), a redirect to a
     /// private/metadata IP must be blocked by the SSRF guard — NOT followed.
     #[tokio::test]
     async fn test_redirect_to_private_ip_blocked_when_ssrf_guard_active() {
@@ -2917,7 +2905,7 @@ mod tests {
         let component =
             HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
         let endpoint_ctx = NoOpComponentContext;
-        // allowPrivateIps=false is the default — do NOT set it
+        // allowInternal=false is the default — do NOT set it
         let endpoint = component.create_endpoint(&url, &endpoint_ctx).unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -2927,7 +2915,7 @@ mod tests {
         // Must be an error — SSRF guard blocks the redirect target
         assert!(
             result.is_err(),
-            "Redirect to private IP 169.254.169.254 must be blocked when allowPrivateIps=false"
+            "Redirect to private IP 169.254.169.254 must be blocked when allowInternal=false"
         );
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2973,7 +2961,7 @@ mod tests {
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
             .create_endpoint(
-                &format!("{url}?allowPrivateIps=true&maxRedirects=2"),
+                &format!("{url}?allowInternal=true&maxRedirects=2"),
                 &endpoint_ctx,
             )
             .unwrap();
@@ -3026,7 +3014,7 @@ mod tests {
         // apiKey is NOT a Camel option, should be forwarded as query param
         let endpoint = component
             .create_endpoint(
-                &format!("{url}/api?apiKey=secret123&httpMethod=GET&allowPrivateIps=true"),
+                &format!("{url}/api?apiKey=secret123&httpMethod=GET&allowInternal=true"),
                 &endpoint_ctx,
             )
             .unwrap();
@@ -3133,7 +3121,7 @@ mod tests {
         );
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/slow?allowPrivateIps=true"), &endpoint_ctx)
+            .create_endpoint(&format!("{url}/slow?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -3160,7 +3148,7 @@ mod tests {
             HttpComponent::with_config(HttpConfig::default().with_read_timeout_ms(5_000));
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
+            .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -3187,10 +3175,7 @@ mod tests {
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(
-                "http://example.com/api?allowPrivateIps=false",
-                &endpoint_ctx,
-            )
+            .create_endpoint("http://example.com/api?allowInternal=false", &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -3215,7 +3200,7 @@ mod tests {
     fn test_ssrf_config_defaults() {
         let config = HttpEndpointConfig::from_uri("http://example.com/api").unwrap();
         assert!(
-            !config.allow_private_ips,
+            !config.allow_internal,
             "Private IPs should be blocked by default"
         );
         assert!(
@@ -3225,11 +3210,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ssrf_config_allow_private_ips() {
+    fn test_ssrf_config_allow_internal() {
         let config =
-            HttpEndpointConfig::from_uri("http://example.com/api?allowPrivateIps=true").unwrap();
+            HttpEndpointConfig::from_uri("http://example.com/api?allowInternal=true").unwrap();
         assert!(
-            config.allow_private_ips,
+            config.allow_internal,
             "Private IPs should be allowed when explicitly set"
         );
     }
@@ -3294,10 +3279,10 @@ mod tests {
         let ctx = test_producer_ctx();
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
-        // With allowPrivateIps=true, the validation should pass
+        // With allowInternal=true, the validation should pass
         // (actual connection will fail, but that's expected)
         let endpoint = component
-            .create_endpoint("http://192.168.1.1/api?allowPrivateIps=true", &endpoint_ctx)
+            .create_endpoint("http://192.168.1.1/api?allowInternal=true", &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -4265,7 +4250,7 @@ mod tests {
             let component = HttpComponent::new();
             let endpoint_ctx = NoOpComponentContext;
             let endpoint = component
-                .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
+                .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
                 .unwrap();
             let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 
@@ -4448,7 +4433,7 @@ mod tests {
             let component = HttpComponent::new();
             let endpoint_ctx = NoOpComponentContext;
             let endpoint = component
-                .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
+                .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
                 .unwrap();
             let producer = endpoint.create_producer(rt(), &ctx).unwrap();
 

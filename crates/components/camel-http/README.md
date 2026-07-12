@@ -54,7 +54,7 @@ https://host:port/path[?options]
 | `throwExceptionOnFailure` | `true` | Throw on non-2xx responses |
 | `okStatusCodeRange` | `200-299` | Success status code range |
 | `responseTimeout` | Global default | Response timeout (ms) |
-| `allowPrivateIps` | Global default | Allow requests to private IPs |
+| `allowInternal` | Global default | Allow requests to private IPs |
 | `blockedHosts` | Global default | Comma-separated blocked hosts |
 | `maxBodySize` | Global default | Max response body size (bytes) |
 
@@ -87,7 +87,7 @@ let route = RouteBuilder::from("http://0.0.0.0:8080/hello")
 ```rust
 // GET request
 let route = RouteBuilder::from("timer:tick?period=60000")
-    .to("http://api.example.com/data?allowPrivateIps=false")
+    .to("http://api.example.com/data?allowInternal=false")
     .log("Response received", camel_processor::LogLevel::Info)
     .build()?;
 
@@ -235,11 +235,11 @@ follow_redirects = false            # Follow HTTP redirects (default: false)
 response_timeout_ms = 30000         # Response timeout (default: 30000)
 max_body_size = 10485760            # Max response body size, 10MB (default: 10MB)
 max_request_body = 2097152          # Max request body for server, 2MB (default: 2MB)
-allow_private_ips = false           # Allow requests to private IPs (default: false)
+allow_internal = false           # Allow requests to private IPs (default: false)
 blocked_hosts = []                  # Blocked host list (default: empty)
 ```
 
-URI parameters override **request-level** defaults (`responseTimeout`, `allowPrivateIps`, `blockedHosts`, `maxBodySize`). Connection-level settings (`connect_timeout_ms`, `pool_*`, `follow_redirects`) are baked into the shared connection pool and cannot be overridden per URI.
+URI parameters override **request-level** defaults (`responseTimeout`, `allowInternal`, `blockedHosts`, `maxBodySize`). Connection-level settings (`connect_timeout_ms`, `pool_*`, `follow_redirects`) are baked into the shared connection pool and cannot be overridden per URI.
 
 ### Profile-Specific Configuration
 
@@ -251,11 +251,11 @@ pool_max_idle_per_host = 100
 [production.components.http]
 connect_timeout_ms = 5000   # Faster fail in production
 pool_idle_timeout_ms = 60000
-allow_private_ips = false
+allow_internal = false
 
 [development.components.http]
 connect_timeout_ms = 60000  # More lenient in dev
-allow_private_ips = true    # Allow internal services in dev
+allow_internal = true    # Allow internal services in dev
 ```
 
 ## SSRF Protection
@@ -263,7 +263,7 @@ allow_private_ips = true    # Allow internal services in dev
 By default, the HTTP client blocks requests to private IP addresses for security. To allow:
 
 ```rust
-.to("http://internal.service/api?allowPrivateIps=true")
+.to("http://internal.service/api?allowInternal=true")
 ```
 
 To block specific hosts:

@@ -25,7 +25,7 @@ format = "json"
 # connect_timeout_ms = 5000
 # response_timeout_ms = 30000
 # max_connections = 100
-# allow_private_ips = false
+# allow_internal = false
 
 # [default.components.kafka]
 # brokers = "localhost:9092"

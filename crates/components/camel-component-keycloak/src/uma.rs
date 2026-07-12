@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use camel_auth::http_client::build_ssrf_pinned_client;
+use camel_api::SsrfPolicy;
+use camel_auth::http_client::{SsrfClientOptions, build_ssrf_pinned_client};
 use camel_auth::oauth2::{ClientCredentialsProvider, TokenProvider};
 use camel_auth::permission::{PermissionDecision, PermissionEvaluator, PermissionRequest};
 use camel_auth::types::AuthError;
@@ -44,6 +45,7 @@ impl KeycloakUmaEvaluator {
         realm: String,
         client_id: String,
         client_secret: String,
+        policy: SsrfPolicy,
     ) -> Result<Self, AuthError> {
         let server_url_trimmed = server_url.trim_end_matches('/');
         let realm_url = format!("{}/realms/{}", server_url_trimmed, realm);
@@ -55,6 +57,7 @@ impl KeycloakUmaEvaluator {
             client_secret,
             None,
             None,
+            policy,
         )
         .await?;
         // DNS-pin the permission client to the same host as the token endpoint,
@@ -62,8 +65,9 @@ impl KeycloakUmaEvaluator {
         let http = build_ssrf_pinned_client(
             &token_endpoint,
             "UMA permission",
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_secs(30),
+            &SsrfClientOptions::new(policy)
+                .with_connect_timeout(std::time::Duration::from_secs(5))
+                .with_request_timeout(std::time::Duration::from_secs(30)),
         )
         .await?;
         Ok(Self {
@@ -236,6 +240,7 @@ mod tests {
             "test".into(),
             "client".into(),
             "secret".into(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(result.is_err(), "should reject non-HTTPS server URL");

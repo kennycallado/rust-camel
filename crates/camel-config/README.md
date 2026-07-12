@@ -49,7 +49,7 @@ max_attempts = 5
 connect_timeout_ms = 5000
 response_timeout_ms = 30000
 max_connections = 100
-allow_private_ips = false
+allow_internal = false
 
 [default.components.kafka]
 brokers = "localhost:9092"
@@ -107,7 +107,7 @@ log_level = "debug"
 watch = true
 
 [development.components.http]
-allow_private_ips = true  # Allow internal services in dev
+allow_internal = true  # Allow internal services in dev
 ```
 
 ## Configuration Sections
@@ -149,7 +149,7 @@ response_timeout_ms = 30000    # Response timeout (default: none)
 max_connections = 100          # Max concurrent connections (default: 100)
 max_body_size = 10485760       # Max response body size, 10MB (default: 10MB)
 max_request_body = 2097152     # Max request body for server, 2MB (default: 2MB)
-allow_private_ips = false      # Allow requests to private IPs (default: false)
+allow_internal = false      # Allow requests to private IPs (default: false)
 ```
 
 ### Kafka Component

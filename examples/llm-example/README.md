@@ -66,11 +66,16 @@ Route 2 logs the same (streaming response materialized via stream cache).
    For Ollama:
 
    ```toml
+   [llm]
+   allow_internal = true
+
    [providers.my-ollama]
    type = "ollama"
    base_url = "http://localhost:11434"
    default_model = "llama3"
    ```
+
+   `allow_internal = true` permits HTTP + loopback addresses for local development.
 
 3. **Update the URIs** to reference the real provider name, e.g.:
 

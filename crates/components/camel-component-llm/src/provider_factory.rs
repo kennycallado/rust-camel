@@ -8,18 +8,25 @@ use crate::config::{LlmGlobalConfig, LlmProviderConfig};
 use crate::error::LlmError;
 use crate::provider::LlmProvider;
 use crate::provider::mock::{MockMode, MockProvider};
+use camel_api::SsrfPolicy;
 
 pub type ProviderMap = HashMap<String, Arc<dyn LlmProvider>>;
 
 pub fn build_provider_map(config: &LlmGlobalConfig) -> Result<ProviderMap, LlmError> {
     let mut map = HashMap::new();
     let global_timeout = config.timeout_secs;
+    let policy = if config.allow_internal {
+        SsrfPolicy::AllowInternal
+    } else {
+        SsrfPolicy::PublicHttpsOnly
+    };
     for (name, provider_config) in &config.providers {
-        let provider = build_single(name, provider_config, global_timeout).map_err(|e| {
-            // log-policy: system-broken
-            tracing::error!(provider = %name, error = %e, "failed to build llm provider");
-            e
-        })?;
+        let provider =
+            build_single(name, provider_config, global_timeout, policy).map_err(|e| {
+                // log-policy: system-broken
+                tracing::error!(provider = %name, error = %e, "failed to build llm provider");
+                e
+            })?;
         map.insert(name.clone(), provider);
     }
     Ok(map)
@@ -40,7 +47,10 @@ pub fn build_provider_map(config: &LlmGlobalConfig) -> Result<ProviderMap, LlmEr
 /// Returns (host_string, validated_socket_addresses) for the caller to pin
 /// via `reqwest::ClientBuilder::resolve_to_addrs`, closing the TOCTOU window
 /// between validation and the first outbound request.
-pub fn validate_llm_url_pinned(url: &str) -> Result<(String, Vec<SocketAddr>), LlmError> {
+pub fn validate_llm_url_pinned(
+    url: &str,
+    policy: SsrfPolicy,
+) -> Result<(String, Vec<SocketAddr>), LlmError> {
     let parsed = url::Url::parse(url)
         .map_err(|e| LlmError::InvalidRequest(format!("invalid llm base_url '{url}': {e}")))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -61,12 +71,26 @@ pub fn validate_llm_url_pinned(url: &str) -> Result<(String, Vec<SocketAddr>), L
             ))
         })?
         .collect();
+    let scheme_is_http = parsed.scheme() == "http";
     for addr in &addrs {
-        if camel_api::is_ssrf_blocked_ip(&addr.ip()) {
-            return Err(LlmError::InvalidRequest(format!(
-                "llm base_url resolves to blocked SSRF address: {}",
-                addr.ip()
-            )));
+        let is_blocked = camel_api::is_ssrf_blocked_ip(&addr.ip());
+        match policy {
+            SsrfPolicy::PublicHttpsOnly => {
+                if is_blocked {
+                    return Err(LlmError::InvalidRequest(format!(
+                        "llm base_url resolves to blocked SSRF address: {}",
+                        addr.ip()
+                    )));
+                }
+            }
+            SsrfPolicy::AllowInternal => {
+                if scheme_is_http && !is_blocked {
+                    return Err(LlmError::InvalidRequest(format!(
+                        "llm base_url resolves to public IP {} — HTTP not permitted (use HTTPS or allow_internal for internal only)",
+                        addr.ip()
+                    )));
+                }
+            }
         }
     }
     Ok((host_str.to_string(), addrs))
@@ -82,7 +106,7 @@ pub fn validate_llm_url_pinned(url: &str) -> Result<(String, Vec<SocketAddr>), L
 /// validation fails. An unresolvable host is treated as a configuration
 /// error — silently passing would let typos, hijacked DNS, or
 /// firewalled-internal names reach the outbound client.
-pub fn validate_llm_url(url: &str) -> Result<(), LlmError> {
+pub fn validate_llm_url(url: &str, policy: SsrfPolicy) -> Result<(), LlmError> {
     let parsed = url::Url::parse(url)
         .map_err(|e| LlmError::InvalidRequest(format!("invalid llm base_url '{url}': {e}")))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -91,20 +115,30 @@ pub fn validate_llm_url(url: &str) -> Result<(), LlmError> {
             parsed.scheme()
         )));
     }
-    // SSRF: resolve host and reject blocked IPs. Fail-closed on resolution
-    // failure so a misconfigured or non-resolvable host never silently
-    // bypasses the SSRF guard.
-    if let Some(host) = parsed.host_str() {
-        use std::net::ToSocketAddrs;
-        let addrs = (host, 0u16).to_socket_addrs().map_err(|e| {
-            LlmError::InvalidRequest(format!("cannot resolve llm base_url host '{host}': {e}"))
-        })?;
-        for addr in addrs {
-            if camel_api::is_ssrf_blocked_ip(&addr.ip()) {
-                return Err(LlmError::InvalidRequest(format!(
-                    "llm base_url resolves to blocked SSRF address: {}",
-                    addr.ip()
-                )));
+
+    // Under PublicHttpsOnly: reject non-HTTPS and blocked IPs.
+    // Under AllowInternal: accept http/https; IP-gated decision deferred
+    // to validate_llm_url_pinned which rejects HTTP-if-public.
+    if !policy.allows_internal() {
+        if parsed.scheme() != "https" {
+            return Err(LlmError::InvalidRequest(format!(
+                "llm base_url must use HTTPS for public endpoints (got '{}'). \
+                 Set allow_internal = true for local HTTP endpoints.",
+                parsed.scheme()
+            )));
+        }
+        if let Some(host) = parsed.host_str() {
+            use std::net::ToSocketAddrs;
+            let addrs = (host, 0u16).to_socket_addrs().map_err(|e| {
+                LlmError::InvalidRequest(format!("cannot resolve llm base_url host '{host}': {e}"))
+            })?;
+            for addr in addrs {
+                if camel_api::is_ssrf_blocked_ip(&addr.ip()) {
+                    return Err(LlmError::InvalidRequest(format!(
+                        "llm base_url resolves to blocked SSRF address: {}",
+                        addr.ip()
+                    )));
+                }
             }
         }
     }
@@ -115,6 +149,7 @@ fn build_single(
     name: &str,
     config: &LlmProviderConfig,
     #[allow(unused_variables)] global_timeout: Option<u64>,
+    #[allow(unused_variables)] policy: SsrfPolicy,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     match config {
         LlmProviderConfig::Mock(c) => {
@@ -130,11 +165,11 @@ fn build_single(
         #[cfg(any(feature = "openai", feature = "all-providers"))]
         LlmProviderConfig::Openai(c) => {
             if let Some(ref base_url) = c.base_url {
-                validate_llm_url(base_url)?;
+                validate_llm_url(base_url, policy)?;
             }
             let configured_timeout =
                 Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
-            crate::provider::siumai_adapter::build_openai(name, c, configured_timeout)
+            crate::provider::siumai_adapter::build_openai(name, c, configured_timeout, policy)
                 .map(|p| p as Arc<dyn LlmProvider>)
         }
         #[cfg(not(any(feature = "openai", feature = "all-providers")))]
@@ -143,10 +178,10 @@ fn build_single(
         )),
         #[cfg(any(feature = "ollama", feature = "all-providers"))]
         LlmProviderConfig::Ollama(c) => {
-            validate_llm_url(&c.base_url)?;
+            validate_llm_url(&c.base_url, policy)?;
             let configured_timeout =
                 Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
-            crate::provider::siumai_adapter::build_ollama(name, c, configured_timeout)
+            crate::provider::siumai_adapter::build_ollama(name, c, configured_timeout, policy)
                 .map(|p| p as Arc<dyn LlmProvider>)
         }
         #[cfg(not(any(feature = "ollama", feature = "all-providers")))]
@@ -224,7 +259,8 @@ mod tests {
             default_model: "mock-model".into(),
             error_message: Some("boom".into()),
         });
-        let provider = build_single("test", &config, None).expect("build ok");
+        let provider =
+            build_single("test", &config, None, SsrfPolicy::PublicHttpsOnly).expect("build ok");
         assert_eq!(provider.id(), "test");
     }
 
@@ -233,22 +269,24 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn validate_llm_url_accepts_http() {
-        // IP literal so the test is independent of DNS. Public IP — must
-        // pass the SSRF guard.
-        validate_llm_url("http://1.1.1.1").expect("public http IP literal must pass");
+    fn validate_llm_url_rejects_public_http_under_default_policy() {
+        // Under default policy, HTTP to a public IP is rejected (HTTPS required).
+        let err = validate_llm_url("http://1.1.1.1", SsrfPolicy::PublicHttpsOnly).unwrap_err();
+        assert!(err.to_string().contains("HTTPS"));
     }
 
     #[test]
     fn validate_llm_url_accepts_https() {
-        validate_llm_url("https://1.1.1.1").expect("public https IP literal must pass");
+        validate_llm_url("https://1.1.1.1", SsrfPolicy::PublicHttpsOnly)
+            .expect("public https IP literal must pass");
     }
 
     #[test]
     fn validate_llm_url_rejects_unresolvable_host() {
         // Fail-closed on DNS resolution failure: a non-resolvable host
         // is treated as a config error, not a silent pass-through.
-        let err = validate_llm_url("https://no-such-host.invalid").unwrap_err();
+        let err = validate_llm_url("https://no-such-host.invalid", SsrfPolicy::PublicHttpsOnly)
+            .unwrap_err();
         assert!(
             err.to_string().contains("cannot resolve"),
             "expected DNS error, got: {err}"
@@ -257,20 +295,21 @@ mod tests {
 
     #[test]
     fn validate_llm_url_rejects_ftp_scheme() {
-        let err = validate_llm_url("ftp://api.example.com").unwrap_err();
+        let err =
+            validate_llm_url("ftp://api.example.com", SsrfPolicy::PublicHttpsOnly).unwrap_err();
         assert!(matches!(err, LlmError::InvalidRequest(_)), "got: {err}");
         assert!(err.to_string().contains("http/https"), "msg: {err}");
     }
 
     #[test]
     fn validate_llm_url_rejects_file_scheme() {
-        let err = validate_llm_url("file:///etc/passwd").unwrap_err();
+        let err = validate_llm_url("file:///etc/passwd", SsrfPolicy::PublicHttpsOnly).unwrap_err();
         assert!(err.to_string().contains("http/https"), "msg: {err}");
     }
 
     #[test]
     fn validate_llm_url_rejects_unparseable() {
-        let err = validate_llm_url("not a url").unwrap_err();
+        let err = validate_llm_url("not a url", SsrfPolicy::PublicHttpsOnly).unwrap_err();
         assert!(err.to_string().contains("invalid"), "msg: {err}");
     }
 
@@ -289,7 +328,7 @@ mod tests {
             cache_ttl_secs: None,
             cache_max_entries: None,
         });
-        let result = build_single("oai", &config, None);
+        let result = build_single("oai", &config, None, SsrfPolicy::PublicHttpsOnly);
         assert!(result.is_err(), "expected Err for ftp:// base_url");
         let err = result.err().expect("is_err above"); // allow-unwrap
         assert!(err.to_string().contains("http/https"), "msg: {err}");
@@ -309,7 +348,7 @@ mod tests {
             cache_ttl_secs: None,
             cache_max_entries: None,
         });
-        let result = build_single("ol", &config, None);
+        let result = build_single("ol", &config, None, SsrfPolicy::PublicHttpsOnly);
         assert!(result.is_err(), "expected Err for file:// base_url");
         let err = result.err().expect("is_err above"); // allow-unwrap
         assert!(err.to_string().contains("http/https"), "msg: {err}");
@@ -317,8 +356,8 @@ mod tests {
 
     #[test]
     fn validate_llm_url_pinned_returns_host_and_addrs() {
-        let (host, addrs) =
-            validate_llm_url_pinned("https://1.1.1.1").expect("public IP must pass");
+        let (host, addrs) = validate_llm_url_pinned("https://1.1.1.1", SsrfPolicy::PublicHttpsOnly)
+            .expect("public IP must pass");
         assert!(!addrs.is_empty(), "must resolve at least one address");
         assert!(
             addrs.iter().any(|a| a.ip().to_string() == "1.1.1.1"),
@@ -329,7 +368,8 @@ mod tests {
 
     #[test]
     fn validate_llm_url_pinned_rejects_ssrf_host() {
-        let err = validate_llm_url_pinned("http://169.254.169.254/").unwrap_err();
+        let err = validate_llm_url_pinned("http://169.254.169.254/", SsrfPolicy::PublicHttpsOnly)
+            .unwrap_err();
         assert!(
             err.to_string().contains("blocked"),
             "expected SSRF-blocked, got: {err}"
@@ -338,7 +378,34 @@ mod tests {
 
     #[test]
     fn validate_llm_url_pinned_rejects_invalid_scheme() {
-        let err = validate_llm_url_pinned("ftp://api.example.com").unwrap_err();
+        let err = validate_llm_url_pinned("ftp://api.example.com", SsrfPolicy::PublicHttpsOnly)
+            .unwrap_err();
         assert!(err.to_string().contains("http/https"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_llm_url_allow_internal_accepts_http_localhost() {
+        validate_llm_url("http://127.0.0.1:11434", SsrfPolicy::AllowInternal)
+            .expect("local http must pass under AllowInternal");
+    }
+
+    #[test]
+    fn validate_llm_url_allow_internal_accepts_https_localhost() {
+        validate_llm_url("https://127.0.0.1:8443", SsrfPolicy::AllowInternal)
+            .expect("local https must pass under AllowInternal");
+    }
+
+    #[test]
+    fn validate_llm_url_pinned_allow_internal_accepts_local_http() {
+        let (_, addrs) =
+            validate_llm_url_pinned("http://127.0.0.1:11434", SsrfPolicy::AllowInternal)
+                .expect("local http pinning must pass under AllowInternal");
+        assert!(!addrs.is_empty());
+    }
+
+    #[test]
+    fn validate_llm_url_pinned_allow_internal_rejects_public_http() {
+        let err = validate_llm_url_pinned("http://1.1.1.1", SsrfPolicy::AllowInternal).unwrap_err();
+        assert!(err.to_string().contains("HTTP not permitted"), "got: {err}");
     }
 }

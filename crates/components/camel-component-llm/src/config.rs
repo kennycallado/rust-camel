@@ -36,6 +36,10 @@ pub struct LlmGlobalConfig {
     /// Map of provider name to provider configuration.
     #[serde(default)]
     pub providers: HashMap<String, LlmProviderConfig>,
+
+    /// Allow internal/private/loopback addresses and HTTP for local development.
+    #[serde(default)]
+    pub allow_internal: bool,
 }
 
 impl Default for LlmGlobalConfig {
@@ -45,6 +49,7 @@ impl Default for LlmGlobalConfig {
             timeout_secs: None,
             max_prompt_bytes: default_max_prompt_bytes(),
             providers: HashMap::new(),
+            allow_internal: false,
         }
     }
 }
@@ -424,6 +429,7 @@ mod tests {
             timeout_secs: Some(0), // Some(0) is invalid; None is valid
             max_prompt_bytes: 32768,
             providers: HashMap::new(),
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_err(),
@@ -438,6 +444,7 @@ mod tests {
             timeout_secs: None, // None = no timeout, valid
             max_prompt_bytes: 32768,
             providers: HashMap::new(),
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_ok(),
@@ -467,6 +474,7 @@ mod tests {
             timeout_secs: None,
             max_prompt_bytes: 32768,
             providers,
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_err(),
@@ -496,6 +504,7 @@ mod tests {
             timeout_secs: None,
             max_prompt_bytes: 32768,
             providers,
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_err(),
@@ -524,6 +533,7 @@ mod tests {
             timeout_secs: None,
             max_prompt_bytes: 32768,
             providers,
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_err(),
@@ -556,6 +566,7 @@ mod tests {
             timeout_secs: None,
             max_prompt_bytes: 32768,
             providers,
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_err(),
@@ -585,6 +596,7 @@ mod tests {
             timeout_secs: None,
             max_prompt_bytes: 32768,
             providers,
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_err(),
@@ -614,6 +626,7 @@ mod tests {
             timeout_secs: None,
             max_prompt_bytes: 32768,
             providers,
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_err(),
@@ -643,6 +656,7 @@ mod tests {
             timeout_secs: Some(60),
             max_prompt_bytes: 32768,
             providers,
+            allow_internal: false,
         };
         assert!(
             cfg.validate().is_ok(),
@@ -672,6 +686,7 @@ mod tests {
             timeout_secs: None,
             max_prompt_bytes: 32768,
             providers,
+            allow_internal: false,
         };
         let err = cfg.validate().unwrap_err();
         let msg = err.to_string();

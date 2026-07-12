@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::http_client::build_ssrf_pinned_client;
+use crate::http_client::{SsrfClientOptions, build_ssrf_pinned_client};
 use crate::types::AuthError;
+use camel_api::SsrfPolicy;
 use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,12 +83,14 @@ impl CachingTokenIntrospector {
         client_id: String,
         client_secret: String,
         options: IntrospectionCacheOptions,
+        policy: SsrfPolicy,
     ) -> Result<Self, AuthError> {
         let http = build_ssrf_pinned_client(
             &endpoint,
             "introspection endpoint",
-            Duration::from_secs(5),
-            Duration::from_secs(10),
+            &SsrfClientOptions::new(policy)
+                .with_connect_timeout(Duration::from_secs(5))
+                .with_request_timeout(Duration::from_secs(10)),
         )
         .await?;
         Ok(Self::with_client(
@@ -523,6 +526,7 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(result.is_err());
@@ -537,6 +541,7 @@ mod tests {
             "cid".into(),
             "cs".into(),
             test_cache_opts(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(result.is_err());

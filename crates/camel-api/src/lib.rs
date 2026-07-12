@@ -134,7 +134,7 @@ pub use splitter::{
     StreamingSplitExpression, fragment_exchange, split_body, split_body_json_array,
     split_body_lines,
 };
-pub use ssrf::is_ssrf_blocked_ip;
+pub use ssrf::{SsrfPolicy, is_ssrf_blocked_ip};
 pub use step_lifecycle::{StepLifecycle, StepShutdownReason};
 pub use supervision::SupervisionConfig;
 pub use throttler::{ThrottleStrategy, ThrottlerConfig};

@@ -636,6 +636,10 @@ pub struct KeycloakSecurityConfig {
     pub introspection: KeycloakIntrospectionConfig,
     #[serde(default)]
     pub uma: Option<KeycloakUmaConfig>,
+    /// Allow internal/private/loopback addresses and HTTP for local development.
+    /// Default: false. Set to true only for local Keycloak instances.
+    #[serde(default)]
+    pub allow_internal: bool,
 }
 
 impl fmt::Debug for KeycloakSecurityConfig {
@@ -649,6 +653,7 @@ impl fmt::Debug for KeycloakSecurityConfig {
             .field("jwks", &self.jwks)
             .field("introspection", &self.introspection)
             .field("uma", &self.uma)
+            .field("allow_internal", &self.allow_internal)
             .finish()
     }
 }

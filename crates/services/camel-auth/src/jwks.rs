@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::http_client::build_ssrf_pinned_client;
+use camel_api::SsrfPolicy;
+
+use crate::http_client::{SsrfClientOptions, build_ssrf_pinned_client};
 use crate::types::AuthError;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -49,12 +51,13 @@ impl RemoteJwksProvider {
     /// resolves the hostname at construction time and pins the validated
     /// IPs on the HTTP client, eliminating the TOCTOU window between DNS
     /// resolution and the first outbound request.
-    pub async fn new(jwks_uri: String) -> Result<Self, AuthError> {
+    pub async fn new(jwks_uri: String, policy: SsrfPolicy) -> Result<Self, AuthError> {
         let http = build_ssrf_pinned_client(
             &jwks_uri,
             "JWKS",
-            Duration::from_secs(5),
-            Duration::from_secs(10),
+            &SsrfClientOptions::new(policy)
+                .with_connect_timeout(Duration::from_secs(5))
+                .with_request_timeout(Duration::from_secs(10)),
         )
         .await?;
         Ok(Self::with_client(jwks_uri, http))
@@ -211,6 +214,7 @@ mod tests {
     async fn https_enforcement_rejects_http() {
         let result = RemoteJwksProvider::new(
             "http://kc.example.com/realms/test/protocol/openid-connect/certs".into(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(matches!(result, Err(AuthError::ConfigError(s)) if s.contains("HTTPS")));
@@ -220,6 +224,7 @@ mod tests {
     async fn ssrf_guard_rejects_localhost() {
         let result = RemoteJwksProvider::new(
             "https://localhost/realms/test/protocol/openid-connect/certs".into(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(matches!(result, Err(AuthError::ConfigError(s)) if s.contains("loopback")));
@@ -229,6 +234,7 @@ mod tests {
     async fn ssrf_guard_rejects_private_ip() {
         let result = RemoteJwksProvider::new(
             "https://192.168.1.1/realms/test/protocol/openid-connect/certs".into(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(matches!(result, Err(AuthError::ConfigError(s)) if s.contains("private")));
@@ -240,6 +246,7 @@ mod tests {
         // (IP literal, no network needed), and IP validation.
         let result = RemoteJwksProvider::new(
             "https://1.1.1.1/realms/test/protocol/openid-connect/certs".into(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(result.is_ok());
@@ -248,8 +255,11 @@ mod tests {
     #[tokio::test]
     async fn ssrf_guard_rejects_link_local_metadata_endpoint() {
         // 169.254.169.254 is the cloud instance-metadata address (AWS/GCP/Azure)
-        let result =
-            RemoteJwksProvider::new("https://169.254.169.254/latest/meta-data".into()).await;
+        let result = RemoteJwksProvider::new(
+            "https://169.254.169.254/latest/meta-data".into(),
+            SsrfPolicy::PublicHttpsOnly,
+        )
+        .await;
         assert!(
             matches!(result, Err(AuthError::ConfigError(s)) if s.contains("private") || s.contains("loopback"))
         );
@@ -259,6 +269,7 @@ mod tests {
     async fn ssrf_guard_rejects_ipv6_unique_local() {
         let result = RemoteJwksProvider::new(
             "https://[fc00::1]/realms/test/protocol/openid-connect/certs".into(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(
@@ -270,6 +281,7 @@ mod tests {
     async fn ssrf_guard_rejects_ipv6_loopback() {
         let result = RemoteJwksProvider::new(
             "https://[::1]/realms/test/protocol/openid-connect/certs".into(),
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(
@@ -281,7 +293,11 @@ mod tests {
     async fn url_validator_rejects_loopback_ip_literal() {
         // 127.0.0.1 is a loopback IP literal — rejected at URL validation
         // stage before DNS pinning is attempted.
-        let result = RemoteJwksProvider::new("https://127.0.0.1/certs".into()).await;
+        let result = RemoteJwksProvider::new(
+            "https://127.0.0.1/certs".into(),
+            SsrfPolicy::PublicHttpsOnly,
+        )
+        .await;
         assert!(
             matches!(result, Err(AuthError::ConfigError(s)) if s.contains("loopback") || s.contains("private") || s.contains("SSRF"))
         );
@@ -295,8 +311,9 @@ mod tests {
         let result = build_ssrf_pinned_client(
             "https://localhost/path",
             "test",
-            Duration::from_secs(5),
-            Duration::from_secs(10),
+            &SsrfClientOptions::new(SsrfPolicy::PublicHttpsOnly)
+                .with_connect_timeout(Duration::from_secs(5))
+                .with_request_timeout(Duration::from_secs(10)),
         )
         .await;
         assert!(
@@ -315,7 +332,11 @@ mod tests {
         // .invalid is an RFC 2606 reserved TLD guaranteed never to resolve.
         // Passes hostname validation but fails DNS resolution — exercises
         // the DNS-pinning code path.
-        let result = RemoteJwksProvider::new("https://nonexistent.invalid/certs".into()).await;
+        let result = RemoteJwksProvider::new(
+            "https://nonexistent.invalid/certs".into(),
+            SsrfPolicy::PublicHttpsOnly,
+        )
+        .await;
         assert!(matches!(result, Err(AuthError::ProviderUnavailable(s)) if s.contains("DNS")));
     }
 

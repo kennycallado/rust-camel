@@ -25,7 +25,7 @@ pub struct HttpConfig {
     #[serde(default = "default_max_request_body")]
     pub max_request_body: usize,
     #[serde(default)]
-    pub allow_private_ips: bool,
+    pub allow_internal: bool,
     #[serde(default)]
     pub blocked_hosts: Vec<String>,
     #[serde(default)]
@@ -141,7 +141,7 @@ impl Default for HttpConfig {
             max_body_size: default_max_body_size(),
             max_response_bytes: default_max_response_bytes(),
             max_request_body: default_max_request_body(),
-            allow_private_ips: false,
+            allow_internal: false,
             blocked_hosts: Vec::new(),
             ok_status_code_range: None,
             tls: None,
@@ -164,9 +164,10 @@ impl HttpConfig {
             parse_ok_status_code_range(range)?;
         }
 
-        if let Some(proxy_url) = &self.proxy_url {
-            reqwest::Proxy::all(proxy_url)
-                .map_err(|e| CamelError::Config(format!("invalid proxy_url: {e}")))?;
+        if self.proxy_url.is_some() {
+            return Err(CamelError::EndpointCreationFailed(
+                "proxy_url is incompatible with SSRF DNS pinning".into(),
+            ));
         }
 
         Ok(())
@@ -212,8 +213,8 @@ impl HttpConfig {
         self.max_request_body = n;
         self
     }
-    pub fn with_allow_private_ips(mut self, allow: bool) -> Self {
-        self.allow_private_ips = allow;
+    pub fn with_allow_internal(mut self, allow: bool) -> Self {
+        self.allow_internal = allow;
         self
     }
     pub fn with_blocked_hosts(mut self, hosts: Vec<String>) -> Self {
@@ -228,6 +229,10 @@ impl HttpConfig {
         self.tls = tls;
         self
     }
+    /// Setting `proxy_url` is rejected at validation time because it
+    /// defeats DNS pinning. The field is kept for serde backward-compat
+    /// with existing TOML configs; new code must not set it.
+    #[deprecated(note = "proxy_url is incompatible with SSRF DNS pinning")]
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
         self.proxy_url = proxy_url;
         self
@@ -280,7 +285,7 @@ mod tests {
         assert_eq!(cfg.response_timeout_ms, 30_000);
         assert_eq!(cfg.max_body_size, 10_485_760);
         assert_eq!(cfg.max_request_body, 2_097_152);
-        assert!(!cfg.allow_private_ips);
+        assert!(!cfg.allow_internal);
         assert!(cfg.blocked_hosts.is_empty());
         assert!(cfg.tls.is_none());
         assert!(cfg.proxy_url.is_none());
@@ -292,12 +297,12 @@ mod tests {
             .with_connect_timeout_ms(1_000)
             .with_pool_max_idle_per_host(50)
             .with_follow_redirects(true)
-            .with_allow_private_ips(true)
+            .with_allow_internal(true)
             .with_blocked_hosts(vec!["evil.com".to_string()]);
         assert_eq!(cfg.connect_timeout_ms, 1_000);
         assert_eq!(cfg.pool_max_idle_per_host, 50);
         assert!(cfg.follow_redirects);
-        assert!(cfg.allow_private_ips);
+        assert!(cfg.allow_internal);
         assert_eq!(cfg.blocked_hosts, vec!["evil.com".to_string()]);
         assert_eq!(cfg.response_timeout_ms, 30_000);
     }
@@ -339,9 +344,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_invalid_proxy_url() {
+    fn test_rejects_proxy_url() {
         let cfg = HttpConfig {
-            proxy_url: Some("::not-a-proxy::".into()),
+            proxy_url: Some("http://proxy:8080".into()),
             ..HttpConfig::default()
         };
         assert!(cfg.validate().is_err());

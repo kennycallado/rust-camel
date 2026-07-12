@@ -10,21 +10,6 @@ use crate::admin_endpoint_config::AdminEndpointConfig;
 use crate::admin_operation::AdminOperation;
 use crate::events_endpoint_config::EventsEndpointConfig;
 
-/// Look up a boolean query flag in a Camel component URI.
-///
-/// Used to thread per-URI opt-in flags (e.g. `allowInternalUrls=true`)
-/// through the endpoint parser without changing the structured
-/// `UriComponents` shape.
-fn parse_allow_internal_urls(uri: &str) -> bool {
-    let parsed = match url::Url::parse(uri) {
-        Ok(u) => u,
-        Err(_) => return false,
-    };
-    parsed
-        .query_pairs()
-        .any(|(k, v)| k == "allowInternalUrls" && v == "true")
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeycloakEndpointKind {
     Admin,
@@ -51,13 +36,11 @@ impl KeycloakEndpointConfig {
     pub fn from_uri(
         uri: &str,
         server_url: &str,
+        allow_internal: bool,
         token_provider: Arc<dyn TokenProvider>,
         http: reqwest::Client,
     ) -> Result<Self, CamelError> {
-        // H15: validate the server URL is a public, non-SSRF host.
-        // Internal/private URLs require an explicit per-URI opt-in
-        // (`allowInternalUrls=true`) for local development.
-        let allow_internal = parse_allow_internal_urls(uri);
+        // Set allow_internal=true on KeycloakRealmConfig for local development.
         crate::validate_server_url(server_url, allow_internal)?;
         let components = camel_endpoint::parse_uri(uri)?;
 
@@ -199,10 +182,11 @@ mod tests {
 
     #[test]
     fn endpoint_config_from_uri_admin_valid() {
-        // allowInternalUrls=true opts into localhost for the test environment
+        // allow_internal=true opts into localhost for the test environment
         let config = KeycloakEndpointConfig::from_uri(
-            "keycloak:admin?operation=createUser&realm=test&allowInternalUrls=true",
+            "keycloak:admin?operation=createUser&realm=test",
             "http://localhost:8080",
+            true,
             mock_provider(),
             mock_http(),
         )
@@ -221,8 +205,9 @@ mod tests {
     #[test]
     fn endpoint_config_from_uri_admin_with_user_id() {
         let config = KeycloakEndpointConfig::from_uri(
-            "keycloak:admin?operation=getUser&realm=test&userId=user-123&allowInternalUrls=true",
+            "keycloak:admin?operation=getUser&realm=test&userId=user-123",
             "http://localhost:8080",
+            true,
             mock_provider(),
             mock_http(),
         )
@@ -239,8 +224,9 @@ mod tests {
     #[test]
     fn endpoint_config_from_uri_admin_missing_operation() {
         let result = KeycloakEndpointConfig::from_uri(
-            "keycloak:admin?realm=test&allowInternalUrls=true",
+            "keycloak:admin?realm=test",
             "http://localhost:8080",
+            true,
             mock_provider(),
             mock_http(),
         );
@@ -251,8 +237,9 @@ mod tests {
     #[test]
     fn endpoint_config_from_uri_events_valid() {
         let config = KeycloakEndpointConfig::from_uri(
-            "keycloak:events?realm=test&eventType=events&allowInternalUrls=true",
+            "keycloak:events?realm=test&eventType=events",
             "http://localhost:8080",
+            true,
             mock_provider(),
             mock_http(),
         )
@@ -271,6 +258,7 @@ mod tests {
         let result = KeycloakEndpointConfig::from_uri(
             "keycloak:events?eventType=events",
             "http://localhost:8080",
+            true,
             mock_provider(),
             mock_http(),
         );
@@ -282,6 +270,7 @@ mod tests {
         let result = KeycloakEndpointConfig::from_uri(
             "keycloak:bogus?realm=test",
             "http://localhost:8080",
+            true,
             mock_provider(),
             mock_http(),
         );

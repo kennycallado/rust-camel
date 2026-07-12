@@ -19,6 +19,17 @@ pub(crate) fn validate_url_for_ssrf(
     let parsed = url::Url::parse(url)
         .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
 
+    // Reject non-http(s) schemes under both policies
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(CamelError::ProcessorError(format!(
+                "Scheme '{}' is not allowed (only http and https)",
+                other
+            )));
+        }
+    }
+
     // Check blocked hosts
     if let Some(host) = parsed.host_str()
         && config.blocked_hosts.iter().any(|blocked| host == blocked)
@@ -29,35 +40,52 @@ pub(crate) fn validate_url_for_ssrf(
         )));
     }
 
-    // Check private IPs if not allowed
-    if !config.allow_private_ips
-        && let Some(host) = parsed.host()
-    {
+    // Check IP literals
+    if let Some(host) = parsed.host() {
         match host {
             url::Host::Ipv4(ip) => {
-                if is_ssrf_blocked_ip(&std::net::IpAddr::V4(ip)) {
+                let ip_addr = std::net::IpAddr::V4(ip);
+                let is_blocked = is_ssrf_blocked_ip(&ip_addr);
+                if !config.allow_internal && is_blocked {
                     return Err(CamelError::ProcessorError(format!(
-                        "Private IP '{}' not allowed (set allowPrivateIps=true to override)",
+                        "Private IP '{}' not allowed (set allow_internal=true to override)",
+                        ip
+                    )));
+                }
+                // Under allow_internal: reject public IPs with HTTP (no cleartext to internet)
+                if config.allow_internal && !is_blocked && parsed.scheme() == "http" {
+                    return Err(CamelError::ProcessorError(format!(
+                        "Public IP '{}' not allowed over HTTP (use HTTPS for public IPs)",
                         ip
                     )));
                 }
             }
             url::Host::Ipv6(ip) => {
-                if is_ssrf_blocked_ip(&std::net::IpAddr::V6(ip)) {
+                let ip_addr = std::net::IpAddr::V6(ip);
+                let is_blocked = is_ssrf_blocked_ip(&ip_addr);
+                if !config.allow_internal && is_blocked {
                     return Err(CamelError::ProcessorError(format!(
                         "Blocked IP '{}' not allowed",
                         ip
                     )));
                 }
+                if config.allow_internal && !is_blocked && parsed.scheme() == "http" {
+                    return Err(CamelError::ProcessorError(format!(
+                        "Public IP '{}' not allowed over HTTP (use HTTPS for public IPs)",
+                        ip
+                    )));
+                }
             }
             url::Host::Domain(domain) => {
-                // Block common internal domains
-                let blocked_domains = ["localhost", "127.0.0.1", "0.0.0.0", "local"];
-                if blocked_domains.contains(&domain) {
-                    return Err(CamelError::ProcessorError(format!(
-                        "Domain '{}' is not allowed",
-                        domain
-                    )));
+                // Block common internal domains when not allowing internal
+                if !config.allow_internal {
+                    let blocked_domains = ["localhost", "127.0.0.1", "0.0.0.0", "local"];
+                    if blocked_domains.contains(&domain) {
+                        return Err(CamelError::ProcessorError(format!(
+                            "Domain '{}' is not allowed",
+                            domain
+                        )));
+                    }
                 }
             }
         }
@@ -68,13 +96,13 @@ pub(crate) fn validate_url_for_ssrf(
 
 /// Resolve hostname and optionally validate IPs via SSRF check.
 /// Always resolves for DNS pinning (TOCTOU prevention).
-/// When `allow_private_ips` is true, all resolved addresses are returned as-is.
+/// When `allow_internal` is true, all resolved addresses are returned as-is.
 /// When false, only non-blocked IPs are returned.
 /// Returns a String error so callers can map to the appropriate `CamelError` variant.
 pub(crate) async fn resolve_and_validate_host(
     host: &str,
     port: u16,
-    allow_private_ips: bool,
+    allow_internal: bool,
 ) -> Result<Vec<std::net::SocketAddr>, String> {
     let resolved: Vec<std::net::SocketAddr> = tokio::time::timeout(
         Duration::from_secs(5),
@@ -85,7 +113,7 @@ pub(crate) async fn resolve_and_validate_host(
     .map_err(|e| format!("DNS resolution failed: {e}"))?
     .collect();
 
-    if allow_private_ips {
+    if allow_internal {
         return Ok(resolved);
     }
 
@@ -106,7 +134,7 @@ pub(crate) async fn resolve_and_validate_host(
 /// addresses on success so the caller can pin them via `resolve_to_addrs`.
 pub(crate) async fn validate_redirect_target_for_ssrf(
     url: &url::Url,
-    allow_private_ips: bool,
+    allow_internal: bool,
 ) -> Result<Vec<std::net::SocketAddr>, CamelError> {
     let Some(host_str) = url.host_str() else {
         return Err(CamelError::ProcessorError(
@@ -119,9 +147,17 @@ pub(crate) async fn validate_redirect_target_for_ssrf(
 
     // If the host is an IP literal, check it directly
     if let Ok(ip) = host_str.parse::<std::net::IpAddr>() {
-        if !allow_private_ips && is_ssrf_blocked_ip(&ip) {
+        let is_blocked = is_ssrf_blocked_ip(&ip);
+        if !allow_internal && is_blocked {
             return Err(CamelError::ProcessorError(format!(
                 "Redirect target is a blocked IP: {}",
+                ip
+            )));
+        }
+        // Under allow_internal: reject public IPs with HTTP
+        if allow_internal && !is_blocked && url.scheme() == "http" {
+            return Err(CamelError::ProcessorError(format!(
+                "Redirect to public IP '{}' not allowed over HTTP (use HTTPS)",
                 ip
             )));
         }
@@ -129,11 +165,23 @@ pub(crate) async fn validate_redirect_target_for_ssrf(
     }
 
     // Domain name: use shared resolver with DNS timeout (always resolves for pinning)
-    let addrs = resolve_and_validate_host(host_str, port, allow_private_ips)
+    let addrs = resolve_and_validate_host(host_str, port, allow_internal)
         .await
         .map_err(|e| {
             CamelError::ProcessorError(format!("Failed to resolve redirect host '{host_str}': {e}"))
         })?;
+
+    // Under allow_internal with HTTP: reject if any resolved IP is public
+    if allow_internal
+        && url.scheme() == "http"
+        && let Some(public_addr) = addrs.iter().find(|sa| !is_ssrf_blocked_ip(&sa.ip()))
+    {
+        return Err(CamelError::ProcessorError(format!(
+            "Redirect host '{host_str}' resolves to public IP {} — not allowed over HTTP (use HTTPS)",
+            public_addr.ip()
+        )));
+    }
+
     Ok(addrs)
 }
 
@@ -146,21 +194,20 @@ pub(crate) async fn validate_redirect_target_for_ssrf(
 /// validation succeeds, because reqwest connects directly to the validated addresses.
 ///
 /// Returns `None` when no pinning is needed:
-/// - `allow_private_ips == true` (private IPs permitted, no protection needed)
 /// - Host is an IP literal (already validated directly in `validate_url_for_ssrf`)
 /// - URL has no host
+///
+/// Under `allow_internal=true`, resolution STILL happens for DNS pinning, but:
+/// - If scheme is HTTP and any resolved IP is public → reject
+/// - If all resolved IPs are internal → return `Some((host, addrs))` for pinning
 ///
 /// Returns `Some((host, addrs))` with validated addresses + extracted host string
 /// so the caller can pass both directly to `build_client(…, Some((&host, &addrs)))`
 /// without re-parsing the URL.
 pub(crate) async fn resolve_initial_url_for_ssrf(
     url: &str,
-    allow_private_ips: bool,
+    allow_internal: bool,
 ) -> Result<Option<(String, Vec<std::net::SocketAddr>)>, CamelError> {
-    if allow_private_ips {
-        return Ok(None);
-    }
-
     let parsed = url::Url::parse(url)
         .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
 
@@ -178,11 +225,24 @@ pub(crate) async fn resolve_initial_url_for_ssrf(
     })?;
 
     let host_str_clone = host_str.to_string();
-    let addrs = resolve_and_validate_host(host_str, port, false)
+    // Always resolve for DNS pinning — even under allow_internal
+    let addrs = resolve_and_validate_host(host_str, port, allow_internal)
         .await
         .map_err(|e| {
             CamelError::ProcessorError(format!("Failed to resolve host '{host_str_clone}': {e}"))
         })?;
+
+    // Under allow_internal with HTTP: reject if any resolved IP is public
+    if allow_internal
+        && parsed.scheme() == "http"
+        && let Some(public_addr) = addrs.iter().find(|sa| !is_ssrf_blocked_ip(&sa.ip()))
+    {
+        return Err(CamelError::ProcessorError(format!(
+            "Host '{host_str_clone}' resolves to public IP {} — not allowed over HTTP (use HTTPS)",
+            public_addr.ip()
+        )));
+    }
+
     Ok(Some((host_str.to_string(), addrs)))
 }
 
@@ -306,7 +366,7 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
 
         // SSRF validation: resolve and validate the redirect target
         let resolved_addrs =
-            validate_redirect_target_for_ssrf(&redirect_url, endpoint_config.allow_private_ips)
+            validate_redirect_target_for_ssrf(&redirect_url, endpoint_config.allow_internal)
                 .await?;
 
         // Build a per-hop client with DNS pinning
@@ -337,7 +397,7 @@ mod tests {
     fn test_validate_url_for_ssrf_blocks_and_allows_hosts() {
         let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
         cfg.blocked_hosts = vec!["blocked.local".to_string()];
-        cfg.allow_private_ips = false;
+        cfg.allow_internal = false;
 
         let blocked = validate_url_for_ssrf("http://blocked.local/api", &cfg);
         assert!(blocked.is_err());
@@ -345,9 +405,45 @@ mod tests {
         let private_ip = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
         assert!(private_ip.is_err());
 
-        cfg.allow_private_ips = true;
+        cfg.allow_internal = true;
         let allowed = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
         assert!(allowed.is_ok());
+    }
+
+    /// Under allow_internal=true, public IPs over HTTP are rejected
+    #[test]
+    fn test_validate_url_rejects_public_http_under_allow_internal() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
+        cfg.allow_internal = true;
+
+        // Public IP over HTTP should be rejected
+        let result = validate_url_for_ssrf("http://1.1.1.1/api", &cfg);
+        assert!(
+            result.is_err(),
+            "public IP over HTTP should be rejected under allow_internal"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("HTTPS") || err.contains("public"),
+            "error should mention HTTPS requirement, got: {err}"
+        );
+
+        // Private IP over HTTP should be allowed
+        let result = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
+        assert!(
+            result.is_ok(),
+            "private IP over HTTP should be allowed under allow_internal"
+        );
+    }
+
+    /// Non-http(s) schemes are rejected under both policies
+    #[test]
+    fn test_validate_url_rejects_non_http_schemes() {
+        let cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
+        let result = validate_url_for_ssrf("ftp://example.com/file", &cfg);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("scheme") || err.contains("http"), "got: {err}");
     }
 
     /// Unit test: validate_redirect_target_for_ssrf blocks private IPs
@@ -370,13 +466,13 @@ mod tests {
         let result = validate_redirect_target_for_ssrf(&url, true).await;
         assert!(
             result.is_ok(),
-            "Should allow redirect to 127.0.0.1 when allow_private_ips=true"
+            "Should allow redirect to 127.0.0.1 when allow_internal=true"
         );
     }
 
     /// DNS-rebinding TOCTOU prevention: resolve_initial_url_for_ssrf validates
     /// that the initial request URL's hostname does not resolve to a private IP.
-    /// None = no pinning needed (IP literal or allow_private_ips=true).
+    /// None = no pinning needed (IP literal).
     #[tokio::test]
     async fn test_resolve_initial_url_for_ssrf_blocks_private_ip() {
         // localhost → 127.0.0.1 → blocked
@@ -394,15 +490,22 @@ mod tests {
         );
     }
 
-    /// When allow_private_ips=true, resolution is skipped entirely (returns None).
+    /// When allow_internal=true, resolution STILL happens for DNS pinning.
+    /// localhost resolves to 127.0.0.1 (internal), so it returns Some for pinning.
     #[tokio::test]
-    async fn test_resolve_initial_url_allows_private_ips_when_configured() {
+    async fn test_resolve_initial_url_allow_internal_still_pins() {
         let result = resolve_initial_url_for_ssrf("http://localhost:8080/path", true)
             .await
-            .expect("should succeed when allow_private_ips=true");
+            .expect("should succeed when allow_internal=true");
         assert!(
-            result.is_none(),
-            "should return None when private IPs allowed"
+            result.is_some(),
+            "should return Some for DNS pinning even when allow_internal=true"
+        );
+        let (host, addrs) = result.unwrap();
+        assert_eq!(host, "localhost");
+        assert!(
+            !addrs.is_empty(),
+            "should have resolved addresses for pinning"
         );
     }
 

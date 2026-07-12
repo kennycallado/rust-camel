@@ -32,6 +32,13 @@ model = "llama3"
 base_url = "http://localhost:11434/v1"
 ```
 
+For local Ollama, set `allow_internal = true` to permit HTTP + loopback addresses:
+
+```toml
+[llm]
+allow_internal = true
+```
+
 Or use `LlmBundle` programmatically:
 
 ```rust

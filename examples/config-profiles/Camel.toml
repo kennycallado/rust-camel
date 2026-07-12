@@ -27,7 +27,7 @@ format = "json"
 log_level = "DEBUG"
 
 [development.components.http]
-allow_private_ips = true  # Allow internal services in dev
+allow_internal = true  # Allow internal services in dev
 
 [development.components.kafka]
 brokers = "localhost:9092"
@@ -38,7 +38,7 @@ log_level = "WARN"
 
 [production.components.http]
 connect_timeout_ms = 5000   # Faster fail in production
-allow_private_ips = false
+allow_internal = false
 
 [production.components.kafka]
 brokers = "prod-kafka:9092"

@@ -16,6 +16,26 @@
 
 use std::net::IpAddr;
 
+/// SSRF validation policy for outbound HTTP clients.
+///
+/// `PublicHttpsOnly` is the default and enforces HTTPS + public IPs only.
+/// `AllowInternal` relaxes both: permits private/loopback IPs and permits
+/// HTTP scheme **only when all resolved IPs are internal**. Public IPs
+/// over HTTP remain blocked to prevent cleartext credentials to the internet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SsrfPolicy {
+    #[default]
+    PublicHttpsOnly,
+    AllowInternal,
+}
+
+impl SsrfPolicy {
+    /// Returns `true` when internal/private addresses are permitted.
+    pub fn allows_internal(self) -> bool {
+        matches!(self, Self::AllowInternal)
+    }
+}
+
 /// Returns `true` if `ip` belongs to a network that must NOT be reached
 /// by an outbound HTTP client in this workspace.
 ///
@@ -278,5 +298,18 @@ mod tests {
     #[test]
     fn allows_public_documentation_v6() {
         assert!(!is_ssrf_blocked_ip(&v6("2001:db8::1")));
+    }
+
+    // ---- SsrfPolicy ----
+
+    #[test]
+    fn ssrf_policy_default_is_public_https_only() {
+        assert_eq!(SsrfPolicy::default(), SsrfPolicy::PublicHttpsOnly);
+    }
+
+    #[test]
+    fn ssrf_policy_allows_internal() {
+        assert!(!SsrfPolicy::PublicHttpsOnly.allows_internal());
+        assert!(SsrfPolicy::AllowInternal.allows_internal());
     }
 }

@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use zeroize::Zeroizing;
 
-use crate::http_client::build_ssrf_pinned_client;
+use camel_api::SsrfPolicy;
+
+use crate::http_client::{SsrfClientOptions, build_ssrf_pinned_client};
 use crate::types::AuthError;
 
 fn deserialize_zeroizing_string<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
@@ -89,12 +91,14 @@ impl ClientCredentialsProvider {
         client_secret: String,
         scope: Option<String>,
         audience: Option<Vec<String>>,
+        policy: SsrfPolicy,
     ) -> Result<Self, AuthError> {
         let http = build_ssrf_pinned_client(
             &token_endpoint,
             "OAuth2 token endpoint",
-            Duration::from_secs(10),
-            Duration::from_secs(30),
+            &SsrfClientOptions::new(policy)
+                .with_connect_timeout(Duration::from_secs(10))
+                .with_request_timeout(Duration::from_secs(30)),
         )
         .await?;
         Ok(Self {
@@ -226,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth2_rejects_private_ip_token_endpoint() {
-        // validate_https_public_uri catches IP literals like
+        // validate_uri catches IP literals like
         // 169.254.169.254 before DNS resolution
         let result = ClientCredentialsProvider::new(
             "https://169.254.169.254/token".into(),
@@ -234,6 +238,7 @@ mod tests {
             "secret".into(),
             None,
             None,
+            SsrfPolicy::PublicHttpsOnly,
         )
         .await;
         assert!(

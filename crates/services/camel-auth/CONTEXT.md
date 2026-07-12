@@ -65,7 +65,7 @@ _Avoid_: OAuth server, identity provider (it is a minimal native issuer, not a f
 ### JWKS DNS pinning (jwks.rs:52-58, http_client.rs:16-58)
 
 `RemoteJwksProvider::new()` calls `build_ssrf_pinned_client()` which:
-- Validates the URI is public HTTPS (`validate_https_public_uri()`).
+- Validates the URI is public HTTPS (`validate_uri()` with `SsrfPolicy`).
 - Resolves DNS with 5s timeout, filters through `camel_api::is_ssrf_blocked_ip`.
 - Pins validated IPs via `reqwest::Client::resolve_to_addrs()` — eliminates TOCTOU window.
 - Sets `redirect::Policy::none()` and 5s connect / 10s request timeout.
