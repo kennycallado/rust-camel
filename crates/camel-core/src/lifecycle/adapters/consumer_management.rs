@@ -229,7 +229,7 @@ pub(super) async fn stop_route_internal(
                 .shutdown(camel_api::StepShutdownReason::RouteStop)
                 .await
             {
-                tracing::warn!(
+                tracing::debug!(
                     step = step.name(),
                     error = %e,
                     "StepLifecycle shutdown failed during stop_route for route {}",

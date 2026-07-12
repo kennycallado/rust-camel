@@ -9,7 +9,7 @@ use std::time::Instant;
 use camel_api::{MetricsCollector, RouteController, SupervisionConfig};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub(crate) use super::controller_actor_commands::RouteControllerCommand;
 pub use super::controller_actor_commands::RouteControllerHandle;
@@ -180,7 +180,7 @@ pub fn spawn_supervision_task(
         let mut currently_restarting: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        info!("Supervision loop started");
+        debug!("Supervision loop started");
 
         while let Some(notification) = crash_rx.recv().await {
             let route_id = notification.route_id;
@@ -228,7 +228,7 @@ pub fn spawn_supervision_task(
             currently_restarting.remove(&route_id);
         }
 
-        info!("Supervision loop ended");
+        debug!("Supervision loop ended");
     })
 }
 

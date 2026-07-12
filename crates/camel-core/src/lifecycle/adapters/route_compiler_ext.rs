@@ -257,7 +257,7 @@ pub(crate) struct RouteCompilerExt<'a> {
 impl RouteCompilerExt<'_> {
     fn health_registry(&self) -> Arc<HealthCheckRegistry> {
         self.health_registry.clone().unwrap_or_else(|| {
-            tracing::warn!("health_registry not configured — creating isolated fallback");
+            tracing::debug!("health_registry not configured — creating isolated fallback");
             Arc::new(HealthCheckRegistry::new(std::time::Duration::from_secs(5)))
         })
     }

@@ -118,7 +118,7 @@ where
 
     loop {
         if is_cancelled() {
-            tracing::info!("hot-reload: shutdown requested — stopping watcher");
+            tracing::debug!("hot-reload: shutdown requested — stopping watcher");
             return Ok(());
         }
 
@@ -130,7 +130,7 @@ where
                 tokio::select! {
                     biased;
                     _ = token.cancelled() => {
-                        tracing::info!("hot-reload: shutdown requested — stopping watcher");
+                        tracing::debug!("hot-reload: shutdown requested — stopping watcher");
                         return Ok(());
                     }
                     msg = recv_fut => {

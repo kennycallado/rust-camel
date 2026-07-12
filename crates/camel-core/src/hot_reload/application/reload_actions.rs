@@ -204,7 +204,7 @@ pub(super) async fn apply_swap(
     let new_has_lifecycle = !lifecycle.is_empty();
 
     if running_has_lifecycle || new_has_lifecycle {
-        tracing::info!(
+        tracing::debug!(
             route_id = %route_id,
             running_has_lifecycle,
             new_has_lifecycle,
@@ -295,7 +295,7 @@ pub(super) async fn apply_swap(
         });
     }
     if in_flight > 0 {
-        tracing::info!(
+        tracing::debug!(
             route_id = %route_id,
             action = "swap",
             in_flight = in_flight,
@@ -303,7 +303,7 @@ pub(super) async fn apply_swap(
             in_flight
         );
     } else {
-        tracing::info!(route_id = %route_id, "hot-reload: swapped route pipeline");
+        tracing::debug!(route_id = %route_id, "hot-reload: swapped route pipeline");
     }
 }
 
@@ -738,7 +738,7 @@ pub(super) async fn apply_restart(
                 );
             }
         } else {
-            tracing::info!(
+            tracing::debug!(
                 route_id = %route_id,
                 "hot-reload: restart applied while preserving stopped lifecycle state"
             );
@@ -824,7 +824,7 @@ pub(super) async fn apply_restart(
                 );
             }
         } else {
-            tracing::info!(
+            tracing::debug!(
                 route_id = %route_id,
                 "hot-reload: restart applied while preserving stopped lifecycle state"
             );

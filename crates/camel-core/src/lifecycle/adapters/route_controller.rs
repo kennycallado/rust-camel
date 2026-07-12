@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, ServiceExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
@@ -85,7 +85,7 @@ pub struct DefaultRouteController {
 impl DefaultRouteController {
     pub(super) fn health_registry(&self) -> Arc<HealthCheckRegistry> {
         self.health_registry.clone().unwrap_or_else(|| {
-            warn!("health_registry not configured — creating isolated fallback");
+            debug!("health_registry not configured — creating isolated fallback");
             Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)))
         })
     }
@@ -326,7 +326,7 @@ impl DefaultRouteController {
             )));
         }
 
-        info!(route_id = %route_id, "Adding route to controller");
+        debug!(route_id = %route_id, "Adding route to controller");
 
         let prepared = match self.build_managed_route(
             definition,
@@ -480,7 +480,7 @@ impl DefaultRouteController {
             )));
         }
 
-        info!(route_id = %route_id, generation, "Adding route to controller with generation");
+        debug!(route_id = %route_id, generation, "Adding route to controller with generation");
 
         let prepared = self.build_managed_route(
             definition,
@@ -524,7 +524,7 @@ impl DefaultRouteController {
         if let Some(reg) = &self.health_registry {
             reg.unregister_for_route(route_id);
         }
-        info!(route_id = %route_id, "Route removed from controller (functions preserved for reload finalize)");
+        debug!(route_id = %route_id, "Route removed from controller (functions preserved for reload finalize)");
         Ok(())
     }
 
@@ -706,7 +706,7 @@ impl DefaultRouteController {
         }
 
         super::pipeline_runtime::swap_pipeline_raw(&managed.pipeline, new_pipeline, vec![]);
-        info!(route_id = %route_id, "Pipeline swapped atomically");
+        debug!(route_id = %route_id, "Pipeline swapped atomically");
         Ok(())
     }
 
@@ -730,7 +730,7 @@ impl DefaultRouteController {
             .get(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
         super::pipeline_runtime::swap_pipeline_raw(&managed.pipeline, new_pipeline, lifecycle);
-        info!(route_id = %route_id, "Pipeline swapped (raw — lifecycle bypass)");
+        debug!(route_id = %route_id, "Pipeline swapped (raw — lifecycle bypass)");
         Ok(())
     }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 
 #[cfg(test)]
 use camel_api::StepLifecycle;
@@ -392,7 +392,7 @@ impl CamelContext {
         if let Some(invoker) = service.as_function_invoker() {
             self.function_invoker = Some(invoker.clone());
             if let Err(e) = self.route_controller.try_set_function_invoker(invoker) {
-                tracing::warn!("Failed to propagate function invoker to route controller: {e}");
+                tracing::debug!("Failed to propagate function invoker to route controller: {e}");
             }
         }
 
@@ -402,11 +402,12 @@ impl CamelContext {
 
     /// Register a component with this context.
     pub fn register_component<C: Component + 'static>(&mut self, component: C) {
-        info!(scheme = component.scheme(), "Registering component");
+        let scheme = component.scheme().to_string();
         self.registry
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
             .register(Arc::new(component));
+        trace!(scheme, "Registered component");
     }
 
     /// Register a startup `ConfigCheck` to be evaluated at the head of
@@ -461,7 +462,7 @@ impl CamelContext {
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
         use crate::lifecycle::ports::RouteRegistrationPort;
-        info!(
+        debug!(
             from = definition.from_uri(),
             route_id = %definition.route_id(),
             "Adding route definition"
@@ -820,10 +821,12 @@ impl CamelContext {
 
 impl ComponentRegistrar for CamelContext {
     fn register_component_dyn(&mut self, component: Arc<dyn Component>) {
+        let scheme = component.scheme().to_string();
         self.registry
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
             .register(component);
+        trace!(scheme, "Registered component");
     }
 }
 
