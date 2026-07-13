@@ -395,7 +395,7 @@ impl ContainerProvider {
         // allow-unwrap: Mutex cannot be poisoned in normal operation
         self.log_forwarder_handles
             .lock()
-            .expect("log_fwd mutex poisoned")
+            .expect("log_fwd mutex poisoned") // allow-unwrap
             .push(handle);
     }
 }
@@ -577,7 +577,7 @@ impl Drop for ContainerProvider {
             &mut *self
                 .log_forwarder_handles
                 .lock()
-                .expect("log_fwd mutex poisoned"),
+                .expect("log_fwd mutex poisoned"), // allow-unwrap
         );
         for handle in handles {
             handle.abort();

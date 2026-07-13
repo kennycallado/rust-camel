@@ -88,7 +88,7 @@ impl Service<Exchange> for WireTapService {
         // allow-unwrap: Mutex cannot be poisoned in normal operation
         self.in_flight
             .lock()
-            .expect("in_flight mutex poisoned")
+            .expect("in_flight mutex poisoned") // allow-unwrap
             .spawn(async move {
                 // Acquire semaphore permit if concurrency is bounded.
                 let _permit = match &semaphore {

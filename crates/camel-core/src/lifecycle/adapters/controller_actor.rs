@@ -38,7 +38,7 @@ pub fn spawn_controller_actor(
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
-                        .expect("restarting mutex poisoned")
+                        .expect("restarting mutex poisoned") // allow-unwrap
                         .contains(&route_id)
                     {
                         let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
@@ -53,7 +53,7 @@ pub fn spawn_controller_actor(
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
-                        .expect("restarting mutex poisoned")
+                        .expect("restarting mutex poisoned") // allow-unwrap
                         .contains(&route_id)
                     {
                         let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
@@ -68,7 +68,7 @@ pub fn spawn_controller_actor(
                     // Reject if already restarting.
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     {
-                        let mut guard = restarting.lock().expect("restarting mutex poisoned");
+                        let mut guard = restarting.lock().expect("restarting mutex poisoned"); // allow-unwrap
                         if guard.contains(&route_id) {
                             let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
                                 "route {} is restarting",
@@ -88,7 +88,7 @@ pub fn spawn_controller_actor(
                         // allow-unwrap: Mutex cannot be poisoned in normal operation
                         restarting
                             .lock()
-                            .expect("restarting mutex poisoned")
+                            .expect("restarting mutex poisoned") // allow-unwrap
                             .remove(&route_id);
                         let _ = reply.send(Err(e.clone()));
                         continue;
@@ -111,7 +111,7 @@ pub fn spawn_controller_actor(
                         // allow-unwrap: Mutex cannot be poisoned in normal operation
                         restarting_clone
                             .lock()
-                            .expect("restarting mutex poisoned")
+                            .expect("restarting mutex poisoned") // allow-unwrap
                             .remove(&route_id_for_cleanup);
                         if tx_clone
                             .send(RouteControllerCommand::StartRoute {
@@ -133,7 +133,7 @@ pub fn spawn_controller_actor(
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
-                        .expect("restarting mutex poisoned")
+                        .expect("restarting mutex poisoned") // allow-unwrap
                         .contains(&route_id)
                     {
                         let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
@@ -148,7 +148,7 @@ pub fn spawn_controller_actor(
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
-                        .expect("restarting mutex poisoned")
+                        .expect("restarting mutex poisoned") // allow-unwrap
                         .contains(&route_id)
                     {
                         let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
@@ -172,7 +172,7 @@ pub fn spawn_controller_actor(
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
-                        .expect("restarting mutex poisoned")
+                        .expect("restarting mutex poisoned") // allow-unwrap
                         .contains(&route_id)
                     {
                         let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
@@ -239,7 +239,7 @@ pub fn spawn_controller_actor(
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
-                        .expect("restarting mutex poisoned")
+                        .expect("restarting mutex poisoned") // allow-unwrap
                         .contains(&route_id)
                     {
                         let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
@@ -288,7 +288,7 @@ pub fn spawn_controller_actor(
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
-                        .expect("restarting mutex poisoned")
+                        .expect("restarting mutex poisoned") // allow-unwrap
                         .contains(&route_id)
                     {
                         let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(
@@ -303,7 +303,7 @@ pub fn spawn_controller_actor(
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
-                        .expect("restarting mutex poisoned")
+                        .expect("restarting mutex poisoned") // allow-unwrap
                         .contains(&route_id)
                     {
                         let _ = reply.send(Err(camel_api::CamelError::RouteError(format!(

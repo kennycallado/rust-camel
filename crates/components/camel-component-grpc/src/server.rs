@@ -101,6 +101,7 @@ impl GrpcServerRegistry {
                             "g:grpc:tls-read",
                             &format!("{e}"),
                         );
+                        // log-policy: outside-contract
                         error!(error = %e, "grpc TLS config build failed");
                         return Err(e);
                     }
@@ -191,6 +192,7 @@ impl GrpcServerRegistry {
                             "g:grpc:tls-read",
                             &format!("{e}"),
                         );
+                        // log-policy: outside-contract
                         error!(error = %e, "grpc TLS config build failed");
                         return Err(e);
                     }

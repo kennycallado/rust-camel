@@ -159,7 +159,7 @@ impl TlsReloadRegistry {
         let mut guard = self
             .handlers
             .lock()
-            .expect("TlsReloadRegistry lock poisoned");
+            .expect("TlsReloadRegistry lock poisoned"); // allow-unwrap
         guard.push(handler);
     }
 
@@ -168,7 +168,7 @@ impl TlsReloadRegistry {
         let guard = self
             .handlers
             .lock()
-            .expect("TlsReloadRegistry lock poisoned");
+            .expect("TlsReloadRegistry lock poisoned"); // allow-unwrap
         guard
             .iter()
             .find(|h| h.matches(scheme, host, port))
@@ -180,7 +180,7 @@ impl TlsReloadRegistry {
         let mut guard = self
             .handlers
             .lock()
-            .expect("TlsReloadRegistry lock poisoned");
+            .expect("TlsReloadRegistry lock poisoned"); // allow-unwrap
         guard.retain(|h| !h.matches(scheme, host, port));
     }
 }
