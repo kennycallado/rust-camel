@@ -2,7 +2,7 @@
 description: Stable alias — default balanced implementation worker. Points to the current preferred balanced model.
 mode: subagent
 temperature: 0.1
-model: opencode-go/qwen3.7-plus
+model: opencode-go/minimax-m3
 tools:
   write: true
   edit: true
