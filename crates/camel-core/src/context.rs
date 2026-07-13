@@ -37,9 +37,10 @@ pub use crate::context_builder::CamelContextBuilder;
 ///
 /// # Lifecycle
 ///
-/// A `CamelContext` is single-use: call [`start()`](Self::start) once to launch routes,
-/// then [`stop()`](Self::stop) or [`abort()`](Self::abort) to shut down. Restarting a
-/// stopped context is not supported — create a new instance instead.
+/// Call [`start()`](Self::start) to launch routes, then [`stop()`](Self::stop)
+/// or [`abort()`](Self::abort) to shut down. A stopped context can be restarted
+/// by calling `start()` again — the controller actor stays alive across stop/start
+/// cycles; only [`abort()`](Self::abort) is destructive.
 pub struct CamelContext {
     registry: Arc<std::sync::Mutex<Registry>>,
     route_controller: RouteControllerHandle,
@@ -561,6 +562,9 @@ impl CamelContext {
     pub async fn start(&mut self) -> Result<(), CamelError> {
         info!("Starting CamelContext");
 
+        // Reset cancellation state so a restart after stop() gets a fresh token.
+        self.cancel_token = CancellationToken::new();
+
         // Start lifecycle services first
         for (i, service) in self.services.iter_mut().enumerate() {
             info!("Starting service: {}", service.name());
@@ -656,12 +660,9 @@ impl CamelContext {
             }
         }
 
-        // After all routes are stopped, tell the controller actor to exit
-        // its recv loop. Must happen AFTER route stops so the actor can
-        // process any pending route-stop commands first.
-        let _ = self.route_controller.shutdown().await;
-
-        self.health_registry.cancel_token().cancel();
+        // The controller actor stays alive — it owns route registrations
+        // needed for a subsequent start(). Destructive teardown (actor kill,
+        // health cancel) happens only in abort().
 
         // Then stop lifecycle services in reverse insertion order (LIFO)
         // Continue stopping all services even if some fail
@@ -672,21 +673,6 @@ impl CamelContext {
                 warn!("Service {} failed to stop: {}", service.name(), e);
                 if first_error.is_none() {
                     first_error = Some(e);
-                }
-            }
-        }
-
-        // Join the controller actor task with a bounded timeout.
-        // Graceful exit via Shutdown should be near-instant; the 5s timeout
-        // is a last-resort abort for stuck actors.
-        if let Some(mut join) = self.actor_join.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut join).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => warn!("Controller actor task error during stop: {e}"),
-                Err(_) => {
-                    warn!("Controller actor did not stop within 5s; aborting");
-                    join.abort();
-                    let _ = join.await;
                 }
             }
         }
@@ -745,6 +731,22 @@ impl CamelContext {
                 Ok(Ok(())) => info!("Aborted service: {}", name),
                 Ok(Err(e)) => warn!("Service {} failed to stop during abort: {}", name, e),
                 Err(_) => warn!("Service {} timed out during abort (5s)", name),
+            }
+        }
+
+        // Destructive teardown: kill the controller actor and cancel health
+        // probes. This is what makes abort() non-restartable vs stop().
+        let _ = self.route_controller.shutdown().await;
+        self.health_registry.cancel_token().cancel();
+        if let Some(mut join) = self.actor_join.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut join).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Controller actor task error during abort: {e}"),
+                Err(_) => {
+                    warn!("Controller actor did not stop within 5s during abort; force-aborting");
+                    join.abort();
+                    let _ = join.await;
+                }
             }
         }
     }

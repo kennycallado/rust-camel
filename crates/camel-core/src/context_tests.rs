@@ -1302,18 +1302,18 @@ async fn test_start_runs_registered_config_checks() {
     // is that the runtime is single-use.
 }
 
-// D-L5: stop() must send Shutdown to the controller actor and join its
-// JoinHandle with a bounded timeout, not detach it.
+// D-L5: abort() must send Shutdown to the controller actor and join its
+// JoinHandle with a bounded timeout. stop() keeps the actor alive for restart.
 #[tokio::test]
-async fn test_stop_joins_actor_gracefully() {
+async fn test_abort_joins_actor_gracefully() {
     let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.start().await.unwrap();
 
-    // Take the actor join handle before stop consumes it
+    // Take the actor join handle before abort consumes it
     let actor_join = ctx.take_actor_join().expect("actor_join should be present");
 
     let start = std::time::Instant::now();
-    ctx.stop().await.unwrap();
+    ctx.abort().await;
     let elapsed = start.elapsed();
 
     // Give the actor a moment to process the Shutdown command
@@ -1322,14 +1322,37 @@ async fn test_stop_joins_actor_gracefully() {
     // The actor must have exited its recv loop after receiving Shutdown
     assert!(
         actor_join.is_finished(),
-        "controller actor should have exited after stop()"
+        "controller actor should have exited after abort()"
     );
 
-    // And the whole stop+join should complete well under the 5s bounded timeout
+    // And the whole abort+join should complete well under the 5s bounded timeout
     assert!(
         elapsed < std::time::Duration::from_secs(2),
-        "stop() took {elapsed:?}, expected < 2s (graceful actor join)"
+        "abort() took {elapsed:?}, expected < 2s (graceful actor join)"
     );
+}
+
+// stop() must NOT kill the controller actor — it stays alive so the context
+// can be restarted via a subsequent start().
+#[tokio::test]
+async fn test_stop_keeps_actor_alive_for_restart() {
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    ctx.start().await.unwrap();
+
+    // Take the join handle so we can inspect actor state without stop consuming it
+    let actor_join = ctx.take_actor_join().expect("actor_join should be present");
+
+    ctx.stop().await.unwrap();
+
+    // Actor should still be running (not exited)
+    assert!(
+        !actor_join.is_finished(),
+        "controller actor should still be alive after stop()"
+    );
+
+    // Restart should work — actor is alive, cancel_token was reset
+    ctx.start().await.expect("restart should succeed");
+    ctx.stop().await.expect("stop after restart should succeed");
 }
 
 // ADR-0033: an empty startup-check list must let start() proceed normally
