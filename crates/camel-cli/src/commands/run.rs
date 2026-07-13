@@ -412,6 +412,9 @@ pub async fn run(
     #[cfg(feature = "grpc")]
     register_bundle!(ctx, camel_config, camel_component_grpc::GrpcBundle);
 
+    #[cfg(feature = "exec")]
+    register_bundle!(ctx, camel_config, camel_component_exec::ExecBundle);
+
     #[cfg(feature = "llm")]
     register_bundle!(ctx, camel_config, camel_component_llm::LlmBundle);
 
