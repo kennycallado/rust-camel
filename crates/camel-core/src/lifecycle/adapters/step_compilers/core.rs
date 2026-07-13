@@ -203,9 +203,8 @@ impl StepCompiler for CoreCompiler {
             // ── SetHeaderIfAbsent (declarative, internal-only) ──
             BuilderStep::DeclarativeSetHeaderIfAbsent { key, value } => match value {
                 ValueSourceDef::Literal(value) => {
-                    let svc = camel_processor::SetHeaderIfAbsent::new(
-                        IdentityProcessor, key, value,
-                    );
+                    let svc =
+                        camel_processor::SetHeaderIfAbsent::new(IdentityProcessor, key, value);
                     StepCompileResult::Matched(Ok(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
