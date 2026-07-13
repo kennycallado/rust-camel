@@ -115,13 +115,6 @@ pub fn parse_uri(uri: &str) -> Result<UriComponents, CamelError> {
         )));
     }
 
-    // R4-L2: strip fragment (#...) before parsing path/query. A literal # in
-    // a path must be %23-encoded pre-1.0.0.
-    let rest = match rest.split_once('#') {
-        Some((before, _fragment)) => before,
-        None => rest,
-    };
-
     let (path, params) = match rest.split_once('?') {
         Some((path, query)) => (path, parse_query(query)?),
         None => (rest, HashMap::new()),
@@ -626,19 +619,28 @@ mod tests {
         );
     }
 
-    // R4-L2: fragment stripping tests
+    // R4-L2 (revised): `#` is NOT stripped — Camel endpoint URIs use their own
+    // grammar (`scheme:path?params`), not RFC 3986. `#` is an established
+    // placeholder character in SQL (`:#name`, positional `#`) and in other
+    // component path/query languages. Operators who need a literal `#` in an
+    // RFC-3986 context can percent-encode as `%23` (handled by percent_decode).
 
     #[test]
-    fn parse_uri_strips_fragment_from_path() {
-        let uri = parse_uri("direct://a/b#frag").unwrap();
-        assert!(!uri.path.contains('#'));
-        assert!(!uri.path.contains("frag"));
+    fn parse_uri_preserves_hash_in_path() {
+        let uri = parse_uri("direct://a/b#part").unwrap();
+        assert_eq!(uri.path, "//a/b#part");
     }
 
     #[test]
-    fn parse_uri_strips_fragment_with_query() {
-        let uri = parse_uri("https://host/path?q=1#fragment").unwrap();
-        assert!(!uri.path.contains("fragment"));
-        assert!(!uri.params.values().any(|v| v.contains("fragment")));
+    fn parse_uri_preserves_hash_in_query_value() {
+        let uri = parse_uri("x:p?key=a#b").unwrap();
+        assert_eq!(uri.params.get("key"), Some(&"a#b".to_string()));
+    }
+
+    #[test]
+    fn parse_uri_percent_encoded_hash_decodes() {
+        let uri = parse_uri("x:p%23q?key=a%23b").unwrap();
+        assert_eq!(uri.path, "p#q");
+        assert_eq!(uri.params.get("key"), Some(&"a#b".to_string()));
     }
 }
