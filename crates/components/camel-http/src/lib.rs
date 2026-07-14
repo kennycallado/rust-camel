@@ -21,7 +21,7 @@ pub use static_endpoint::{HttpStaticComponent, HttpStaticConsumer, HttpStaticEnd
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -649,17 +649,9 @@ struct ServerHandle {
     is_tls: bool,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
-    /// AbortHandle for the axum server task. Retained for potential future
-    /// explicit shutdown; currently unused because servers are process-lifetime.
-    #[allow(dead_code)]
-    server_task_abort: tokio::task::AbortHandle,
-    /// JoinHandle for the monitor_axum_task wrapper. Aborted alongside the
-    /// server task on last-route unregister; `is_finished()` is also used as
-    /// the dead-server eviction signal in `get_or_spawn`.
+    /// JoinHandle for the monitor_axum_task wrapper. `is_finished()` is the
+    /// dead-server eviction signal in `get_or_spawn`.
     monitor_task: tokio::task::JoinHandle<()>,
-    /// Reference count of consumers sharing this server. Incremented on each
-    /// `get_or_spawn` call; decremented on `unregister`.
-    route_count: AtomicUsize,
     // Retained so the reload handler (Task 7) can call reload_from_config()
     // to hot-swap certs without restarting the server.
     tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
@@ -823,11 +815,6 @@ impl ServerRegistry {
                             rid.clone(),
                         ))
                     };
-                    // Capture an AbortHandle BEFORE moving the JoinHandle
-                    // into the monitor task — the monitor will own the
-                    // JoinHandle, and we still need to be able to cancel
-                    // the server on last-route unregister.
-                    let server_task_abort = server_task.abort_handle();
                     let addr_for_monitor = format!("{host_owned}:{port}");
                     let monitor_task = tokio::spawn(monitor_axum_task(
                         server_task,
@@ -843,9 +830,7 @@ impl ServerRegistry {
                         is_tls: tls_config.is_some(),
                         tls_cert_path: tls_config.as_ref().map(|t| t.cert_path.clone()),
                         tls_key_path: tls_config.as_ref().map(|t| t.key_path.clone()),
-                        server_task_abort,
                         monitor_task,
-                        route_count: AtomicUsize::new(0),
                         tls_config: tls_rustls_cfg,
                         tls_source,
                     };
@@ -870,44 +855,18 @@ impl ServerRegistry {
             })
             .await?;
 
-        // D-L10: each successful get_or_spawn counts as one consumer sharing
-        // this server. Decremented by `unregister`; reaching 0 tears the
-        // server and monitor down.
-        handle.route_count.fetch_add(1, Ordering::SeqCst);
         Ok(handle.registry.clone())
     }
 
-    /// Unregister one consumer from a server. When the last consumer
-    /// unregisters (refcount drops to 0), the monitor task and the
-    /// underlying axum server are aborted and the registry entry is removed.
-    ///
-    /// D-L10: previously the monitor task was fire-and-forget and the
-    /// server never tore down. Now the refcount tracks shared consumers and
-    /// the last one to leave cleans up the listener and the background tasks.
+    /// Unregister one consumer from a server. HTTP servers are process-lifetime:
+    /// the server stays in the registry for potential restart. Path
+    /// deregistration happens separately in the consumer's cleanup.
     pub async fn unregister(&self, host: &str, port: u16) {
-        let key = (host.to_string(), port);
-        let guard = match self.inner.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        let Some(cell) = guard.get(&key) else {
-            return;
-        };
-        let Some(handle) = cell.get() else {
-            return;
-        };
-        let prev = handle.route_count.fetch_sub(1, Ordering::SeqCst);
-        if prev <= 1 {
-            // Keep the server alive — HTTP servers are process-lifetime
-            // (see ServerHandle comment). The server stays in the registry
-            // for potential restart. Crashed servers are evicted by
-            // get_or_spawn's monitor_task.is_finished() check.
-            debug!(
-                host = host,
-                port = port,
-                "HTTP server idle after last route unregistered (kept alive for restart)"
-            );
-        }
+        debug!(
+            host = host,
+            port = port,
+            "consumer unregistered from HTTP server"
+        );
     }
 
     /// Reset the global registry — **test-only**.
@@ -3722,7 +3681,7 @@ mod tests {
         let rt = test_rt();
 
         // Register 2 routes on the same (host, port) — OnceCell returns the
-        // same ServerHandle and increments route_count on each call.
+        // same ServerHandle.
         let _r1 = registry
             .get_or_spawn(
                 "127.0.0.1",
