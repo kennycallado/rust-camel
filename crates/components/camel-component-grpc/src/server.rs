@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
@@ -46,7 +46,6 @@ struct ServerHandle {
     dispatch: GrpcDispatchTable,
     task: tokio::task::JoinHandle<()>,
     transport: ServerTransport,
-    route_count: AtomicUsize,
     tls_acceptor: SharedTlsAcceptor,
     tls_source: Option<ServerTlsSource>,
 }
@@ -125,7 +124,6 @@ impl GrpcServerRegistry {
                     dispatch,
                     task,
                     transport: config.transport.clone(),
-                    route_count: AtomicUsize::new(0),
                     tls_acceptor,
                     tls_source,
                 };
@@ -149,7 +147,6 @@ impl GrpcServerRegistry {
             .await?;
 
         validate_server_handle(handle, &config.transport, &host_owned, port)?;
-        handle.route_count.fetch_add(1, Ordering::SeqCst);
         Ok(Arc::clone(&handle.dispatch))
     }
 
@@ -210,7 +207,6 @@ impl GrpcServerRegistry {
                     dispatch,
                     task,
                     transport: config.transport.clone(),
-                    route_count: AtomicUsize::new(0),
                     tls_acceptor,
                     tls_source,
                 };
@@ -234,14 +230,13 @@ impl GrpcServerRegistry {
             .await?;
 
         validate_server_handle(handle, &config.transport, &host_owned, port)?;
-        handle.route_count.fetch_add(1, Ordering::SeqCst);
         Ok(Arc::clone(&handle.dispatch))
     }
 
     pub(crate) async fn unregister(&self, host: &str, port: u16, path: &str) {
         let key = (host.to_string(), port);
         let dispatch = {
-            let mut guard = match self.inner.lock() {
+            let guard = match self.inner.lock() {
                 Ok(g) => g,
                 Err(_) => return,
             };
@@ -251,20 +246,10 @@ impl GrpcServerRegistry {
             let Some(handle) = cell.get() else {
                 return;
             };
-            let dispatch = Arc::clone(&handle.dispatch);
-            // Decrement refcount; if last route, abort task and remove entry
-            let prev = handle.route_count.fetch_sub(1, Ordering::SeqCst);
-            if prev == 1 {
-                handle.task.abort();
-                guard.remove(&key);
-                debug!(
-                    host = host,
-                    port = port,
-                    "gRPC server task aborted after last route unregistered"
-                );
-            }
-            dispatch
+            Arc::clone(&handle.dispatch)
         };
+        // Remove this route's path from the dispatch table. The shared
+        // HTTP/2 server stays alive — gRPC servers are process-lifetime.
         let mut table = dispatch.write().await;
         table.remove(path);
     }
@@ -1191,7 +1176,6 @@ mod tests {
                 dispatch,
                 task: dead_task,
                 transport: ServerTransport::Plaintext,
-                route_count: AtomicUsize::new(0),
                 tls_acceptor: None,
                 tls_source: None,
             })
@@ -1727,7 +1711,6 @@ mod tests {
             dispatch,
             task,
             transport: ServerTransport::Plaintext,
-            route_count: AtomicUsize::new(0),
             tls_acceptor: None,
             tls_source: None,
         };
@@ -1878,7 +1861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unregister_last_route_aborts_server_task() {
+    async fn test_unregister_last_route_keeps_server_alive() {
         let registry = GrpcServerRegistry::global();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1912,7 +1895,7 @@ mod tests {
 
         let key = ("127.0.0.1".to_string(), port);
 
-        // Keep a reference to the cell to check task state after removal
+        // Keep a reference to the cell to check task state after unregister
         let cell = {
             let guard = registry.inner.lock().unwrap();
             guard.get(&key).unwrap().clone()
@@ -1928,24 +1911,23 @@ mod tests {
             );
         }
 
-        // Unregister route 2 -> task aborted
+        // Unregister route 2 -> server stays alive (process-lifetime)
         registry.unregister("127.0.0.1", port, "/route2").await;
-        // Give the abort a moment to take effect
         tokio::time::sleep(Duration::from_millis(10)).await;
         {
             let handle = cell.get().expect("handle should exist");
             assert!(
-                handle.task.is_finished(),
-                "task should be aborted after last unregister"
+                !handle.task.is_finished(),
+                "task should still be alive — server is process-lifetime"
             );
         }
 
-        // Verify entry was removed from registry
+        // Entry stays in registry for potential restart.
         {
             let guard = registry.inner.lock().unwrap();
             assert!(
-                guard.get(&key).is_none(),
-                "entry should be removed from registry after last unregister"
+                guard.get(&key).is_some(),
+                "entry should remain in registry — server kept alive for restart"
             );
         }
     }

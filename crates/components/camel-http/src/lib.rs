@@ -700,6 +700,13 @@ impl ServerRegistry {
                 && let Some(handle) = existing.get()
                 && handle.monitor_task.is_finished()
             {
+                // Deregister TLS reload handler so a respawned HTTPS server
+                // doesn't reload stale cert config from the crashed handler.
+                if handle.is_tls {
+                    let scheme = if handle.is_tls { "https" } else { "http" };
+                    camel_component_api::tls_source::TlsReloadRegistry::global()
+                        .unregister(scheme, host, port);
+                }
                 guard.remove(&key);
             }
             guard

@@ -164,28 +164,22 @@ impl ServerRegistry {
     }
 
     /// Release a reference to the server on the given port.
-    /// When the last reference is released, the server task is aborted and the entry removed. (WS-005)
+    /// WebSocket servers are process-lifetime: the server stays alive
+    /// for potential restart. Path deregistration happens separately.
     pub(crate) fn release(&self, port: u16) {
-        let mut guard = match self.inner.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        if let Some(entry) = guard.get_mut(&port) {
-            entry.ref_count = entry.ref_count.saturating_sub(1);
-            if entry.ref_count == 0 {
-                // Abort the server task if it exists (WS-001, WS-005)
-                if let Some(handle) = entry.cell.get() {
-                    handle._task.abort();
-                    // Unregister TLS reload handler (host-agnostic, pass empty host)
-                    if handle.is_tls {
-                        camel_component_api::tls_source::TlsReloadRegistry::global()
-                            .unregister("wss", "", port);
-                    }
-                }
-                guard.remove(&port);
-                tracing::info!(port, "WebSocket server registry entry removed");
+        tracing::debug!(port, "WebSocket consumer released (server kept alive)");
+    }
+
+    /// Reset the global registry — **test-only**.
+    #[cfg(test)]
+    pub fn reset() {
+        let mut guard = Self::global().inner.lock().expect("ServerRegistry lock");
+        for (_, entry) in guard.iter() {
+            if let Some(handle) = entry.cell.get() {
+                handle._task.abort();
             }
         }
+        guard.clear();
     }
 }
 
@@ -1566,6 +1560,14 @@ mod tests {
         std::sync::Arc::new(PanicRuntimeObservability)
     }
 
+    /// Serialize tests that touch the global `ServerRegistry::global()`.
+    ///
+    /// `ServerRegistry::reset()` aborts ALL server tasks globally, so any
+    /// test with a running server must hold this lock for its duration to
+    /// prevent a concurrent `reset()` from killing its server. Tests that
+    /// call `reset()` must also hold it.
+    static REGISTRY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     use super::*;
     use camel_component_api::NoOpComponentContext;
     use std::time::Duration;
@@ -1740,6 +1742,7 @@ mod tests {
 
     #[tokio::test]
     async fn echo_flow_round_trips_message_through_consumer_and_producer() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/echo");
         let component_ctx = NoOpComponentContext;
@@ -1820,6 +1823,7 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_stop_sends_close_1001() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/shutdown");
         let component_ctx = NoOpComponentContext;
@@ -1900,6 +1904,7 @@ mod tests {
 
     #[tokio::test]
     async fn wss_consumer_start_fails_without_tls_cert() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let component_ctx = NoOpComponentContext;
         let endpoint = WssComponent::new()
@@ -1919,6 +1924,10 @@ mod tests {
 
     #[tokio::test]
     async fn wss_consumer_start_fails_with_nonexistent_cert() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        // Ensure clean global state (process-lifetime servers may leak across tests).
+        ServerRegistry::reset();
+
         let port = free_port();
         let component_ctx = NoOpComponentContext;
         let endpoint = WssComponent::new()
@@ -1940,6 +1949,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_registry_returns_same_state_for_same_port() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let state1 = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
@@ -1957,6 +1967,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_handler_returns_404_for_unregistered_path() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let state = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
@@ -2026,6 +2037,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_connections_rejects_with_close_1013() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/limited?maxConnections=1");
         let component_ctx = NoOpComponentContext;
@@ -2079,6 +2091,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_message_size_rejects_with_close_1009() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/sizelimit?maxMessageSize=10");
         let component_ctx = NoOpComponentContext;
@@ -2133,6 +2146,7 @@ mod tests {
 
     #[tokio::test]
     async fn origin_rejection_returns_403() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/origintest?allowOrigin=https://allowed.com");
         let component_ctx = NoOpComponentContext;
@@ -2184,6 +2198,7 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_sends_to_all_connected_clients() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/bc");
         let component_ctx = NoOpComponentContext;
@@ -2255,6 +2270,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_get_or_spawn_returns_same_state() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let results: Arc<std::sync::Mutex<Vec<WsAppState>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2405,6 +2421,7 @@ mod tests {
     // WS-006: Double-start must be rejected
     #[tokio::test]
     async fn consumer_double_start_returns_error() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/doublestart");
         let component_ctx = NoOpComponentContext;
@@ -2444,6 +2461,7 @@ mod tests {
     // WS-005: Registry cleanup on stop + port reuse
     #[tokio::test]
     async fn registry_cleanup_on_consumer_stop() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/cleanup");
         let component_ctx = NoOpComponentContext;
@@ -2477,19 +2495,21 @@ mod tests {
             "registry should be cleaned up after stop"
         );
 
-        // Verify server registry reference is released (port can be reused)
-        // The ServerRegistry should have removed the entry
+        // Server is process-lifetime: release() is a no-op, so the
+        // ServerRegistry entry stays. The port cannot be re-bound until
+        // ServerRegistry::reset() is called.
         let server_reg = ServerRegistry::global();
         let guard = server_reg.inner.lock().unwrap();
         assert!(
-            !guard.contains_key(&port),
-            "ServerRegistry should remove port entry after last consumer stops"
+            guard.contains_key(&port),
+            "ServerRegistry must keep port entry after consumer stop (process-lifetime server)"
         );
     }
 
     // WS-003 + WS-004: poll_ready backpressure and server-send error handling
     #[tokio::test]
     async fn producer_server_send_returns_error_when_all_dropped() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/backpressure");
         let component_ctx = NoOpComponentContext;
@@ -2551,6 +2571,7 @@ mod tests {
     // WS-012: Ping/pong round-trip in server mode
     #[tokio::test]
     async fn server_responds_to_client_ping_with_pong() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/pingpong");
         let component_ctx = NoOpComponentContext;
@@ -2636,6 +2657,7 @@ mod tests {
     // WS-001: Server bind error is visible (fake server-start error test)
     #[tokio::test]
     async fn server_bind_error_is_reported() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         // Bind a port manually to cause a conflict
         let _listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = _listener.local_addr().unwrap().port();
@@ -2698,6 +2720,7 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_stop_returns_error_when_server_had_errors() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/errorflag")).unwrap();
         let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
@@ -2728,6 +2751,7 @@ mod tests {
 
     #[tokio::test]
     async fn consumer_stop_succeeds_when_server_healthy() {
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
         let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/healthy")).unwrap();
         let mut consumer = WsConsumer::new(cfg.server_config(), test_rt());
@@ -3012,6 +3036,7 @@ mod tests {
         use camel_component_api::test_support::tls;
         use camel_component_api::tls_source::TlsReloadRegistry;
 
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let (cert_pem, key_pem) = {
@@ -3052,13 +3077,13 @@ mod tests {
             .await
             .expect("registered WSS handler reload() must succeed");
 
-        // Release the (only) reference — server task is aborted and the
-        // handler must be unregistered.
+        // Release the (only) reference. release() is a no-op
+        // (process-lifetime server), so the handler STAYS registered.
         ServerRegistry::global().release(port);
 
         assert!(
-            TlsReloadRegistry::global().find("wss", "", port).is_none(),
-            "WSS server release must unregister the reload handler"
+            TlsReloadRegistry::global().find("wss", "", port).is_some(),
+            "WSS server release is a no-op; reload handler must remain registered"
         );
     }
 
@@ -3067,6 +3092,7 @@ mod tests {
         use camel_component_api::test_support::tls;
         use camel_component_api::tls_source::TlsReloadRegistry;
 
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let (cert_pem, key_pem) = {
@@ -3117,17 +3143,22 @@ mod tests {
             "handler must remain registered while ref count > 0"
         );
 
-        // Release the LAST reference — now the server is torn down.
+        // Release the LAST reference. release() is a no-op regardless of
+        // ref count, so the handler STAYS registered.
         ServerRegistry::global().release(port);
         assert!(
-            TlsReloadRegistry::global().find("wss", "", port).is_none(),
-            "handler must be unregistered after final release"
+            TlsReloadRegistry::global().find("wss", "", port).is_some(),
+            "handler must remain registered — release() is a no-op (process-lifetime server)"
         );
     }
 
     #[tokio::test]
     async fn ws_plaintext_does_not_register_tls_reload_handler() {
         use camel_component_api::tls_source::TlsReloadRegistry;
+
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        // Ensure clean global state (process-lifetime servers may leak across tests).
+        ServerRegistry::reset();
 
         let port = free_port();
         let _state = ServerRegistry::global()
