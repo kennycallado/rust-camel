@@ -649,18 +649,16 @@ struct ServerHandle {
     is_tls: bool,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
-    /// AbortHandle for the axum server task. The server task itself is
-    /// moved into `monitor_axum_task` (which awaits it), so we capture an
-    /// `AbortHandle` first to be able to cancel the server on last-route
-    /// unregister even though we no longer own the JoinHandle.
+    /// AbortHandle for the axum server task. Retained for potential future
+    /// explicit shutdown; currently unused because servers are process-lifetime.
+    #[allow(dead_code)]
     server_task_abort: tokio::task::AbortHandle,
     /// JoinHandle for the monitor_axum_task wrapper. Aborted alongside the
     /// server task on last-route unregister; `is_finished()` is also used as
     /// the dead-server eviction signal in `get_or_spawn`.
     monitor_task: tokio::task::JoinHandle<()>,
     /// Reference count of consumers sharing this server. Incremented on each
-    /// `get_or_spawn` call; decremented on `unregister`. When it drops to 0,
-    /// the server and monitor tasks are aborted and the registry entry is removed.
+    /// `get_or_spawn` call; decremented on `unregister`.
     route_count: AtomicUsize,
     // Retained so the reload handler (Task 7) can call reload_from_config()
     // to hot-swap certs without restarting the server.
@@ -888,43 +886,27 @@ impl ServerRegistry {
     /// the last one to leave cleans up the listener and the background tasks.
     pub async fn unregister(&self, host: &str, port: u16) {
         let key = (host.to_string(), port);
-        let to_abort: Option<(tokio::task::AbortHandle, tokio::task::AbortHandle)> = {
-            let mut guard = match self.inner.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            let Some(cell) = guard.get(&key) else {
-                return;
-            };
-            let Some(handle) = cell.get() else {
-                return;
-            };
-            let prev = handle.route_count.fetch_sub(1, Ordering::SeqCst);
-            if prev == 1 {
-                let server_abort = handle.server_task_abort.clone();
-                // `JoinHandle::abort_handle` takes `&self` so we can clone
-                // out without moving the JoinHandle (which is still owned
-                // by the ServerHandle until the cell is dropped).
-                let monitor_abort = handle.monitor_task.abort_handle();
-                guard.remove(&key);
-                debug!(
-                    host = host,
-                    port = port,
-                    "HTTP server tasks aborted after last route unregistered"
-                );
-                Some((server_abort, monitor_abort))
-            } else {
-                None
-            }
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
         };
-        if let Some((server_abort, monitor_abort)) = to_abort {
-            // Abort the server first — the monitor task awaits the server's
-            // JoinHandle, so cancelling the server releases the monitor's
-            // await and lets the monitor body exit naturally. Then we abort
-            // the monitor as a belt-and-suspenders cleanup in case the
-            // monitor body is still in the middle of a synchronous span.
-            server_abort.abort();
-            monitor_abort.abort();
+        let Some(cell) = guard.get(&key) else {
+            return;
+        };
+        let Some(handle) = cell.get() else {
+            return;
+        };
+        let prev = handle.route_count.fetch_sub(1, Ordering::SeqCst);
+        if prev <= 1 {
+            // Keep the server alive — HTTP servers are process-lifetime
+            // (see ServerHandle comment). The server stays in the registry
+            // for potential restart. Crashed servers are evicted by
+            // get_or_spawn's monitor_task.is_finished() check.
+            debug!(
+                host = host,
+                port = port,
+                "HTTP server idle after last route unregistered (kept alive for restart)"
+            );
         }
     }
 
@@ -3729,7 +3711,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_unregister_last_http_route_aborts_monitor() {
+    async fn test_unregister_last_http_route_keeps_server_alive() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
         ServerRegistry::reset();
         let registry = ServerRegistry::global();
@@ -3769,8 +3751,6 @@ mod tests {
             .unwrap();
 
         let key = ("127.0.0.1".to_string(), port);
-        // Snapshot the cell so we can inspect the handle after the entry is
-        // removed from the registry.
         let cell = {
             let guard = registry.inner.lock().expect("lock");
             guard.get(&key).expect("entry should exist").clone()
@@ -3788,26 +3768,25 @@ mod tests {
             );
         }
 
-        // Unregister second route -> monitor aborted (count = 0).
+        // Unregister second route -> server stays alive (process-lifetime).
         registry.unregister("127.0.0.1", port).await;
-        // Give the abort a moment to take effect.
         tokio::time::sleep(Duration::from_millis(20)).await;
         {
             let handle = cell
                 .get()
-                .expect("handle should still exist after second unregister");
+                .expect("handle should still exist after last unregister");
             assert!(
-                handle.monitor_task.is_finished(),
-                "monitor task should be aborted after last unregister"
+                !handle.monitor_task.is_finished(),
+                "monitor task should still be alive — server is process-lifetime"
             );
         }
 
-        // Verify entry was removed from registry.
+        // Entry stays in registry for potential restart.
         {
             let guard = registry.inner.lock().expect("lock");
             assert!(
-                guard.get(&key).is_none(),
-                "entry should be removed from registry after last unregister"
+                guard.get(&key).is_some(),
+                "entry should remain in registry — server kept alive for restart"
             );
         }
     }

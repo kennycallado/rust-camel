@@ -164,10 +164,12 @@ impl HttpConfig {
             parse_ok_status_code_range(range)?;
         }
 
-        if self.proxy_url.is_some() {
-            return Err(CamelError::EndpointCreationFailed(
-                "proxy_url is incompatible with SSRF DNS pinning".into(),
-            ));
+        if let Some(ref proxy) = self.proxy_url
+            && url::Url::parse(proxy).is_err()
+        {
+            return Err(CamelError::Config(format!(
+                "proxy_url '{proxy}' is not a valid URL"
+            )));
         }
 
         Ok(())
@@ -344,12 +346,21 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_proxy_url() {
+    fn test_rejects_invalid_proxy_url() {
+        let cfg = HttpConfig {
+            proxy_url: Some("::not-a-proxy::".into()),
+            ..HttpConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_accepts_valid_proxy_url() {
         let cfg = HttpConfig {
             proxy_url: Some("http://proxy:8080".into()),
             ..HttpConfig::default()
         };
-        assert!(cfg.validate().is_err());
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
