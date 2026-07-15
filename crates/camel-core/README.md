@@ -40,6 +40,7 @@ crates/camel-core/src/
 - **Tracer EIP**: Automatic message-flow tracing with configurable detail levels
 - **Metrics**: Pluggable `MetricsCollector` integration
 - **Datasource Catalog**: Named database connection management with shared pools, factory-based health checks, and centralized configuration
+- **Component Metadata Catalog**: Automatic metadata harvesting at registration time via `Component::metadata()`. Queryable through `CamelContext::component_metadata()` / `metadata_catalog()`.
 - **Optional languages**: `lang-js` and `lang-rhai` feature flags
 
 ## Installation

@@ -13,6 +13,7 @@ pub mod body;
 pub mod body_converter;
 pub mod circuit_breaker;
 pub mod claim_check;
+pub mod component_metadata;
 pub mod data_format;
 pub mod datasource;
 pub mod declarative;

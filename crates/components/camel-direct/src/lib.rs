@@ -16,6 +16,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
+use camel_api::component_metadata::{
+    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
+};
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
 use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
@@ -168,6 +171,35 @@ impl Default for DirectComponent {
 impl Component for DirectComponent {
     fn scheme(&self) -> &str {
         "direct"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        ComponentMetadata {
+            scheme: "direct".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: "Synchronous in-memory direct invocation between routes".to_string(),
+            uri_syntax: "direct:name".to_string(),
+            capabilities: ComponentCapabilities {
+                supports_consumer: true,
+                supports_producer: true,
+                ..Default::default()
+            },
+            uri_options: vec![
+                UriOption::new(
+                    "timeout_ms",
+                    "Producer call timeout in milliseconds",
+                    OptionKind::Int,
+                )
+                .with_default("30000"),
+                UriOption::new(
+                    "failIfNoConsumers",
+                    "Fail if no consumer registered for the name",
+                    OptionKind::Bool,
+                )
+                .with_default("true"),
+            ],
+            ..ComponentMetadata::minimal("direct")
+        }
     }
 
     fn create_endpoint(

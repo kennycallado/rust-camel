@@ -25,6 +25,9 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use camel_api::BoxProcessorExt;
+use camel_api::component_metadata::{
+    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
+};
 use camel_component_api::parse_uri;
 use camel_component_api::{
     BoxProcessor, CamelError, Component, ComponentContext, ConcurrencyModel, Consumer,
@@ -378,6 +381,76 @@ impl Default for SedaComponent {
 impl Component for SedaComponent {
     fn scheme(&self) -> &str {
         "seda"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        ComponentMetadata {
+            scheme: "seda".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: "Asynchronous staged event-driven architecture with bounded queue"
+                .to_string(),
+            uri_syntax: "seda:name?size=1000&concurrentConsumers=1".to_string(),
+            capabilities: ComponentCapabilities {
+                supports_consumer: true,
+                supports_producer: true,
+                ..Default::default()
+            },
+            uri_options: vec![
+                UriOption::new(
+                    "size",
+                    "Bounded queue capacity. Must be > 0",
+                    OptionKind::Int,
+                )
+                .with_default("1000"),
+                UriOption::new(
+                    "concurrentConsumers",
+                    "Consumer concurrency. Clamped to 1 minimum",
+                    OptionKind::Int,
+                )
+                .with_default("1"),
+                UriOption::new(
+                    "multipleConsumers",
+                    "Fanout mode — clone to all subscribers",
+                    OptionKind::Bool,
+                )
+                .with_default("false"),
+                UriOption::new(
+                    "blockWhenFull",
+                    "Block producer when queue full vs fail fast",
+                    OptionKind::Bool,
+                )
+                .with_default("false"),
+                UriOption::new(
+                    "discardIfNoConsumers",
+                    "Silently drop if no consumers vs error",
+                    OptionKind::Bool,
+                )
+                .with_default("false"),
+                UriOption::new(
+                    "timeout",
+                    "Timeout for enqueue and reply wait in milliseconds",
+                    OptionKind::Int,
+                )
+                .with_default("30000"),
+                UriOption::new(
+                    "waitForTaskToComplete",
+                    "When to wait for task completion",
+                    OptionKind::Enum(vec![
+                        "Never".to_string(),
+                        "IfReplyExpected".to_string(),
+                        "Always".to_string(),
+                    ]),
+                )
+                .with_default("IfReplyExpected"),
+                UriOption::new(
+                    "exchangePattern",
+                    "Exchange pattern",
+                    OptionKind::Enum(vec!["InOnly".to_string(), "InOut".to_string()]),
+                )
+                .with_default("InOnly"),
+            ],
+            ..ComponentMetadata::minimal("seda")
+        }
     }
 
     fn create_endpoint(

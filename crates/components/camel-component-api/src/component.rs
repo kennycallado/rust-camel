@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use camel_api::CamelError;
+use camel_api::component_metadata::ComponentMetadata;
 
 use crate::component_context::ComponentContext;
 use crate::endpoint::Endpoint;
@@ -11,6 +12,15 @@ use crate::endpoint::Endpoint;
 pub trait Component: Send + Sync {
     /// The URI scheme this component handles (e.g., "timer", "log").
     fn scheme(&self) -> &str;
+
+    /// Declare this component's metadata (URI options, capabilities, version).
+    ///
+    /// Called once at registration time to harvest metadata into the catalog.
+    /// Override to provide rich metadata; the default returns a minimal
+    /// entry with just the scheme name.
+    fn metadata(&self) -> ComponentMetadata {
+        ComponentMetadata::minimal(self.scheme())
+    }
 
     /// Create an endpoint from a URI string.
     fn create_endpoint(
@@ -53,6 +63,15 @@ mod tests {
         ) -> Result<Box<dyn Endpoint>, CamelError> {
             Err(CamelError::EndpointCreationFailed("not implemented".into()))
         }
+    }
+
+    #[test]
+    fn test_component_default_metadata() {
+        let c = DummyComponent;
+        let meta = c.metadata();
+        assert_eq!(meta.scheme, "dummy");
+        assert_eq!(meta.schema_version, ComponentMetadata::SCHEMA_VERSION);
+        assert!(meta.uri_options.is_empty());
     }
 
     #[tokio::test]

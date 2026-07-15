@@ -59,6 +59,7 @@
 //! //! to avoid a circular dependency — `camel-config` depends on `camel-core`.
 //!
 pub mod claim_check;
+pub mod component_metadata_catalog;
 pub mod context;
 mod context_builder;
 pub mod datasource;

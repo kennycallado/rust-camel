@@ -33,6 +33,7 @@ use std::task::{Context, Poll};
 use tokio::sync::{Mutex, Notify};
 use tower::Service;
 
+use camel_api::component_metadata::{ComponentCapabilities, ComponentMetadata};
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
@@ -206,6 +207,20 @@ impl Default for MockComponent {
 impl Component for MockComponent {
     fn scheme(&self) -> &str {
         "mock"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        ComponentMetadata {
+            scheme: "mock".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: "Records exchanges for test assertions".to_string(),
+            uri_syntax: "mock:name".to_string(),
+            capabilities: ComponentCapabilities {
+                supports_producer: true,
+                ..Default::default()
+            },
+            ..ComponentMetadata::minimal("mock")
+        }
     }
 
     fn create_endpoint(

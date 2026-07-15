@@ -8,6 +8,7 @@ use tracing::{debug, info, trace, warn};
 
 #[cfg(test)]
 use camel_api::StepLifecycle;
+use camel_api::component_metadata::ComponentMetadata;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
     CamelError, FunctionInvoker, HealthReport, Lifecycle, MetricsCollector, PlatformIdentity,
@@ -402,13 +403,12 @@ impl CamelContext {
     }
 
     /// Register a component with this context.
+    ///
+    /// Delegates to [`register_component_dyn`](Self::register_component_dyn)
+    /// so metadata harvesting happens regardless of which entry point
+    /// is used.
     pub fn register_component<C: Component + 'static>(&mut self, component: C) {
-        let scheme = component.scheme().to_string();
-        self.registry
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
-            .register(Arc::new(component));
-        trace!(scheme, "Registered component");
+        self.register_component_dyn(Arc::new(component));
     }
 
     /// Register a startup `ConfigCheck` to be evaluated at the head of
@@ -772,6 +772,35 @@ impl CamelContext {
         self.component_configs
             .get(&TypeId::of::<T>())
             .and_then(|b| b.downcast_ref::<T>())
+    }
+
+    // --- Component Metadata ---
+
+    /// Get a component's harvested metadata by URI scheme.
+    pub fn component_metadata(&self, scheme: &str) -> Option<ComponentMetadata> {
+        self.registry.lock().ok()?.get_metadata(scheme)
+    }
+
+    /// Get metadata for every registered component.
+    pub fn all_component_metadata(&self) -> Vec<ComponentMetadata> {
+        self.registry
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
+            .all_metadata()
+    }
+
+    /// Get a metadata catalog handle implementing
+    /// [`ComponentMetadataCatalog`](camel_api::component_metadata::ComponentMetadataCatalog).
+    ///
+    /// The returned handle shares the same `Arc<Mutex<Registry>>` as the
+    /// context, so registrations made through one are visible through the
+    /// other.
+    pub fn metadata_catalog(
+        &self,
+    ) -> crate::component_metadata_catalog::RuntimeComponentMetadataCatalog {
+        crate::component_metadata_catalog::RuntimeComponentMetadataCatalog::new(Arc::clone(
+            &self.registry,
+        ))
     }
 
     // --- Route Template Registry (data-only) ---

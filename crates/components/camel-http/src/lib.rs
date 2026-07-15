@@ -32,6 +32,9 @@ use tower::Service;
 use tracing::debug;
 
 use axum::body::BodyDataStream;
+use camel_api::component_metadata::{
+    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
+};
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
 use camel_component_api::tls_source::ServerTlsSource;
@@ -1645,6 +1648,65 @@ impl Component for HttpComponent {
         "http"
     }
 
+    fn metadata(&self) -> ComponentMetadata {
+        ComponentMetadata {
+            scheme: "http".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: "HTTP client and server component".to_string(),
+            uri_syntax: "http://host:port/path?options".to_string(),
+            capabilities: ComponentCapabilities {
+                supports_consumer: true,
+                supports_producer: true,
+                supports_streaming: true,
+                ..Default::default()
+            },
+            uri_options: vec![
+                UriOption::new(
+                    "httpMethod",
+                    "HTTP method. Defaults to CamelHttpMethod header or POST/GET",
+                    OptionKind::String,
+                ),
+                UriOption::new(
+                    "throwExceptionOnFailure",
+                    "Throw on non-2xx status",
+                    OptionKind::Bool,
+                )
+                .with_default("true"),
+                UriOption::new(
+                    "okStatusCodeRange",
+                    "Success status code range",
+                    OptionKind::String,
+                )
+                .with_default("200-299"),
+                UriOption::new(
+                    "responseTimeout",
+                    "Response timeout in milliseconds",
+                    OptionKind::Int,
+                ),
+                UriOption::new(
+                    "maxBodySize",
+                    "Max request/response body bytes",
+                    OptionKind::Int,
+                )
+                .with_default("10485760"),
+                UriOption::new(
+                    "authMethod",
+                    "Authentication method",
+                    OptionKind::Enum(vec!["Basic".to_string(), "Bearer".to_string()]),
+                ),
+                UriOption::new("authUsername", "Basic auth username", OptionKind::String).secret(),
+                UriOption::new("authPassword", "Basic auth password", OptionKind::String).secret(),
+                UriOption::new("authBearerToken", "Bearer auth token", OptionKind::String).secret(),
+                UriOption::new("userAgent", "User-Agent header", OptionKind::String),
+                UriOption::new("followRedirects", "Follow HTTP redirects", OptionKind::Bool)
+                    .with_default("false"),
+                UriOption::new("maxRedirects", "Max redirect hops", OptionKind::Int)
+                    .with_default("10"),
+            ],
+            ..ComponentMetadata::minimal("http")
+        }
+    }
+
     fn create_endpoint(
         &self,
         uri: &str,
@@ -1699,6 +1761,68 @@ impl Default for HttpsComponent {
 impl Component for HttpsComponent {
     fn scheme(&self) -> &str {
         "https"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        // HTTPS shares the same URI option surface as HTTP.  Only the scheme
+        // differs; the metadata for `https` simply reuses the HTTP option list
+        // and capability declaration.
+        ComponentMetadata {
+            scheme: "https".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: "HTTPS client and server component (TLS over HTTP)".to_string(),
+            uri_syntax: "https://host:port/path?options".to_string(),
+            capabilities: ComponentCapabilities {
+                supports_consumer: true,
+                supports_producer: true,
+                supports_streaming: true,
+                ..Default::default()
+            },
+            uri_options: vec![
+                UriOption::new(
+                    "httpMethod",
+                    "HTTP method. Defaults to CamelHttpMethod header or POST/GET",
+                    OptionKind::String,
+                ),
+                UriOption::new(
+                    "throwExceptionOnFailure",
+                    "Throw on non-2xx status",
+                    OptionKind::Bool,
+                )
+                .with_default("true"),
+                UriOption::new(
+                    "okStatusCodeRange",
+                    "Success status code range",
+                    OptionKind::String,
+                )
+                .with_default("200-299"),
+                UriOption::new(
+                    "responseTimeout",
+                    "Response timeout in milliseconds",
+                    OptionKind::Int,
+                ),
+                UriOption::new(
+                    "maxBodySize",
+                    "Max request/response body bytes",
+                    OptionKind::Int,
+                )
+                .with_default("10485760"),
+                UriOption::new(
+                    "authMethod",
+                    "Authentication method",
+                    OptionKind::Enum(vec!["Basic".to_string(), "Bearer".to_string()]),
+                ),
+                UriOption::new("authUsername", "Basic auth username", OptionKind::String).secret(),
+                UriOption::new("authPassword", "Basic auth password", OptionKind::String).secret(),
+                UriOption::new("authBearerToken", "Bearer auth token", OptionKind::String).secret(),
+                UriOption::new("userAgent", "User-Agent header", OptionKind::String),
+                UriOption::new("followRedirects", "Follow HTTP redirects", OptionKind::Bool)
+                    .with_default("false"),
+                UriOption::new("maxRedirects", "Max redirect hops", OptionKind::Int)
+                    .with_default("10"),
+            ],
+            ..ComponentMetadata::minimal("https")
+        }
     }
 
     fn create_endpoint(

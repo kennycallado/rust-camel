@@ -17,6 +17,9 @@ use chrono::Utc;
 use tokio::time;
 use tracing::debug;
 
+use camel_api::component_metadata::{
+    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
+};
 use camel_component_api::UriConfig;
 use camel_component_api::{BoxProcessor, CamelError, Exchange, Message};
 use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
@@ -130,6 +133,51 @@ impl Default for TimerComponent {
 impl Component for TimerComponent {
     fn scheme(&self) -> &str {
         "timer"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        ComponentMetadata {
+            scheme: "timer".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: "Generates timer events at fixed intervals".to_string(),
+            uri_syntax: "timer:name?period=1000&delay=0&repeatCount=0".to_string(),
+            capabilities: ComponentCapabilities {
+                supports_consumer: true,
+                ..Default::default()
+            },
+            uri_options: vec![
+                UriOption::new(
+                    "period",
+                    "Interval between ticks in milliseconds",
+                    OptionKind::Int,
+                )
+                .with_default("1000"),
+                UriOption::new(
+                    "delay",
+                    "Initial delay before first tick in milliseconds",
+                    OptionKind::Int,
+                )
+                .with_default("0"),
+                UriOption::new(
+                    "repeatCount",
+                    "Maximum number of ticks. 0 or omitted means infinite",
+                    OptionKind::Int,
+                ),
+                UriOption::new(
+                    "fixedRate",
+                    "true=skip missed ticks, false=fire all missed",
+                    OptionKind::Bool,
+                )
+                .with_default("false"),
+                UriOption::new(
+                    "includeMetadata",
+                    "Include CamelTimer* headers in exchanges",
+                    OptionKind::Bool,
+                )
+                .with_default("true"),
+            ],
+            ..ComponentMetadata::minimal("timer")
+        }
     }
 
     fn create_endpoint(

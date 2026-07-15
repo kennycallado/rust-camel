@@ -23,6 +23,7 @@ If you're building custom components or processors for rust-camel, you'll need t
 - **Health monitoring**: Service health status tracking and Kubernetes-ready endpoints
 - **Security Policy**: Authorization abstractions — `Principal`, `AuthorizationDecision`, `SecurityPolicy` trait, and exchange property helpers
 - **Canonical Route Spec**: Serializable cross-language route IR (`CanonicalRouteSpec`) with JSON Schema (schemars) and TypeScript type generation (ts-rs). All `Canonical*` types support `Serialize`/`Deserialize`/`JsonSchema`/`TS` derives.
+- **Component Metadata**: URI options, capabilities, and version schema (`ComponentMetadata`, `UriOption`, `ComponentCapabilities`, `ComponentMetadataCatalog` trait). JSON Schema type contract at `schemas/component-metadata.json`.
 
 ## Unit of Work (UoW)
 

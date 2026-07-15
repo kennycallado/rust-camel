@@ -824,6 +824,7 @@ fn run_schema_generation(check: bool) -> Result<(), String> {
     // Pure content-producing fns (no IO).
     let canonical_schema = generate_canonical_schema_content()?;
     let dsl_schema = generate_dsl_schema()?;
+    let component_metadata_schema = generate_component_metadata_schema()?;
 
     // JSON schema artifacts: (path, content).
     let schema_artifacts: Vec<(std::path::PathBuf, String)> = vec![
@@ -832,6 +833,10 @@ fn run_schema_generation(check: bool) -> Result<(), String> {
             canonical_schema,
         ),
         (dsl_dir.join("route-schema.json"), dsl_schema),
+        (
+            schemas_dir.join("component-metadata.json"),
+            component_metadata_schema,
+        ),
     ];
 
     // TS artifacts: ALWAYS export to a tempdir first (never write to ts_dir
@@ -917,6 +922,11 @@ fn run_schema_generation(check: bool) -> Result<(), String> {
 fn generate_canonical_schema_content() -> Result<String, String> {
     let schema = schemars::schema_for!(camel_api::CanonicalRouteSpec);
     serde_json::to_string_pretty(&schema).map_err(|e| format!("serialize canonical: {e}"))
+}
+
+fn generate_component_metadata_schema() -> Result<String, String> {
+    let schema = schemars::schema_for!(camel_api::component_metadata::ComponentMetadata);
+    serde_json::to_string_pretty(&schema).map_err(|e| format!("serialize component-metadata: {e}"))
 }
 
 fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {

@@ -81,6 +81,39 @@ camel-dsl can reference them without depending on the auth service. The decision
 permission engines) live in `camel-auth`. Established by ADR-0010.
 _Avoid_: auth service, authenticator (those are camel-auth concepts, not these contract types)
 
+**OptionKind**:
+Closed enum of supported URI option value types (String, Int, Bool, Float, Duration, Enum, List).
+Defined in `component_metadata.rs`.
+_Avoid_: option type, parameter type
+
+**UriOption**:
+A single URI-parameter definition with builder methods. Includes name, description, kind, required
+flag, default value, aliases, deprecation notice, and secret flag. Defined in
+`component_metadata.rs`.
+_Avoid_: parameter, query param
+
+**ComponentCapabilities**:
+Named boolean flags declaring what a component supports (consumer, producer, polling_consumer,
+streaming). Defined in `component_metadata.rs`.
+_Avoid_: feature flags, component flags
+
+**CapabilityQuery**:
+Tri-state query struct for filtering components by capability. Each field is `Option<bool>` —
+`None` means "don't care". Defined in `component_metadata.rs`.
+_Avoid_: filter, search query
+
+**ComponentMetadata**:
+Top-level component descriptor: scheme, schema_version, version, description, uri_syntax,
+capabilities, and uri_options. The stable contract that SDK emits, registry indexes, catalog
+displays, and tooling consumes. Defined in `component_metadata.rs`.
+_Avoid_: component info, component descriptor (use ComponentMetadata for the type)
+
+**ComponentMetadataCatalog**:
+Trait defining the query interface for runtime component metadata lookup. Returns owned
+`ComponentMetadata` values (references can't span Mutex guards). Defined in `component_metadata.rs`,
+implemented by `RuntimeComponentMetadataCatalog` in camel-core.
+_Avoid_: metadata store, metadata service
+
 ## Example dialogue
 
 > "Where is `Exchange` defined, and where is its lifecycle?"

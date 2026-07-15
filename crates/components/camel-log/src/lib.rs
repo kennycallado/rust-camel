@@ -13,6 +13,9 @@ use std::task::{Context, Poll};
 use tower::Service;
 use tracing::{debug, error, info, trace, warn};
 
+use camel_api::component_metadata::{
+    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
+};
 use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
@@ -187,6 +190,64 @@ impl Default for LogComponent {
 impl Component for LogComponent {
     fn scheme(&self) -> &str {
         "log"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        ComponentMetadata {
+            scheme: "log".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: "Logs exchanges at a configurable level".to_string(),
+            uri_syntax: "log:category?level=info&showHeaders=false".to_string(),
+            capabilities: ComponentCapabilities {
+                supports_producer: true,
+                ..Default::default()
+            },
+            uri_options: vec![
+                UriOption::new(
+                    "level",
+                    "Log level",
+                    OptionKind::Enum(vec![
+                        "trace".to_string(),
+                        "debug".to_string(),
+                        "info".to_string(),
+                        "warn".to_string(),
+                        "error".to_string(),
+                    ]),
+                )
+                .with_default("info"),
+                UriOption::new(
+                    "showHeaders",
+                    "Include headers in log output",
+                    OptionKind::Bool,
+                )
+                .with_default("false"),
+                UriOption::new("showBody", "Include body in log output", OptionKind::Bool)
+                    .with_default("true"),
+                UriOption::new(
+                    "maxChars",
+                    "Truncate body to N characters. Omit for no limit",
+                    OptionKind::Int,
+                ),
+                UriOption::new(
+                    "logMask",
+                    "Redact sensitive headers and body",
+                    OptionKind::Bool,
+                )
+                .with_default("false"),
+                UriOption::new(
+                    "showStreamInfo",
+                    "Show stream origin info",
+                    OptionKind::Bool,
+                )
+                .with_default("false"),
+                UriOption::new(
+                    "groupSize",
+                    "Emit log every N exchanges for group logging",
+                    OptionKind::Int,
+                ),
+            ],
+            ..ComponentMetadata::minimal("log")
+        }
     }
 
     fn create_endpoint(

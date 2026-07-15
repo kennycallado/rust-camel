@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ComponentMetadata",
+  "type": "object",
+  "properties": {
+    "capabilities": {
+      "$ref": "#/$defs/ComponentCapabilities"
+    },
+    "description": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "scheme": {
+      "type": "string"
+    },
+    "uri_options": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/UriOption"
+      }
+    },
+    "uri_syntax": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "scheme",
+    "schema_version",
+    "version",
+    "description",
+    "uri_syntax",
+    "capabilities"
+  ],
+  "$defs": {
+    "ComponentCapabilities": {
+      "type": "object",
+      "properties": {
+        "supports_consumer": {
+          "type": "boolean"
+        },
+        "supports_polling_consumer": {
+          "type": "boolean"
+        },
+        "supports_producer": {
+          "type": "boolean"
+        },
+        "supports_streaming": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "supports_consumer",
+        "supports_producer",
+        "supports_polling_consumer",
+        "supports_streaming"
+      ]
+    },
+    "OptionKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "string",
+            "int",
+            "bool",
+            "float",
+            "duration"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "enum": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "enum"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "list": {
+              "$ref": "#/$defs/OptionKind"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "list"
+          ]
+        }
+      ]
+    },
+    "UriOption": {
+      "type": "object",
+      "properties": {
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "default_value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deprecated": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/OptionKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "secret": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "kind"
+      ]
+    }
+  }
+}

@@ -48,7 +48,10 @@ A single processing unit in a Pipeline — either an EIP pattern (filter, choice
 _Avoid_: handler, middleware, transformer
 
 **CamelContext**:
-The composition root of the runtime. Manages component, language, function, and service registries; controls Route lifecycle.
+The composition root of the runtime. Manages component, language, function, and service registries;
+controls Route lifecycle. Exposes metadata accessors: `component_metadata(scheme)`,
+`all_component_metadata()`, and `metadata_catalog()` for trait-object lookup. Established by
+ADR-0041.
 _Avoid_: container, application context, context (unqualified)
 
 **RuntimeObservability**:
@@ -83,6 +86,17 @@ _Avoid_: OnException (use OnException in DSL context; ExceptionPolicy in runtime
 
 **In-memory repository max_entries cap (evict-oldest)**:
 `MemoryIdempotentRepository` and `MemoryClaimCheckRepository` (in `camel-core`) accept a per-instance `max_entries` cap via `new_with_max_entries(name, cap)`. The default `new()` uses `DEFAULT_MAX_ENTRIES = 100_000`. When the cap is reached for a new key, the OLDEST entry is evicted on the write path (insertion-order via a per-instance atomic seq counter) before the new key is inserted; new-key writes are serialized by a per-instance write guard so the cap invariant holds under concurrent writers. Clock-free, no background task; O(1) amortized under the cap, one O(n) scan per insert-at-cap. Trade-off: an evicted idempotent key re-admits as new (bounded at-most-once ceiling — duplicates possible under a >cap unique-key flood; upgrade path is a persistent repository). Established Batch 1 (H10, H11).
+
+**RuntimeComponentMetadataCatalog**:
+Thin wrapper around `Arc<Mutex<Registry>>` implementing `ComponentMetadataCatalog`. Created
+on-demand via `CamelContext::metadata_catalog()`. Defined in `component_metadata_catalog.rs`.
+_Avoid_: metadata catalog impl, catalog wrapper
+
+**Metadata Harvesting**:
+The process of calling `component.metadata()` once at registration time (inside
+`Registry::register()`) and storing the result indexed by scheme. Ensures metadata is available
+without re-invoking the component. The scheme is validated and normalized on mismatch.
+_Avoid_: metadata collection, metadata extraction
 
 ## Compiled Step Variants
 
