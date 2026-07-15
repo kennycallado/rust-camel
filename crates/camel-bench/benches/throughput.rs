@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message};
+use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message};
 use camel_core::route::{CompiledStep, compose_pipeline};
 use camel_processor::{ChoiceService, FilterService, LogLevel, LogProcessor, WhenClause};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -14,7 +12,7 @@ fn build_throughput_pipeline() -> BoxProcessor {
     let filter = BoxProcessor::new(FilterService::new(|_: &Exchange| true, noop()));
     let choice = BoxProcessor::new(ChoiceService::new(
         vec![WhenClause {
-            predicate: Arc::new(|_: &Exchange| true),
+            predicate: FilterPredicate::new(|_: &Exchange| true),
             pipeline: noop(),
         }],
         Some(noop()),

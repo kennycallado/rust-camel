@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -24,7 +23,7 @@ impl FilterService {
         sub_pipeline: BoxProcessor,
     ) -> Self {
         Self {
-            predicate: Arc::new(predicate),
+            predicate: FilterPredicate::new(predicate),
             sub_pipeline,
         }
     }
@@ -78,7 +77,7 @@ pub struct FilterSegment {
 impl Clone for FilterSegment {
     fn clone(&self) -> Self {
         Self {
-            predicate: Arc::clone(&self.predicate),
+            predicate: self.predicate.clone(),
             body: self.body.clone(),
         }
     }

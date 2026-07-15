@@ -1,7 +1,6 @@
-use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, Message, Value};
+use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message, Value};
 use camel_processor::choice::{ChoiceService, WhenClause};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use std::sync::Arc;
 use tower::ServiceExt;
 
 fn append_body(suffix: &str) -> BoxProcessor {
@@ -26,7 +25,7 @@ fn bench_choice_predicates(c: &mut Criterion) {
     for count in [3, 10, 50] {
         let whens: Vec<WhenClause> = (0..count)
             .map(|i| WhenClause {
-                predicate: Arc::new(move |ex: &Exchange| {
+                predicate: FilterPredicate::new(move |ex: &Exchange| {
                     ex.input.header(&format!("match-{i}")).is_some()
                 }),
                 pipeline: append_body(&format!("-matched-{i}")),

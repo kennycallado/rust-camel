@@ -5,10 +5,10 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use camel_api::BoxProcessor;
+use camel_api::{BoxProcessor, CamelError};
 
 use super::{
-    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+    CompilationContext, CompileOutcome, CompiledStep, StepCompiler, StepCompilerRegistry,
     pack_lifecycles,
 };
 use crate::lifecycle::adapters::endpoint_resolver_factory;
@@ -25,7 +25,7 @@ impl StepCompiler for RoutingCompiler {
         _step_index: usize,
         ctx: &CompilationContext,
         registry: &StepCompilerRegistry,
-    ) -> StepCompileResult {
+    ) -> Result<CompileOutcome, CamelError> {
         match step {
             // ── DynamicRouter ──
             BuilderStep::DynamicRouter { config } => {
@@ -36,7 +36,7 @@ impl StepCompiler for RoutingCompiler {
                 );
                 let svc =
                     camel_processor::dynamic_router::DynamicRouterService::new(config, resolver);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -51,10 +51,7 @@ impl StepCompiler for RoutingCompiler {
                 ignore_invalid_endpoints,
                 max_iterations,
             } => {
-                let expression = match compile_language_expression(ctx.languages, &expression) {
-                    Ok(e) => e,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let expression = compile_language_expression(ctx.languages, &expression)?;
                 let expression: camel_api::RouterExpression =
                     Arc::new(move |exchange: &camel_api::Exchange| {
                         let value = await_eval(&expression, exchange);
@@ -78,7 +75,7 @@ impl StepCompiler for RoutingCompiler {
                 );
                 let svc =
                     camel_processor::dynamic_router::DynamicRouterService::new(config, resolver);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -93,7 +90,7 @@ impl StepCompiler for RoutingCompiler {
                     ctx.producer_ctx.clone(),
                 );
                 let svc = camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -107,10 +104,7 @@ impl StepCompiler for RoutingCompiler {
                 cache_size,
                 ignore_invalid_endpoints,
             } => {
-                let expression = match compile_language_expression(ctx.languages, &expression) {
-                    Ok(e) => e,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let expression = compile_language_expression(ctx.languages, &expression)?;
                 let expression: camel_api::RoutingSlipExpression =
                     Arc::new(move |exchange: &camel_api::Exchange| {
                         let value = await_eval(&expression, exchange);
@@ -132,7 +126,7 @@ impl StepCompiler for RoutingCompiler {
                     ctx.producer_ctx.clone(),
                 );
                 let svc = camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -146,13 +140,9 @@ impl StepCompiler for RoutingCompiler {
                     Arc::clone(&ctx.rt),
                     ctx.producer_ctx.clone(),
                 );
-                let svc = match camel_processor::recipient_list::RecipientListService::new(
-                    config, resolver,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                let svc =
+                    camel_processor::recipient_list::RecipientListService::new(config, resolver)?;
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -168,10 +158,7 @@ impl StepCompiler for RoutingCompiler {
                 stop_on_exception,
                 aggregation: _aggregation,
             } => {
-                let expression = match compile_language_expression(ctx.languages, &expression) {
-                    Ok(e) => e,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let expression = compile_language_expression(ctx.languages, &expression)?;
                 let expression: camel_api::recipient_list::RecipientListExpression =
                     Arc::new(move |exchange: &camel_api::Exchange| {
                         let value = await_eval(&expression, exchange);
@@ -197,13 +184,9 @@ impl StepCompiler for RoutingCompiler {
                     Arc::clone(&ctx.rt),
                     ctx.producer_ctx.clone(),
                 );
-                let svc = match camel_processor::recipient_list::RecipientListService::new(
-                    config, resolver,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                let svc =
+                    camel_processor::recipient_list::RecipientListService::new(config, resolver)?;
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -212,14 +195,10 @@ impl StepCompiler for RoutingCompiler {
 
             // ── Throttle (recursive — compiles child steps, outcome-aware) ──
             BuilderStep::Throttle { config, steps } => {
-                let (sub_segments, lifecycles) =
-                    match ctx.compile_children_segments(steps, registry) {
-                        Ok(pair) => pair,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                let (sub_segments, lifecycles) = ctx.compile_children_segments(steps, registry)?;
                 let body = compose_outcome_segment(sub_segments);
                 let segment = camel_processor::ThrottleSegment::new(config, body);
-                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
@@ -232,10 +211,7 @@ impl StepCompiler for RoutingCompiler {
                 let mut all_lifecycles = Vec::new();
                 for step in steps {
                     let (sub_segments, lifecycles) =
-                        match ctx.compile_children_segments(vec![step], registry) {
-                            Ok(pair) => pair,
-                            Err(e) => return StepCompileResult::Matched(Err(e)),
-                        };
+                        ctx.compile_children_segments(vec![step], registry)?;
                     all_lifecycles.extend(lifecycles);
                     destinations.push(compose_outcome_segment(sub_segments));
                 }
@@ -244,14 +220,14 @@ impl StepCompiler for RoutingCompiler {
                     strategy: config.strategy,
                     round_robin_index: Arc::new(AtomicUsize::new(0)),
                 };
-                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(all_lifecycles),
                 }))
             }
 
-            _ => StepCompileResult::NotHandled(step),
+            _ => Ok(CompileOutcome::NotHandled(step)),
         }
     }
 }

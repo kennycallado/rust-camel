@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, FilterPredicate};
 use camel_builder::RouteBuilder;
 use camel_component_direct::DirectComponent;
 use camel_core::context::CamelContext;
@@ -71,7 +71,7 @@ async fn main() -> Result<(), CamelError> {
         .do_try()
         .process(always_fail("boom-from-route-2"))
         .do_catch_when({
-            Arc::new(|ex: &Exchange| {
+            FilterPredicate::new(|ex: &Exchange| {
                 ex.error
                     .as_ref()
                     .is_some_and(|e| e.variant_name() == "ProcessorError")

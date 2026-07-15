@@ -37,6 +37,17 @@ pub enum AggregationStrategy {
     Custom(Arc<dyn Fn(Exchange, Exchange) -> Exchange + Send + Sync>),
 }
 
+impl std::fmt::Debug for AggregationStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AggregationStrategy::LastWins => f.write_str("LastWins"),
+            AggregationStrategy::CollectAll => f.write_str("CollectAll"),
+            AggregationStrategy::Original => f.write_str("Original"),
+            AggregationStrategy::Custom(_) => f.write_str("Custom(..)"),
+        }
+    }
+}
+
 /// The streaming format to use when splitting a stream body.
 #[derive(
     Clone,
@@ -181,6 +192,19 @@ pub struct SplitterConfig {
     /// processing; this cap rejects a split that would explode memory.
     /// Default 100_000. For unbounded/lazy input use `StreamingSplitter`.
     pub max_fragments: usize,
+}
+
+impl std::fmt::Debug for SplitterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SplitterConfig")
+            .field("expression", &"<split-expression>")
+            .field("aggregation", &self.aggregation)
+            .field("parallel", &self.parallel)
+            .field("parallel_limit", &self.parallel_limit)
+            .field("stop_on_exception", &self.stop_on_exception)
+            .field("max_fragments", &self.max_fragments)
+            .finish()
+    }
 }
 
 impl SplitterConfig {

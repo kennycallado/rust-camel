@@ -91,7 +91,7 @@ pub(crate) fn compile_filter_predicate(
     expression: &LanguageExpressionDef,
 ) -> Result<FilterPredicate, CamelError> {
     let predicate = compile_language_predicate(languages, expression)?;
-    Ok(Arc::new(move |exchange: &Exchange| {
+    Ok(FilterPredicate::new(move |exchange: &Exchange| {
         await_matches(&predicate, exchange)
     }))
 }
@@ -226,6 +226,7 @@ mod tests {
     use crate::lifecycle::application::route_definition::{LanguageExpressionDef, ValueSourceDef};
     use camel_api::BoxProcessor;
     use camel_api::IdentityProcessor;
+    use camel_api::OpaqueProcessor;
     use camel_api::body::Body;
 
     /// A mock endpoint that returns `None` for polling_consumer (default).
@@ -526,6 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_steps_covers_non_endpoint_variants() {
+        use camel_api::FilterPredicate;
         use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
         use std::time::Duration;
 
@@ -543,7 +545,7 @@ mod tests {
         let rt: Arc<dyn RuntimeObservability> = Arc::new(camel_component_api::NoOpComponentContext);
 
         let steps = vec![
-            BuilderStep::Processor(BoxProcessor::new(IdentityProcessor)),
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(IdentityProcessor))),
             BuilderStep::Stop,
             BuilderStep::Delay {
                 config: camel_api::DelayConfig::new(1),
@@ -611,12 +613,12 @@ mod tests {
                     .unwrap(),
             },
             BuilderStep::Filter {
-                predicate: Arc::new(|_| true),
+                predicate: FilterPredicate::new(|_| true),
                 steps: vec![BuilderStep::Stop],
             },
             BuilderStep::Choice {
                 whens: vec![crate::lifecycle::application::route_definition::WhenStep {
-                    predicate: Arc::new(|_| true),
+                    predicate: FilterPredicate::new(|_| true),
                     steps: vec![BuilderStep::Stop],
                 }],
                 otherwise: Some(vec![BuilderStep::Stop]),

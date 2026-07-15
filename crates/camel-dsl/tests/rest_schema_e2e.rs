@@ -72,7 +72,7 @@ fn compiled_unmarshal_processor() -> camel_api::BoxProcessor {
         "route must have at least one step (unmarshal), got: 0",
     );
     match &steps[0] {
-        BuilderStep::Processor(p) => p.clone(),
+        BuilderStep::Processor(op) => op.0.clone(),
         other => panic!("expected BuilderStep::Processor for unmarshal, got: {other:?}"),
     }
 }

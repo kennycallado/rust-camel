@@ -14,6 +14,17 @@ pub enum MulticastStrategy {
     Custom(MulticastAggregationFn),
 }
 
+impl std::fmt::Debug for MulticastStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MulticastStrategy::LastWins => f.write_str("LastWins"),
+            MulticastStrategy::CollectAll => f.write_str("CollectAll"),
+            MulticastStrategy::Original => f.write_str("Original"),
+            MulticastStrategy::Custom(_) => f.write_str("Custom(..)"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MulticastConfig {
     pub parallel: bool,
@@ -21,6 +32,18 @@ pub struct MulticastConfig {
     pub stop_on_exception: bool,
     pub timeout: Option<Duration>,
     pub aggregation: MulticastStrategy,
+}
+
+impl std::fmt::Debug for MulticastConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MulticastConfig")
+            .field("parallel", &self.parallel)
+            .field("parallel_limit", &self.parallel_limit)
+            .field("stop_on_exception", &self.stop_on_exception)
+            .field("timeout", &self.timeout)
+            .field("aggregation", &self.aggregation)
+            .finish()
+    }
 }
 
 impl MulticastConfig {

@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use camel_api::{CamelError, Exchange, FilterPredicate};
@@ -23,7 +22,7 @@ impl ValidateService {
         expression_source: impl Into<String>,
     ) -> Self {
         Self {
-            predicate: Arc::new(predicate),
+            predicate: FilterPredicate::new(predicate),
             expression_source: expression_source.into(),
         }
     }

@@ -1,4 +1,4 @@
-use camel_api::{BoxProcessor, BoxProcessorExt, Exchange};
+use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, OpaqueProcessor};
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
 use camel_core::route::{BuilderStep, RouteDefinition};
@@ -24,7 +24,7 @@ fn bench_lifecycle(c: &mut Criterion) {
                     for i in 0..count {
                         let route = RouteDefinition::new(
                             format!("timer:tick-{i}?period=1000"),
-                            vec![BuilderStep::Processor(pass_through())],
+                            vec![BuilderStep::Processor(OpaqueProcessor(pass_through()))],
                         )
                         .with_route_id(format!("bench-lifecycle-{i}"));
                         ctx.add_route_definition(route).await.unwrap();

@@ -363,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn catch_by_predicate_matches_via_exception_kind() {
         let try_step = always_fail(CamelError::Io("disk full".into()));
-        let predicate: FilterPredicate = Arc::new(|ex: &Exchange| {
+        let predicate = FilterPredicate::new(|ex: &Exchange| {
             ex.properties
                 .get(camel_api::exchange::PROPERTY_EXCEPTION_KIND)
                 .map(|v| matches!(v, camel_api::Value::String(s) if s == "io"))
@@ -394,7 +394,7 @@ mod tests {
         let mut svc = DoTryService::new(vec![try_step]);
         svc.catch_clauses.push(CatchClause {
             matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
-            on_when: Some(Arc::new(|_ex| false)),
+            on_when: Some(FilterPredicate::new(|_ex| false)),
             steps: vec![record_call(first_call.clone())],
             disposition: ExceptionDisposition::Handled,
         });
@@ -505,7 +505,7 @@ mod tests {
         let finally_call = Arc::new(AtomicU32::new(0));
         let mut svc = DoTryService::new(vec![passthrough()]);
         svc.finally_steps = vec![record_call(finally_call.clone())];
-        svc.finally_on_when = Some(Arc::new(|_ex| false));
+        svc.finally_on_when = Some(FilterPredicate::new(|_ex| false));
 
         let mut boxed = BoxProcessor::new(svc);
         let _ = boxed.ready().await.unwrap().call(Exchange::default()).await;
@@ -656,7 +656,7 @@ mod tests {
         let mut svc = DoTryService::new(vec![try_step]);
         // No catch clauses → original error stays.
         svc.finally_steps = vec![finally_step];
-        svc.finally_on_when = Some(Arc::new(|_ex| false));
+        svc.finally_on_when = Some(FilterPredicate::new(|_ex| false));
 
         let mut boxed = BoxProcessor::new(svc);
         let result = boxed.ready().await.unwrap().call(Exchange::default()).await;

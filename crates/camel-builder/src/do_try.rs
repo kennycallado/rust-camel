@@ -15,7 +15,7 @@
 
 use crate::RouteBuilder;
 use camel_api::error_handler::ExceptionDisposition;
-use camel_api::{BoxProcessor, FilterPredicate};
+use camel_api::{BoxProcessor, FilterPredicate, OpaqueProcessor};
 use camel_core::route::BuilderStep;
 use camel_processor::{CatchClause, CatchMatcher, DoTryService};
 
@@ -123,7 +123,9 @@ impl DoTryBuilder {
         let mut parent = self.parent;
         parent
             .steps
-            .push(BuilderStep::Processor(BoxProcessor::new(do_try)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                do_try,
+            ))));
         parent
     }
 }

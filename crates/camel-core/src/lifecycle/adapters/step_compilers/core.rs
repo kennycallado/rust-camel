@@ -11,7 +11,7 @@ use camel_processor::{LogProcessor, log::DynamicLog, script_mutator::ScriptMutat
 use tracing::warn;
 
 use super::{
-    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+    CompilationContext, CompileOutcome, CompiledStep, StepCompiler, StepCompilerRegistry,
     pack_lifecycles,
 };
 use crate::lifecycle::adapters::step_resolution::{
@@ -37,27 +37,27 @@ impl StepCompiler for CoreCompiler {
         _step_index: usize,
         ctx: &CompilationContext,
         registry: &StepCompilerRegistry,
-    ) -> StepCompileResult {
+    ) -> Result<CompileOutcome, CamelError> {
         match step {
             // ── Pre-built processor ──
-            BuilderStep::Processor(svc) => StepCompileResult::Matched(Ok(CompiledStep::Process {
-                processor: svc,
+            BuilderStep::Processor(op) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+                processor: op.0,
                 body_contract: None,
                 lifecycle: None,
             })),
 
             // ── Stop ──
-            BuilderStep::Stop => StepCompileResult::Matched(Ok(CompiledStep::Stop)),
+            BuilderStep::Stop => Ok(CompileOutcome::Matched(CompiledStep::Stop)),
 
             // ── Resequence (N4: must be top-level only) ──
-            BuilderStep::Resequence { .. } => StepCompileResult::Matched(Err(
-                CamelError::RouteError("resequence must be a top-level step".into()),
+            BuilderStep::Resequence { .. } => Err(CamelError::RouteError(
+                "resequence must be a top-level step".into(),
             )),
 
             // ── Delay ──
             BuilderStep::Delay { config } => {
                 let svc = camel_processor::delayer::DelayerService::new(config);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -66,16 +66,13 @@ impl StepCompiler for CoreCompiler {
 
             // ── Validate ──
             BuilderStep::Validate { predicate } => {
-                let predicate_arc = match compile_filter_predicate(ctx.languages, &predicate) {
-                    Ok(p) => p,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let predicate_arc = compile_filter_predicate(ctx.languages, &predicate)?;
                 let expression_source = predicate.source.clone();
                 let svc = camel_processor::ValidateService::from_predicate(
                     predicate_arc,
                     expression_source,
                 );
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None, // Validate is stateless
@@ -96,25 +93,17 @@ impl StepCompiler for CoreCompiler {
             } => {
                 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
 
-                let repo = match ctx.idempotent_repositories.get(&repository) {
-                    Some(r) => r,
-                    None => {
-                        return StepCompileResult::Matched(Err(CamelError::ComponentNotFound(
-                            format!(
-                                "idempotent_consumer: repository '{repository}' is not registered"
-                            ),
-                        )));
-                    }
-                };
-                let message_id = match compile_message_id_expression(ctx.languages, &expression) {
-                    Ok(m) => m,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let repo = ctx
+                    .idempotent_repositories
+                    .get(&repository)
+                    .ok_or_else(|| {
+                        CamelError::ComponentNotFound(format!(
+                            "idempotent_consumer: repository '{repository}' is not registered"
+                        ))
+                    })?;
+                let message_id = compile_message_id_expression(ctx.languages, &expression)?;
                 let (child_segments, child_lifecycles) =
-                    match ctx.compile_children_segments(steps, registry) {
-                        Ok(pair) => pair,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    ctx.compile_children_segments(steps, registry)?;
                 let child_pipeline = compose_outcome_segment(child_segments);
                 let svc = camel_processor::IdempotentConsumerSegment::new(
                     repo,
@@ -123,7 +112,7 @@ impl StepCompiler for CoreCompiler {
                     eager,
                     remove_on_failure,
                 );
-                StepCompileResult::Matched(Ok(CompiledStep::Segment {
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(child_lifecycles),
@@ -133,7 +122,7 @@ impl StepCompiler for CoreCompiler {
             // ── Static Log ──
             BuilderStep::Log { level, message } => {
                 let svc = LogProcessor::new(level, message);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -148,10 +137,7 @@ impl StepCompiler for CoreCompiler {
                         "DeclarativeLog with Literal should have been compiled to a Processor"
                     );
                 };
-                let expression = match compile_language_expression(ctx.languages, &expression) {
-                    Ok(e) => e,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let expression = compile_language_expression(ctx.languages, &expression)?;
                 let svc =
                     DynamicLog::new(level, move |exchange: &Exchange| {
                         tokio::task::block_in_place(|| {
@@ -165,7 +151,7 @@ impl StepCompiler for CoreCompiler {
                         })
                         .to_string()
                     });
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -176,23 +162,20 @@ impl StepCompiler for CoreCompiler {
             BuilderStep::DeclarativeSetHeader { key, value } => match value {
                 ValueSourceDef::Literal(value) => {
                     let svc = camel_processor::SetHeader::new(IdentityProcessor, key, value);
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
-                    let expression = match compile_language_expression(ctx.languages, &expression) {
-                        Ok(e) => e,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    let expression = compile_language_expression(ctx.languages, &expression)?;
                     let svc = camel_processor::DynamicSetHeader::new(
                         IdentityProcessor,
                         key,
                         move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -205,23 +188,20 @@ impl StepCompiler for CoreCompiler {
                 ValueSourceDef::Literal(value) => {
                     let svc =
                         camel_processor::SetHeaderIfAbsent::new(IdentityProcessor, key, value);
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
-                    let expression = match compile_language_expression(ctx.languages, &expression) {
-                        Ok(e) => e,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    let expression = compile_language_expression(ctx.languages, &expression)?;
                     let svc = camel_processor::DynamicSetHeaderIfAbsent::new(
                         IdentityProcessor,
                         key,
                         move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -233,23 +213,20 @@ impl StepCompiler for CoreCompiler {
             BuilderStep::DeclarativeSetProperty { key, value_source } => match value_source {
                 ValueSourceDef::Literal(value) => {
                     let svc = set_property::SetProperty::new(IdentityProcessor, key, value);
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
-                    let expression = match compile_language_expression(ctx.languages, &expression) {
-                        Ok(e) => e,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    let expression = compile_language_expression(ctx.languages, &expression)?;
                     let svc = camel_processor::DynamicSetProperty::new(
                         IdentityProcessor,
                         key,
                         move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -265,17 +242,14 @@ impl StepCompiler for CoreCompiler {
                         IdentityProcessor,
                         move |_exchange: &Exchange| body.clone(),
                     );
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
-                    let expression = match compile_language_expression(ctx.languages, &expression) {
-                        Ok(e) => e,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                    let expression = compile_language_expression(ctx.languages, &expression)?;
                     let svc = camel_processor::SetBody::new(
                         IdentityProcessor,
                         move |exchange: &Exchange| {
@@ -283,7 +257,7 @@ impl StepCompiler for CoreCompiler {
                             value_to_body(value)
                         },
                     );
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
@@ -293,23 +267,16 @@ impl StepCompiler for CoreCompiler {
 
             // ── Declarative Script (graceful degradation: try mutating, fallback to SetBody) ──
             BuilderStep::DeclarativeScript { expression } => {
-                let lang = match resolve_language(ctx.languages, &expression.language) {
-                    Ok(l) => l,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let lang = resolve_language(ctx.languages, &expression.language)?;
                 match lang.create_mutating_expression(&expression.source) {
-                    Ok(mut_expr) => StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
                         body_contract: None,
                         lifecycle: None,
                     })),
                     Err(LanguageError::NotSupported { .. }) => {
                         // Graceful degradation: fall back to read-only Expression → SetBody
-                        let expression =
-                            match compile_language_expression(ctx.languages, &expression) {
-                                Ok(e) => e,
-                                Err(e) => return StepCompileResult::Matched(Err(e)),
-                            };
+                        let expression = compile_language_expression(ctx.languages, &expression)?;
                         let svc = camel_processor::SetBody::new(
                             IdentityProcessor,
                             move |exchange: &Exchange| {
@@ -317,26 +284,26 @@ impl StepCompiler for CoreCompiler {
                                 value_to_body(value)
                             },
                         );
-                        StepCompileResult::Matched(Ok(CompiledStep::Process {
+                        Ok(CompileOutcome::Matched(CompiledStep::Process {
                             processor: BoxProcessor::new(svc),
                             body_contract: None,
                             lifecycle: None,
                         }))
                     }
-                    Err(e) => StepCompileResult::Matched(Err(CamelError::RouteError(format!(
+                    Err(e) => Err(CamelError::RouteError(format!(
                         "Failed to create mutating expression for language '{}': {}",
                         expression.language, e
-                    )))),
+                    ))),
                 }
             }
 
             // ── Function step ──
             BuilderStep::DeclarativeFunction { mut definition } => {
                 let Some(invoker) = ctx.function_invoker.clone() else {
-                    return StepCompileResult::Matched(Err(CamelError::Config(
+                    return Err(CamelError::Config(
                         "function: step requires FunctionRuntimeService registered via with_lifecycle"
                             .into(),
-                    )));
+                    ));
                 };
                 definition.route_id = ctx.route_id.map(|s| s.to_string());
                 definition.step_index = Some(_step_index);
@@ -350,7 +317,7 @@ impl StepCompiler for CoreCompiler {
                     FunctionStagingMode::DryCompile => {}
                 }
                 let step = crate::step::function_step::FunctionStep::new(invoker, definition);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(step),
                     body_contract: None,
                     lifecycle: None,
@@ -359,22 +326,13 @@ impl StepCompiler for CoreCompiler {
 
             // ── Bean invocation ──
             BuilderStep::Bean { name, method } => {
-                let beans = match ctx.beans.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        return StepCompileResult::Matched(Err(CamelError::ProcessorError(
-                            "beans mutex poisoned".into(),
-                        )));
-                    }
-                };
-                let bean = match beans.get(&name) {
-                    Some(b) => b.clone(),
-                    None => {
-                        return StepCompileResult::Matched(Err(CamelError::ProcessorError(
-                            format!("Bean not found: {}", name),
-                        )));
-                    }
-                };
+                let beans = ctx
+                    .beans
+                    .lock()
+                    .map_err(|_| CamelError::ProcessorError("beans mutex poisoned".into()))?;
+                let bean = beans.get(&name).ok_or_else(|| {
+                    CamelError::ProcessorError(format!("Bean not found: {}", name))
+                })?;
                 let processor = tower::service_fn(move |mut exchange: Exchange| {
                     let bean = Arc::clone(&bean);
                     let method = method.clone();
@@ -389,7 +347,7 @@ impl StepCompiler for CoreCompiler {
                         Ok(exchange)
                     }
                 });
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(processor),
                     body_contract: None,
                     lifecycle: None,
@@ -398,12 +356,9 @@ impl StepCompiler for CoreCompiler {
 
             // ── Script (hard error on NotSupported) ──
             BuilderStep::Script { language, script } => {
-                let lang = match resolve_language(ctx.languages, &language) {
-                    Ok(l) => l,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let lang = resolve_language(ctx.languages, &language)?;
                 match lang.create_mutating_expression(&script) {
-                    Ok(mut_expr) => StepCompileResult::Matched(Ok(CompiledStep::Process {
+                    Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
                         processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
                         body_contract: None,
                         lifecycle: None,
@@ -411,14 +366,14 @@ impl StepCompiler for CoreCompiler {
                     Err(LanguageError::NotSupported {
                         feature,
                         language: ref lang_name,
-                    }) => StepCompileResult::Matched(Err(CamelError::RouteError(format!(
+                    }) => Err(CamelError::RouteError(format!(
                         "Language '{}' does not support {} (required for .script() step)",
                         lang_name, feature
-                    )))),
-                    Err(e) => StepCompileResult::Matched(Err(CamelError::RouteError(format!(
+                    ))),
+                    Err(e) => Err(CamelError::RouteError(format!(
                         "Failed to create mutating expression for language '{}': {}",
                         language, e
-                    )))),
+                    ))),
                 }
             }
 
@@ -429,14 +384,14 @@ impl StepCompiler for CoreCompiler {
                 key,
                 filter,
             } => {
-                let repo = match ctx.claim_check_repositories.get(&repository) {
-                    Some(r) => r,
-                    None => {
-                        return StepCompileResult::Matched(Err(CamelError::ComponentNotFound(
-                            format!("claim_check: repository '{repository}' is not registered"),
-                        )));
-                    }
-                };
+                let repo = ctx
+                    .claim_check_repositories
+                    .get(&repository)
+                    .ok_or_else(|| {
+                        CamelError::ComponentNotFound(format!(
+                            "claim_check: repository '{repository}' is not registered"
+                        ))
+                    })?;
                 let op = match operation.as_str() {
                     "set" => camel_processor::claim_check::ClaimCheckOp::Set,
                     "get" => camel_processor::claim_check::ClaimCheckOp::Get,
@@ -444,33 +399,25 @@ impl StepCompiler for CoreCompiler {
                     "push" => camel_processor::claim_check::ClaimCheckOp::Push,
                     "pop" => camel_processor::claim_check::ClaimCheckOp::Pop,
                     other => {
-                        return StepCompileResult::Matched(Err(CamelError::RouteError(format!(
+                        return Err(CamelError::RouteError(format!(
                             "claim_check: unsupported operation '{other}'"
-                        ))));
+                        )));
                     }
                 };
-                let key_expr =
-                    match crate::lifecycle::adapters::step_resolution::compile_key_expression(
-                        ctx.languages,
-                        &key,
-                    ) {
-                        Ok(k) => k,
-                        Err(e) => return StepCompileResult::Matched(Err(e)),
-                    };
+                let key_expr = crate::lifecycle::adapters::step_resolution::compile_key_expression(
+                    ctx.languages,
+                    &key,
+                )?;
                 let mut svc = camel_processor::ClaimCheckService::new(repo, op, key_expr);
                 if let Some(filter_str) = filter {
-                    match ClaimCheckFilter::parse(&filter_str) {
-                        Ok(f) => {
-                            svc = svc.with_filter(f);
-                        }
-                        Err(e) => {
-                            return StepCompileResult::Matched(Err(CamelError::RouteError(
-                                format!("claim_check: invalid filter '{filter_str}': {e}"),
-                            )));
-                        }
-                    }
+                    let f = ClaimCheckFilter::parse(&filter_str).map_err(|e| {
+                        CamelError::RouteError(format!(
+                            "claim_check: invalid filter '{filter_str}': {e}"
+                        ))
+                    })?;
+                    svc = svc.with_filter(f);
                 }
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -480,7 +427,7 @@ impl StepCompiler for CoreCompiler {
             // ── Sampling (Process-mode, stateless, no StepLifecycle) ──
             BuilderStep::Sampling { period } => {
                 let svc = camel_processor::SamplingService::new(period);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -492,12 +439,9 @@ impl StepCompiler for CoreCompiler {
                 expression,
                 reverse,
             } => {
-                let sort_expr = match compile_sort_expression(ctx.languages, &expression) {
-                    Ok(e) => e,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let sort_expr = compile_sort_expression(ctx.languages, &expression)?;
                 let svc = camel_processor::SortService::new(sort_expr, reverse);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
@@ -505,7 +449,7 @@ impl StepCompiler for CoreCompiler {
             }
 
             // ── Everything else: not handled ──
-            _ => StepCompileResult::NotHandled(step),
+            _ => Ok(CompileOutcome::NotHandled(step)),
         }
     }
 }
@@ -596,8 +540,8 @@ mod tests {
 
         let result = reg.compile_step(step, 0, &ctx);
         let compiled = result
-            .expect("compilation should return Some")
-            .expect("compilation should succeed");
+            .expect("compilation should succeed")
+            .expect("should match");
 
         assert!(
             matches!(compiled, CompiledStep::Segment { .. }),
@@ -619,8 +563,7 @@ mod tests {
         };
 
         let result = reg.compile_step(step, 0, &dummy_context());
-        assert!(result.is_some(), "compiler should handle the step");
-        let err = result.unwrap().unwrap_err();
+        let err = result.expect_err("compiler should produce an error for nested resequence");
         assert!(
             matches!(err, CamelError::RouteError(_)),
             "should be RouteError, got {err:?}"
@@ -700,8 +643,8 @@ mod tests {
         };
         let result = reg.compile_step(step, 0, &ctx);
         let compiled = result
-            .expect("compilation should return Some")
-            .expect("compilation should succeed");
+            .expect("compilation should succeed")
+            .expect("should match");
 
         // Extract the processor and invoke it.
         let processor = match compiled {

@@ -6,9 +6,10 @@ use crate::shared::components::domain::Registry;
 use arc_swap::ArcSwap;
 use camel_api::function::PrepareToken;
 use camel_api::{
-    ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
-    FunctionInvoker, FunctionInvokerSync, RuntimeCommand, StepLifecycle, StepShutdownReason,
-    SyncBoxProcessor, Value, ValueSourceDef,
+    BoxProcessor, ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId,
+    FunctionInvocationError, FunctionInvoker, FunctionInvokerSync, IdentityProcessor,
+    OpaqueProcessor, RuntimeCommand, StepLifecycle, StepShutdownReason, SyncBoxProcessor, Value,
+    ValueSourceDef,
 };
 use camel_component_api::ConcurrencyModel;
 
@@ -252,6 +253,7 @@ async fn swap_pipeline_and_remove_route_behaviors() {
 
 #[test]
 fn resolve_steps_covers_declarative_and_eip_variants() {
+    use camel_api::FilterPredicate;
     use camel_api::LanguageExpressionDef;
     use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 
@@ -317,12 +319,12 @@ fn resolve_steps_covers_declarative_and_eip_variants() {
                 .unwrap(),
         },
         BuilderStep::Filter {
-            predicate: Arc::new(|_| true),
+            predicate: FilterPredicate::new(|_| true),
             steps: vec![BuilderStep::Stop],
         },
         BuilderStep::Choice {
             whens: vec![crate::lifecycle::application::route_definition::WhenStep {
-                predicate: Arc::new(|_| true),
+                predicate: FilterPredicate::new(|_| true),
                 steps: vec![BuilderStep::Stop],
             }],
             otherwise: Some(vec![BuilderStep::Stop]),
@@ -657,7 +659,9 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
 
     let resolved = controller
         .resolve_steps(
-            vec![BuilderStep::Processor(BoxProcessor::new(IdentityProcessor))],
+            vec![BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                IdentityProcessor,
+            )))],
             &producer_ctx,
             &controller.registry,
             None,
@@ -1712,8 +1716,8 @@ async fn resequencer_compile_route_returns_ack_and_posts_to_continuation() {
                     },
                 },
             },
-            BuilderStep::Processor(BoxProcessor::new(tower::util::BoxCloneService::new(
-                RecordingPostProcessor { tx },
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                tower::util::BoxCloneService::new(RecordingPostProcessor { tx }),
             ))),
         ],
     )
@@ -1832,8 +1836,8 @@ async fn resequencer_batch_e2e_sort_and_emit() {
                     },
                 },
             },
-            BuilderStep::Processor(BoxProcessor::new(tower::util::BoxCloneService::new(
-                RecordingPost { tx },
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                tower::util::BoxCloneService::new(RecordingPost { tx }),
             ))),
         ],
     )
@@ -1953,8 +1957,8 @@ async fn resequencer_hot_swap_drains_old_service() {
                     },
                 },
             },
-            BuilderStep::Processor(BoxProcessor::new(tower::util::BoxCloneService::new(
-                DrainRecorder { tx: old_tx },
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                tower::util::BoxCloneService::new(DrainRecorder { tx: old_tx }),
             ))),
         ],
     )
@@ -1979,8 +1983,8 @@ async fn resequencer_hot_swap_drains_old_service() {
                     },
                 },
             },
-            BuilderStep::Processor(BoxProcessor::new(tower::util::BoxCloneService::new(
-                DrainRecorder { tx: new_tx },
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                tower::util::BoxCloneService::new(DrainRecorder { tx: new_tx }),
             ))),
         ],
     )

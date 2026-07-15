@@ -9,7 +9,7 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::loop_eip::LoopConfig;
 use camel_api::security_policy::SecurityPolicyConfig;
 use camel_api::{
-    AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, ResequencePolicyConfig,
+    AggregatorConfig, FilterPredicate, MulticastConfig, OpaqueProcessor, ResequencePolicyConfig,
     SplitterConfig,
 };
 use camel_auth::TokenAuthenticator;
@@ -19,6 +19,15 @@ use camel_component_api::ConcurrencyModel;
 pub struct WhenStep {
     pub predicate: FilterPredicate,
     pub steps: Vec<BuilderStep>,
+}
+
+impl std::fmt::Debug for WhenStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhenStep")
+            .field("predicate", &self.predicate)
+            .field("steps", &self.steps)
+            .finish()
+    }
 }
 
 pub use camel_api::declarative::{LanguageExpressionDef, ValueSourceDef};
@@ -48,9 +57,10 @@ pub struct DoTryFinallyBuilder {
 }
 
 /// A step in an unresolved route definition.
+#[derive(Debug)]
 pub enum BuilderStep {
     /// A pre-built Tower processor service.
-    Processor(BoxProcessor),
+    Processor(OpaqueProcessor),
     /// A destination URI — resolved at start time by CamelContext.
     To(String),
     /// A stop step that halts processing immediately.
@@ -273,255 +283,6 @@ pub enum BuilderStep {
     },
 }
 
-impl std::fmt::Debug for BuilderStep {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BuilderStep::Processor(_) => write!(f, "BuilderStep::Processor(...)"),
-            BuilderStep::To(uri) => write!(f, "BuilderStep::To({uri:?})"),
-            BuilderStep::Stop => write!(f, "BuilderStep::Stop"),
-            BuilderStep::Log { level, message } => write!(
-                f,
-                "BuilderStep::Log {{ level: {level:?}, message: {message:?} }}"
-            ),
-            BuilderStep::DeclarativeSetHeader { key, .. } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeSetHeader {{ key: {key:?}, .. }}"
-                )
-            }
-            BuilderStep::DeclarativeSetHeaderIfAbsent { key, .. } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeSetHeaderIfAbsent {{ key: {key:?}, .. }}"
-                )
-            }
-            BuilderStep::DeclarativeSetBody { .. } => {
-                write!(f, "BuilderStep::DeclarativeSetBody {{ .. }}")
-            }
-            BuilderStep::DeclarativeSetProperty { key, .. } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeSetProperty {{ key: {key:?}, .. }}"
-                )
-            }
-            BuilderStep::DeclarativeFilter { steps, .. } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeFilter {{ steps: {steps:?}, .. }}"
-                )
-            }
-            BuilderStep::DeclarativeChoice { whens, otherwise } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeChoice {{ whens: {} clause(s), otherwise: {} }}",
-                    whens.len(),
-                    if otherwise.is_some() { "Some" } else { "None" }
-                )
-            }
-            BuilderStep::DeclarativeScript { expression } => write!(
-                f,
-                "BuilderStep::DeclarativeScript {{ language: {:?}, .. }}",
-                expression.language
-            ),
-            BuilderStep::DeclarativeFunction { definition } => write!(
-                f,
-                "BuilderStep::DeclarativeFunction {{ id: {:?}, runtime: {:?}, .. }}",
-                definition.id, definition.runtime
-            ),
-            BuilderStep::DeclarativeSplit { steps, .. } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeSplit {{ steps: {steps:?}, .. }}"
-                )
-            }
-            BuilderStep::DeclarativeStreamSplit {
-                steps,
-                stream_config,
-                ..
-            } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeStreamSplit {{ format: {:?}, steps: {} step(s) }}",
-                    stream_config.format,
-                    steps.len()
-                )
-            }
-            BuilderStep::DeclarativeDynamicRouter { expression, .. } => write!(
-                f,
-                "BuilderStep::DeclarativeDynamicRouter {{ language: {:?}, .. }}",
-                expression.language
-            ),
-            BuilderStep::DeclarativeRoutingSlip { expression, .. } => write!(
-                f,
-                "BuilderStep::DeclarativeRoutingSlip {{ language: {:?}, .. }}",
-                expression.language
-            ),
-            BuilderStep::Split { steps, .. } => {
-                write!(f, "BuilderStep::Split {{ steps: {steps:?}, .. }}")
-            }
-            BuilderStep::Aggregate { .. } => write!(f, "BuilderStep::Aggregate {{ .. }}"),
-            BuilderStep::Filter { steps, .. } => {
-                write!(f, "BuilderStep::Filter {{ steps: {steps:?}, .. }}")
-            }
-            BuilderStep::Choice { whens, otherwise } => {
-                write!(
-                    f,
-                    "BuilderStep::Choice {{ whens: {} clause(s), otherwise: {} }}",
-                    whens.len(),
-                    if otherwise.is_some() { "Some" } else { "None" }
-                )
-            }
-            BuilderStep::WireTap { uri } => write!(f, "BuilderStep::WireTap {{ uri: {uri:?} }}"),
-            BuilderStep::Multicast { steps, .. } => {
-                write!(f, "BuilderStep::Multicast {{ steps: {steps:?}, .. }}")
-            }
-            BuilderStep::DeclarativeLog { level, .. } => {
-                write!(f, "BuilderStep::DeclarativeLog {{ level: {level:?}, .. }}")
-            }
-            BuilderStep::Bean { name, method } => {
-                write!(
-                    f,
-                    "BuilderStep::Bean {{ name: {name:?}, method: {method:?} }}"
-                )
-            }
-            BuilderStep::Script { language, .. } => {
-                write!(f, "BuilderStep::Script {{ language: {language:?}, .. }}")
-            }
-            BuilderStep::Throttle { steps, .. } => {
-                write!(f, "BuilderStep::Throttle {{ steps: {steps:?}, .. }}")
-            }
-            BuilderStep::LoadBalance { steps, .. } => {
-                write!(f, "BuilderStep::LoadBalance {{ steps: {steps:?}, .. }}")
-            }
-            BuilderStep::DynamicRouter { .. } => {
-                write!(f, "BuilderStep::DynamicRouter {{ .. }}")
-            }
-            BuilderStep::RoutingSlip { .. } => {
-                write!(f, "BuilderStep::RoutingSlip {{ .. }}")
-            }
-            BuilderStep::RecipientList { .. } => {
-                write!(f, "BuilderStep::RecipientList {{ .. }}")
-            }
-            BuilderStep::DeclarativeRecipientList {
-                expression,
-                aggregation,
-                ..
-            } => write!(
-                f,
-                "BuilderStep::DeclarativeRecipientList {{ language: {:?}, aggregation: {:?}, .. }}",
-                expression.language, aggregation
-            ),
-            BuilderStep::Delay { config } => {
-                write!(f, "BuilderStep::Delay {{ config: {:?} }}", config)
-            }
-            BuilderStep::Loop { config, steps } => {
-                write!(
-                    f,
-                    "BuilderStep::Loop {{ config: {:?}, steps: {} }}",
-                    config.mode_name(),
-                    steps.len()
-                )
-            }
-            BuilderStep::DeclarativeLoop {
-                count,
-                while_predicate,
-                steps,
-                max_iterations,
-            } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeLoop {{ count: {:?}, while: {}, steps: {}, max_iterations: {:?} }}",
-                    count,
-                    while_predicate.is_some(),
-                    steps.len(),
-                    max_iterations
-                )
-            }
-            BuilderStep::Validate { predicate } => {
-                write!(
-                    f,
-                    "BuilderStep::Validate {{ language: {:?}, source: {:?} }}",
-                    predicate.language, predicate.source
-                )
-            }
-            BuilderStep::IdempotentConsumer {
-                repository,
-                expression,
-                steps,
-                eager,
-                remove_on_failure,
-            } => {
-                write!(
-                    f,
-                    "BuilderStep::IdempotentConsumer {{ repository: {repository:?}, language: {:?}, steps: {}, eager: {eager}, remove_on_failure: {remove_on_failure} }}",
-                    expression.language,
-                    steps.len()
-                )
-            }
-            BuilderStep::Enrich {
-                uri,
-                strategy,
-                timeout_ms,
-            } => {
-                write!(
-                    f,
-                    "BuilderStep::Enrich {{ uri: {uri:?}, strategy: {strategy:?}, timeout_ms: {timeout_ms:?} }}"
-                )
-            }
-            BuilderStep::PollEnrich {
-                uri,
-                strategy,
-                timeout_ms,
-            } => {
-                write!(
-                    f,
-                    "BuilderStep::PollEnrich {{ uri: {uri:?}, strategy: {strategy:?}, timeout_ms: {timeout_ms:?} }}"
-                )
-            }
-            BuilderStep::ClaimCheck {
-                repository,
-                operation,
-                key,
-                filter,
-            } => {
-                write!(
-                    f,
-                    "BuilderStep::ClaimCheck {{ repository: {repository:?}, operation: {operation:?}, \
-                     key: {{ language: {:?}, source: {:?} }}, filter: {filter:?} }}",
-                    key.language, key.source
-                )
-            }
-            BuilderStep::Sampling { period } => {
-                write!(f, "BuilderStep::Sampling {{ period: {period} }}")
-            }
-            BuilderStep::Sort {
-                expression,
-                reverse,
-            } => {
-                write!(
-                    f,
-                    "BuilderStep::Sort {{ language: {:?}, source: {:?}, reverse: {reverse} }}",
-                    expression.language, expression.source
-                )
-            }
-            BuilderStep::DeclarativeDoTry {
-                try_steps,
-                catch,
-                finally,
-            } => {
-                write!(
-                    f,
-                    "BuilderStep::DeclarativeDoTry {{ try_steps: {} step(s), catch: {} clause(s), finally: {} }}",
-                    try_steps.len(),
-                    catch.len(),
-                    if finally.is_some() { "Some" } else { "None" }
-                )
-            }
-            BuilderStep::Resequence { .. } => write!(f, "BuilderStep::Resequence {{ .. }}"),
-        }
-    }
-}
-
 /// An unresolved route definition. "to" URIs have not been resolved to producers yet.
 pub struct RouteDefinition {
     pub(crate) from_uri: String,
@@ -735,6 +496,538 @@ impl RouteDefinitionInfo {
 mod tests {
     use super::*;
 
+    /// Golden debug output for EVERY BuilderStep variant.
+    ///
+    /// Before refactoring the manual `Debug` impl to `#[derive(Debug)]`, this test
+    /// locks the exact output of every variant so the refactor can be verified.
+    #[test]
+    fn golden_debug_output_all_variants() {
+        use camel_api::declarative::LanguageExpressionDef;
+        use camel_api::loop_eip::LoopMode;
+        use camel_api::recipient_list::RecipientListConfig;
+        use camel_api::splitter::{AggregationStrategy, StreamSplitConfig, StreamSplitFormat};
+        use camel_api::{
+            BoxProcessor, DynamicRouterConfig, Exchange, FilterPredicate, FunctionDefinition,
+            FunctionId, IdentityProcessor, MulticastConfig, OpaqueProcessor, RoutingSlipConfig,
+            Value,
+        };
+        use std::sync::Arc;
+
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        };
+
+        // -- group A: trivial / non-recursive ----------------------------------
+        // derive(Debug) emits the variant without the enum name for unit/tuple variants.
+        assert_eq!(format!("{:?}", BuilderStep::Stop), "Stop");
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(IdentityProcessor)))
+            ),
+            "Processor(BoxProcessor(...))"
+        );
+        assert_eq!(
+            format!("{:?}", BuilderStep::To("mock:out".into())),
+            "To(\"mock:out\")"
+        );
+
+        // -- group B: variant with named fields (no sub-steps) -----------------
+        // derive(Debug) emits ALL fields, not the redacted `..` form.
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Log {
+                    level: camel_processor::LogLevel::Info,
+                    message: "hello".into(),
+                }
+            ),
+            "Log { level: Info, message: \"hello\" }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeSetHeader {
+                    key: "k".into(),
+                    value: ValueSourceDef::Literal(Value::String("v".into())),
+                }
+            ),
+            "DeclarativeSetHeader { key: \"k\", value: Literal(String(\"v\")) }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeSetHeaderIfAbsent {
+                    key: "k".into(),
+                    value: ValueSourceDef::Literal(Value::String("v".into())),
+                }
+            ),
+            "DeclarativeSetHeaderIfAbsent { key: \"k\", value: Literal(String(\"v\")) }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeSetBody {
+                    value: ValueSourceDef::Literal(Value::String("v".into())),
+                }
+            ),
+            "DeclarativeSetBody { value: Literal(String(\"v\")) }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeSetProperty {
+                    key: "prop".into(),
+                    value_source: ValueSourceDef::Literal(Value::String("v".into())),
+                }
+            ),
+            "DeclarativeSetProperty { key: \"prop\", value_source: Literal(String(\"v\")) }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeScript {
+                    expression: expr.clone(),
+                }
+            ),
+            "DeclarativeScript { expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" } }"
+        );
+
+        // DeclarativeFunction needs a FunctionDefinition
+        let func_def = FunctionDefinition {
+            id: FunctionId("test-id".into()),
+            runtime: "my_runtime".into(),
+            source: "${body}".into(),
+            timeout_ms: 5000,
+            route_id: None,
+            step_index: None,
+        };
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeFunction {
+                    definition: func_def,
+                }
+            ),
+            "DeclarativeFunction { definition: FunctionDefinition { id: FunctionId(\"test-id\"), runtime: \"my_runtime\", source: \"${body}\", timeout_ms: 5000, route_id: None, step_index: None } }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::WireTap {
+                    uri: "mock:tap".into(),
+                }
+            ),
+            "WireTap { uri: \"mock:tap\" }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeLog {
+                    level: camel_processor::LogLevel::Info,
+                    message: ValueSourceDef::Expression(expr.clone()),
+                }
+            ),
+            "DeclarativeLog { level: Info, message: Expression(LanguageExpressionDef { language: \"simple\", source: \"${body}\" }) }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Bean {
+                    name: "myBean".into(),
+                    method: "process".into(),
+                }
+            ),
+            "Bean { name: \"myBean\", method: \"process\" }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Script {
+                    language: "js".into(),
+                    script: "body".into(),
+                }
+            ),
+            "Script { language: \"js\", script: \"body\" }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Aggregate {
+                    config: camel_api::AggregatorConfig::correlate_by("id")
+                        .complete_when_size(1)
+                        .build()
+                        .unwrap(),
+                }
+            ),
+            "Aggregate { config: AggregatorConfig { header_name: \"id\", completion: Single(Size(1)), correlation: HeaderName(\"id\"), strategy: CollectAll, max_buckets: Some(10000), bucket_ttl: Some(300s), force_completion_on_stop: false, discard_on_timeout: false, max_timeout_tasks: 1024 } }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DynamicRouter {
+                    config: DynamicRouterConfig::new(Arc::new(|_: &Exchange| Some(
+                        "mock:dr".into()
+                    ))),
+                }
+            ),
+            "DynamicRouter { config: DynamicRouterConfig { uri_delimiter: \",\", cache_size: 1000, ignore_invalid_endpoints: false, max_iterations: 1000, timeout: Some(60s) } }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::RoutingSlip {
+                    config: RoutingSlipConfig::new(Arc::new(|_: &Exchange| Some("mock:rs".into()))),
+                }
+            ),
+            "RoutingSlip { config: RoutingSlipConfig { uri_delimiter: \",\", cache_size: 1000, ignore_invalid_endpoints: false } }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::RecipientList {
+                    config: RecipientListConfig::new(Arc::new(|_: &Exchange| String::new())),
+                }
+            ),
+            "RecipientList { config: RecipientListConfig { delimiter: \",\", parallel: false, parallel_limit: None, stop_on_exception: false, max_recipients: 1000 } }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Enrich {
+                    uri: "mock:enrich".into(),
+                    strategy: Some("agg".into()),
+                    timeout_ms: Some(1000),
+                }
+            ),
+            "Enrich { uri: \"mock:enrich\", strategy: Some(\"agg\"), timeout_ms: Some(1000) }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::PollEnrich {
+                    uri: "mock:poll".into(),
+                    strategy: None,
+                    timeout_ms: None,
+                }
+            ),
+            "PollEnrich { uri: \"mock:poll\", strategy: None, timeout_ms: None }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Validate {
+                    predicate: expr.clone(),
+                }
+            ),
+            "Validate { predicate: LanguageExpressionDef { language: \"simple\", source: \"${body}\" } }"
+        );
+
+        assert_eq!(
+            format!("{:?}", BuilderStep::Sampling { period: 100 }),
+            "Sampling { period: 100 }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Resequence {
+                    policy_config: Default::default(),
+                }
+            ),
+            "Resequence { policy_config: ResequencePolicyConfig { mode: Batch { correlation: \"header.id\", sort: \"header.id\", completion: SizeOrTimeout(100, 30000) } } }"
+        );
+
+        // -- group C: variants with named fields (sub-steps is Vec) ------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeFilter {
+                    predicate: expr.clone(),
+                    steps: vec![BuilderStep::Stop],
+                }
+            ),
+            "DeclarativeFilter { predicate: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, steps: [Stop] }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeSplit {
+                    expression: expr.clone(),
+                    aggregation: AggregationStrategy::Original,
+                    parallel: false,
+                    parallel_limit: Some(2),
+                    stop_on_exception: true,
+                    steps: vec![BuilderStep::Stop],
+                }
+            ),
+            "DeclarativeSplit { expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, aggregation: Original, parallel: false, parallel_limit: Some(2), stop_on_exception: true, steps: [Stop] }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Split {
+                    config: camel_api::splitter::SplitterConfig::new(
+                        camel_api::splitter::split_body_lines()
+                    ),
+                    steps: vec![BuilderStep::Stop],
+                }
+            ),
+            "Split { config: SplitterConfig { expression: \"<split-expression>\", aggregation: LastWins, parallel: false, parallel_limit: None, stop_on_exception: true, max_fragments: 100000 }, steps: [Stop] }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Filter {
+                    predicate: FilterPredicate::new(|_: &Exchange| true),
+                    steps: vec![BuilderStep::Stop],
+                }
+            ),
+            "Filter { predicate: FilterPredicate(..), steps: [Stop] }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Throttle {
+                    config: camel_api::ThrottlerConfig::new(
+                        10,
+                        std::time::Duration::from_millis(10)
+                    ),
+                    steps: vec![BuilderStep::Stop],
+                }
+            ),
+            "Throttle { config: ThrottlerConfig { max_requests: 10, period: 10ms, strategy: Delay }, steps: [Stop] }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::LoadBalance {
+                    config: camel_api::LoadBalancerConfig::round_robin(),
+                    steps: vec![BuilderStep::To("mock:l1".into())],
+                }
+            ),
+            "LoadBalance { config: LoadBalancerConfig { strategy: RoundRobin }, steps: [To(\"mock:l1\")] }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Delay {
+                    config: camel_api::DelayConfig::new(500),
+                }
+            ),
+            "Delay { config: DelayConfig { delay_ms: 500, dynamic_header: None, max_delay_ms: 3600000 } }"
+        );
+
+        // -- group D: Choice / DeclarativeChoice --------------------------------
+        // derive(Debug) emits full field enumeration; WhenStep Debug is a
+        // full struct listing; nested BuilderStep::Stop stays as `Stop`.
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Choice {
+                    whens: vec![WhenStep {
+                        predicate: FilterPredicate::new(|_: &Exchange| true),
+                        steps: vec![BuilderStep::To("mock:a".into())],
+                    }],
+                    otherwise: None,
+                }
+            ),
+            "Choice { whens: [WhenStep { predicate: FilterPredicate(..), steps: [To(\"mock:a\")] }], otherwise: None }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeChoice {
+                    whens: vec![DeclarativeWhenStep {
+                        predicate: expr.clone(),
+                        steps: vec![BuilderStep::Stop],
+                    }],
+                    otherwise: Some(vec![BuilderStep::Stop]),
+                }
+            ),
+            "DeclarativeChoice { whens: [DeclarativeWhenStep { predicate: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, steps: [Stop] }], otherwise: Some([Stop]) }"
+        );
+
+        // -- group E: Multicast -------------------------------------------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Multicast {
+                    steps: vec![BuilderStep::To("direct:a".into())],
+                    config: MulticastConfig::new(),
+                }
+            ),
+            "Multicast { steps: [To(\"direct:a\")], config: MulticastConfig { parallel: false, parallel_limit: None, stop_on_exception: false, timeout: None, aggregation: LastWins } }"
+        );
+
+        // -- group F: DeclarativeDynamicRouter / DeclarativeRoutingSlip --------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeDynamicRouter {
+                    expression: expr.clone(),
+                    uri_delimiter: ",".into(),
+                    cache_size: 1000,
+                    ignore_invalid_endpoints: false,
+                    max_iterations: 1000,
+                }
+            ),
+            "DeclarativeDynamicRouter { expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, uri_delimiter: \",\", cache_size: 1000, ignore_invalid_endpoints: false, max_iterations: 1000 }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeRoutingSlip {
+                    expression: expr.clone(),
+                    uri_delimiter: ",".into(),
+                    cache_size: 1000,
+                    ignore_invalid_endpoints: false,
+                }
+            ),
+            "DeclarativeRoutingSlip { expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, uri_delimiter: \",\", cache_size: 1000, ignore_invalid_endpoints: false }"
+        );
+
+        // -- group G: DeclarativeRecipientList ---------------------------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeRecipientList {
+                    expression: expr.clone(),
+                    delimiter: ",".into(),
+                    parallel: false,
+                    parallel_limit: None,
+                    stop_on_exception: false,
+                    aggregation: "original".into(),
+                }
+            ),
+            "DeclarativeRecipientList { expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, delimiter: \",\", parallel: false, parallel_limit: None, stop_on_exception: false, aggregation: \"original\" }"
+        );
+
+        // -- group H: Loop / DeclarativeLoop -----------------------------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Loop {
+                    config: camel_api::loop_eip::LoopConfig::new(LoopMode::Count(3)),
+                    steps: vec![],
+                }
+            ),
+            "Loop { config: LoopConfig { mode: Count(3), max_iterations: 10000 }, steps: [] }"
+        );
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeLoop {
+                    count: Some(5),
+                    while_predicate: None,
+                    steps: vec![],
+                    max_iterations: Some(100),
+                }
+            ),
+            "DeclarativeLoop { count: Some(5), while_predicate: None, steps: [], max_iterations: Some(100) }"
+        );
+
+        // -- group I: ClaimCheck -----------------------------------------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::ClaimCheck {
+                    repository: "myRepo".into(),
+                    operation: "checkout".into(),
+                    key: expr.clone(),
+                    filter: None,
+                }
+            ),
+            "ClaimCheck { repository: \"myRepo\", operation: \"checkout\", key: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, filter: None }"
+        );
+
+        // -- group J: Sort -----------------------------------------------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::Sort {
+                    expression: expr.clone(),
+                    reverse: false,
+                }
+            ),
+            "Sort { expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, reverse: false }"
+        );
+
+        // -- group K: IdempotentConsumer ---------------------------------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::IdempotentConsumer {
+                    repository: "myRepo".into(),
+                    expression: expr.clone(),
+                    steps: vec![],
+                    eager: true,
+                    remove_on_failure: false,
+                }
+            ),
+            "IdempotentConsumer { repository: \"myRepo\", expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, steps: [], eager: true, remove_on_failure: false }"
+        );
+
+        // -- group L: DeclarativeDoTry -----------------------------------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeDoTry {
+                    try_steps: vec![BuilderStep::Stop],
+                    catch: vec![],
+                    finally: None,
+                }
+            ),
+            "DeclarativeDoTry { try_steps: [Stop], catch: [], finally: None }"
+        );
+
+        // -- group M: DeclarativeStreamSplit -----------------------------------
+        assert_eq!(
+            format!(
+                "{:?}",
+                BuilderStep::DeclarativeStreamSplit {
+                    stream_config: StreamSplitConfig {
+                        format: StreamSplitFormat::Ndjson,
+                        max_record_bytes: 1024 * 1024,
+                        batch_size: 1,
+                        chunk_size: None,
+                        include_origin: true,
+                    },
+                    aggregation: AggregationStrategy::Original,
+                    stop_on_exception: true,
+                    steps: vec![BuilderStep::Stop],
+                }
+            ),
+            "DeclarativeStreamSplit { stream_config: StreamSplitConfig { format: Ndjson, max_record_bytes: 1048576, batch_size: 1, chunk_size: None, include_origin: true }, aggregation: Original, stop_on_exception: true, steps: [Stop] }"
+        );
+    }
+
     #[test]
     fn test_builder_step_multicast_variant() {
         use camel_api::MulticastConfig;
@@ -803,7 +1096,8 @@ mod tests {
     fn test_builder_step_debug_covers_many_variants() {
         use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
         use camel_api::{
-            DynamicRouterConfig, Exchange, IdentityProcessor, RoutingSlipConfig, Value,
+            BoxProcessor, DynamicRouterConfig, Exchange, FilterPredicate, IdentityProcessor,
+            OpaqueProcessor, RoutingSlipConfig, Value,
         };
         use std::sync::Arc;
 
@@ -813,7 +1107,7 @@ mod tests {
         };
 
         let steps = vec![
-            BuilderStep::Processor(BoxProcessor::new(IdentityProcessor)),
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(IdentityProcessor))),
             BuilderStep::To("mock:out".into()),
             BuilderStep::Stop,
             BuilderStep::Log {
@@ -860,7 +1154,7 @@ mod tests {
                     .unwrap(),
             },
             BuilderStep::Filter {
-                predicate: Arc::new(|_: &Exchange| true),
+                predicate: FilterPredicate::new(|_: &Exchange| true),
                 steps: vec![BuilderStep::Stop],
             },
             BuilderStep::WireTap {
@@ -915,16 +1209,15 @@ mod tests {
 
     #[test]
     fn test_choice_builder_step_debug() {
-        use camel_api::{Exchange, FilterPredicate};
-        use std::sync::Arc;
+        use camel_api::FilterPredicate;
 
-        fn always_true(_: &Exchange) -> bool {
+        fn always_true(_: &camel_api::Exchange) -> bool {
             true
         }
 
         let step = BuilderStep::Choice {
             whens: vec![WhenStep {
-                predicate: Arc::new(always_true) as FilterPredicate,
+                predicate: FilterPredicate::new(always_true),
                 steps: vec![BuilderStep::To("mock:a".into())],
             }],
             otherwise: None,

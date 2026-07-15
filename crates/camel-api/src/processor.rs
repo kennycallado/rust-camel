@@ -46,6 +46,26 @@ impl Service<Exchange> for IdentityProcessor {
 /// single boxed type.
 pub type BoxProcessor = tower::util::BoxCloneService<Exchange, Exchange, CamelError>;
 
+/// Opaque newtype around [`BoxProcessor`] for `Debug` redaction.
+///
+/// `BoxProcessor` is a type alias for Tower's `BoxCloneService`, which doesn't
+/// have a useful `Debug` impl. This newtype lets the rest of the codebase use
+/// `#[derive(Debug)]` on data structures that hold processors while keeping
+/// the `Debug` output bounded. Use `op.0` to get the inner `BoxProcessor`
+/// for invocation or further wrapping.
+///
+/// Pre-v1.0: introduced to enable `#[derive(Debug)]` on `BuilderStep` (H2).
+/// Once the data model is more stable, the inner type may grow a structured
+/// `Debug` impl and this wrapper can be removed.
+#[derive(Clone)]
+pub struct OpaqueProcessor(pub BoxProcessor);
+
+impl std::fmt::Debug for OpaqueProcessor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BoxProcessor(...)")
+    }
+}
+
 /// Thread-safe wrapper for [`BoxProcessor`].
 ///
 /// `BoxProcessor` (`BoxCloneService`) is `Send` but not `Sync` because the

@@ -18,19 +18,6 @@ pub enum CorrelationStrategy {
     Fn(Arc<dyn Fn(&Exchange) -> Option<String> + Send + Sync>),
 }
 
-impl Clone for CorrelationStrategy {
-    fn clone(&self) -> Self {
-        match self {
-            CorrelationStrategy::HeaderName(h) => CorrelationStrategy::HeaderName(h.clone()),
-            CorrelationStrategy::Expression { expr, language } => CorrelationStrategy::Expression {
-                expr: expr.clone(),
-                language: language.clone(),
-            },
-            CorrelationStrategy::Fn(f) => CorrelationStrategy::Fn(Arc::clone(f)),
-        }
-    }
-}
-
 impl std::fmt::Debug for CorrelationStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -45,6 +32,19 @@ impl std::fmt::Debug for CorrelationStrategy {
     }
 }
 
+impl Clone for CorrelationStrategy {
+    fn clone(&self) -> Self {
+        match self {
+            CorrelationStrategy::HeaderName(h) => CorrelationStrategy::HeaderName(h.clone()),
+            CorrelationStrategy::Expression { expr, language } => CorrelationStrategy::Expression {
+                expr: expr.clone(),
+                language: language.clone(),
+            },
+            CorrelationStrategy::Fn(f) => CorrelationStrategy::Fn(Arc::clone(f)),
+        }
+    }
+}
+
 /// How to combine collected exchanges into one.
 #[derive(Clone)]
 pub enum AggregationStrategy {
@@ -52,6 +52,15 @@ pub enum AggregationStrategy {
     CollectAll,
     /// Left-fold: f(f(ex1, ex2), ex3), ...
     Custom(AggregationFn),
+}
+
+impl std::fmt::Debug for AggregationStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AggregationStrategy::CollectAll => f.write_str("CollectAll"),
+            AggregationStrategy::Custom(_) => f.write_str("Custom(..)"),
+        }
+    }
 }
 
 /// When the bucket is considered complete and should be emitted.
@@ -66,12 +75,31 @@ pub enum CompletionCondition {
     Timeout(Duration),
 }
 
+impl std::fmt::Debug for CompletionCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompletionCondition::Size(n) => f.debug_tuple("Size").field(n).finish(),
+            CompletionCondition::Predicate(_) => f.write_str("Predicate(..)"),
+            CompletionCondition::Timeout(d) => f.debug_tuple("Timeout").field(d).finish(),
+        }
+    }
+}
+
 /// Determines how a bucket's completion is evaluated.
 /// `Single` wraps one condition; `Any` completes when the first condition triggers.
 #[derive(Clone)]
 pub enum CompletionMode {
     Single(CompletionCondition),
     Any(Vec<CompletionCondition>),
+}
+
+impl std::fmt::Debug for CompletionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompletionMode::Single(c) => f.debug_tuple("Single").field(c).finish(),
+            CompletionMode::Any(conds) => f.debug_tuple("Any").field(conds).finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +147,22 @@ pub struct AggregatorConfig {
     /// rely on `bucket_ttl` eviction (graceful degradation under a key flood).
     /// Default 1024.
     pub max_timeout_tasks: usize,
+}
+
+impl std::fmt::Debug for AggregatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AggregatorConfig")
+            .field("header_name", &self.header_name)
+            .field("completion", &self.completion)
+            .field("correlation", &self.correlation)
+            .field("strategy", &self.strategy)
+            .field("max_buckets", &self.max_buckets)
+            .field("bucket_ttl", &self.bucket_ttl)
+            .field("force_completion_on_stop", &self.force_completion_on_stop)
+            .field("discard_on_timeout", &self.discard_on_timeout)
+            .field("max_timeout_tasks", &self.max_timeout_tasks)
+            .finish()
+    }
 }
 
 impl AggregatorConfig {

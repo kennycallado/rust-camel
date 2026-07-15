@@ -21,7 +21,7 @@ use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
 use camel_api::{
     BoxProcessor, CamelError, CanonicalRouteSpec, Exchange, FilterPredicate, IdentityProcessor,
-    LanguageExpressionDef, ProcessorFn, Value,
+    LanguageExpressionDef, OpaqueProcessor, ProcessorFn, Value,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
@@ -59,19 +59,24 @@ pub trait StepAccumulator: Sized {
     {
         let svc = ProcessorFn::new(f);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         self
     }
 
     fn process_fn(mut self, processor: BoxProcessor) -> Self {
-        self.steps_mut().push(BuilderStep::Processor(processor));
+        self.steps_mut()
+            .push(BuilderStep::Processor(OpaqueProcessor(processor)));
         self
     }
 
     fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         let svc = SetHeader::new(IdentityProcessor, key, value);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         self
     }
 
@@ -81,7 +86,9 @@ pub trait StepAccumulator: Sized {
     {
         let svc = MapBody::new(IdentityProcessor, mapper);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         self
     }
 
@@ -92,7 +99,9 @@ pub trait StepAccumulator: Sized {
         let body: Body = body.into();
         let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         self
     }
 
@@ -113,7 +122,9 @@ pub trait StepAccumulator: Sized {
     {
         let svc = SetBody::new(IdentityProcessor, expr);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         self
     }
 
@@ -123,7 +134,9 @@ pub trait StepAccumulator: Sized {
     {
         let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         self
     }
 
@@ -185,7 +198,9 @@ pub trait StepAccumulator: Sized {
     fn convert_body_to(mut self, target: BodyType) -> Self {
         let svc = ConvertBodyTo::new(IdentityProcessor, target);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         self
     }
 
@@ -193,7 +208,9 @@ pub trait StepAccumulator: Sized {
         let config = camel_api::stream_cache::StreamCacheConfig::new(threshold);
         let svc = StreamCacheService::new(IdentityProcessor, config);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         self
     }
 
@@ -220,7 +237,9 @@ pub trait StepAccumulator: Sized {
             .ok_or_else(|| CamelError::Config(format!("unknown data format: '{name}'")))?;
         let svc = MarshalService::new(IdentityProcessor, df);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         Ok(self)
     }
 
@@ -240,7 +259,9 @@ pub trait StepAccumulator: Sized {
             .ok_or_else(|| CamelError::Config(format!("unknown data format: '{name}'")))?;
         let svc = UnmarshalService::new(IdentityProcessor, df);
         self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
+                svc,
+            ))));
         Ok(self)
     }
 
@@ -394,7 +415,7 @@ impl RouteBuilder {
     {
         FilterBuilder {
             parent: self,
-            predicate: std::sync::Arc::new(predicate),
+            predicate: camel_api::FilterPredicate::new(predicate),
             steps: vec![],
         }
     }
@@ -605,7 +626,7 @@ impl RouteBuilder {
     {
         LoopBuilder {
             parent: self,
-            config: LoopConfig::new(LoopMode::While(std::sync::Arc::new(predicate))),
+            config: LoopConfig::new(LoopMode::While(camel_api::FilterPredicate::new(predicate))),
             steps: vec![],
         }
     }
@@ -1130,7 +1151,7 @@ impl SplitBuilder {
     {
         FilterInSplitBuilder {
             parent: self,
-            predicate: std::sync::Arc::new(predicate),
+            predicate: camel_api::FilterPredicate::new(predicate),
             steps: vec![],
         }
     }
@@ -1225,7 +1246,7 @@ impl ChoiceBuilder {
     {
         WhenBuilder {
             parent: self,
-            predicate: std::sync::Arc::new(predicate),
+            predicate: camel_api::FilterPredicate::new(predicate),
             steps: vec![],
         }
     }
@@ -1418,7 +1439,7 @@ impl LoopBuilder {
     {
         LoopInLoopBuilder {
             parent: self,
-            config: LoopConfig::new(LoopMode::While(std::sync::Arc::new(predicate))),
+            config: LoopConfig::new(LoopMode::While(camel_api::FilterPredicate::new(predicate))),
             steps: vec![],
         }
     }
@@ -2256,8 +2277,8 @@ mod tests {
             def.steps()
                 .iter()
                 .filter_map(|s| {
-                    if let BuilderStep::Processor(p) = s {
-                        Some(p.clone())
+                    if let BuilderStep::Processor(op) = s {
+                        Some(op.0.clone())
                     } else {
                         None
                     }
@@ -2288,8 +2309,8 @@ mod tests {
             def.steps()
                 .iter()
                 .filter_map(|s| {
-                    if let BuilderStep::Processor(p) = s {
-                        Some(p.clone())
+                    if let BuilderStep::Processor(op) = s {
+                        Some(op.0.clone())
                     } else {
                         None
                     }
@@ -2324,8 +2345,8 @@ mod tests {
             def.steps()
                 .iter()
                 .filter_map(|s| {
-                    if let BuilderStep::Processor(p) = s {
-                        Some(p.clone())
+                    if let BuilderStep::Processor(op) = s {
+                        Some(op.0.clone())
                     } else {
                         None
                     }

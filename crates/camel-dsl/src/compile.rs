@@ -621,7 +621,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                 let processors: Vec<camel_api::BoxProcessor> = compiled_steps
                     .into_iter()
                     .filter_map(|step| match step {
-                        camel_core::route::BuilderStep::Processor(p) => Some(p),
+                        camel_core::route::BuilderStep::Processor(op) => Some(op.0),
                         _ => None,
                     })
                     .collect();
@@ -795,8 +795,11 @@ fn compile_declarative_step_with_threshold(
                         serde_json::Value::String(s) => s,
                         other => other.to_string(),
                     };
-                    Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-                        camel_processor::LogProcessor::new(compiled_level, s),
+                    Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
+                        camel_api::BoxProcessor::new(camel_processor::LogProcessor::new(
+                            compiled_level,
+                            s,
+                        )),
                     )))
                 }
                 ValueSourceDef::Expression(_) => Ok(BuilderStep::DeclarativeLog {
@@ -820,8 +823,11 @@ fn compile_declarative_step_with_threshold(
         }
         DeclarativeStep::StreamCache(def) => {
             let config = stream_cache_config(def.threshold, stream_cache_threshold);
-            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-                StreamCacheService::new(camel_api::IdentityProcessor, config),
+            Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
+                camel_api::BoxProcessor::new(StreamCacheService::new(
+                    camel_api::IdentityProcessor,
+                    config,
+                )),
             )))
         }
         DeclarativeStep::Stop => Ok(BuilderStep::Stop),
@@ -975,11 +981,11 @@ fn compile_declarative_step_with_threshold(
                 BodyTypeDef::Xml => BodyType::Xml,
                 BodyTypeDef::Empty => BodyType::Empty,
             };
-            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-                StreamCacheService::new(
+            Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
+                camel_api::BoxProcessor::new(StreamCacheService::new(
                     ConvertBodyTo::new(IdentityProcessor, target),
                     camel_api::stream_cache::StreamCacheConfig::new(stream_cache_threshold),
-                ),
+                )),
             )))
         }
         DeclarativeStep::Bean(BeanStepDef { name, method }) => {
@@ -1023,8 +1029,8 @@ fn compile_declarative_step_with_threshold(
                         "unknown data format: '{format}'. Expected: json, xml, zip, protobuf:<path>#<Message>"
                     )))?
             };
-            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-                MarshalService::new(camel_api::IdentityProcessor, df),
+            Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
+                camel_api::BoxProcessor::new(MarshalService::new(camel_api::IdentityProcessor, df)),
             )))
         }
         DeclarativeStep::Unmarshal(DataFormatDef {
@@ -1070,7 +1076,7 @@ fn compile_declarative_step_with_threshold(
                     camel_api::stream_cache::StreamCacheConfig::new(stream_cache_threshold),
                 ))
             };
-            Ok(BuilderStep::Processor(inner))
+            Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(inner)))
         }
         DeclarativeStep::Delay(DelayStepDef {
             delay_ms,

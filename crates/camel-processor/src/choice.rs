@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -78,7 +77,7 @@ pub struct WhenClauseSegment {
 impl Clone for WhenClauseSegment {
     fn clone(&self) -> Self {
         Self {
-            predicate: Arc::clone(&self.predicate),
+            predicate: self.predicate.clone(),
             body: self.body.clone(),
         }
     }
@@ -107,7 +106,7 @@ impl Clone for ChoiceSegment {
                 .clauses
                 .iter()
                 .map(|c| WhenClauseSegment {
-                    predicate: Arc::clone(&c.predicate),
+                    predicate: c.predicate.clone(),
                     body: c.body.clone(),
                 })
                 .collect(),
@@ -144,7 +143,6 @@ impl camel_api::OutcomePipeline for ChoiceSegment {
 mod tests {
     use super::*;
     use camel_api::{Body, BoxProcessorExt, Message, Value};
-    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn append_body(suffix: &'static str) -> BoxProcessor {
@@ -165,7 +163,7 @@ mod tests {
     }
 
     fn pred_header(name: &'static str) -> FilterPredicate {
-        Arc::new(move |ex: &Exchange| ex.input.header(name).is_some())
+        FilterPredicate::new(move |ex: &Exchange| ex.input.header(name).is_some())
     }
 
     // 1. First matching when executes its pipeline.

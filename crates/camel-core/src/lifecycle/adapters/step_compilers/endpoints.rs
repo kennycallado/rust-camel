@@ -9,7 +9,7 @@ use camel_api::{BoxProcessor, CamelError};
 use camel_endpoint::parse_uri;
 
 use super::{
-    CompilationContext, CompiledStep, StepCompileResult, StepCompiler, StepCompilerRegistry,
+    CompilationContext, CompileOutcome, CompiledStep, StepCompiler, StepCompilerRegistry,
     resolve_producer,
 };
 use crate::lifecycle::application::route_definition::BuilderStep;
@@ -23,33 +23,19 @@ impl StepCompiler for EndpointsCompiler {
         _step_index: usize,
         ctx: &CompilationContext,
         _registry: &StepCompilerRegistry,
-    ) -> StepCompileResult {
+    ) -> Result<CompileOutcome, CamelError> {
         match step {
             // ── To ──
             BuilderStep::To(uri) => {
-                let parsed = match parse_uri(&uri) {
-                    Ok(p) => p,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let parsed = parse_uri(&uri)?;
                 let component = ctx
                     .component_ctx
                     .resolve_component(&parsed.scheme)
-                    .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()));
-                let component = match component {
-                    Ok(c) => c,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
-                let endpoint = match component.create_endpoint(&uri, ctx.component_ctx.as_ref()) {
-                    Ok(e) => e,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                    .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
+                let endpoint = component.create_endpoint(&uri, ctx.component_ctx.as_ref())?;
                 let contract = endpoint.body_contract();
-                let producer = match endpoint.create_producer(Arc::clone(&ctx.rt), ctx.producer_ctx)
-                {
-                    Ok(p) => p,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                let producer = endpoint.create_producer(Arc::clone(&ctx.rt), ctx.producer_ctx)?;
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: producer,
                     body_contract: contract,
                     lifecycle: None,
@@ -58,19 +44,16 @@ impl StepCompiler for EndpointsCompiler {
 
             // ── WireTap ──
             BuilderStep::WireTap { uri } => {
-                let producer = match resolve_producer(ctx, &uri) {
-                    Ok(p) => p,
-                    Err(e) => return StepCompileResult::Matched(Err(e)),
-                };
+                let producer = resolve_producer(ctx, &uri)?;
                 let svc = camel_processor::WireTapService::new(producer);
-                StepCompileResult::Matched(Ok(CompiledStep::Process {
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
                 }))
             }
 
-            _ => StepCompileResult::NotHandled(step),
+            _ => Ok(CompileOutcome::NotHandled(step)),
         }
     }
 }

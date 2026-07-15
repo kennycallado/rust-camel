@@ -66,18 +66,23 @@ pub enum CompiledStep {
     },
 }
 
-/// Result from a compiler: either it handled the step (with success or error),
-/// or it did not recognize the variant and returns the step for the next compiler.
-pub(crate) enum StepCompileResult {
-    Matched(Result<CompiledStep, CamelError>),
+/// Result from a compiler: either it handled the step, or it did not recognize
+/// the variant and returns the step for the next compiler.
+///
+/// `Result` is intentionally outside this enum (returned by `StepCompiler::compile`)
+/// so that compiler arms can use the `?` operator for propagated errors instead of
+/// wrapping every `Err` in `Matched(Err(e))`.
+pub(crate) enum CompileOutcome {
+    Matched(CompiledStep),
     NotHandled(BuilderStep),
 }
 
 /// A compiler that can handle one or more `BuilderStep` variants.
 ///
 /// The `compile` method receives ownership of the step. If the compiler recognizes
-/// the variant it returns `StepCompileResult::Matched(...)`. Otherwise it returns the
-/// step back via `NotHandled(step)`.
+/// the variant it returns `Ok(CompileOutcome::Matched(...))`. Otherwise it returns
+/// `Ok(CompileOutcome::NotHandled(step))` to pass the step to the next compiler.
+/// Compilation errors are returned as `Err(CamelError)`.
 pub(crate) trait StepCompiler: Send + Sync {
     fn compile(
         &self,
@@ -85,7 +90,7 @@ pub(crate) trait StepCompiler: Send + Sync {
         step_index: usize,
         ctx: &CompilationContext,
         registry: &StepCompilerRegistry,
-    ) -> StepCompileResult;
+    ) -> Result<CompileOutcome, CamelError>;
 }
 
 /// Shared context passed to every compiler invocation.
@@ -203,21 +208,22 @@ impl StepCompilerRegistry {
     }
 
     /// Try each compiler in order. The first to return `Matched` wins.
-    /// If all return `NotHandled`, returns `None`.
+    /// If all return `NotHandled`, returns `Ok(None)`. Compilation errors
+    /// short-circuit and return `Err(CamelError)`.
     pub fn compile_step(
         &self,
         step: BuilderStep,
         step_index: usize,
         ctx: &CompilationContext,
-    ) -> Option<Result<CompiledStep, CamelError>> {
+    ) -> Result<Option<CompiledStep>, CamelError> {
         let mut step = step;
         for compiler in &self.compilers {
-            match compiler.compile(step, step_index, ctx, self) {
-                StepCompileResult::Matched(result) => return Some(result),
-                StepCompileResult::NotHandled(s) => step = s,
+            match compiler.compile(step, step_index, ctx, self)? {
+                CompileOutcome::Matched(s) => return Ok(Some(s)),
+                CompileOutcome::NotHandled(s) => step = s,
             }
         }
-        None
+        Ok(None)
     }
 
     /// Compile all steps in a vector.
@@ -228,9 +234,8 @@ impl StepCompilerRegistry {
     ) -> Result<Vec<CompiledStep>, CamelError> {
         let mut out = Vec::with_capacity(steps.len());
         for (i, step) in steps.into_iter().enumerate() {
-            match self.compile_step(step, i, ctx) {
-                Some(Ok(c)) => out.push(c),
-                Some(Err(e)) => return Err(e),
+            match self.compile_step(step, i, ctx)? {
+                Some(c) => out.push(c),
                 None => {
                     return Err(CamelError::RouteError(
                         "no compiler registered for step variant".into(),
@@ -403,16 +408,14 @@ mod segment_tests {
             _step_index: usize,
             _ctx: &CompilationContext,
             _registry: &StepCompilerRegistry,
-        ) -> StepCompileResult {
+        ) -> Result<CompileOutcome, CamelError> {
             match step {
-                BuilderStep::Processor(svc) => {
-                    StepCompileResult::Matched(Ok(CompiledStep::Process {
-                        processor: svc,
-                        body_contract: None,
-                        lifecycle: Some(self.handle.clone()),
-                    }))
-                }
-                other => StepCompileResult::NotHandled(other),
+                BuilderStep::Processor(op) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    processor: op.0,
+                    body_contract: None,
+                    lifecycle: Some(self.handle.clone()),
+                })),
+                other => Ok(CompileOutcome::NotHandled(other)),
             }
         }
     }
@@ -422,7 +425,9 @@ mod segment_tests {
         use std::collections::HashMap;
         use std::sync::Mutex;
 
-        use camel_api::{BoxProcessor, BoxProcessorExt, StepLifecycle};
+        use camel_api::{
+            BoxProcessor, BoxProcessorExt, FilterPredicate, OpaqueProcessor, StepLifecycle,
+        };
         use camel_bean::BeanRegistry;
         use camel_component_api::{
             ComponentContext, NoOpComponentContext, RuntimeObservability,
@@ -465,10 +470,10 @@ mod segment_tests {
 
         // Compile a Filter with a child Processor step.
         let filter_step = BuilderStep::Filter {
-            predicate: Arc::new(|_| true),
-            steps: vec![BuilderStep::Processor(BoxProcessor::from_fn(|ex| {
-                Box::pin(async move { Ok(ex) })
-            }))],
+            predicate: FilterPredicate::new(|_| true),
+            steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
+            ))],
         };
 
         let result = reg.compile_step(filter_step, 0, &ctx);
@@ -515,7 +520,9 @@ mod segment_tests {
         use std::sync::Mutex;
 
         use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
-        use camel_api::{BoxProcessor, BoxProcessorExt, StepLifecycle};
+        use camel_api::{
+            BoxProcessor, BoxProcessorExt, FilterPredicate, OpaqueProcessor, StepLifecycle,
+        };
         use camel_bean::BeanRegistry;
         use camel_component_api::{
             ComponentContext, NoOpComponentContext, RuntimeObservability,
@@ -554,10 +561,14 @@ mod segment_tests {
 
         // Filter with TWO child Processors → both get the same lifecycle handle.
         let filter_step = BuilderStep::Filter {
-            predicate: Arc::new(|_| true),
+            predicate: FilterPredicate::new(|_| true),
             steps: vec![
-                BuilderStep::Processor(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))),
-                BuilderStep::Processor(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))),
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::from_fn(|ex| {
+                    Box::pin(async move { Ok(ex) })
+                }))),
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::from_fn(|ex| {
+                    Box::pin(async move { Ok(ex) })
+                }))),
             ],
         };
 
@@ -590,7 +601,9 @@ mod segment_tests {
 
         use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
         use crate::lifecycle::application::route_definition::WhenStep;
-        use camel_api::{BoxProcessor, BoxProcessorExt, StepLifecycle};
+        use camel_api::{
+            BoxProcessor, BoxProcessorExt, FilterPredicate, OpaqueProcessor, StepLifecycle,
+        };
         use camel_bean::BeanRegistry;
         use camel_component_api::{
             ComponentContext, NoOpComponentContext, RuntimeObservability,
@@ -631,16 +644,16 @@ mod segment_tests {
         let choice_step = BuilderStep::Choice {
             whens: vec![
                 WhenStep {
-                    predicate: Arc::new(|_| true),
-                    steps: vec![BuilderStep::Processor(BoxProcessor::from_fn(|ex| {
-                        Box::pin(async move { Ok(ex) })
-                    }))],
+                    predicate: FilterPredicate::new(|_| true),
+                    steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                        BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
+                    ))],
                 },
                 WhenStep {
-                    predicate: Arc::new(|_| false),
-                    steps: vec![BuilderStep::Processor(BoxProcessor::from_fn(|ex| {
-                        Box::pin(async move { Ok(ex) })
-                    }))],
+                    predicate: FilterPredicate::new(|_| false),
+                    steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                        BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
+                    ))],
                 },
             ],
             otherwise: None,
@@ -675,7 +688,9 @@ mod segment_tests {
         use std::sync::Mutex;
 
         use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
-        use camel_api::{BoxProcessor, BoxProcessorExt, StepLifecycle};
+        use camel_api::{
+            BoxProcessor, BoxProcessorExt, FilterPredicate, OpaqueProcessor, StepLifecycle,
+        };
         use camel_bean::BeanRegistry;
         use camel_component_api::{
             ComponentContext, NoOpComponentContext, RuntimeObservability,
@@ -716,14 +731,14 @@ mod segment_tests {
         // The outer Segment's lifecycle should contain the innermost handle
         // (proves recursive flattening through compile_children_segments).
         let inner_filter = BuilderStep::Filter {
-            predicate: Arc::new(|_| true),
-            steps: vec![BuilderStep::Processor(BoxProcessor::from_fn(|ex| {
-                Box::pin(async move { Ok(ex) })
-            }))],
+            predicate: FilterPredicate::new(|_| true),
+            steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
+            ))],
         };
 
         let outer_filter = BuilderStep::Filter {
-            predicate: Arc::new(|_| true),
+            predicate: FilterPredicate::new(|_| true),
             steps: vec![inner_filter],
         };
 
@@ -744,5 +759,228 @@ mod segment_tests {
             }
             other => panic!("Expected CompiledStep::Segment, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+    use camel_api::{BoxProcessor, BoxProcessorExt};
+    use camel_bean::BeanRegistry;
+    use camel_component_api::{
+        ComponentContext, NoOpComponentContext, RuntimeObservability,
+        test_support::NoopRuntimeObservability,
+    };
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// Compiler that handles `BuilderStep::To` → `CompiledStep::Stop`.
+    struct ToStopCompiler;
+
+    impl StepCompiler for ToStopCompiler {
+        fn compile(
+            &self,
+            step: BuilderStep,
+            _step_index: usize,
+            _ctx: &CompilationContext,
+            _registry: &StepCompilerRegistry,
+        ) -> Result<CompileOutcome, CamelError> {
+            match step {
+                BuilderStep::To(_) => Ok(CompileOutcome::Matched(CompiledStep::Stop)),
+                other => Ok(CompileOutcome::NotHandled(other)),
+            }
+        }
+    }
+
+    /// Compiler that handles `BuilderStep::To` → `CompiledStep::Process`.
+    struct ToProcessCompiler;
+
+    impl StepCompiler for ToProcessCompiler {
+        fn compile(
+            &self,
+            step: BuilderStep,
+            _step_index: usize,
+            _ctx: &CompilationContext,
+            _registry: &StepCompilerRegistry,
+        ) -> Result<CompileOutcome, CamelError> {
+            match step {
+                BuilderStep::To(_) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
+                    body_contract: None,
+                    lifecycle: None,
+                })),
+                other => Ok(CompileOutcome::NotHandled(other)),
+            }
+        }
+    }
+
+    /// Compiler that passes all steps through (never handles any variant).
+    /// Returns `NotHandled(step)` for every input, proving by-value pass-through.
+    struct PassThroughCompiler;
+
+    impl StepCompiler for PassThroughCompiler {
+        fn compile(
+            &self,
+            step: BuilderStep,
+            _step_index: usize,
+            _ctx: &CompilationContext,
+            _registry: &StepCompilerRegistry,
+        ) -> Result<CompileOutcome, CamelError> {
+            Ok(CompileOutcome::NotHandled(step))
+        }
+    }
+
+    /// Shared context builder — avoids repeating the 15-line setup in every test.
+    #[allow(clippy::too_many_arguments)]
+    fn ctx<'a>(
+        pc: &'a ProducerContext,
+        rt: Arc<dyn RuntimeObservability>,
+        languages: &'a SharedLanguageRegistry,
+        beans: &'a Arc<Mutex<BeanRegistry>>,
+        component_ctx: Arc<dyn ComponentContext>,
+        staging: &'a FunctionStagingMode,
+        idempotent_repositories: &'a crate::IdempotentRegistry,
+        claim_check_repositories: &'a crate::ClaimCheckRegistry,
+    ) -> CompilationContext<'a> {
+        CompilationContext {
+            producer_ctx: pc,
+            rt,
+            languages,
+            beans,
+            function_invoker: None,
+            component_ctx,
+            route_id: None,
+            staging_mode: staging,
+            idempotent_repositories,
+            claim_check_repositories,
+        }
+    }
+
+    /// Test that the dispatcher respects registration order: the first matching
+    /// compiler wins even when a later compiler also matches.
+    #[test]
+    fn compile_step_preserves_registry_order() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+        );
+
+        // Register ToStopCompiler FIRST, ToProcessCompiler SECOND.
+        // Both match BuilderStep::To. The first-registered should win.
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(ToStopCompiler));
+        reg.register(Box::new(ToProcessCompiler));
+
+        let result = reg
+            .compile_step(BuilderStep::To("test".into()), 0, &context)
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        assert!(
+            matches!(result, CompiledStep::Stop),
+            "expected ToStopCompiler (first registered) to win, got {result:?}"
+        );
+    }
+
+    /// Test that when no compiler handles a variant, the dispatcher returns
+    /// `Ok(None)` rather than an error.
+    #[test]
+    fn compile_step_unhandled_returns_ok_none() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+        );
+
+        // Register a compiler that only handles BuilderStep::To.
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(ToStopCompiler));
+
+        // Send a BuilderStep::Log variant — ToStopCompiler does not match it.
+        let result = reg.compile_step(
+            BuilderStep::Log {
+                level: camel_processor::LogLevel::Info,
+                message: "unhandled".into(),
+            },
+            0,
+            &context,
+        );
+
+        assert!(
+            matches!(result, Ok(None)),
+            "expected Ok(None), got {result:?}"
+        );
+    }
+
+    /// Test that `NotHandled(step)` passes the step by-value to the next
+    /// compiler. Compiler N returns `NotHandled(step)` for a variant that
+    /// compiler N+1 handles — proving the step is not dropped or replaced.
+    #[test]
+    fn compile_step_nothandled_passes_step_intact_to_next_compiler() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+        );
+
+        // Register PassThroughCompiler FIRST (never handles anything),
+        // ToStopCompiler SECOND (handles BuilderStep::To).
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(PassThroughCompiler));
+        reg.register(Box::new(ToStopCompiler));
+
+        let result = reg
+            .compile_step(BuilderStep::To("passthrough".into()), 0, &context)
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        assert!(
+            matches!(result, CompiledStep::Stop),
+            "expected ToStopCompiler (N+1) to win after pass-through, got {result:?}"
+        );
     }
 }

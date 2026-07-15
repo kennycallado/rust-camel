@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use camel_api::{
-    AggregationStrategy, Body, BoxProcessor, BoxProcessorExt, Exchange, Message, SplitterConfig,
-    Value, split_body,
+    AggregationStrategy, Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message,
+    SplitterConfig, Value, split_body,
 };
 use camel_core::route::{CompiledStep, compose_pipeline};
 use camel_processor::{
@@ -23,7 +21,7 @@ fn build_pipeline() -> BoxProcessor {
 
     let choice = BoxProcessor::new(ChoiceService::new(
         vec![WhenClause {
-            predicate: Arc::new(|ex: &Exchange| {
+            predicate: FilterPredicate::new(|ex: &Exchange| {
                 matches!(
                     ex.input.header("type"),
                     Some(v) if v == &Value::String("important".to_string())

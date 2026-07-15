@@ -407,7 +407,7 @@ mod tests {
             catches: vec![
                 CatchClauseSegment {
                     matcher: CatchMatcher::ByVariant(vec!["Io".into()]),
-                    on_when: Some(Arc::new(|_ex| false)),
+                    on_when: Some(FilterPredicate::new(|_ex| false)),
                     body: seg_record(first_call.clone()),
                     disposition: ExceptionDisposition::Handled,
                 },
@@ -448,7 +448,7 @@ mod tests {
             try_body: seg_complete(),
             catches: vec![],
             finally: Some(FinallyClauseSegment {
-                on_when: Some(Arc::new(|_ex| false)),
+                on_when: Some(FilterPredicate::new(|_ex| false)),
                 body: seg_record(finally_call.clone()),
             }),
         };

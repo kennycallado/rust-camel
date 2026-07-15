@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use camel_api::{BoxProcessor, BoxProcessorExt, Exchange};
+use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, OpaqueProcessor};
 use camel_component_timer::TimerComponent;
 use camel_core::route::{BuilderStep, RouteDefinition};
 use camel_core::{DefaultRouteController, Registry, spawn_controller_actor};
@@ -29,7 +29,7 @@ fn bench_swap_pipeline_latency(c: &mut Criterion) {
     rt.block_on(async {
         let route = RouteDefinition::new(
             "timer:swap?period=1000",
-            vec![BuilderStep::Processor(pass_through())],
+            vec![BuilderStep::Processor(OpaqueProcessor(pass_through()))],
         )
         .with_route_id("bench-swap");
 

@@ -114,7 +114,8 @@ pub use platform::{
     ReadinessGate,
 };
 pub use processor::{
-    BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn, SyncBoxProcessor,
+    BoxProcessor, BoxProcessorExt, IdentityProcessor, OpaqueProcessor, Processor, ProcessorFn,
+    SyncBoxProcessor,
 };
 pub use producer::ProducerContext;
 pub use resequencer::{

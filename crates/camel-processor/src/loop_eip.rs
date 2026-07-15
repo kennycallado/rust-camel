@@ -183,7 +183,8 @@ mod tests {
 
     use camel_api::loop_eip::{LoopConfig, LoopMode, MAX_LOOP_ITERATIONS};
     use camel_api::{
-        Body, BoxProcessor, BoxProcessorExt, CamelError, Exchange, IdentityProcessor, Message,
+        Body, BoxProcessor, BoxProcessorExt, CamelError, Exchange, FilterPredicate,
+        IdentityProcessor, Message,
     };
     use tower::{Service, ServiceExt};
 
@@ -264,7 +265,7 @@ mod tests {
     async fn test_loop_while_stops_when_predicate_false() {
         let counter = Arc::new(AtomicUsize::new(0));
 
-        let predicate = Arc::new(|exchange: &Exchange| {
+        let predicate = FilterPredicate::new(|exchange: &Exchange| {
             exchange
                 .property("iterations")
                 .and_then(|v| v.as_u64())
@@ -310,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn test_loop_while_respects_max_iterations() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let predicate = Arc::new(|_exchange: &Exchange| true);
+        let predicate = FilterPredicate::new(|_exchange: &Exchange| true);
         let config = LoopConfig::new(LoopMode::While(predicate));
         let mut service = LoopService::new(config, counter_pipeline(Arc::clone(&counter)));
 
@@ -378,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn test_loop_while_with_custom_max_iterations() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let predicate: Arc<dyn Fn(&Exchange) -> bool + Send + Sync> = Arc::new(|_| true);
+        let predicate = FilterPredicate::new(|_| true);
         let config = LoopConfig::new(LoopMode::While(predicate)).with_max_iterations(50);
         let mut service = LoopService::new(config, counter_pipeline(Arc::clone(&counter)));
         let exchange = Exchange::new(Message::new("test"));
