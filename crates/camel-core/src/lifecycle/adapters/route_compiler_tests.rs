@@ -134,11 +134,11 @@ fn test_pipeline_poll_ready_delegates_to_first_step() {
     };
     let boxed = BoxProcessor::new(inner);
     let mut pipeline = SequentialPipeline {
-        steps: vec![CompiledStep::Process {
+        steps: SharedSnapshot(Arc::from(vec![CompiledStep::Process {
             processor: boxed,
             body_contract: None,
             lifecycle: None,
-        }],
+        }])),
         handler: None,
     };
 
@@ -155,7 +155,7 @@ fn test_pipeline_poll_ready_with_empty_steps() {
     let mut cx = Context::from_waker(&waker);
 
     let mut pipeline = SequentialPipeline {
-        steps: vec![],
+        steps: SharedSnapshot(Arc::from(vec![])),
         handler: None,
     };
     let result = pipeline.poll_ready(&mut cx);
@@ -177,7 +177,7 @@ async fn test_pipeline_stop_returns_ok_with_exchange() {
     };
 
     let mut pipeline = SequentialPipeline {
-        steps: vec![stop_step, after_step],
+        steps: SharedSnapshot(Arc::from(vec![stop_step, after_step])),
         handler: None,
     };
 
@@ -205,7 +205,7 @@ async fn test_run_steps_stop_produces_pipeline_outcome_stopped() {
         },
     ];
     let ex = Exchange::new(camel_api::Message::new("payload"));
-    let outcome = run_steps(steps, ex, None, false).await;
+    let outcome = run_steps(SharedSnapshot(Arc::from(steps)), ex, None, false).await;
     match outcome {
         PipelineOutcome::Stopped(returned) => {
             assert_eq!(returned.input.body.as_text(), Some("payload"));
@@ -270,7 +270,7 @@ async fn test_run_steps_stop_bypasses_error_handler() {
     let steps = vec![CompiledStep::Stop];
     let ex = Exchange::new(camel_api::Message::new("payload"));
     let outcome = run_steps(
-        steps,
+        SharedSnapshot(Arc::from(steps)),
         ex,
         Some(Arc::new(RecordingHandler { counter })),
         false,
@@ -382,7 +382,7 @@ async fn test_run_steps_continued_skips_failed_step() {
 
     let handler: Arc<dyn RouteErrorHandler> = Arc::new(ContinuedHandler);
     let outcome = run_steps(
-        vec![step1, step2, step3],
+        SharedSnapshot(Arc::from([step1, step2, step3])),
         make_test_exchange(),
         Some(handler),
         false,
@@ -397,6 +397,34 @@ async fn test_run_steps_continued_skips_failed_step() {
         step3_hit.load(Ordering::SeqCst),
         "step 3 should have executed after continued"
     );
+}
+
+#[tokio::test]
+async fn test_run_steps_failed_without_handler_returns_failed() {
+    // Optimized path: a failing step + handler=None → short-circuit to
+    // PipelineOutcome::Failed without attempting retry/recovery.
+    let steps = vec![CompiledStep::Process {
+        processor: BoxProcessor::from_fn(|_ex| {
+            Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
+        }),
+        body_contract: None,
+        lifecycle: None,
+    }];
+    let ex = Exchange::new(camel_api::Message::new("payload"));
+    let outcome = run_steps(SharedSnapshot(Arc::from(steps)), ex, None, false).await;
+    match outcome {
+        PipelineOutcome::Failed(err) => {
+            assert!(
+                matches!(&err, CamelError::ProcessorError(msg) if msg == "boom"),
+                "expected ProcessorError('boom'), got {:?}",
+                err
+            );
+        }
+        other => panic!(
+            "expected PipelineOutcome::Failed, got: {:?}",
+            other.is_success()
+        ),
+    }
 }
 
 // ── RouteChannelService tests ─────────────────────────────────────────
@@ -742,7 +770,7 @@ async fn test_sampling_drop_stops_following_process_step() {
     // Exchange 1 — should be stopped by sampling (counter=1, 1%2≠0)
     captured.store(false, Ordering::SeqCst);
     let ex1 = Exchange::new(Message::new("first"));
-    let outcome1 = run_steps(steps.clone(), ex1, None, false).await;
+    let outcome1 = run_steps(SharedSnapshot(Arc::from(steps.clone())), ex1, None, false).await;
     match &outcome1 {
         PipelineOutcome::Stopped(returned) => {
             assert!(
@@ -760,7 +788,7 @@ async fn test_sampling_drop_stops_following_process_step() {
     // Exchange 2 — should pass through (counter=2, 2%2=0)
     captured.store(false, Ordering::SeqCst);
     let ex2 = Exchange::new(Message::new("second"));
-    let outcome2 = run_steps(steps.clone(), ex2, None, false).await;
+    let outcome2 = run_steps(SharedSnapshot(Arc::from(steps.clone())), ex2, None, false).await;
     match &outcome2 {
         PipelineOutcome::Completed(returned) => {
             assert!(
@@ -871,7 +899,7 @@ mod run_steps_segment_tests {
             lifecycle: None,
         }];
         let ex = Exchange::new(Message::new("original"));
-        let outcome = run_steps(steps, ex, None, false).await;
+        let outcome = run_steps(SharedSnapshot(Arc::from(steps)), ex, None, false).await;
         match outcome {
             PipelineOutcome::Stopped(returned_ex) => {
                 if let camel_api::Body::Bytes(b) = &returned_ex.input.body {
@@ -953,7 +981,7 @@ mod run_steps_segment_tests {
             lifecycle: None,
         }];
         let ex = Exchange::new(Message::new("hello"));
-        let outcome = run_steps(steps, ex, Some(handler), false).await;
+        let outcome = run_steps(SharedSnapshot(Arc::from(steps)), ex, Some(handler), false).await;
         assert!(
             matches!(outcome, PipelineOutcome::Failed(_)),
             "expected Failed, got {:?}",
@@ -1115,4 +1143,17 @@ mod sequential_outcome_segment_tests {
             recorded
         );
     }
+}
+
+/// Documents that SharedSnapshot is Send + Sync.
+///
+/// This is a runtime assertion that the `unsafe impl Send + Sync` is in
+/// effect. It does NOT mechanically verify that `CompiledStep` remains
+/// free of `UnsafeCell` — that requires manual review. The compile-time
+/// guard in the parent module asserts `CompiledStep: Send` as a partial
+/// check; `Sync` has no equivalent guard and must be verified manually.
+#[test]
+fn shared_snapshot_is_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<SharedSnapshot>();
 }

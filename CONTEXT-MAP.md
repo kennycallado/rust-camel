@@ -63,6 +63,7 @@ are a convenience index and may lag the file.
 - [0038](./docs/adr/0038-configurable-dos-caps-via-per-format-config-channel.md) — Configurable DoS caps via per-format config channel; setting a non-default cap in YAML is the ADR-0033 per-item explicit choice
 - [0039](./docs/adr/0039-configurable-loop-iteration-cap.md) — Configurable per-Step loop iteration cap via `max_iterations` (ADR-0033/0038 per-item escape hatch)
 - [0040](./docs/adr/0040-configurable-materialize-limits.md) — Configurable materialize limits for XSLT/XJ/WASM producers (ADR-0032, ADR-0033, ADR-0038)
+- [0042](./docs/adr/0042-arc-compiled-steps-snapshot.md) — `Arc<[CompiledStep]>` shared snapshot avoids per-Exchange Vec clone; `SharedSnapshot` newtype adds `Send + Sync`
 
 ## Key Terms
 

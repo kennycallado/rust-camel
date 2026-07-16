@@ -33,6 +33,49 @@ pub(crate) use super::outcome_composition::{
     BodyCoercingSegment, BoxProcessorSegment, StopSegment, compose_outcome_segment,
 };
 
+/// Newtype around `Arc<[CompiledStep]>` that adds `Send + Sync`.
+///
+/// `CompiledStep` contains `BoxProcessor` (tower `BoxCloneService`) which
+/// is `Send + !Sync` — the `!Sync` is an artifact of Tower's trait-object
+/// bounds (`Box<dyn ... + Send>` lacks `+ Sync`), NOT because of interior
+/// mutability. Verified: no `Rc`, `RefCell`, `Cell`, or `UnsafeCell` in
+/// `OutcomePipeline`, `OutcomeSegment`, or `BoxProcessor`.
+///
+/// SAFETY: Concurrent access DOES occur — multiple Exchanges read
+/// `&CompiledStep` from the same Arc simultaneously across tokio worker
+/// threads. This is sound because `run_steps` only reads shared references
+/// and calls `.clone()` to obtain owned copies before invoking. Read-only
+/// `&T` + `clone()` of types free of `UnsafeCell` is sound across threads.
+///
+/// INVARIANT: If any `CompiledStep` variant ever introduces a type backed
+/// by `UnsafeCell` (`Rc`, `RefCell`, `Cell`), this unsafe impl becomes
+/// unsound UB. The compile-time guard below ensures `CompiledStep: Send`;
+/// there is no mechanical guard for `Sync` — that requires manual review
+/// (see `shared_snapshot_is_send_sync` test).
+#[derive(Clone)]
+struct SharedSnapshot(Arc<[CompiledStep]>);
+
+// SAFETY: see struct doc above. `Send` is required so the future returned
+// by `run_steps` (which owns the snapshot) is itself `Send` and compatible
+// with `BoxCloneService`'s `Pin<Box<dyn Future + Send>>` return type.
+unsafe impl Send for SharedSnapshot {}
+
+// SAFETY: see struct doc above. `Sync` is required because the snapshot
+// is held behind `Arc` and may be read concurrently by `&self` access on
+// `SequentialPipeline`/`TracedPipeline` clones (e.g. `poll_ready` on one
+// thread, `call` on another).
+unsafe impl Sync for SharedSnapshot {}
+
+// Compile-time guard: CompiledStep must remain Send.
+// If this fails, SharedSnapshot's unsafe impl Send becomes unsound.
+#[allow(dead_code)]
+const _: () = {
+    fn assert_send<T: Send>() {}
+    fn _check() {
+        assert_send::<CompiledStep>();
+    }
+};
+
 /// Compose a list of CompiledSteps into a sub-pipeline (EIP internal).
 ///
 /// Uses `into_tower_result()` so `PipelineOutcome::Stopped` maps to `Ok(ex)`.
@@ -42,7 +85,7 @@ pub fn compose_pipeline(processors: Vec<CompiledStep>) -> BoxProcessor {
         return BoxProcessor::new(IdentityProcessor);
     }
     BoxProcessor::new(SequentialPipeline {
-        steps: processors,
+        steps: SharedSnapshot(processors.into()),
         handler: None,
     })
 }
@@ -60,7 +103,7 @@ pub fn compose_pipeline_with_handler(
         return BoxProcessor::new(IdentityProcessor);
     }
     BoxProcessor::new(SequentialPipeline {
-        steps: processors,
+        steps: SharedSnapshot(processors.into()),
         handler,
     })
 }
@@ -114,7 +157,7 @@ pub fn compose_traced_pipeline(
         .collect();
 
     BoxProcessor::new(TracedPipeline {
-        steps: wrapped,
+        steps: SharedSnapshot(wrapped.into()),
         handler,
     })
 }
@@ -199,7 +242,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
         .collect();
 
     BoxProcessor::new(TracedPipeline {
-        steps: wrapped,
+        steps: SharedSnapshot(wrapped.into()),
         handler,
     })
 }
@@ -211,7 +254,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
 /// at the consumer boundary.
 #[derive(Clone)]
 struct SequentialPipeline {
-    steps: Vec<CompiledStep>,
+    steps: SharedSnapshot,
     handler: Option<Arc<dyn RouteErrorHandler>>,
 }
 
@@ -221,7 +264,7 @@ impl Service<Exchange> for SequentialPipeline {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match self.steps.first() {
+        match self.steps.0.first() {
             Some(CompiledStep::Process { processor, .. }) => {
                 let mut proc = processor.clone();
                 match proc.poll_ready(cx) {
@@ -241,11 +284,15 @@ impl Service<Exchange> for SequentialPipeline {
     // Downstream consumers (RouteChannelService, ExchangeUoWLayer, HTTP/Kafka reply
     // finalisers) see Result<Exchange, CamelError> and treat Stop as success.
     fn call(&mut self, exchange: Exchange) -> Self::Future {
+        // Cheap Arc::clone (refcount bump) on the SharedSnapshot newtype.
+        // `SharedSnapshot: Send` so the future returned by `run_steps`
+        // captures it directly without needing a Send-asserting wrapper.
         let steps = self.steps.clone();
         let handler = self.handler.clone();
         Box::pin(async move {
-            let outcome = run_steps(steps, exchange, handler, false).await;
-            outcome.into_tower_result()
+            run_steps(steps, exchange, handler, false)
+                .await
+                .into_tower_result()
         })
     }
 }
@@ -253,7 +300,7 @@ impl Service<Exchange> for SequentialPipeline {
 /// A traced service pipeline for wrapped CompiledSteps.
 #[derive(Clone)]
 struct TracedPipeline {
-    steps: Vec<CompiledStep>,
+    steps: SharedSnapshot,
     handler: Option<Arc<dyn RouteErrorHandler>>,
 }
 
@@ -263,7 +310,7 @@ impl Service<Exchange> for TracedPipeline {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match self.steps.first() {
+        match self.steps.0.first() {
             Some(CompiledStep::Process { processor, .. }) => {
                 let mut proc = processor.clone();
                 match proc.poll_ready(cx) {
@@ -284,16 +331,23 @@ impl Service<Exchange> for TracedPipeline {
         let steps = self.steps.clone();
         let handler = self.handler.clone();
         Box::pin(async move {
-            let outcome = run_steps(steps, exchange, handler, true).await;
-            outcome.into_tower_result()
+            run_steps(steps, exchange, handler, true)
+                .await
+                .into_tower_result()
         })
     }
 }
 
 /// Run a sequence of CompiledSteps with optional error recovery.
 ///
-/// Each step is unified under `Box<dyn RetryableStep>` — both Process and
-/// Segment variants are treated uniformly. On failure:
+/// Each step is unified under [`OwnedRetryable`] — both Process and
+/// Segment variants are treated uniformly via a stack-allocated enum
+/// that dispatches to the existing `RetryableStep` impls on
+/// `BoxProcessor` and `OutcomeSegment`. This eliminates the per-step
+/// `Box::new(...) as Box<dyn RetryableStep>` heap allocation that the
+/// pre-A2 implementation paid for every step of every Exchange (A2).
+///
+/// On failure:
 /// 1. If a handler is present, `match_policy` selects a retry policy.
 /// 2. `retry_step` attempts recovery; if exhausted, `handle_step` determines
 ///    the disposition:
@@ -304,36 +358,33 @@ impl Service<Exchange> for TracedPipeline {
 ///
 /// CompiledStep::Stop short-circuits to `PipelineOutcome::Stopped(ex)` — the
 /// handler is bypassed and no Tower service is invoked (ADR-0024 §3.5).
-pub async fn run_steps(
-    steps: Vec<CompiledStep>,
+async fn run_steps(
+    steps: SharedSnapshot,
     exchange: Exchange,
     handler: Option<Arc<dyn RouteErrorHandler>>,
     trace: bool,
 ) -> PipelineOutcome {
     use camel_api::error_handler::RetryableStep;
     let mut ex = exchange;
-    for (i, step) in steps.into_iter().enumerate() {
-        let (mut retryable, _body_contract): (Box<dyn RetryableStep>, _) = match step {
+    // Index-based loop (not `for (i, step) in steps.0.iter().enumerate()`) so
+    // the future stays `Send`: the iterator holds `&[CompiledStep]`, but
+    // `CompiledStep: !Sync` (Tower `BoxCloneService` + `dyn OutcomePipeline`
+    // trait objects), so `&[CompiledStep]: !Send`. The slice reference must
+    // not span any `.await`. `&steps.0[i]` is consumed by the `match` scrutinee
+    // and drops before the await — no borrow is live across the await point.
+    let len = steps.0.len();
+    for i in 0..len {
+        // A2: dispatch to existing `RetryableStep` impls through a stack
+        // enum instead of paying `Box::new(...) as Box<dyn RetryableStep>`
+        // per step. `OwnedRetryable` is `enum { Processor, Segment }` with
+        // discriminant-by-value layout — no extra heap alloc.
+        let mut retryable: OwnedRetryable = match &steps.0[i] {
             CompiledStep::Stop => return PipelineOutcome::Stopped(ex),
-            CompiledStep::Process {
-                processor,
-                body_contract,
-                ..
-            } => {
-                let boxed: Box<dyn RetryableStep> = Box::new(processor);
-                (boxed, body_contract)
-            }
-            CompiledStep::Segment {
-                segment,
-                body_contract,
-                ..
-            } => {
-                let boxed: Box<dyn RetryableStep> = Box::new(segment);
-                (boxed, body_contract)
-            }
+            CompiledStep::Process { processor, .. } => OwnedRetryable::Processor(processor.clone()),
+            CompiledStep::Segment { segment, .. } => OwnedRetryable::Segment(segment.clone()),
         };
 
-        let original = ex.clone();
+        let original = handler.as_ref().map(|_| ex.clone());
         let outcome = if trace {
             invoke_with_span(&mut retryable, ex, i).await
         } else {
@@ -351,12 +402,14 @@ pub async fn run_steps(
                 return PipelineOutcome::Stopped(stopped_ex);
             }
             PipelineOutcome::Failed(err) => {
-                let Some(handler) = handler.as_ref() else {
+                let (Some(handler), Some(original)) = (handler.as_ref(), original) else {
                     return PipelineOutcome::Failed(err);
                 };
                 let policy = handler.match_policy(&err);
+                // `&mut retryable` auto-coerces from `&mut OwnedRetryable` to
+                // `&mut dyn RetryableStep` via the trait impl on the enum.
                 match handler
-                    .retry_step(policy, retryable.as_mut(), original, err)
+                    .retry_step(policy, &mut retryable, original, err)
                     .await
                 {
                     RetryOutcome::Recovered(exchange) => {
@@ -398,8 +451,34 @@ pub async fn run_steps(
     PipelineOutcome::Completed(ex)
 }
 
+/// Stack-allocated dispatcher that unifies `BoxProcessor` and
+/// `OutcomeSegment` for the retry path without the heap allocation a
+/// `Box<dyn RetryableStep>` would require. Sized by-value, dispatched
+/// through a single trait method that fans out to the existing
+/// `RetryableStep` impls on each variant.
+///
+/// A2: replaces `Box::new(processor.clone()) as Box<dyn RetryableStep>`
+/// (and the equivalent for segments) with this enum, saving one heap
+/// allocation per pipeline step per Exchange invocation.
+enum OwnedRetryable {
+    Processor(camel_api::BoxProcessor),
+    Segment(camel_api::OutcomeSegment),
+}
+
+impl camel_api::error_handler::RetryableStep for OwnedRetryable {
+    fn invoke<'a>(
+        &'a mut self,
+        exchange: Exchange,
+    ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+        match self {
+            OwnedRetryable::Processor(p) => p.invoke(exchange),
+            OwnedRetryable::Segment(s) => s.invoke(exchange),
+        }
+    }
+}
+
 async fn invoke_with_span(
-    retryable: &mut Box<dyn camel_api::error_handler::RetryableStep>,
+    retryable: &mut dyn camel_api::error_handler::RetryableStep,
     exchange: Exchange,
     idx: usize,
 ) -> PipelineOutcome {
