@@ -441,6 +441,7 @@ impl DefaultRouteController {
                 pipeline_cancel_token: CancellationToken::new(),
                 channel_sender: None,
                 in_flight: uow_counter,
+                drain_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 aggregate_split,
                 agg_service: None,
                 compiled: route_runtime_state::CompiledRoute {
@@ -792,6 +793,7 @@ impl DefaultRouteController {
         tx_for_storage: mpsc::Sender<ExchangeEnvelope>,
         // Pipeline cancellation — a child of the managed route's pipeline_cancel_token.
         pipeline_cancel: CancellationToken,
+        drain_in_flight: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<(), CamelError> {
         let (late_tx, late_rx) = mpsc::channel::<Exchange>(256);
 
@@ -844,6 +846,7 @@ impl DefaultRouteController {
                         match envelope_opt {
                             Some(envelope) => {
                                 let ExchangeEnvelope { exchange, reply_tx } = envelope;
+                                let _drain_guard = super::route_helpers::DrainGuard::new(Arc::clone(&drain_in_flight));
                                 let pre_pipe = pre_pipeline.load();
                                 let ex = match pre_pipe.processor.clone_inner().oneshot(exchange).await {
                                     Ok(ex) => ex,

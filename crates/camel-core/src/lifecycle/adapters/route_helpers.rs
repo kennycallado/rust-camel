@@ -6,6 +6,7 @@
 //! on `DefaultRouteController` state.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -116,10 +117,32 @@ pub(super) struct ManagedRoute {
     pub(super) channel_sender: Option<mpsc::Sender<ExchangeEnvelope>>,
     /// In-flight exchange counter. `None` when UoW is not configured for this route.
     pub(super) in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Always-populated counter for shutdown drain coordination (ADR-0043 amend).
+    /// Incremented when the pipeline task dequeues an exchange, decremented on
+    /// completion. `stop_route_internal` waits for this to reach zero before
+    /// cancelling the pipeline cancel token.
+    pub(super) drain_in_flight: Arc<std::sync::atomic::AtomicU64>,
     pub(super) aggregate_split: Option<AggregateSplitInfo>,
     pub(super) agg_service: Option<Arc<AggregatorService>>,
     /// Compiled runtime state (security artifacts captured at add time).
     pub(super) compiled: route_runtime_state::CompiledRoute,
+}
+
+/// RAII guard that increments a counter on creation and decrements on drop.
+/// Used to track in-flight exchanges for shutdown drain coordination.
+pub(super) struct DrainGuard(Arc<AtomicU64>);
+
+impl DrainGuard {
+    pub(super) fn new(c: Arc<AtomicU64>) -> Self {
+        c.fetch_add(1, Ordering::Relaxed);
+        Self(c)
+    }
+}
+
+impl Drop for DrainGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// A compiled pipeline bundle carrying both the processor and its lifecycle

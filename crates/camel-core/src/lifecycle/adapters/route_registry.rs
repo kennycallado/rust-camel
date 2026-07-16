@@ -210,6 +210,7 @@ mod tests {
             pipeline_cancel_token: tokio_util::sync::CancellationToken::new(),
             channel_sender: None,
             in_flight: None,
+            drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             aggregate_split: None,
             agg_service: None,
             compiled: route_runtime_state::CompiledRoute {

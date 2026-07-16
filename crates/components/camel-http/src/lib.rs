@@ -2347,6 +2347,14 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
                 body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
             }
         }
+        CamelError::ConsumerStopping => {
+            tracing::debug!(path = %path, "Pipeline aborted during route shutdown");
+            HttpReply {
+                status: 503,
+                headers: vec![],
+                body: HttpReplyBody::Bytes(bytes::Bytes::from("Service Unavailable")),
+            }
+        }
         e => {
             // log-policy: handler-owned
             tracing::warn!(error = %e, path = %path, "Pipeline error processing HTTP request");

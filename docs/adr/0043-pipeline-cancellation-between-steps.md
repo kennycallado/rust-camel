@@ -1,7 +1,7 @@
 # ADR-0043: Pipeline cancellation between steps
 
 ## Status
-Accepted
+Accepted (amended 2026-07-16: drain-grace precedence)
 
 ## Context
 `run_steps` is a linear `async fn` with no cooperative cancellation. When a route
@@ -63,7 +63,30 @@ We return `PipelineOutcome::Failed(CamelError::ConsumerStopping)` rather than
 - The in-flight step's `.await` completes naturally; the NEXT iteration exits.
 
 ## Consequences
-- In-flight Exchanges exit cleanly on route stop (one more step boundary at most).
+- In-flight Exchanges **drain to completion** during graceful stop. `stop_route_internal`
+  closes the channel and waits for `drain_in_flight` to reach zero (bounded by
+  `shutdown_timeout`) BEFORE cancelling `pipeline_cancel_token`. The B1
+  cancel-between-steps check is a **backstop** that fires only after the drain grace
+  expires — not immediately on stop.
+- If the drain timeout expires with exchanges still in-flight, the cancel token fires
+  and those stragglers exit at the next step boundary with `Failed(ConsumerStopping)`.
+- HTTP consumer maps `ConsumerStopping → 503 Service Unavailable` (not 500).
 - UoW failure hooks see `Failed(ConsumerStopping)` — distinguishable from real errors.
 - No lifecycle bug: token is per-start via task-local, not compiled-in.
 - Restart regression test required (stop → start → exchanges process normally).
+
+### Amendment (2026-07-16): drain-grace precedence
+
+**Original consequence:** "In-flight Exchanges exit cleanly on route stop (one more
+step boundary at most)."
+
+**Problem:** `stop_route_internal` cancelled `pipeline_cancel_token` BEFORE joining,
+so the B1 check killed in-flight exchanges immediately — even with a 30s shutdown
+timeout configured. HTTP consumers received `ConsumerStopping → 500` for requests
+the server had already accepted and could have completed.
+
+**Fix:** Added `drain_in_flight: Arc<AtomicU64>` to `ManagedRoute` (always populated,
+incremented by a `DrainGuard` RAII at dequeue, decremented on drop). `stop_route_internal`
+now closes the channel, waits for the counter to reach zero (bounded by
+`shutdown_timeout`), and only THEN cancels the pipeline token. The B1 check remains
+as a safety backstop for stragglers past the grace window.

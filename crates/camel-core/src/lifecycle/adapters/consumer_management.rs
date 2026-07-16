@@ -173,40 +173,82 @@ pub(super) async fn stop_route_internal(
         agg_svc.force_complete_all();
     }
 
-    let managed = routes
-        .get_mut(route_id)
-        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
-    managed.pipeline_cancel_token.cancel();
-
-    let managed = routes
-        .get_mut(route_id)
-        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
-    let consumer_handle = managed.consumer_handle.take();
-    let pipeline_handle = managed.pipeline_handle.take();
-
-    // D-M7: snapshot abort handles BEFORE moving JoinHandles into the
-    // timeout block. On timeout, abort() cancels the tasks instead of
-    // letting them detach (drop = detach in tokio).
-    let consumer_abort = consumer_handle.as_ref().map(|h| h.abort_handle());
-    let pipeline_abort = pipeline_handle.as_ref().map(|h| h.abort_handle());
+    // Drop the stored channel sender and join the consumer task BEFORE the
+    // drain wait. This ensures no new envelopes can appear in the channel
+    // while we drain — closing the buffered-but-undequeued race window
+    // (expert review Q1).
+    let deadline = tokio::time::Instant::now() + shutdown_timeout;
 
     let managed = routes
         .get_mut(route_id)
         .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     managed.channel_sender = None;
 
-    let timeout_result = tokio::time::timeout(shutdown_timeout, async {
-        match (consumer_handle, pipeline_handle) {
-            (Some(c), Some(p)) => {
-                let _ = tokio::join!(c, p);
-            }
-            (Some(c), None) => {
-                let _ = c.await;
-            }
-            (None, Some(p)) => {
-                let _ = p.await;
-            }
-            (None, None) => {}
+    // Take + join consumer handle first (bounded by deadline).
+    let managed = routes
+        .get_mut(route_id)
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+    let consumer_handle = managed.consumer_handle.take();
+    let consumer_abort = consumer_handle.as_ref().map(|h| h.abort_handle());
+    let consumer_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let consumer_join_result = tokio::time::timeout(consumer_budget, async {
+        if let Some(h) = consumer_handle {
+            let _ = h.await;
+        }
+    })
+    .await;
+    if consumer_join_result.is_err() {
+        warn!(
+            route_id = %route_id,
+            "Consumer task did not stop within {:.0?} — aborting",
+            consumer_budget,
+        );
+        if let Some(h) = consumer_abort {
+            h.abort();
+        }
+    }
+
+    // Drain: wait for in-flight exchanges to complete. The consumer is now
+    // fully stopped, so no new envelopes can enter the pipeline. The pipeline
+    // tasks' CANCEL_TOKEN is still uncancelled, so run_steps does NOT fire the
+    // ConsumerStopping check — exchanges finish normally (ADR-0043 amend).
+    let managed = routes
+        .get_mut(route_id)
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+    let drain_counter = Arc::clone(&managed.drain_in_flight);
+    let drain_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let drain_result = tokio::time::timeout(drain_budget, async {
+        while drain_counter.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    if drain_result.is_err() {
+        let remaining = drain_counter.load(std::sync::atomic::Ordering::Relaxed);
+        warn!(
+            route_id = %route_id,
+            remaining_in_flight = remaining,
+            "Drain timeout — cancelling {} lingering exchange(s)",
+            remaining,
+        );
+    }
+
+    // NOW cancel the pipeline token — only kills stragglers past the grace.
+    let managed = routes
+        .get_mut(route_id)
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+    managed.pipeline_cancel_token.cancel();
+
+    // Join the pipeline task (remaining deadline budget).
+    let managed = routes
+        .get_mut(route_id)
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+    let pipeline_handle = managed.pipeline_handle.take();
+    let pipeline_abort = pipeline_handle.as_ref().map(|h| h.abort_handle());
+    let join_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let timeout_result = tokio::time::timeout(join_budget, async {
+        if let Some(h) = pipeline_handle {
+            let _ = h.await;
         }
     })
     .await;
@@ -214,12 +256,9 @@ pub(super) async fn stop_route_internal(
     if timeout_result.is_err() {
         warn!(
             route_id = %route_id,
-            "Route shutdown timed out after {:.0?} — aborting lingering tasks",
-            shutdown_timeout
+            "Pipeline task did not stop within {:.0?} — aborting",
+            join_budget,
         );
-        if let Some(h) = consumer_abort {
-            h.abort();
-        }
         if let Some(h) = pipeline_abort {
             h.abort();
         }
@@ -273,6 +312,7 @@ pub(super) async fn stop_route_internal(
         .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     managed.consumer_cancel_token = CancellationToken::new();
     managed.pipeline_cancel_token = CancellationToken::new();
+    managed.drain_in_flight = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     info!(route_id = %route_id, "Route stopped");
     Ok(())
@@ -352,6 +392,7 @@ mod tests {
             pipeline_cancel_token: CancellationToken::new(),
             channel_sender,
             in_flight: None,
+            drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             aggregate_split: None,
             agg_service: None,
             compiled: route_runtime_state::CompiledRoute {
@@ -675,6 +716,7 @@ mod tests {
                 pipeline_cancel_token: CancellationToken::new(),
                 channel_sender: Some(mpsc_tx),
                 in_flight: None,
+                drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 aggregate_split: None,
                 agg_service: None,
                 compiled: route_runtime_state::CompiledRoute {

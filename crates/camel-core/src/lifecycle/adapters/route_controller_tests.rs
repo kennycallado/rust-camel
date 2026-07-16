@@ -145,6 +145,7 @@ fn helper_functions_cover_non_async_branches() {
         pipeline_cancel_token: CancellationToken::new(),
         channel_sender: None,
         in_flight: None,
+        drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         aggregate_split: None,
         agg_service: None,
         compiled: route_runtime_state::CompiledRoute {
@@ -1551,6 +1552,7 @@ fn swap_pipeline_rejects_lifecycle_bearing_route() {
         pipeline_cancel_token: CancellationToken::new(),
         channel_sender: None,
         in_flight: None,
+        drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         aggregate_split: None,
         agg_service: None,
         compiled: route_runtime_state::CompiledRoute {
@@ -1605,6 +1607,7 @@ fn swap_pipeline_rejects_agg_service_route() {
         pipeline_cancel_token: CancellationToken::new(),
         channel_sender: None,
         in_flight: None,
+        drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         aggregate_split: None,
         agg_service: Some(Arc::new(svc)),
         compiled: route_runtime_state::CompiledRoute {
@@ -1646,6 +1649,7 @@ fn swap_pipeline_raw_bypasses_lifecycle_rejection() {
         pipeline_cancel_token: CancellationToken::new(),
         channel_sender: None,
         in_flight: None,
+        drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         aggregate_split: None,
         agg_service: None,
         compiled: route_runtime_state::CompiledRoute {

@@ -21,7 +21,7 @@ use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 #[cfg(test)]
 use crate::lifecycle::adapters::route_helpers::emit_start_route_event;
 use crate::lifecycle::adapters::route_helpers::{
-    handle_is_running, inferred_lifecycle_label, ready_with_backoff,
+    DrainGuard, handle_is_running, inferred_lifecycle_label, ready_with_backoff,
 };
 use crate::lifecycle::adapters::route_registry::DEFAULT_SHUTDOWN_TIMEOUT;
 
@@ -117,6 +117,7 @@ impl camel_api::RouteController for DefaultRouteController {
         // Create child tokens for independent lifecycle control
         let consumer_cancel = managed.consumer_cancel_token.child_token();
         let pipeline_cancel = managed.pipeline_cancel_token.child_token();
+        let drain_in_flight = Arc::clone(&managed.drain_in_flight);
         // Clone sender for storage (to reuse on resume)
         let tx_for_storage = tx.clone();
         let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone(), route_id.to_string());
@@ -135,6 +136,7 @@ impl camel_api::RouteController for DefaultRouteController {
                     runtime_for_consumer,
                     tx_for_storage,
                     pipeline_cancel,
+                    drain_in_flight,
                 )
                 .await;
         }
@@ -174,6 +176,7 @@ impl camel_api::RouteController for DefaultRouteController {
                         // fresh one (avoids the lifecycle bug where a compiled-in
                         // child token stays cancelled after stop→restart).
                         let cancel = pipeline_cancel.clone();
+                        let _drain_guard = DrainGuard::new(Arc::clone(&drain_in_flight));
                         let result = CANCEL_TOKEN
                             .scope(cancel, async move { pipeline.call(exchange).await })
                             .await;
@@ -213,9 +216,11 @@ impl camel_api::RouteController for DefaultRouteController {
                         let ExchangeEnvelope { exchange, reply_tx } = envelope;
                         let pipe_ref = Arc::clone(&pipeline);
                         let cancel = pipeline_cancel.clone();
+                        let drain_clone = Arc::clone(&drain_in_flight);
                         tokio::spawn(async move {
                             // Permit owned by this task — released on completion (RAII).
                             let _permit = permit;
+                            let _drain_guard = DrainGuard::new(drain_clone);
 
                             // Load current pipeline from ArcSwap
                             let mut pipe = pipe_ref.load().processor.clone_inner();

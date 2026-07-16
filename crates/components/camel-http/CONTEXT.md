@@ -48,6 +48,7 @@ Per ADR-0024 and spec §3.4. Documents the accepted and rejected names/values fo
 - `Body::Stream` already consumed before reply → `500 Internal Server Error` + empty body (system-broken `error!` at lib.rs:1109).
 - Pipeline returns `Err(CamelError::Unauthenticated(msg))` → `401 Unauthorized` + `WWW-Authenticate: Bearer` + body "Unauthorized".
 - Pipeline returns `Err(CamelError::Unauthorized(msg))` → `403 Forbidden` + body "Forbidden".
+- Pipeline returns `Err(CamelError::ConsumerStopping)` → `503 Service Unavailable` + body "Service Unavailable". Fires only when an exchange is aborted past the drain grace window (ADR-0043 amend).
 - Pipeline returns `Err(_)` (any other error) → `500 Internal Server Error` + body "Internal Server Error".
 
 ### Silent behaviour forbidden
