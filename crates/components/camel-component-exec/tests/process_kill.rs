@@ -12,7 +12,7 @@ async fn timeout_kills_process_tree() {
     )
     .expect("spawn failed");
     // simulate timeout fire
-    kill_tree(&child);
+    kill_tree(&mut child);
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
     assert!(status.is_ok(), "child must be killed, not hang");
 }

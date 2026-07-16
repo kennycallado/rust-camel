@@ -257,7 +257,7 @@ impl ExecProducer {
                 Err(e) => return Err(ExecError::Spawn(e)),
             },
             _ = tokio::time::sleep(timeout) => {
-                process::kill_tree(&child);
+                process::kill_tree(&mut child);
                 let _ = child.wait().await; // reap the killed tree
                 (None, true)
             }

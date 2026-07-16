@@ -79,7 +79,7 @@ pub fn spawn(
 /// Kill the whole process group (Unix). Best-effort on Windows (post-v1: job object).
 /// M-5: guard against pid 0/None (would signal the caller's own group if the child
 /// already exited and `id()` returned None).
-pub fn kill_tree(child: &tokio::process::Child) {
+pub fn kill_tree(child: &mut tokio::process::Child) {
     let Some(pid) = child.id() else { return };
     #[cfg(unix)]
     {
