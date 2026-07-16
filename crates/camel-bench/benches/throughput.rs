@@ -1,5 +1,5 @@
 use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message};
-use camel_core::route::{CompiledStep, compose_pipeline};
+use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use camel_processor::{ChoiceService, FilterService, LogLevel, LogProcessor, WhenClause};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tower::ServiceExt;
@@ -22,23 +22,26 @@ fn build_throughput_pipeline() -> BoxProcessor {
         "throughput-log".to_string(),
     ));
 
-    compose_pipeline(vec![
-        CompiledStep::Process {
-            processor: filter,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: choice,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: log,
-            body_contract: None,
-            lifecycle: None,
-        },
-    ])
+    compose_pipeline(
+        vec![
+            CompiledStep::Process {
+                processor: filter,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: choice,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: log,
+                body_contract: None,
+                lifecycle: None,
+            },
+        ],
+        PipelineRuntimeCtx::compile_time(),
+    )
 }
 
 /// Benchmarks sustained throughput of a simple pipeline (filter → choice → log)

@@ -140,6 +140,7 @@ fn test_pipeline_poll_ready_delegates_to_first_step() {
             lifecycle: None,
         }])),
         handler: None,
+        ctx: PipelineRuntimeCtx::compile_time(),
     };
 
     let first = pipeline.poll_ready(&mut cx);
@@ -157,6 +158,7 @@ fn test_pipeline_poll_ready_with_empty_steps() {
     let mut pipeline = SequentialPipeline {
         steps: SharedSnapshot(Arc::from(vec![])),
         handler: None,
+        ctx: PipelineRuntimeCtx::compile_time(),
     };
     let result = pipeline.poll_ready(&mut cx);
     assert!(result.is_ready(), "expected Ready for empty pipeline");
@@ -179,6 +181,7 @@ async fn test_pipeline_stop_returns_ok_with_exchange() {
     let mut pipeline = SequentialPipeline {
         steps: SharedSnapshot(Arc::from(vec![stop_step, after_step])),
         handler: None,
+        ctx: PipelineRuntimeCtx::compile_time(),
     };
 
     let ex = Exchange::new(camel_api::Message::new("hello"));
@@ -205,7 +208,14 @@ async fn test_run_steps_stop_produces_pipeline_outcome_stopped() {
         },
     ];
     let ex = Exchange::new(camel_api::Message::new("payload"));
-    let outcome = run_steps(SharedSnapshot(Arc::from(steps)), ex, None, false).await;
+    let outcome = run_steps(
+        SharedSnapshot(Arc::from(steps)),
+        ex,
+        None,
+        false,
+        &PipelineRuntimeCtx::compile_time(),
+    )
+    .await;
     match outcome {
         PipelineOutcome::Stopped(returned) => {
             assert_eq!(returned.input.body.as_text(), Some("payload"));
@@ -274,6 +284,7 @@ async fn test_run_steps_stop_bypasses_error_handler() {
         ex,
         Some(Arc::new(RecordingHandler { counter })),
         false,
+        &PipelineRuntimeCtx::compile_time(),
     )
     .await;
 
@@ -294,6 +305,7 @@ async fn test_compose_traced_pipeline_disabled() {
         DetailLevel::Minimal,
         None,
         None,
+        PipelineRuntimeCtx::compile_time(),
     );
     let ex = Exchange::new(camel_api::Message::new("hello"));
     let result = tower::ServiceExt::oneshot(pipeline, ex).await;
@@ -314,6 +326,7 @@ async fn test_compose_traced_pipeline_enabled() {
         DetailLevel::Minimal,
         None,
         None,
+        PipelineRuntimeCtx::compile_time(),
     );
     let ex = Exchange::new(camel_api::Message::new("hello"));
     let result = tower::ServiceExt::oneshot(pipeline, ex).await;
@@ -340,6 +353,7 @@ async fn test_compose_pipeline_with_contracts_coerces_before_inner_processor() {
             lifecycle: None,
         }],
         None,
+        PipelineRuntimeCtx::compile_time(),
     );
 
     let mut ex = Exchange::new(Message::default());
@@ -386,6 +400,7 @@ async fn test_run_steps_continued_skips_failed_step() {
         make_test_exchange(),
         Some(handler),
         false,
+        &PipelineRuntimeCtx::compile_time(),
     )
     .await;
     assert!(
@@ -411,7 +426,14 @@ async fn test_run_steps_failed_without_handler_returns_failed() {
         lifecycle: None,
     }];
     let ex = Exchange::new(camel_api::Message::new("payload"));
-    let outcome = run_steps(SharedSnapshot(Arc::from(steps)), ex, None, false).await;
+    let outcome = run_steps(
+        SharedSnapshot(Arc::from(steps)),
+        ex,
+        None,
+        false,
+        &PipelineRuntimeCtx::compile_time(),
+    )
+    .await;
     match outcome {
         PipelineOutcome::Failed(err) => {
             assert!(
@@ -442,6 +464,7 @@ async fn test_route_channel_pipeline_propagate_returns_err() {
             lifecycle: None,
         }],
         Some(handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
     );
     let channel = RouteChannelService::new(handler.clone(), None, None, pipeline, false);
     let mut svc = BoxProcessor::new(channel);
@@ -455,7 +478,11 @@ async fn test_route_channel_security_error_calls_boundary() {
     let deny_all = BoxProcessor::from_fn(|_ex| {
         Box::pin(async { Err(CamelError::Unauthorized("denied".into())) })
     });
-    let pipeline = compose_pipeline_with_handler(vec![], Some(handler.clone()));
+    let pipeline = compose_pipeline_with_handler(
+        vec![],
+        Some(handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
+    );
     let channel = RouteChannelService::new(handler.clone(), Some(deny_all), None, pipeline, false);
     let mut svc = BoxProcessor::new(channel);
     let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
@@ -475,7 +502,11 @@ async fn test_route_channel_cb_reject_calls_boundary() {
         fallback: None,
     });
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
-    let pipeline = compose_pipeline_with_handler(vec![], Some(handler.clone()));
+    let pipeline = compose_pipeline_with_handler(
+        vec![],
+        Some(handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
+    );
     let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline, false);
     let mut svc = BoxProcessor::new(channel);
     let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
@@ -501,7 +532,11 @@ async fn test_route_channel_cb_fallback_executes_fallback() {
         fallback: Some(fallback),
     });
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
-    let pipeline = compose_pipeline_with_handler(vec![], Some(handler.clone()));
+    let pipeline = compose_pipeline_with_handler(
+        vec![],
+        Some(handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
+    );
     let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline, false);
     let mut svc = BoxProcessor::new(channel);
     let result = svc.ready().await.unwrap().call(make_test_exchange()).await;
@@ -528,7 +563,11 @@ async fn test_route_channel_cb_fallback_failure_calls_boundary() {
     });
     cb_gate.after_result(&Err(CamelError::ProcessorError("force open".into())));
 
-    let pipeline = compose_pipeline_with_handler(vec![], Some(handler.clone()));
+    let pipeline = compose_pipeline_with_handler(
+        vec![],
+        Some(handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
+    );
     let channel = RouteChannelService::new(handler.clone(), None, Some(cb_gate), pipeline, false);
 
     let mut svc = BoxProcessor::new(channel);
@@ -555,7 +594,11 @@ async fn test_route_channel_cb_counts_stopped_as_success() {
     let cb_clone = cb_gate.clone();
 
     // Pipeline emits Stop as the only step — top-level maps Stop to Ok(ex).
-    let pipeline = compose_pipeline_with_handler(vec![CompiledStep::Stop], None);
+    let pipeline = compose_pipeline_with_handler(
+        vec![CompiledStep::Stop],
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
 
     let channel = RouteChannelService::new(handler, None, Some(cb_gate), pipeline, false);
 
@@ -621,6 +664,7 @@ async fn test_use_original_message_stash_survives_full_route_channel() {
             },
         ],
         Some(handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
     );
 
     let channel = RouteChannelService::new(handler, None, None, pipeline, true);
@@ -696,6 +740,7 @@ async fn test_use_original_message_wholesale_exchange_replacement() {
             },
         ],
         Some(handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
     );
 
     let channel = RouteChannelService::new(handler, None, None, pipeline, true);
@@ -770,7 +815,14 @@ async fn test_sampling_drop_stops_following_process_step() {
     // Exchange 1 — should be stopped by sampling (counter=1, 1%2≠0)
     captured.store(false, Ordering::SeqCst);
     let ex1 = Exchange::new(Message::new("first"));
-    let outcome1 = run_steps(SharedSnapshot(Arc::from(steps.clone())), ex1, None, false).await;
+    let outcome1 = run_steps(
+        SharedSnapshot(Arc::from(steps.clone())),
+        ex1,
+        None,
+        false,
+        &PipelineRuntimeCtx::compile_time(),
+    )
+    .await;
     match &outcome1 {
         PipelineOutcome::Stopped(returned) => {
             assert!(
@@ -788,7 +840,14 @@ async fn test_sampling_drop_stops_following_process_step() {
     // Exchange 2 — should pass through (counter=2, 2%2=0)
     captured.store(false, Ordering::SeqCst);
     let ex2 = Exchange::new(Message::new("second"));
-    let outcome2 = run_steps(SharedSnapshot(Arc::from(steps.clone())), ex2, None, false).await;
+    let outcome2 = run_steps(
+        SharedSnapshot(Arc::from(steps.clone())),
+        ex2,
+        None,
+        false,
+        &PipelineRuntimeCtx::compile_time(),
+    )
+    .await;
     match &outcome2 {
         PipelineOutcome::Completed(returned) => {
             assert!(
@@ -899,7 +958,14 @@ mod run_steps_segment_tests {
             lifecycle: None,
         }];
         let ex = Exchange::new(Message::new("original"));
-        let outcome = run_steps(SharedSnapshot(Arc::from(steps)), ex, None, false).await;
+        let outcome = run_steps(
+            SharedSnapshot(Arc::from(steps)),
+            ex,
+            None,
+            false,
+            &PipelineRuntimeCtx::compile_time(),
+        )
+        .await;
         match outcome {
             PipelineOutcome::Stopped(returned_ex) => {
                 if let camel_api::Body::Bytes(b) = &returned_ex.input.body {
@@ -981,7 +1047,14 @@ mod run_steps_segment_tests {
             lifecycle: None,
         }];
         let ex = Exchange::new(Message::new("hello"));
-        let outcome = run_steps(SharedSnapshot(Arc::from(steps)), ex, Some(handler), false).await;
+        let outcome = run_steps(
+            SharedSnapshot(Arc::from(steps)),
+            ex,
+            Some(handler),
+            false,
+            &PipelineRuntimeCtx::compile_time(),
+        )
+        .await;
         assert!(
             matches!(outcome, PipelineOutcome::Failed(_)),
             "expected Failed, got {:?}",
@@ -1141,6 +1214,94 @@ mod sequential_outcome_segment_tests {
             vec![1, 10, 100],
             "children must execute in forward order; got {:?}",
             recorded
+        );
+    }
+}
+
+// ── B1 cancellation tests ──
+//
+// These tests were moved from crates/camel-core/tests/cancellation_between_steps.rs
+// as part of fixing CANCEL_TOKEN visibility to pub(crate) — integration tests at
+// `tests/` cannot access pub(crate) items.
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    fn pass_through() -> CompiledStep {
+        CompiledStep::Process {
+            processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
+            body_contract: None,
+            lifecycle: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_pipeline_returns_consumer_stopping() {
+        let cancel = CancellationToken::new();
+        let mut pipeline = compose_pipeline(
+            (0..3).map(|_| pass_through()).collect(),
+            PipelineRuntimeCtx::compile_time(),
+        );
+        cancel.cancel();
+        // Wrap in CANCEL_TOKEN scope — simulates pipeline task.
+        let result = CANCEL_TOKEN
+            .scope(cancel, async {
+                pipeline.call(Exchange::new(Message::new("hello"))).await
+            })
+            .await;
+        assert!(
+            matches!(result, Err(ref e) if matches!(e, CamelError::ConsumerStopping)),
+            "expected ConsumerStopping, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_pipeline_stops_at_next_boundary() {
+        let cancel = CancellationToken::new();
+        let cancel_in_step = cancel.clone();
+
+        let step1 = CompiledStep::Process {
+            processor: BoxProcessor::from_fn(move |ex: Exchange| {
+                let c = cancel_in_step.clone();
+                Box::pin(async move {
+                    c.cancel();
+                    Ok(ex)
+                })
+            }),
+            body_contract: None,
+            lifecycle: None,
+        };
+
+        let mut pipeline = compose_pipeline(
+            vec![pass_through(), step1, pass_through()],
+            PipelineRuntimeCtx::compile_time(),
+        );
+        let result = CANCEL_TOKEN
+            .scope(cancel, async {
+                pipeline.call(Exchange::new(Message::new("hello"))).await
+            })
+            .await;
+        assert!(
+            matches!(result, Err(ref e) if matches!(e, CamelError::ConsumerStopping)),
+            "expected ConsumerStopping after mid-pipeline cancel, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_cancel_token_skips_check() {
+        // Without CANCEL_TOKEN scope, run_steps should NOT check cancellation.
+        // Exchanges process normally even if a token somewhere is cancelled.
+        let mut pipeline = compose_pipeline(
+            (0..3).map(|_| pass_through()).collect(),
+            PipelineRuntimeCtx::compile_time(),
+        );
+        // No CANCEL_TOKEN.scope wrapper — task-local absent.
+        let result = pipeline.call(Exchange::new(Message::new("hello"))).await;
+        assert!(
+            result.is_ok(),
+            "without task-local, exchange should complete normally, got: {result:?}"
         );
     }
 }

@@ -8,12 +8,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
-    BoxProcessor, CamelError, Exchange, IdentityProcessor, Message, ORIGINAL_MESSAGE_EXTENSION,
-    PipelineOutcome,
+    BoxProcessor, CamelError, Exchange, IdentityProcessor, Message, NoOpMetrics,
+    ORIGINAL_MESSAGE_EXTENSION, PipelineOutcome,
 };
 
 use camel_api::error_handler::{BoundaryKind, RetryOutcome, StepDisposition};
@@ -32,6 +33,36 @@ use crate::shared::observability::domain::DetailLevel;
 pub(crate) use super::outcome_composition::{
     BodyCoercingSegment, BoxProcessorSegment, StopSegment, compose_outcome_segment,
 };
+
+// Task-local cancel token — set by the pipeline task per-start, checked by
+// `run_steps` between steps. Absent in direct tests (skip check).
+//
+// Design: per-start task-local, NOT compiled into the pipeline struct, to
+// avoid the lifecycle bug where a compiled-in child token stays cancelled
+// after stop→restart (the new start would inherit the cancelled state).
+// ADR-0043.
+tokio::task_local! {
+    pub(crate) static CANCEL_TOKEN: CancellationToken;
+}
+
+/// Runtime context for metrics + route_id (B3). Cancel is via task-local (B1).
+#[derive(Clone)]
+pub struct PipelineRuntimeCtx {
+    pub metrics: Arc<dyn MetricsCollector>,
+    pub route_id: Arc<str>,
+}
+
+impl PipelineRuntimeCtx {
+    /// Constructor for compile-time contexts where no MetricsCollector is available.
+    /// The resulting pipeline will emit disposition counters to NoOpMetrics (no-op).
+    /// Prefer constructing PipelineRuntimeCtx with real metrics at route startup.
+    pub fn compile_time() -> Self {
+        Self {
+            metrics: Arc::new(NoOpMetrics),
+            route_id: Arc::from(""),
+        }
+    }
+}
 
 /// Newtype around `Arc<[CompiledStep]>` that adds `Send + Sync`.
 ///
@@ -80,13 +111,14 @@ const _: () = {
 ///
 /// Uses `into_tower_result()` so `PipelineOutcome::Stopped` maps to `Ok(ex)`.
 /// Use [`compose_pipeline_with_handler`] for the top-level consumer-facing pipeline.
-pub fn compose_pipeline(processors: Vec<CompiledStep>) -> BoxProcessor {
+pub fn compose_pipeline(processors: Vec<CompiledStep>, ctx: PipelineRuntimeCtx) -> BoxProcessor {
     if processors.is_empty() {
         return BoxProcessor::new(IdentityProcessor);
     }
     BoxProcessor::new(SequentialPipeline {
         steps: SharedSnapshot(processors.into()),
         handler: None,
+        ctx,
     })
 }
 
@@ -98,6 +130,7 @@ pub fn compose_pipeline(processors: Vec<CompiledStep>) -> BoxProcessor {
 pub fn compose_pipeline_with_handler(
     processors: Vec<CompiledStep>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
+    ctx: PipelineRuntimeCtx,
 ) -> BoxProcessor {
     if processors.is_empty() {
         return BoxProcessor::new(IdentityProcessor);
@@ -105,6 +138,7 @@ pub fn compose_pipeline_with_handler(
     BoxProcessor::new(SequentialPipeline {
         steps: SharedSnapshot(processors.into()),
         handler,
+        ctx,
     })
 }
 
@@ -119,9 +153,10 @@ pub fn compose_traced_pipeline(
     detail_level: DetailLevel,
     metrics: Option<Arc<dyn MetricsCollector>>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
+    ctx: PipelineRuntimeCtx,
 ) -> BoxProcessor {
     if !trace_enabled {
-        return compose_pipeline_with_handler(processors, handler);
+        return compose_pipeline_with_handler(processors, handler, ctx);
     }
 
     if processors.is_empty() {
@@ -159,6 +194,7 @@ pub fn compose_traced_pipeline(
     BoxProcessor::new(TracedPipeline {
         steps: SharedSnapshot(wrapped.into()),
         handler,
+        ctx,
     })
 }
 
@@ -170,6 +206,7 @@ pub fn compose_traced_pipeline(
 pub fn compose_pipeline_with_contracts(
     processors: Vec<CompiledStep>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
+    ctx: PipelineRuntimeCtx,
 ) -> BoxProcessor {
     let wrapped: Vec<CompiledStep> = processors
         .into_iter()
@@ -190,7 +227,7 @@ pub fn compose_pipeline_with_contracts(
             CompiledStep::Segment { .. } => step,
         })
         .collect();
-    compose_pipeline_with_handler(wrapped, handler)
+    compose_pipeline_with_handler(wrapped, handler, ctx)
 }
 
 /// Compose a list of `CompiledStep` items into a traced pipeline with body coercion.
@@ -204,9 +241,10 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
     detail_level: DetailLevel,
     metrics: Option<Arc<dyn MetricsCollector>>,
     handler: Option<Arc<dyn RouteErrorHandler>>,
+    ctx: PipelineRuntimeCtx,
 ) -> BoxProcessor {
     if !trace_enabled {
-        return compose_pipeline_with_contracts(processors, handler);
+        return compose_pipeline_with_contracts(processors, handler, ctx);
     }
 
     if processors.is_empty() {
@@ -244,6 +282,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
     BoxProcessor::new(TracedPipeline {
         steps: SharedSnapshot(wrapped.into()),
         handler,
+        ctx,
     })
 }
 
@@ -256,6 +295,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
 struct SequentialPipeline {
     steps: SharedSnapshot,
     handler: Option<Arc<dyn RouteErrorHandler>>,
+    ctx: PipelineRuntimeCtx,
 }
 
 impl Service<Exchange> for SequentialPipeline {
@@ -289,8 +329,9 @@ impl Service<Exchange> for SequentialPipeline {
         // captures it directly without needing a Send-asserting wrapper.
         let steps = self.steps.clone();
         let handler = self.handler.clone();
+        let ctx = self.ctx.clone();
         Box::pin(async move {
-            run_steps(steps, exchange, handler, false)
+            run_steps(steps, exchange, handler, false, &ctx)
                 .await
                 .into_tower_result()
         })
@@ -302,6 +343,7 @@ impl Service<Exchange> for SequentialPipeline {
 struct TracedPipeline {
     steps: SharedSnapshot,
     handler: Option<Arc<dyn RouteErrorHandler>>,
+    ctx: PipelineRuntimeCtx,
 }
 
 impl Service<Exchange> for TracedPipeline {
@@ -330,8 +372,9 @@ impl Service<Exchange> for TracedPipeline {
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let steps = self.steps.clone();
         let handler = self.handler.clone();
+        let ctx = self.ctx.clone();
         Box::pin(async move {
-            run_steps(steps, exchange, handler, true)
+            run_steps(steps, exchange, handler, true, &ctx)
                 .await
                 .into_tower_result()
         })
@@ -363,6 +406,7 @@ async fn run_steps(
     exchange: Exchange,
     handler: Option<Arc<dyn RouteErrorHandler>>,
     trace: bool,
+    ctx: &PipelineRuntimeCtx,
 ) -> PipelineOutcome {
     use camel_api::error_handler::RetryableStep;
     let mut ex = exchange;
@@ -374,6 +418,12 @@ async fn run_steps(
     // and drops before the await — no borrow is live across the await point.
     let len = steps.0.len();
     for i in 0..len {
+        // B1: cooperative cancellation between steps via task-local.
+        // If the task-local is not set (direct test calls), skip the check.
+        let cancelled = CANCEL_TOKEN.try_with(|t| t.is_cancelled()).unwrap_or(false);
+        if cancelled {
+            return PipelineOutcome::Failed(CamelError::ConsumerStopping);
+        }
         // A2: dispatch to existing `RetryableStep` impls through a stack
         // enum instead of paying `Box::new(...) as Box<dyn RetryableStep>`
         // per step. `OwnedRetryable` is `enum { Processor, Segment }` with
@@ -413,9 +463,19 @@ async fn run_steps(
                     .await
                 {
                     RetryOutcome::Recovered(exchange) => {
+                        ctx.metrics.record_counter(
+                            "pipeline_disposition",
+                            1.0,
+                            &[("disposition", "recovered"), ("route_id", &ctx.route_id)],
+                        );
                         ex = exchange;
                     }
                     RetryOutcome::Stopped(stopped_ex) => {
+                        ctx.metrics.record_counter(
+                            "pipeline_disposition",
+                            1.0,
+                            &[("disposition", "stopped"), ("route_id", &ctx.route_id)],
+                        );
                         return PipelineOutcome::Stopped(stopped_ex);
                     }
                     RetryOutcome::Exhausted {
@@ -433,15 +493,40 @@ async fn run_steps(
                         };
                         match disposition {
                             Ok(StepDisposition::Propagate(e)) => {
+                                ctx.metrics.record_counter(
+                                    "pipeline_disposition",
+                                    1.0,
+                                    &[("disposition", "propagated"), ("route_id", &ctx.route_id)],
+                                );
                                 return PipelineOutcome::Failed(e);
                             }
                             Ok(StepDisposition::Handled(done)) => {
+                                ctx.metrics.record_counter(
+                                    "pipeline_disposition",
+                                    1.0,
+                                    &[("disposition", "handled"), ("route_id", &ctx.route_id)],
+                                );
                                 return PipelineOutcome::Completed(done);
                             }
                             Ok(StepDisposition::Continued(next)) => {
+                                ctx.metrics.record_counter(
+                                    "pipeline_disposition",
+                                    1.0,
+                                    &[("disposition", "continued"), ("route_id", &ctx.route_id)],
+                                );
                                 ex = next;
                             }
-                            Err(e) => return PipelineOutcome::Failed(e),
+                            Err(e) => {
+                                ctx.metrics.record_counter(
+                                    "pipeline_disposition",
+                                    1.0,
+                                    &[
+                                        ("disposition", "handler_error"),
+                                        ("route_id", &ctx.route_id),
+                                    ],
+                                );
+                                return PipelineOutcome::Failed(e);
+                            }
                         }
                     }
                 }

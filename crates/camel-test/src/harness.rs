@@ -396,7 +396,7 @@ mod tests {
     #[tokio::test]
     async fn tst005_concurrent_exchange_processing() {
         use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message};
-        use camel_core::route::{CompiledStep, compose_pipeline};
+        use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
         use tower::ServiceExt;
@@ -414,11 +414,14 @@ mod tests {
             })
         };
 
-        let pipeline = compose_pipeline(vec![CompiledStep::Process {
-            processor,
-            body_contract: None,
-            lifecycle: None,
-        }]);
+        let pipeline = compose_pipeline(
+            vec![CompiledStep::Process {
+                processor,
+                body_contract: None,
+                lifecycle: None,
+            }],
+            PipelineRuntimeCtx::compile_time(),
+        );
 
         let concurrency: u32 = 10;
         let mut handles = Vec::with_capacity(concurrency as usize);
@@ -526,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn tst008_header_propagation_across_processors() {
         use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, Message, Value};
-        use camel_core::route::{CompiledStep, compose_pipeline};
+        use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
         use tower::ServiceExt;
 
         let step1: BoxProcessor = BoxProcessor::from_fn(|mut ex: Exchange| {
@@ -545,18 +548,21 @@ mod tests {
             })
         });
 
-        let pipeline = compose_pipeline(vec![
-            CompiledStep::Process {
-                processor: step1,
-                body_contract: None,
-                lifecycle: None,
-            },
-            CompiledStep::Process {
-                processor: step2,
-                body_contract: None,
-                lifecycle: None,
-            },
-        ]);
+        let pipeline = compose_pipeline(
+            vec![
+                CompiledStep::Process {
+                    processor: step1,
+                    body_contract: None,
+                    lifecycle: None,
+                },
+                CompiledStep::Process {
+                    processor: step2,
+                    body_contract: None,
+                    lifecycle: None,
+                },
+            ],
+            PipelineRuntimeCtx::compile_time(),
+        );
         let ex = Exchange::new(Message::new("input"));
         let result = pipeline.oneshot(ex).await.unwrap();
 

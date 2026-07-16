@@ -33,7 +33,7 @@ use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 use crate::lifecycle::adapters::route_compiler::{
-    RouteChannelService, compose_pipeline, compose_pipeline_with_contracts,
+    PipelineRuntimeCtx, RouteChannelService, compose_pipeline, compose_pipeline_with_contracts,
     compose_traced_pipeline_with_contracts,
 };
 use crate::lifecycle::adapters::route_helpers::{
@@ -133,6 +133,22 @@ pub(super) fn resolve_uow_layer(
     Ok((layer, counter))
 }
 
+/// Build a `PipelineRuntimeCtx` from optional tracer metrics and a route ID.
+///
+/// Extracted to eliminate the same 5-line construction block that appeared 5×
+/// across `build_eh_config_pipeline` (free fn) and `RouteCompilerExt` methods.
+fn build_pipeline_ctx(
+    tracer_metrics: &Option<Arc<dyn MetricsCollector>>,
+    route_id: &str,
+) -> PipelineRuntimeCtx {
+    PipelineRuntimeCtx {
+        metrics: tracer_metrics
+            .clone()
+            .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+        route_id: Arc::from(route_id),
+    }
+}
+
 /// Build a pipeline with or without an error handler + RouteChannelService.
 ///
 /// When `eh_config` is `Some`, constructs a [`RouteChannelService`] with explicit
@@ -183,6 +199,10 @@ pub(crate) fn build_eh_config_pipeline(
             component_ctx.as_ref(),
         )?) as Arc<dyn RouteErrorHandler>;
 
+        // Build ctx: real metrics from controller (or NoOpMetrics fallback) +
+        // route_id. The cancel token is per-start via task-local, not here.
+        let pipeline_ctx = build_pipeline_ctx(&tracer_metrics, route_id);
+
         let pipeline = compose_traced_pipeline_with_contracts(
             processors_with_contracts,
             route_id,
@@ -190,6 +210,7 @@ pub(crate) fn build_eh_config_pipeline(
             tracer_detail_level,
             tracer_metrics,
             Some(handler.clone()),
+            pipeline_ctx,
         );
 
         // Security: standalone gate (SecurityPolicyLayer wrapping IdentityProcessor)
@@ -210,6 +231,7 @@ pub(crate) fn build_eh_config_pipeline(
         BoxProcessor::new(channel)
     } else {
         // ── Old path: Tower layer wrapping (no error handler configured) ──
+        let pipeline_ctx = build_pipeline_ctx(&tracer_metrics, route_id);
         let mut pipeline = compose_traced_pipeline_with_contracts(
             processors_with_contracts,
             route_id,
@@ -217,6 +239,7 @@ pub(crate) fn build_eh_config_pipeline(
             tracer_detail_level,
             tracer_metrics,
             None,
+            pipeline_ctx,
         );
 
         if let Some(cb_config) = circuit_breaker {
@@ -350,8 +373,10 @@ impl RouteCompilerExt<'_> {
                 Some(route_id),
                 staging_mode,
             )?;
-            let pre_pipeline =
-                super::pipeline_runtime::new_shared_pipeline(compose_pipeline(pre_pairs));
+            let pre_pipeline = super::pipeline_runtime::new_shared_pipeline(compose_pipeline(
+                pre_pairs,
+                build_pipeline_ctx(self.tracer_metrics, route_id),
+            ));
 
             let post_pairs = self.resolve_steps(
                 post_steps,
@@ -360,8 +385,10 @@ impl RouteCompilerExt<'_> {
                 Some(route_id),
                 staging_mode,
             )?;
-            let post_pipeline =
-                super::pipeline_runtime::new_shared_pipeline(compose_pipeline(post_pairs));
+            let post_pipeline = super::pipeline_runtime::new_shared_pipeline(compose_pipeline(
+                post_pairs,
+                build_pipeline_ctx(self.tracer_metrics, route_id),
+            ));
 
             return Ok((
                 Some(AggregateSplitInfo {
@@ -410,7 +437,11 @@ impl RouteCompilerExt<'_> {
                 ));
             }
 
-            let post_continuation = compose_pipeline_with_contracts(post_compiled, None);
+            let post_continuation = compose_pipeline_with_contracts(
+                post_compiled,
+                None,
+                build_pipeline_ctx(self.tracer_metrics, route_id),
+            );
 
             // Create the resequencer policy from the config
             let policy: Arc<dyn ResequencePolicy> = match &reseq_info.policy_config.mode {

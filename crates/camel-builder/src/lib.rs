@@ -1857,7 +1857,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compose_pipeline_runs_steps_in_order() {
-        use camel_core::route::{CompiledStep, compose_pipeline};
+        use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 
         let processors = vec![
             CompiledStep::Process {
@@ -1882,7 +1882,7 @@ mod tests {
             },
         ];
 
-        let pipeline = compose_pipeline(processors);
+        let pipeline = compose_pipeline(processors, PipelineRuntimeCtx::compile_time());
         let exchange = Exchange::new(Message::new("hello"));
         let result = pipeline.oneshot(exchange).await.unwrap();
 
@@ -1895,9 +1895,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_compose_pipeline_empty_is_identity() {
-        use camel_core::route::compose_pipeline;
+        use camel_core::route::{PipelineRuntimeCtx, compose_pipeline};
 
-        let pipeline = compose_pipeline(vec![]);
+        let pipeline = compose_pipeline(vec![], PipelineRuntimeCtx::compile_time());
         let exchange = Exchange::new(Message::new("unchanged"));
         let result = pipeline.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("unchanged"));
@@ -2267,7 +2267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_body_static_processor_works() {
-        use camel_core::route::{CompiledStep, compose_pipeline};
+        use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
         let def = RouteBuilder::from("t:t")
             .route_id("test-route")
             .set_body("replaced")
@@ -2289,6 +2289,7 @@ mod tests {
                     lifecycle: None,
                 })
                 .collect(),
+            PipelineRuntimeCtx::compile_time(),
         );
         let exchange = Exchange::new(Message::new("original"));
         let result = pipeline.oneshot(exchange).await.unwrap();
@@ -2297,7 +2298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_body_fn_processor_works() {
-        use camel_core::route::{CompiledStep, compose_pipeline};
+        use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
         let def = RouteBuilder::from("t:t")
             .route_id("test-route")
             .set_body_fn(|ex: &Exchange| {
@@ -2321,6 +2322,7 @@ mod tests {
                     lifecycle: None,
                 })
                 .collect(),
+            PipelineRuntimeCtx::compile_time(),
         );
         let exchange = Exchange::new(Message::new("hello"));
         let result = pipeline.oneshot(exchange).await.unwrap();
@@ -2329,7 +2331,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_header_fn_processor_works() {
-        use camel_core::route::{CompiledStep, compose_pipeline};
+        use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
         let def = RouteBuilder::from("t:t")
             .route_id("test-route")
             .set_header_fn("echo", |ex: &Exchange| {
@@ -2357,6 +2359,7 @@ mod tests {
                     lifecycle: None,
                 })
                 .collect(),
+            PipelineRuntimeCtx::compile_time(),
         );
         let exchange = Exchange::new(Message::new("ping"));
         let result = pipeline.oneshot(exchange).await.unwrap();

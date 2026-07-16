@@ -14,7 +14,9 @@ use camel_api::error_handler::{
 use camel_api::{
     BoxProcessor, BoxProcessorExt, CamelError, CircuitBreakerConfig, Exchange, Message,
 };
-use camel_core::route::{CompiledStep, RouteChannelService, compose_pipeline_with_handler};
+use camel_core::route::{
+    CompiledStep, PipelineRuntimeCtx, RouteChannelService, compose_pipeline_with_handler,
+};
 use camel_processor::error_handler::{DefaultRouteErrorHandler, RouteErrorHandler};
 use camel_processor::{CircuitBreakerDecision, CircuitBreakerGate};
 use tower::ServiceExt;
@@ -71,6 +73,7 @@ async fn continued_e2e_step3_executes_after_step2_failure() {
             },
         ],
         Some(handler),
+        PipelineRuntimeCtx::compile_time(),
     );
 
     // Execute the exchange
@@ -179,6 +182,7 @@ async fn continued_e2e_route_channel_service_with_cb_gate() {
             },
         ],
         Some(handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
     );
 
     // CircuitBreakerGate — shared state via Arc

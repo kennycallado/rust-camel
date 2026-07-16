@@ -16,6 +16,7 @@ use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeE
 
 use crate::lifecycle::adapters::consumer_management;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
+use crate::lifecycle::adapters::route_compiler::CANCEL_TOKEN;
 use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 #[cfg(test)]
 use crate::lifecycle::adapters::route_helpers::emit_start_route_event;
@@ -167,7 +168,15 @@ impl camel_api::RouteController for DefaultRouteController {
                             return;
                         }
 
-                        let result = pipeline.call(exchange).await;
+                        // B1: scope CANCEL_TOKEN so run_steps can check cancellation
+                        // between steps. Per-start task-local — child token expires
+                        // when this pipeline task exits; the next start re-scopes a
+                        // fresh one (avoids the lifecycle bug where a compiled-in
+                        // child token stays cancelled after stop→restart).
+                        let cancel = pipeline_cancel.clone();
+                        let result = CANCEL_TOKEN
+                            .scope(cancel, async move { pipeline.call(exchange).await })
+                            .await;
                         if let Some(tx) = reply_tx {
                             let _ = tx.send(result);
                         } else if let Err(ref e) = result {
@@ -181,27 +190,32 @@ impl camel_api::RouteController for DefaultRouteController {
                 let sem = max.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
                 tokio::spawn(async move {
                     loop {
-                        // Use select! to exit promptly on cancellation even when idle
+                        // B2 (ADR-0044): acquire permit BEFORE dequeue.
+                        // Cancel-aware: route stop is not blocked waiting for a permit.
+                        let permit = match &sem {
+                            Some(s) => {
+                                let acquired = tokio::select! {
+                                    p = Arc::clone(s).acquire_owned() => p.expect("semaphore closed"), // allow-unwrap
+                                    _ = pipeline_cancel.cancelled() => return,
+                                };
+                                Some(acquired)
+                            }
+                            None => None,
+                        };
+
                         let envelope = tokio::select! {
                             envelope = rx.recv() => match envelope {
                                 Some(e) => e,
-                                None => return, // Channel closed
+                                None => return,
                             },
-                            _ = pipeline_cancel.cancelled() => {
-                                // Cancellation requested - exit gracefully
-                                return;
-                            }
+                            _ = pipeline_cancel.cancelled() => return,
                         };
                         let ExchangeEnvelope { exchange, reply_tx } = envelope;
                         let pipe_ref = Arc::clone(&pipeline);
-                        let sem = sem.clone();
                         let cancel = pipeline_cancel.clone();
                         tokio::spawn(async move {
-                            // Acquire semaphore permit if bounded
-                            let _permit = match &sem {
-                                Some(s) => Some(s.acquire().await.expect("semaphore closed")), // allow-unwrap
-                                None => None,
-                            };
+                            // Permit owned by this task — released on completion (RAII).
+                            let _permit = permit;
 
                             // Load current pipeline from ArcSwap
                             let mut pipe = pipe_ref.load().processor.clone_inner();
@@ -214,7 +228,11 @@ impl camel_api::RouteController for DefaultRouteController {
                                 return;
                             }
 
-                            let result = pipe.call(exchange).await;
+                            // B1: scope CANCEL_TOKEN so run_steps can check
+                            // cancellation between steps.
+                            let result = CANCEL_TOKEN
+                                .scope(cancel, async move { pipe.call(exchange).await })
+                                .await;
                             if let Some(tx) = reply_tx {
                                 let _ = tx.send(result);
                             } else if let Err(ref e) = result {

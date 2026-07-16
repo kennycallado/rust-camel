@@ -50,7 +50,7 @@ fn passthrough() -> camel_api::BoxProcessor {
 /// `compose_pipeline` (not `_with_handler`) keeps the hot path minimal so the
 /// delta attributable to A2 is visible.
 fn build_three_step_pipeline() -> camel_api::BoxProcessor {
-    use camel_core::route::{CompiledStep, compose_pipeline};
+    use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 
     let processors: Vec<CompiledStep> = (0..3)
         .map(|_| CompiledStep::Process {
@@ -60,7 +60,7 @@ fn build_three_step_pipeline() -> camel_api::BoxProcessor {
         })
         .collect();
 
-    compose_pipeline(processors)
+    compose_pipeline(processors, PipelineRuntimeCtx::compile_time())
 }
 
 #[tokio::test(flavor = "current_thread")]

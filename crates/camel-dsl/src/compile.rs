@@ -25,7 +25,7 @@ use camel_api::{
 use camel_component_api::ConcurrencyModel;
 use camel_core::route::{
     BuilderStep, CompiledStep, DeclarativeWhenStep, DoTryCatchClauseBuilder, DoTryFinallyBuilder,
-    RouteDefinition, compose_pipeline,
+    PipelineRuntimeCtx, RouteDefinition, compose_pipeline,
 };
 use camel_processor::{
     ConvertBodyTo, JsonSchemaValidateService, LogLevel, MarshalService, StreamCacheService,
@@ -657,6 +657,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                                 lifecycle: None,
                             })
                             .collect(),
+                        PipelineRuntimeCtx::compile_time(),
                     ));
                 }
             }

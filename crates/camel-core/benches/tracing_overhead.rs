@@ -1,6 +1,8 @@
 use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message};
 use camel_core::DetailLevel;
-use camel_core::route::{CompiledStep, compose_pipeline, compose_traced_pipeline};
+use camel_core::route::{
+    CompiledStep, PipelineRuntimeCtx, compose_pipeline, compose_traced_pipeline,
+};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use tower::Service;
 
@@ -18,9 +20,16 @@ fn bench_tracing_overhead(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     let steps: Vec<CompiledStep> = (0..10).map(|_| pass_through()).collect();
-    let mut plain = compose_pipeline(steps.clone());
-    let mut traced =
-        compose_traced_pipeline(steps, "bench-route", true, DetailLevel::Full, None, None);
+    let mut plain = compose_pipeline(steps.clone(), PipelineRuntimeCtx::compile_time());
+    let mut traced = compose_traced_pipeline(
+        steps,
+        "bench-route",
+        true,
+        DetailLevel::Full,
+        None,
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
 
     group.bench_function("plain_10_steps", |b| {
         b.to_async(&rt).iter(|| {

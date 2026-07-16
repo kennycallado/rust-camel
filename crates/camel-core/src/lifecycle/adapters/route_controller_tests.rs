@@ -6,8 +6,8 @@ use crate::shared::components::domain::Registry;
 use arc_swap::ArcSwap;
 use camel_api::function::PrepareToken;
 use camel_api::{
-    BoxProcessor, ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId,
-    FunctionInvocationError, FunctionInvoker, FunctionInvokerSync, IdentityProcessor,
+    BoxProcessor, BoxProcessorExt, ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId,
+    FunctionInvocationError, FunctionInvoker, FunctionInvokerSync, IdentityProcessor, Message,
     OpaqueProcessor, RuntimeCommand, StepLifecycle, StepShutdownReason, SyncBoxProcessor, Value,
     ValueSourceDef,
 };
@@ -605,6 +605,130 @@ async fn concurrent_concurrency_override_path_executes() {
     controller.start_route("rt-concurrent").await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     controller.stop_route("rt-concurrent").await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_backpressure_blocks_processor_when_saturated() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // This test verifies back-pressure at the processor level: with
+    // Concurrent { max: 1 }, exchange B's processor is NOT invoked while
+    // exchange A holds the sole semaphore permit.
+    //
+    // NOTE: This invariant holds under BOTH the old (permit-after-dequeue)
+    // and new (B2 permit-before-dequeue, ADR-0044) admission patterns.
+    // In the old code, B is dequeued into a spawned task that blocks on
+    // semaphore acquire; in the new B2 code, B stays in the mpsc channel
+    // because the outer loop blocks on acquire before rx.recv().  Neither
+    // increments process_count for B.
+    //
+    // The distinguishing invariant (B stays in the mpsc channel under B2)
+    // is not directly observable from outside the pipeline task.  B2
+    // ordering correctness is verified by code inspection of
+    // route_controller_trait.rs and documented in ADR-0044.
+    //
+    // If someone reverts to the old permit-after-dequeue loop:
+    //   rx.recv() -> spawn { sem.acquire(); pipe.call() }
+    // this test STILL PASSES — B's processor is not called in either case.
+    let mut controller = build_controller_with_components();
+
+    // Oneshot to block the first exchange's processor until test release
+    let (block_tx, block_rx) = tokio::sync::oneshot::channel::<()>();
+    let block_rx = Arc::new(tokio::sync::Mutex::new(Some(block_rx)));
+
+    // Track how many times the processor was invoked
+    let process_count = Arc::new(AtomicUsize::new(0));
+
+    let processor = {
+        let count = process_count.clone();
+        let rx = block_rx.clone();
+        BoxProcessor::from_fn(move |exchange: Exchange| {
+            let count = count.clone();
+            let rx = rx.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                // First exchange blocks waiting for test release
+                let mut guard = rx.lock().await;
+                if let Some(rx) = guard.take() {
+                    let _ = rx.await;
+                }
+                Ok(exchange)
+            })
+        })
+    };
+
+    // period + delay prevent the timer's immediate first tick from
+    // interfering — the consumer sleeps for 10s before producing any
+    // exchanges, so only manually-injected exchanges go through the pipeline.
+    let route = RouteDefinition::new(
+        "timer:tick?period=10000&delay=10000",
+        vec![BuilderStep::Processor(OpaqueProcessor(processor))],
+    )
+    .with_route_id("rt-b2")
+    .with_concurrency(ConcurrencyModel::Concurrent { max: Some(1) });
+
+    controller.add_route(route).await.unwrap();
+    controller.start_route("rt-b2").await.unwrap();
+
+    // Small yield for pipeline task to start polling
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Get channel sender to inject exchanges directly (bypass the timer
+    // consumer, which never fires with period=10000 within the test window).
+    let sender = controller
+        .routes
+        .get("rt-b2")
+        .and_then(|r| r.channel_sender.clone())
+        .expect("channel sender should exist after start");
+
+    // Send exchange A — acquires the semaphore permit, blocks on oneshot
+    sender
+        .send(ExchangeEnvelope {
+            exchange: Exchange::new(Message::new("A")),
+            reply_tx: None,
+        })
+        .await
+        .unwrap();
+
+    // Allow the pipeline loop to dequeue A and spawn the processing task
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    assert_eq!(
+        process_count.load(Ordering::SeqCst),
+        1,
+        "exchange A should be processing (permit acquired)"
+    );
+
+    // Send exchange B — permit held by A, B blocks at semaphore acquisition
+    sender
+        .send(ExchangeEnvelope {
+            exchange: Exchange::new(Message::new("B")),
+            reply_tx: None,
+        })
+        .await
+        .unwrap();
+
+    // Allow time for B to attempt (and fail) to acquire the permit
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    assert_eq!(
+        process_count.load(Ordering::SeqCst),
+        1,
+        "exchange B should NOT be processing (permit held by A)"
+    );
+
+    // Release A — completion drops the permit, B acquires and processes
+    block_tx.send(()).unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        process_count.load(Ordering::SeqCst),
+        2,
+        "exchange B should process after A releases the permit"
+    );
+
+    controller.stop_route("rt-b2").await.unwrap();
 }
 
 #[tokio::test]

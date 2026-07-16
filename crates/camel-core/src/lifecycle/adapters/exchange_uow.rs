@@ -337,7 +337,9 @@ mod tests {
     async fn on_complete_fires_on_stopped() {
         // ADR-0024: Stop arrives as Ok(ex) at the Tower boundary, so ExchangeUoW's
         // `Ok(ex) => fire_hook(on_complete, ...)` arm fires for Stop.
-        use crate::lifecycle::adapters::route_compiler::compose_pipeline_with_handler;
+        use crate::lifecycle::adapters::route_compiler::{
+            PipelineRuntimeCtx, compose_pipeline_with_handler,
+        };
         use crate::lifecycle::adapters::step_compilers::CompiledStep;
 
         let fired = Arc::new(AtomicU64::new(0));
@@ -350,8 +352,11 @@ mod tests {
         let layer = ExchangeUoWLayer::new(Arc::clone(&counter), Some(hook), None);
 
         // Top-level pipeline with Stop — maps Stop to Ok(ex).
-        let stop_pipeline: BoxProcessor =
-            compose_pipeline_with_handler(vec![CompiledStep::Stop], None);
+        let stop_pipeline: BoxProcessor = compose_pipeline_with_handler(
+            vec![CompiledStep::Stop],
+            None,
+            PipelineRuntimeCtx::compile_time(),
+        );
 
         let svc = layer.layer(stop_pipeline);
         let ex = Exchange::new(Message::new("payload"));

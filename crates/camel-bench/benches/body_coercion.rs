@@ -1,5 +1,5 @@
 use camel_api::{Body, BodyType, BoxProcessor, BoxProcessorExt, Exchange, Message, Value};
-use camel_core::route::{CompiledStep, compose_pipeline_with_contracts};
+use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline_with_contracts};
 use criterion::{Criterion, criterion_group, criterion_main};
 use tower::ServiceExt;
 
@@ -20,6 +20,7 @@ fn bench_body_coercion(c: &mut Criterion) {
             lifecycle: None,
         }],
         None,
+        PipelineRuntimeCtx::compile_time(),
     );
     group.bench_function("coerce_json_to_text_single_step", |b| {
         b.to_async(&rt).iter(|| {
@@ -36,6 +37,7 @@ fn bench_body_coercion(c: &mut Criterion) {
             lifecycle: None,
         }],
         None,
+        PipelineRuntimeCtx::compile_time(),
     );
     group.bench_function("pipeline_no_contracts", |b| {
         b.to_async(&rt).iter(|| {
@@ -64,6 +66,7 @@ fn bench_body_coercion(c: &mut Criterion) {
             },
         ],
         None,
+        PipelineRuntimeCtx::compile_time(),
     );
     group.bench_function("pipeline_mixed_contracts", |b| {
         b.to_async(&rt).iter(|| {

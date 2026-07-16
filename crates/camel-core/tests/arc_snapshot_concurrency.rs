@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message, SyncBoxProcessor, Value};
-use camel_core::route::{CompiledStep, compose_pipeline};
+use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use tokio::sync::Barrier;
 use tokio::time::timeout;
 use tower::Service;
@@ -45,6 +45,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
         })
         .chain((0..4).map(|_| pass_through()))
         .collect(),
+        PipelineRuntimeCtx::compile_time(),
     );
 
     // S1: first step sets "phase: s1" marker, remainder pass-through.
@@ -59,6 +60,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
         })
         .chain((0..19).map(|_| pass_through()))
         .collect(),
+        PipelineRuntimeCtx::compile_time(),
     );
 
     // SyncBoxProcessor wraps BoxProcessor behind Arc<Mutex<...>>,
@@ -170,11 +172,14 @@ async fn in_flight_call_completes_on_old_snapshot_after_swap() {
             .set_header("s0-marker", Value::String("yes".into()));
         async move { Ok(ex) }
     });
-    let s0 = compose_pipeline(vec![CompiledStep::Process {
-        processor: s0_proc,
-        body_contract: None,
-        lifecycle: None,
-    }]);
+    let s0 = compose_pipeline(
+        vec![CompiledStep::Process {
+            processor: s0_proc,
+            body_contract: None,
+            lifecycle: None,
+        }],
+        PipelineRuntimeCtx::compile_time(),
+    );
 
     // S1: a pipeline that marks the exchange with "s1-marker"
     let s1_proc = BoxProcessor::from_fn(|mut ex: Exchange| {
@@ -182,11 +187,14 @@ async fn in_flight_call_completes_on_old_snapshot_after_swap() {
             .set_header("s1-marker", Value::String("yes".into()));
         async move { Ok(ex) }
     });
-    let s1 = compose_pipeline(vec![CompiledStep::Process {
-        processor: s1_proc,
-        body_contract: None,
-        lifecycle: None,
-    }]);
+    let s1 = compose_pipeline(
+        vec![CompiledStep::Process {
+            processor: s1_proc,
+            body_contract: None,
+            lifecycle: None,
+        }],
+        PipelineRuntimeCtx::compile_time(),
+    );
 
     let sw = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor::new(s0)));
 

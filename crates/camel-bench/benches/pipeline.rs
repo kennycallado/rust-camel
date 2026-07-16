@@ -2,7 +2,7 @@ use camel_api::{
     AggregationStrategy, Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message,
     SplitterConfig, Value, split_body,
 };
-use camel_core::route::{CompiledStep, compose_pipeline};
+use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use camel_processor::{
     ChoiceService, FilterService, LogLevel, LogProcessor, SplitterService, WhenClause,
 };
@@ -49,28 +49,31 @@ fn build_pipeline() -> BoxProcessor {
 
     let log = BoxProcessor::new(LogProcessor::new(LogLevel::Info, "bench-log".to_string()));
 
-    compose_pipeline(vec![
-        CompiledStep::Process {
-            processor: filter,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: choice,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: splitter,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: log,
-            body_contract: None,
-            lifecycle: None,
-        },
-    ])
+    compose_pipeline(
+        vec![
+            CompiledStep::Process {
+                processor: filter,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: choice,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: splitter,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: log,
+                body_contract: None,
+                lifecycle: None,
+            },
+        ],
+        PipelineRuntimeCtx::compile_time(),
+    )
 }
 
 /// Benchmarks a 4-stage pipeline (filter → choice → splitter → log)

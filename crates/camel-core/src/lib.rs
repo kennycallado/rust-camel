@@ -83,7 +83,7 @@ pub mod template;
 #[cfg(feature = "internal-adapters")]
 pub mod route {
     pub use crate::lifecycle::adapters::route_compiler::{
-        RouteChannelService, compose_pipeline, compose_pipeline_with_contracts,
+        PipelineRuntimeCtx, RouteChannelService, compose_pipeline, compose_pipeline_with_contracts,
         compose_pipeline_with_handler, compose_traced_pipeline,
     };
     pub use crate::lifecycle::adapters::route_types::Route;

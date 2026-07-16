@@ -1,5 +1,5 @@
 use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message, Value};
-use camel_core::route::{CompiledStep, compose_pipeline};
+use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use camel_processor::{ChoiceService, FilterService, LogLevel, LogProcessor, WhenClause};
 use criterion::{Criterion, criterion_group, criterion_main};
 use tower::ServiceExt;
@@ -39,33 +39,36 @@ fn build_exchange_flow() -> BoxProcessor {
     let step4 = BoxProcessor::new(LogProcessor::new(LogLevel::Info, "flow-log".to_string()));
     let step5 = body_step("final");
 
-    compose_pipeline(vec![
-        CompiledStep::Process {
-            processor: step1,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: step2,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: step3,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: step4,
-            body_contract: None,
-            lifecycle: None,
-        },
-        CompiledStep::Process {
-            processor: step5,
-            body_contract: None,
-            lifecycle: None,
-        },
-    ])
+    compose_pipeline(
+        vec![
+            CompiledStep::Process {
+                processor: step1,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: step2,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: step3,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: step4,
+                body_contract: None,
+                lifecycle: None,
+            },
+            CompiledStep::Process {
+                processor: step5,
+                body_contract: None,
+                lifecycle: None,
+            },
+        ],
+        PipelineRuntimeCtx::compile_time(),
+    )
 }
 
 /// Benchmarks a 5-processor exchange flow (set-header → filter → choice → log → set-body)

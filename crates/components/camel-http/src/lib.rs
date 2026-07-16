@@ -5742,7 +5742,7 @@ mod tests {
     #[tokio::test]
     async fn http_consumer_returns_body_and_code_on_stop() {
         use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, Message};
-        use camel_core::route::{CompiledStep, compose_pipeline_with_handler};
+        use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline_with_handler};
         use tower::ServiceExt;
 
         // Pipeline: set_body("nope") + set CamelHttpResponseCode=409 + Stop.
@@ -5768,6 +5768,7 @@ mod tests {
         let pipeline = compose_pipeline_with_handler(
             vec![set_body_step, set_status_step, CompiledStep::Stop],
             None,
+            PipelineRuntimeCtx::compile_time(),
         );
 
         let ex = Exchange::new(Message::default());
@@ -5794,10 +5795,14 @@ mod tests {
         // E2E coverage of the full HTTP dispatch path is in
         // crates/camel-test/tests/integration_test.rs.
         use camel_api::{Exchange, Message};
-        use camel_core::route::{CompiledStep, compose_pipeline_with_handler};
+        use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline_with_handler};
         use tower::ServiceExt;
 
-        let pipeline = compose_pipeline_with_handler(vec![CompiledStep::Stop], None);
+        let pipeline = compose_pipeline_with_handler(
+            vec![CompiledStep::Stop],
+            None,
+            PipelineRuntimeCtx::compile_time(),
+        );
         let ex = Exchange::new(Message::default());
         let result = pipeline.oneshot(ex).await;
         assert!(result.is_ok(), "Stop with empty body arrives as Ok");

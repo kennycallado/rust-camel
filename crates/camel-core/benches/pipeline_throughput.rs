@@ -1,5 +1,5 @@
 use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message};
-use camel_core::route::{CompiledStep, compose_pipeline};
+use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tower::Service;
 
@@ -18,7 +18,7 @@ fn bench_pipeline_throughput(c: &mut Criterion) {
 
     for step_count in [1, 5, 20] {
         let steps: Vec<CompiledStep> = (0..step_count).map(|_| pass_through()).collect();
-        let mut pipeline = compose_pipeline(steps.clone());
+        let mut pipeline = compose_pipeline(steps.clone(), PipelineRuntimeCtx::compile_time());
 
         group.bench_with_input(
             BenchmarkId::new("steps", step_count),
