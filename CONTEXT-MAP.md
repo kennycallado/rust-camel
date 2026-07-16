@@ -64,6 +64,8 @@ are a convenience index and may lag the file.
 - [0039](./docs/adr/0039-configurable-loop-iteration-cap.md) — Configurable per-Step loop iteration cap via `max_iterations` (ADR-0033/0038 per-item escape hatch)
 - [0040](./docs/adr/0040-configurable-materialize-limits.md) — Configurable materialize limits for XSLT/XJ/WASM producers (ADR-0032, ADR-0033, ADR-0038)
 - [0042](./docs/adr/0042-arc-compiled-steps-snapshot.md) — `Arc<[CompiledStep]>` shared snapshot avoids per-Exchange Vec clone; `SharedSnapshot` newtype adds `Send + Sync`
+- [0043](./docs/adr/0043-pipeline-cancellation-between-steps.md) — Per-start `task_local!` cancel token checked between steps; returns `Failed(ConsumerStopping)`
+- [0044](./docs/adr/0044-route-admission-backpressure.md) — Semaphore permit acquired before dequeue in Concurrent model; consumer back-pressure when permits exhausted
 
 ## Key Terms
 
