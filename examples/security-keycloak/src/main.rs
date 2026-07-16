@@ -152,13 +152,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut alice_exchange = Exchange::default();
     alice_exchange.input.headers.insert(
         "authorization".to_string(),
-        Value::String(format!("Bearer {}", &*alice_token.access_token)), // allow-secret
+        Value::String(format!("Bearer {}", *alice_token.access_token)), // allow-secret
     );
 
     let mut bob_exchange = Exchange::default();
     bob_exchange.input.headers.insert(
         "authorization".to_string(),
-        Value::String(format!("Bearer {}", &*bob_token.access_token)), // allow-secret
+        Value::String(format!("Bearer {}", *bob_token.access_token)), // allow-secret
     );
 
     let alice_decision = admin_policy.evaluate(&mut alice_exchange).await;
