@@ -63,7 +63,7 @@ Optional per-Route configuration that wraps the Pipeline with exchange lifecycle
 _Avoid_: transaction, scope, UnitOfWork
 
 **RuntimeBus**:
-CQRS façade for the Route control plane. Commands mutate Route state (start, stop, add); queries read current status from projections.
+CQRS façade for the **Route control plane only**. Commands mutate Route state (start, stop, add); queries read current status from projections. Uses synchronous-projection CQRS (projection updated within the same UnitOfWork as the command — no read-model lag). The data plane (Exchange/Pipeline processing) is explicitly NOT CQRS. Established by ADR-0002; two-phase persistence refined by ADR-0018; scope/ceiling framed by ADR-0045.
 _Avoid_: event bus, message bus, command bus (unqualified)
 
 **Route Lifecycle Projection**:
