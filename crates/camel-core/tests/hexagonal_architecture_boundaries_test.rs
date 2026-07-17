@@ -142,7 +142,7 @@ fn application_layer_depends_on_ports_and_domain_only() {
 #[test]
 fn ports_layer_only_uses_approved_application_imports() {
     assert_no_forbidden_imports(
-        "lifecycle/ports",
+        "lifecycle/application/ports",
         &[
             "crate::lifecycle::adapters",
             "crate::context",
@@ -162,7 +162,7 @@ fn ports_layer_only_uses_approved_application_imports() {
 fn domain_and_ports_do_not_import_runtime_contract_types_from_camel_api_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let route_runtime = root.join("lifecycle/domain/route_runtime.rs");
-    let runtime_ports = root.join("lifecycle/ports/runtime_ports.rs");
+    let runtime_ports = root.join("lifecycle/application/ports/runtime_ports.rs");
 
     assert_file_not_contains(
         &route_runtime,
@@ -343,7 +343,7 @@ fn domain_has_no_tower_or_framework_types() {
 #[test]
 fn ports_imports_route_definition_from_application_not_adapters() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let ports_file = root.join("lifecycle/ports/runtime_ports.rs");
+    let ports_file = root.join("lifecycle/application/ports/runtime_ports.rs");
 
     assert_file_contains(
         &ports_file,
@@ -398,7 +398,7 @@ fn hot_reload_does_not_import_lifecycle_domain_directly() {
 #[test]
 fn lifecycle_ports_registration_port_is_pub_crate_only() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/lifecycle/ports/registration_port.rs");
+        .join("src/lifecycle/application/ports/registration_port.rs");
     let content = std::fs::read_to_string(&path).expect("failed to read registration_port.rs");
     assert!(
         content.contains("pub(crate) trait RouteRegistrationPort"),
@@ -517,6 +517,33 @@ fn flat_root_modules_are_recorded_as_pending_tier_c_slices() {
             p.display()
         );
     }
+}
+
+// ---- Stage 2 (Tier B, rc-d0pu.2): entity purity ----
+
+#[test]
+fn lifecycle_domain_error_has_no_thiserror() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle/domain/error.rs");
+    let content = std::fs::read_to_string(&path).expect("failed to read domain/error.rs");
+    assert!(
+        !content.contains("thiserror"),
+        "domain/error.rs must not use thiserror (ADR-0045 §4); DomainError uses a manual impl"
+    );
+}
+
+#[test]
+fn runtime_event_entity_has_no_serde_derives() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle/domain/runtime_event.rs");
+    let content = std::fs::read_to_string(&path).expect("failed to read runtime_event.rs");
+    // Check no derive attribute names Serialize (robust to doc-comment mentions).
+    let derives_serialize = content
+        .lines()
+        .filter(|l| l.trim_start().starts_with("#[derive("))
+        .any(|l| l.contains("Serialize"));
+    assert!(
+        !derives_serialize,
+        "RuntimeEvent entity must not derive Serialize (ADR-0045 §4); persistence uses RuntimeEventRecord"
+    );
 }
 
 // ---- Stage 6 (Tier A, rc-d0pu.1): honest export feature (A-prime) ----

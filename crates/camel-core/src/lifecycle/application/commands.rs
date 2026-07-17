@@ -12,7 +12,6 @@ use camel_api::{
 };
 use camel_api::{CamelError, RuntimeCommand, RuntimeCommandResult};
 
-use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::application::route_definition::{
     BuilderStep, DeclarativeWhenStep, RouteDefinition,
 };
@@ -23,6 +22,7 @@ use crate::lifecycle::ports::{
     EventPublisherPort, ProjectionStorePort, RouteRepositoryPort, RouteStatusProjection,
     RuntimeExecutionPort, RuntimeUnitOfWorkPort,
 };
+use camel_component_api::HealthCheckRegistry as HealthCheckRegistryTrait;
 use camel_processor::LogLevel;
 
 pub struct CommandDeps {
@@ -31,7 +31,7 @@ pub struct CommandDeps {
     pub events: Arc<dyn EventPublisherPort>,
     pub uow: Option<Arc<dyn RuntimeUnitOfWorkPort>>,
     pub execution: Option<Arc<dyn RuntimeExecutionPort>>,
-    pub health_registry: Option<Arc<HealthCheckRegistry>>,
+    pub health_registry: Option<Arc<dyn HealthCheckRegistryTrait>>,
 }
 
 pub async fn execute_command(
@@ -281,7 +281,7 @@ async fn handle_lifecycle(
             health_registry.force_unhealthy_for_route(
                 &route_id,
                 &format!("route:{route_id}"),
-                format!("route failed: {error}"),
+                &format!("route failed: {error}"),
             );
         }
         return persist_and_return(deps, aggregate, expected_version, events, route_id).await;

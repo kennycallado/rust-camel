@@ -8,7 +8,6 @@ use camel_api::{
     RuntimeQueryBus, RuntimeQueryResult,
 };
 
-use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::application::commands::{
     CommandDeps, execute_command, handle_register_internal,
 };
@@ -20,6 +19,7 @@ use crate::lifecycle::ports::{
     CommandDedupPort, EventPublisherPort, InFlightCountResult, ProjectionStorePort,
     RouteRepositoryPort, RuntimeExecutionPort, RuntimeUnitOfWorkPort,
 };
+use camel_component_api::HealthCheckRegistry as HealthCheckRegistryTrait;
 
 impl From<InFlightCountResult> for RuntimeQueryResult {
     fn from(r: InFlightCountResult) -> Self {
@@ -41,7 +41,7 @@ pub struct RuntimeBus {
     dedup: Arc<dyn CommandDedupPort>,
     uow: Option<Arc<dyn RuntimeUnitOfWorkPort>>,
     execution: Option<Arc<dyn RuntimeExecutionPort>>,
-    health_registry: Option<Arc<HealthCheckRegistry>>,
+    health_registry: Option<Arc<dyn HealthCheckRegistryTrait>>,
     journal_recovered_once: OnceCell<()>,
 }
 
@@ -74,7 +74,10 @@ impl RuntimeBus {
         self
     }
 
-    pub fn with_health_registry(mut self, health_registry: Arc<HealthCheckRegistry>) -> Self {
+    pub fn with_health_registry(
+        mut self,
+        health_registry: Arc<crate::health_registry::HealthCheckRegistry>,
+    ) -> Self {
         self.health_registry = Some(health_registry);
         self
     }

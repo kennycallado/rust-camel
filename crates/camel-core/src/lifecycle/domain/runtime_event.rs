@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
-
 /// Internal runtime event contract used by domain/application/ports.
 ///
 /// API-layer event types can map to this contract at crate boundaries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Serde lives in the adapter ring (`runtime_event_record`), not on the entity
+/// (ADR-0045 §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
     RouteRegistered { route_id: String },
     RouteStartRequested { route_id: String },

@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use camel_api::CamelError;
 
+use crate::lifecycle::adapters::runtime_event_record::runtime_event_serde;
 use crate::lifecycle::domain::{DomainError, RuntimeEvent};
 use crate::lifecycle::ports::RuntimeEventJournalPort;
 
@@ -63,6 +64,7 @@ impl Default for RedbJournalOptions {
 pub struct JournalEntry {
     pub seq: u64,
     pub timestamp_ms: i64,
+    #[serde(with = "runtime_event_serde")]
     pub event: RuntimeEvent,
 }
 

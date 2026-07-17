@@ -74,16 +74,15 @@ justification; every new bypass must land a line here, or it is a boundary viola
 
 **Entity-purity gaps (the dependency rule):**
 
-- **`RuntimeEvent` derives `Serialize`** (`lifecycle/domain/runtime_event.rs`) — violates §1
-  ("no Serde in entities"). Target: introduce a persistence DTO (`RuntimeEventRecord`) and strip the
-  derive; serialization consumers read the DTO, not the entity. Listed here because removing the
-  public derive is a pre-1.0-visible change that needs the DTO in place first.
-- **`LanguageRegistryError` derives `thiserror::Error`** (`lifecycle/domain/error.rs:33`) —
-  violates §1 ("no framework derives in entities"). `DomainError` in the same file is already clean
-  (manual `impl std::error::Error`, no derive); the `use thiserror::Error;` import exists only to
-  serve `LanguageRegistryError`. Target: move `LanguageRegistryError` out of `domain/` into the
-  languages application slice (it is a registration error, not a domain invariant), keep a
-  deprecated re-export shim since it is part of the public API surface.
+- ✅ **`RuntimeEvent` derived `Serialize`** (`lifecycle/domain/runtime_event.rs`) — REMEDIATED in
+  Tier B (`rc-d0pu.2`): the `RuntimeEventRecord` DTO (`lifecycle/adapters/runtime_event_record.rs`)
+  now carries Serde via a `#[serde(with)]` bridge on `JournalEntry.event`; the entity derive is
+  stripped. Wire format byte-compatible (roundtrip test). Kept here for the historical record.
+- ✅ **`LanguageRegistryError` derived `thiserror::Error`** (`lifecycle/domain/error.rs:33`) —
+  REMEDIATED in Tier B (`rc-d0pu.2`): relocated to `language_registry.rs` (languages application
+  slice); `domain/error.rs` no longer imports thiserror (only `DomainError`'s manual impl remains).
+  A `#[deprecated]` re-export shim at `lifecycle::domain` keeps the old path compiling; shim removal
+  tracked in bd `rc-rfr9`. Kept here for the historical record.
 
 ### 5. Ring → module mapping
 The four Clean Architecture rings map to camel-core modules as follows (vertical slices are the

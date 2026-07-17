@@ -15,8 +15,20 @@ use std::sync::{Arc, Mutex};
 
 use camel_language_api::Language;
 use camel_language_api::LanguagesConfig;
+use thiserror::Error;
 
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
+
+/// Error type for language registration operations on [`CamelContext`](crate::CamelContext).
+///
+/// This is distinct from [`camel_language_api::error::LanguageError`], which
+/// covers language-evaluation concerns (parse, eval, unknown variable, etc.).
+/// Registration is a context-configuration invariant, not a language concern.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LanguageRegistryError {
+    #[error("language '{name}' is already registered")]
+    AlreadyRegistered { name: String },
+}
 
 /// Build a language registry from `[languages.*]` config blocks.
 ///

@@ -17,6 +17,7 @@ pub(crate) mod route_helpers;
 pub(crate) mod route_registry;
 pub(crate) mod route_runtime_state;
 pub mod route_types;
+pub(crate) mod runtime_event_record;
 pub mod runtime_execution;
 pub(crate) mod step_compilers;
 pub(crate) mod step_resolution;

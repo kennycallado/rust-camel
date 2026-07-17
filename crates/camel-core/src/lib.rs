@@ -112,6 +112,7 @@ pub use crate::hot_reload::adapters::ReloadWatcher;
 pub use crate::hot_reload::application::FunctionReloadContext;
 pub use crate::hot_reload::application::execute_reload_actions;
 pub use crate::hot_reload::domain::ReloadAction;
+pub use crate::language_registry::LanguageRegistryError;
 pub use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 pub use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
 pub use crate::lifecycle::adapters::controller_actor::spawn_supervision_task;
@@ -134,8 +135,7 @@ pub use crate::lifecycle::adapters::{
 pub use crate::lifecycle::application::runtime_bus::RuntimeBus;
 pub use crate::lifecycle::application::{BuilderStep, RouteDefinition};
 pub use crate::lifecycle::domain::{
-    LanguageRegistryError, RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState,
-    RuntimeEvent,
+    RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
 };
 pub use crate::lifecycle::ports::{
     CommandDedupPort, EventPublisherPort, InFlightCountResult, ProjectionStorePort,
@@ -161,8 +161,8 @@ impl From<lifecycle::domain::DomainError> for CamelError {
     }
 }
 
-impl From<lifecycle::domain::LanguageRegistryError> for CamelError {
-    fn from(e: lifecycle::domain::LanguageRegistryError) -> Self {
+impl From<crate::language_registry::LanguageRegistryError> for CamelError {
+    fn from(e: crate::language_registry::LanguageRegistryError) -> Self {
         CamelError::Config(e.to_string())
     }
 }

@@ -19,11 +19,11 @@ use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
 
 use crate::health_registry::HealthCheckRegistry;
+use crate::language_registry::LanguageRegistryError;
 use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
-use crate::lifecycle::domain::LanguageRegistryError;
 use crate::registry::RegistryError;
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::TracerConfig;

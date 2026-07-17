@@ -413,7 +413,7 @@ async fn fail_route_forces_unhealthy_health_entry() {
     health_registry.register_for_route("route-f", healthy_check("consumer"));
 
     let deps = CommandDeps {
-        health_registry: Some(Arc::clone(&health_registry)),
+        health_registry: Some(health_registry.clone()),
         ..deps
     };
 

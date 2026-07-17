@@ -10,7 +10,7 @@ use camel_api::CamelError;
 use crate::context::RuntimeExecutionHandle;
 use crate::hot_reload::domain::ReloadAction;
 #[cfg(test)]
-use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+use crate::hot_reload::ports::ReloadIntrospectionPort;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 
 use super::reload_actions;
@@ -34,7 +34,7 @@ pub struct ReloadError {
 #[cfg(test)]
 fn compute_reload_actions(
     new_definitions: &[RouteDefinition],
-    controller: &DefaultRouteController,
+    controller: &dyn ReloadIntrospectionPort,
 ) -> Vec<ReloadAction> {
     let active_ids: std::collections::HashSet<String> =
         controller.route_ids().into_iter().collect();

@@ -964,5 +964,18 @@ impl DefaultRouteController {
 }
 
 #[cfg(test)]
+impl crate::hot_reload::ports::ReloadIntrospectionPort for DefaultRouteController {
+    fn route_ids(&self) -> Vec<String> {
+        self.route_ids() // inherent pub fn
+    }
+    fn route_from_uri(&self, route_id: &str) -> Option<String> {
+        self.route_from_uri(route_id) // inherent pub fn
+    }
+    fn route_source_hash(&self, route_id: &str) -> Option<u64> {
+        self.route_source_hash(route_id) // inherent pub fn
+    }
+}
+
+#[cfg(test)]
 #[path = "route_controller_tests.rs"]
 mod tests;
