@@ -162,6 +162,25 @@ YAML example (streaming NDJSON split):
       - to: "log:fragment"
 ```
 
+## Aggregation contract (divergence from Apache Camel)
+
+`SplitterService` and `StreamingSplitterService` invoke the configured
+`AggregationStrategy` with a `Vec<Result<Exchange, CamelError>>` — failed
+fragments appear as `Err(e)` entries in the Vec, NOT as Exchanges with the
+exception attached. This diverges permanently from Apache Camel, where the
+aggregation strategy receives the failed Exchange and inspects
+`exchange.getProperty(Exchange.EXCEPTION_CLASS)` to decide recovery.
+
+The rust-camel model is forced by ADR-0019 (`ExceptionDisposition` enum
+replaces `handled:bool`) and the Tower separation (`Service<Exchange>`
+returns `Result<Exchange, CamelError>`, not Exchange-with-exception-state).
+Aggregation strategies that need error-aware logic must inspect the `Result`
+shape; they cannot rely on the Camel-style exception-attached Exchange.
+
+Per ADR-0046 §Anti-patrones, this divergence is documented here as tracked
+content (not in a gitignored spike doc). Source: spike Splitter (commit
+`8d31e74a`), divergence label D2.
+
 ## ADR-0012 log-policy sites
 
 All 5 sites in this crate are category **(a) handler-owned** — EIP processor failures that occur
