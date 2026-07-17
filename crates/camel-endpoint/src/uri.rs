@@ -115,6 +115,12 @@ pub fn parse_uri(uri: &str) -> Result<UriComponents, CamelError> {
         )));
     }
 
+    // R4-L2 (b): only the FIRST '?' separates path from query. Any subsequent
+    // '?' is preserved literally inside the query value (no error, no log) —
+    // matching the `#` precedent from ab13389f. Camel endpoint URIs use their
+    // own grammar (`scheme:path?params`), not RFC 3986, so we do not reject a
+    // second '?'. Operators who need a literal '?' in a value can percent-encode
+    // as `%3F` (handled by percent_decode).
     let (path, params) = match rest.split_once('?') {
         Some((path, query)) => (path, parse_query(query)?),
         None => (rest, HashMap::new()),
@@ -642,5 +648,35 @@ mod tests {
         let uri = parse_uri("x:p%23q?key=a%23b").unwrap();
         assert_eq!(uri.path, "p#q");
         assert_eq!(uri.params.get("key"), Some(&"a#b".to_string()));
+    }
+
+    // R4-L2 (b) (revised): a second '?' is NOT treated as an error. Only the
+    // first '?' separates path from query; any subsequent '?' is preserved
+    // literally inside the query value (no error, no log). Camel endpoint URIs
+    // use their own grammar (`scheme:path?params`), not RFC 3986. Operators who
+    // need a literal '?' in an RFC-3986 context can percent-encode as `%3F`
+    // (handled by percent_decode). Matches the `#` precedent from ab13389f.
+
+    #[test]
+    fn parse_uri_second_question_preserved_in_value() {
+        let uri = parse_uri("direct://p?a=1?b=2").unwrap();
+        assert_eq!(uri.path, "//p");
+        assert_eq!(uri.params.get("a"), Some(&"1?b=2".to_string()));
+        assert!(
+            !uri.params.contains_key("b"),
+            "second '?' must not start a new parameter"
+        );
+    }
+
+    #[test]
+    fn parse_uri_percent_encoded_question_in_path_decodes() {
+        let uri = parse_uri("x:p%3Fq?key=v").unwrap();
+        assert_eq!(uri.path, "p?q");
+    }
+
+    #[test]
+    fn parse_uri_percent_encoded_question_in_value_decodes() {
+        let uri = parse_uri("x:p?key=a%3Fb").unwrap();
+        assert_eq!(uri.params.get("key"), Some(&"a?b".to_string()));
     }
 }
