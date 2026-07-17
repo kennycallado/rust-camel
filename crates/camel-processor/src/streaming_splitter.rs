@@ -75,7 +75,22 @@ impl Service<Exchange> for StreamingSplitterService {
             let mut acc_bodies: Vec<Value> = Vec::new();
             let mut index: u64 = 0;
 
-            // One-entry lookahead for CamelSplitComplete
+            // One-entry lookahead for CamelSplitComplete.
+            //
+            // Property (rc-n6xt investigation): to set CamelSplitComplete=true on
+            // the last fragment, we must peek stream.next() before running the
+            // sub-pipeline of fragment N. Consequence: fragment N's sub-pipeline
+            // invocation is delayed until fragment N+1 has arrived from the
+            // stream. For I/O-bound streams this shifts time-sensitive side
+            // effects (telemetry, log timestamps) by ~1 stream interval per
+            // fragment. Total wall time is unaffected (sequential either way);
+            // peak memory holds 1 extra Exchange (the peeked `next`) during the
+            // sub-pipeline call — irrelevant for the small fragments streaming
+            // splits are designed for. ADR-0044 backpressure is not impacted
+            // (route semaphore holds for the full call() either way).
+            //
+            // Alternative (eager emit, no lookahead) would break Camel C6
+            // CamelSplitComplete semantics. Not changing.
             let mut current = stream.next().await;
 
             while let Some(fragment_result) = current.take() {
