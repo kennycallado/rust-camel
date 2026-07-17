@@ -67,6 +67,7 @@ are a convenience index and may lag the file.
 - [0043](./docs/adr/0043-pipeline-cancellation-between-steps.md) — Per-start `task_local!` cancel token checked between steps; returns `Failed(ConsumerStopping)`
 - [0044](./docs/adr/0044-route-admission-backpressure.md) — Semaphore permit acquired before dequeue in Concurrent model; consumer back-pressure when permits exhausted
 - [0045](./docs/adr/0045-camel-core-architecture-charter.md) — camel-core architecture charter: codifies the Clean + DDD + CQRS + vertical-slices + hexagonal promise crate-wide; declares the module-discipline ceiling (no crate-split through 1.0) and scopes CQRS to the control plane (synchronous-projection)
+- [0046](./docs/adr/0046-apache-camel-inspiration-not-conformance.md) — Apache Camel is design-inspiration corpus, not conformance authority; consultation protocol (trigger by divergence-density, 3 tests, classify-while-reading, native tests, KPI = divergences-documentadas/EIP); rejects `cargo xtask port-camel-test`
 
 ## Key Terms
 
