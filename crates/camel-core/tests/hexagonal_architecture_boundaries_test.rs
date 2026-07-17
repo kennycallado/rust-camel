@@ -425,3 +425,185 @@ fn hot_reload_does_not_use_old_flat_config_path() {
         &["crate::config::", "crate::tracer::", "crate::registry::"],
     );
 }
+
+// ---- Stage 1 (Tier A, rc-d0pu.1): extend coverage to shared/ + confine CQRS bypass ----
+
+#[test]
+fn shared_domain_has_no_infrastructure_or_cross_slice_imports() {
+    // Mirror the existing `domain_has_no_tower_or_framework_types` rule, plus cross-slice guards.
+    // Deliberately NOT forbidding serde / camel_component_api — those are accepted DDD value-object
+    // patterns in this codebase (registry.rs holds Arc<dyn Component>; config.rs derives Deserialize).
+    let forbidden = &[
+        "tower::",
+        "BoxProcessor",
+        "compose_pipeline",
+        "TracingProcessor",
+        "crate::lifecycle",
+        "crate::context",
+        "crate::hot_reload",
+    ];
+    // shared/ is asymmetric: components/ has only domain/, observability/ has domain/ + adapters/.
+    // Scope to the domain sub-layers only — adapters/tracer.rs legitimately imports tower::Service.
+    assert_no_forbidden_imports("shared/components/domain", forbidden);
+    assert_no_forbidden_imports("shared/observability/domain", forbidden);
+}
+
+#[test]
+fn cqrs_inflight_bypass_is_confined_to_two_production_sites() {
+    // The InFlightCount read bypass (ADR-0045 §4 exception) is a deliberate two-site contract in
+    // PRODUCTION query-routing code. Pin both halves AND confine them: the variant may appear only
+    // in queries.rs and runtime_bus.rs within lifecycle/application/ — a third file introducing it
+    // would be a new read site (silent drift the charter §4 exception forbids).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let queries = root.join("lifecycle/application/queries.rs");
+    let bus = root.join("lifecycle/application/runtime_bus.rs");
+
+    // Site 1: queries.rs InFlightCount arm must return an error (exhaustiveness stub, never reads).
+    assert_file_contains(
+        &queries,
+        &["must be handled by RuntimeBus, not execute_query"],
+    );
+    // Site 2: runtime_bus.rs must intercept InFlightCount.
+    assert_file_contains(&bus, &["RuntimeQuery::InFlightCount", ".in_flight_count("]);
+
+    // Confinement: across lifecycle/application/, RuntimeQuery::InFlightCount may appear ONLY in
+    // queries.rs and runtime_bus.rs. (Test-code mentions inside those two files are fine; the
+    // #[cfg(test)] stub in lifecycle/adapters/controller_actor.rs is outside application/ entirely.)
+    let app_dir = root.join("lifecycle/application");
+    let mut files = Vec::new();
+    collect_rust_files(&app_dir, &mut files);
+    let mut offenders = Vec::new();
+    for file in &files {
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "queries.rs" || name == "runtime_bus.rs" {
+            continue;
+        }
+        let content = fs::read_to_string(file).expect("read application src file");
+        if content.contains("RuntimeQuery::InFlightCount") {
+            offenders.push(file.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "RuntimeQuery::InFlightCount must appear only in queries.rs and runtime_bus.rs within \
+         lifecycle/application/; also found in: {}",
+        offenders.join(", ")
+    );
+}
+
+#[test]
+fn flat_root_modules_are_recorded_as_pending_tier_c_slices() {
+    // These flat-root modules have NO hexagonal structure yet. They are Tier C (rc-d0pu.3) reorg
+    // targets. This test only enumerates them so they stay visible — it asserts existence, NOT
+    // layering (enforcing layering that does not exist would generate false violations).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let pending = [
+        "context.rs",
+        "context_builder.rs",
+        "health_registry.rs",
+        "datasource.rs",
+        "template.rs",
+        "registry.rs",
+        "language_registry.rs",
+        "component_metadata_catalog.rs",
+        "startup_validation.rs",
+    ];
+    for name in pending {
+        let p = root.join(name);
+        assert!(
+            p.exists(),
+            "expected flat-root slice {} to still exist at {}",
+            name,
+            p.display()
+        );
+    }
+}
+
+// ---- Stage 6 (Tier A, rc-d0pu.1): honest export feature (A-prime) ----
+
+#[test]
+fn export_feature_gates_reexports_not_compilation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // (a) Sanity anchor: the adapters module compiles unconditionally (no feature gate).
+    let lifecycle_mod = root.join("lifecycle/mod.rs");
+    let lm = fs::read_to_string(&lifecycle_mod).expect("read lifecycle/mod.rs");
+    assert!(
+        lm.contains("pub(crate) mod adapters;"),
+        "adapters module must compile unconditionally"
+    );
+
+    // (b) The feature name must not appear in any src file other than lib.rs.
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+    for file in &files {
+        let rel = file.strip_prefix(&root).unwrap_or(file);
+        if rel == Path::new("lib.rs") {
+            continue;
+        }
+        let content = fs::read_to_string(file).expect("read src file");
+        assert!(
+            !content.contains("export-internal-adapters"),
+            "export-internal-adapters must not appear outside lib.rs (found in {})",
+            file.display()
+        );
+    }
+
+    // (c) In lib.rs, EVERY line mentioning `export-internal-adapters` must govern an export — check
+    //     by the bare feature NAME (not the canonical `cfg(feature = "...")` spelling) so noncanonical
+    //     forms like cfg(all(feature = "...", ...)) or cfg_attr are also caught. The next non-blank,
+    //     non-comment, non-attribute line must be `pub use` or `pub mod`.
+    let lib = root.join("lib.rs");
+    let content = fs::read_to_string(&lib).expect("read lib.rs");
+    // Presence check: genuinely RED before the rename (0 mentions) and GREEN after.
+    let gate_count = content.matches("export-internal-adapters").count();
+    assert!(
+        gate_count >= 1,
+        "expected export-internal-adapters gates in lib.rs, found {gate_count}"
+    );
+    let lines: Vec<&str> = content.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains("export-internal-adapters") {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < lines.len() {
+            let t = lines[j].trim();
+            if t.is_empty() || t.starts_with("//") || t.starts_with("#[") {
+                j += 1;
+                continue;
+            }
+            break;
+        }
+        assert!(
+            j < lines.len(),
+            "export-internal-adapters reference at lib.rs:{} governs no item",
+            i + 1
+        );
+        let item = lines[j].trim();
+        assert!(
+            item.starts_with("pub use") || item.starts_with("pub mod"),
+            "export-internal-adapters at lib.rs:{} must govern `pub use`/`pub mod`, found `{}`",
+            i + 1,
+            item
+        );
+    }
+
+    // (d) The compatibility alias must NOT appear as a source cfg gate. The literal "internal-adapters"
+    //     may exist only in Cargo.toml (the alias declaration); no src/**/*.rs file may contain it —
+    //     otherwise the old name could silently become a compile gate, re-introducing the N5 confusion.
+    //     (Pre-rename lib.rs has 7 such literals, making the RED state concrete; post-rename → 0.)
+    let mut alias_offenders = Vec::new();
+    for file in &files {
+        let content = fs::read_to_string(file).expect("read src file");
+        if content.contains("\"internal-adapters\"") {
+            alias_offenders.push(file.display().to_string());
+        }
+    }
+    assert!(
+        alias_offenders.is_empty(),
+        "the \"internal-adapters\" literal must not appear in any src file (Cargo.toml-only alias); \
+         found in: {}",
+        alias_offenders.join(", ")
+    );
+}

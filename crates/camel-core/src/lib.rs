@@ -80,7 +80,7 @@ pub mod startup_validation;
 pub mod step;
 pub mod template;
 
-#[cfg(feature = "internal-adapters")]
+#[cfg(feature = "export-internal-adapters")]
 pub mod route {
     pub use crate::lifecycle::adapters::route_compiler::{
         PipelineRuntimeCtx, RouteChannelService, compose_pipeline, compose_pipeline_with_contracts,
@@ -92,7 +92,7 @@ pub mod route {
     pub use crate::lifecycle::domain::route::RouteSpec;
 }
 
-#[cfg(feature = "internal-adapters")]
+#[cfg(feature = "export-internal-adapters")]
 pub mod route_controller {
     pub use crate::lifecycle::adapters::route_controller::*;
 }
@@ -115,18 +115,18 @@ pub use crate::hot_reload::domain::ReloadAction;
 pub use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 pub use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
 pub use crate::lifecycle::adapters::controller_actor::spawn_supervision_task;
-#[cfg(feature = "internal-adapters")]
+#[cfg(feature = "export-internal-adapters")]
 pub use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
-#[cfg(feature = "internal-adapters")]
+#[cfg(feature = "export-internal-adapters")]
 pub use crate::lifecycle::adapters::redb_journal::{
     JournalDurability, JournalEntry, JournalInspectFilter, RedbJournalOptions,
     RedbRuntimeEventJournal,
 };
-#[cfg(feature = "internal-adapters")]
+#[cfg(feature = "export-internal-adapters")]
 pub use crate::lifecycle::adapters::route_controller::DefaultRouteController;
-#[cfg(feature = "internal-adapters")]
+#[cfg(feature = "export-internal-adapters")]
 pub use crate::lifecycle::adapters::route_types::Route;
-#[cfg(feature = "internal-adapters")]
+#[cfg(feature = "export-internal-adapters")]
 pub use crate::lifecycle::adapters::{
     InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore, InMemoryRouteRepository,
     InMemoryRuntimeStore, RuntimeExecutionAdapter,
