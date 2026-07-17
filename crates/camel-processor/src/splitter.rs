@@ -851,4 +851,83 @@ mod tests {
             "error should mention max_fragments: {err}"
         );
     }
+
+    // ── 16. Fragments have unique correlation IDs ──────────────────────
+    // Inspiration: Camel SplitterTest C1/C4 — fragments must be distinguishable
+    // downstream (e.g. for idempotency keys). fragment_exchange (camel-api)
+    // assigns a fresh UUID per fragment; this test pins the invariant.
+
+    #[tokio::test]
+    async fn test_splitter_each_fragment_has_unique_correlation_id() {
+        // Pipeline records each fragment's correlation_id into the body.
+        let recorder = BoxProcessor::from_fn(|ex: Exchange| {
+            Box::pin(async move {
+                let id = ex.correlation_id().to_string();
+                let mut out = ex;
+                out.input.body = Body::Text(id);
+                Ok(out)
+            })
+        });
+
+        let config = SplitterConfig::new(camel_api::split_body_lines())
+            .aggregation(AggregationStrategy::CollectAll);
+        let mut svc = SplitterService::new(config, recorder).unwrap();
+
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("a\nb\nc\nd"))
+            .await
+            .unwrap();
+
+        let ids: Vec<String> = match &result.input.body {
+            Body::Json(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect(),
+            other => panic!("expected JSON array of ids, got {other:?}"),
+        };
+        assert_eq!(ids.len(), 4, "should have 4 fragments");
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), 4, "fragment correlation_ids must be unique");
+    }
+
+    // ── 17. split(body()) on a JSON Array body ─────────────────────────
+    // Inspiration: Camel SplitterTest C11 — when body is already a collection,
+    // split iterates elements without tokenizing. camel_api::split_body_json_array
+    // provides this; verify the wiring through SplitterService.
+
+    #[tokio::test]
+    async fn test_splitter_json_array_body() {
+        let recorder = BoxProcessor::from_fn(|ex: Exchange| {
+            Box::pin(async move {
+                let v = match &ex.input.body {
+                    Body::Json(v) => v.clone(),
+                    other => panic!("expected JSON fragment, got {other:?}"),
+                };
+                let mut out = ex;
+                out.input.body = Body::Json(v);
+                Ok(out)
+            })
+        });
+
+        let config = SplitterConfig::new(camel_api::split_body_json_array())
+            .aggregation(AggregationStrategy::CollectAll);
+        let mut svc = SplitterService::new(config, recorder).unwrap();
+
+        let msg = Message::new(Body::Json(serde_json::json!([1, 2, 3])));
+        let parent = Exchange::new(msg);
+
+        let result = svc.ready().await.unwrap().call(parent).await.unwrap();
+        match &result.input.body {
+            Body::Json(serde_json::Value::Array(arr)) => {
+                assert_eq!(arr.len(), 3, "should split array into 3 fragments");
+                assert_eq!(arr[0], 1);
+                assert_eq!(arr[1], 2);
+                assert_eq!(arr[2], 3);
+            }
+            other => panic!("expected JSON array body, got {other:?}"),
+        }
+    }
 }

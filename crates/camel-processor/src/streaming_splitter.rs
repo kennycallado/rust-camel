@@ -10,6 +10,7 @@ use camel_api::{
 };
 
 pub const CAMEL_SPLIT_INDEX: &str = "CamelSplitIndex";
+pub const CAMEL_SPLIT_SIZE: &str = "CamelSplitSize";
 pub const CAMEL_SPLIT_COMPLETE: &str = "CamelSplitComplete";
 
 #[derive(Clone)]
@@ -93,6 +94,11 @@ impl Service<Exchange> for StreamingSplitterService {
                 let mut fragment = fragment;
                 fragment.set_property(CAMEL_SPLIT_INDEX, Value::from(index));
                 fragment.set_property(CAMEL_SPLIT_COMPLETE, Value::Bool(is_last));
+                // Match Camel C6 semantics: SPLIT_SIZE is null during the stream
+                // and only set on the last fragment (where total becomes known).
+                if is_last {
+                    fragment.set_property(CAMEL_SPLIT_SIZE, Value::from(index + 1));
+                }
 
                 let mut pipeline = sub_pipeline.clone();
                 let ready = tower::ServiceExt::ready(&mut pipeline).await;
@@ -749,5 +755,57 @@ mod tests {
             matches!(result.input.body, Body::Empty),
             "original body should be sanitized to Empty"
         );
+    }
+
+    // ── CAMEL_SPLIT_SIZE: null during stream, set on last fragment ──────
+    // Inspiration: Camel SplitterTest C6 — in streaming mode the total count
+    // is unknown until end-of-stream; SPLIT_SIZE is therefore absent on
+    // intermediate fragments and present (= index+1) on the last one.
+    // Spike `camel-splitter-conformance-spike` G3.
+
+    #[tokio::test]
+    async fn test_streaming_split_size_set_only_on_last_fragment() {
+        let recorder = BoxProcessor::from_fn(|ex: Exchange| {
+            Box::pin(async move {
+                let idx = ex.property(CAMEL_SPLIT_INDEX).cloned();
+                let size = ex.property(CAMEL_SPLIT_SIZE).cloned();
+                let complete = ex.property(CAMEL_SPLIT_COMPLETE).cloned();
+                let body = serde_json::json!({
+                    "index": idx,
+                    "size": size,
+                    "complete": complete,
+                });
+                let mut out = ex;
+                out.input.body = Body::Json(body);
+                Ok(out)
+            })
+        });
+
+        let expr = test_expression(vec![
+            make_exchange("x"),
+            make_exchange("y"),
+            make_exchange("z"),
+        ]);
+        let mut svc =
+            StreamingSplitterService::new(expr, recorder, AggregationStrategy::CollectAll, true);
+
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("original"))
+            .await
+            .unwrap();
+
+        // size: null on intermediates, 3 (= index+1) on last
+        let expected = serde_json::json!([
+            {"index": 0, "size": serde_json::Value::Null, "complete": false},
+            {"index": 1, "size": serde_json::Value::Null, "complete": false},
+            {"index": 2, "size": 3, "complete": true},
+        ]);
+        match &result.input.body {
+            Body::Json(v) => assert_eq!(*v, expected),
+            other => panic!("expected JSON body, got {other:?}"),
+        }
     }
 }
