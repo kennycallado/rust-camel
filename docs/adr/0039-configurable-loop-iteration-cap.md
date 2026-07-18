@@ -1,7 +1,7 @@
 # ADR-0039: Configurable Loop Iteration Cap
 
 **Date:** 2026-07-11
-**Status:** Proposed
+**Status:** Accepted (implemented in `5f6d6d10`)
 **Cross-refs:** ADR-0033 (Security defaults), ADR-0038 (Configurable DoS caps), ADR-0032 (Exchange-data trust boundary)
 
 ## Context

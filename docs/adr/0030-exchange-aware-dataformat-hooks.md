@@ -1,7 +1,7 @@
 # ADR-0030: Exchange-aware DataFormat hooks
 
 **Date:** 2026-06-28
-**Status:** Proposed (blocking rc-v5xf CSV implementation)
+**Status:** Accepted (implemented in `d4a423a2`)
 **Issue:** bd rc-v5xf
 **Oracle:** e_gpt (ses_0f086bbe4ffepmh4MrdpurR0XU) — verdict Trait extension
 **Analysis:** docs/superpowers/analysis/dataformat-coupling-2026-06-28.md

@@ -1,7 +1,7 @@
 # ADR-0038: Configurable DoS Caps via Per-Format Config Channel
 
 **Date:** 2026-07-11
-**Status:** Proposed
+**Status:** Accepted (implemented in `28e61377`)
 **Cross-refs:** ADR-0032 (Exchange-data trust boundary), ADR-0033 (Security defaults), ADR-0017 (DSL snake_case)
 
 > **Note:** Numbered 0038 instead of 0034 because 0034 was already claimed by `0034-controlbus-capability-authz.md`.

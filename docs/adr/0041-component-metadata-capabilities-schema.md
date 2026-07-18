@@ -1,7 +1,7 @@
 # ADR-0041: Component Metadata and Capabilities Schema
 
 **Date:** 2026-07-15
-**Status:** Proposed
+**Status:** Accepted (implemented in `0114dee3`)
 
 ## Context
 

@@ -1,7 +1,7 @@
 # ADR-0040: Configurable Materialize Limits for Producers
 
 **Date:** 2026-07-11
-**Status:** Proposed
+**Status:** Accepted (implemented in `db8340bb`)
 **Cross-refs:** ADR-0033 (Security defaults), ADR-0038 (Configurable DoS caps), ADR-0032 (Exchange-data trust boundary)
 
 ## Context

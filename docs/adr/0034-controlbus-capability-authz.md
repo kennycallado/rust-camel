@@ -1,6 +1,6 @@
 # ADR-0034: ControlBus capability authorization
 
-**Status:** Proposed
+**Status:** Accepted (implemented in `6fc4fde4`)
 **Date:** 2026-07-03
 
 ## Context
