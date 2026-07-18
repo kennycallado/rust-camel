@@ -106,6 +106,7 @@ Non-pool parameters like `outputType`, `onConsume`, `delay` etc. work normally w
 |--------|---------|-------------|
 | `delay` | `500` | Polling delay in milliseconds |
 | `initialDelay` | `1000` | Initial delay before first poll (ms) |
+| `repeatCount` | - | Max number of polls; omit for infinite. `0` = never polls |
 | `maxMessagesPerPoll` | - | Maximum rows to process per poll |
 | `onConsume` | - | SQL to execute after successful row processing |
 | `onConsumeFailed` | - | SQL to execute after failed row processing |
@@ -114,6 +115,7 @@ Non-pool parameters like `outputType`, `onConsume`, `delay` etc. work normally w
 | `useIterator` | `true` | Process rows individually (true) or as batch (false) |
 | `expectedUpdateCount` | - | Expected rows affected (error if mismatch) |
 | `breakBatchOnConsumeFail` | `false` | Stop batch processing on failure |
+| `breakOnEmpty` | `false` | Stop polling when a poll returns zero rows (SelectList only; StreamList warns and ignores) |
 
 ### Producer Options
 
