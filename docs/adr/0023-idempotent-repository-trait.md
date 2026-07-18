@@ -11,7 +11,7 @@
 
 The `IdempotentRepository` trait lives in `camel-api` (`crates/camel-api/src/idempotent.rs:13`) so any crate (component, processor, test) can implement it without depending on `camel-core` lifecycle internals. This mirrors `StepLifecycle` placement in `camel-api` (ADR-0022 §Trait location).
 
-**Contract C1:** `contains()` returns `Result<bool, CamelError>` (NOT `bool`). Backends (Redis, JDBC, S3) have transient read failures. The Idempotent Consumer propagates `Err` — it must never treat a failed read as "not a duplicate" (`crates/camel-api/src/idempotent.rs:32-36`).
+**Contract C1:** `contains()` returns `Result<bool, CamelError>` (NOT `bool`). Backends (Redis, SQL-backed, S3) have transient read failures. The Idempotent Consumer propagates `Err` — it must never treat a failed read as "not a duplicate" (`crates/camel-api/src/idempotent.rs:32-36`).
 
 **Key-only:** The trait stores keys (`String`), not full messages. Motivation: an idempotent repository tracks which messages have been seen, not what they contained. Storing full messages would blow memory/backing-store and is the job of a different pattern (Claim Check, Phase 2). Future: a `key_fn: Arc<dyn Fn(&Exchange) -> String>` on the Idempotent Consumer step derives the key from the exchange (e.g. `exchange.message_id()`, header-based, body-hash).
 
@@ -63,7 +63,7 @@ Using `OutcomeSegment` (`compose_outcome_segment` via `crates/camel-core/src/lif
 
 ### Problem
 
-Before Phase 1, the Idempotent Consumer EIP had no pluggable key store. The processor would need to hard-code an in-memory HashSet or HashMap, making it impossible to share state across restarts or cluster nodes. Real deployments need Redis, JDBC, or other backends.
+Before Phase 1, the Idempotent Consumer EIP had no pluggable key store. The processor would need to hard-code an in-memory HashSet or HashMap, making it impossible to share state across restarts or cluster nodes. Real deployments need Redis, SQL-backed (via SQLx in `camel-sql`), or other backends.
 
 ### Key store requirements
 
@@ -92,7 +92,7 @@ The auth crate's DashMap `NamedRegistry` (`crates/services/camel-auth/src/regist
 
 ### Trait location
 
-`IdempotentRepository` in `camel-api` (`idempotent.rs`) means any crate can implement it without depending on `camel-core`. Future backends (Redis in `camel-component-redis`, JDBC in `camel-sql`) can implement the trait remotely.
+`IdempotentRepository` in `camel-api` (`idempotent.rs`) means any crate can implement it without depending on `camel-core`. Future backends (Redis in `camel-component-redis`, SQL in `camel-sql` via SQLx) can implement the trait remotely.
 
 ### Interface stability
 
