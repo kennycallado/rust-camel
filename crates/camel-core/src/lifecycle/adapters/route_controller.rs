@@ -27,7 +27,6 @@ pub use camel_processor::aggregator::SharedLanguageRegistry;
 use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::route_compiler_ext::{RouteCompilerExt, build_eh_config_pipeline};
-pub(crate) use crate::lifecycle::adapters::route_helpers::PreparedRoute;
 use crate::lifecycle::adapters::route_helpers::{
     AggregateSplitInfo, CrashNotification, ManagedRoute, assert_no_mixed_top_level_splits,
     handle_is_running, inferred_lifecycle_label, is_pending,
@@ -81,6 +80,11 @@ pub struct DefaultRouteController {
     /// built-in `"memory"` repository.
     pub(super) idempotent_repositories: crate::SharedIdempotentRegistry,
     pub(super) claim_check_repositories: crate::SharedClaimCheckRegistry,
+    /// F2 staging: prepared-but-not-inserted ManagedRoutes keyed by route_id.
+    /// `prepare_*` writes here; `insert_prepared_route` drains via `remove()`.
+    /// On insert-failure error paths, the caller (`reload_actions.rs`) must
+    /// explicitly drain to avoid orphan CancellationToken/SharedPipeline leaks.
+    pub(super) prepared_staging: HashMap<String, ManagedRoute>,
 }
 
 impl DefaultRouteController {
@@ -136,6 +140,7 @@ impl DefaultRouteController {
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
+            prepared_staging: HashMap::new(),
         }
     }
 
@@ -161,6 +166,7 @@ impl DefaultRouteController {
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
+            prepared_staging: HashMap::new(),
         }
     }
 
@@ -186,6 +192,7 @@ impl DefaultRouteController {
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
+            prepared_staging: HashMap::new(),
         }
     }
 
@@ -329,11 +336,11 @@ impl DefaultRouteController {
 
         debug!(route_id = %route_id, "Adding route to controller");
 
-        let prepared = match self.build_managed_route(
+        let managed = match self.build_managed_route(
             definition,
             &super::step_resolution::FunctionStagingMode::DirectAdd,
         ) {
-            Ok(prepared) => prepared,
+            Ok(managed) => managed,
             Err(err) => {
                 self.discard_function_staging();
                 return Err(err);
@@ -348,16 +355,16 @@ impl DefaultRouteController {
         }
 
         self.routes
-            .insert(prepared.route_id.clone(), prepared.managed);
+            .insert(managed.definition.route_id().to_string(), managed);
 
         Ok(())
     }
 
-    fn build_managed_route(
+    pub(super) fn build_managed_route(
         &self,
         definition: RouteDefinition,
         staging_mode: &super::step_resolution::FunctionStagingMode,
-    ) -> Result<PreparedRoute, CamelError> {
+    ) -> Result<ManagedRoute, CamelError> {
         let route_id = definition.route_id().to_string();
 
         let definition_info = definition.to_info();
@@ -427,45 +434,27 @@ impl DefaultRouteController {
             None
         };
 
-        Ok(PreparedRoute {
-            route_id,
-            managed: ManagedRoute {
-                definition: definition_info,
-                from_uri,
-                pipeline: super::pipeline_runtime::new_shared_pipeline_with_lifecycle(
-                    pipeline, lifecycle,
-                ),
-                concurrency,
-                consumer_handle: None,
-                pipeline_handle: None,
-                consumer_cancel_token: CancellationToken::new(),
-                pipeline_cancel_token: CancellationToken::new(),
-                channel_sender: None,
-                in_flight: uow_counter,
-                drain_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                aggregate_split,
-                agg_service: None,
-                compiled: route_runtime_state::CompiledRoute {
-                    security_policy,
-                    security_authenticator,
-                },
+        Ok(ManagedRoute {
+            definition: definition_info,
+            from_uri,
+            pipeline: super::pipeline_runtime::new_shared_pipeline_with_lifecycle(
+                pipeline, lifecycle,
+            ),
+            concurrency,
+            consumer_handle: None,
+            pipeline_handle: None,
+            consumer_cancel_token: CancellationToken::new(),
+            pipeline_cancel_token: CancellationToken::new(),
+            channel_sender: None,
+            in_flight: uow_counter,
+            drain_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            aggregate_split,
+            agg_service: None,
+            compiled: route_runtime_state::CompiledRoute {
+                security_policy,
+                security_authenticator,
             },
         })
-    }
-
-    pub(crate) fn insert_prepared_route(
-        &mut self,
-        prepared: PreparedRoute,
-    ) -> Result<(), CamelError> {
-        if self.routes.contains_key(&prepared.route_id) {
-            return Err(CamelError::RouteError(format!(
-                "Route '{}' already exists",
-                prepared.route_id
-            )));
-        }
-        self.routes
-            .insert(prepared.route_id.clone(), prepared.managed);
-        Ok(())
     }
 
     pub async fn add_route_with_generation(
@@ -484,26 +473,14 @@ impl DefaultRouteController {
 
         debug!(route_id = %route_id, generation, "Adding route to controller with generation");
 
-        let prepared = self.build_managed_route(
+        let managed = self.build_managed_route(
             definition,
             &super::step_resolution::FunctionStagingMode::HotReload { generation },
         )?;
 
-        self.routes
-            .insert(prepared.route_id.clone(), prepared.managed);
+        self.routes.insert(route_id, managed);
 
         Ok(())
-    }
-
-    pub(crate) fn prepare_route_definition_with_generation(
-        &self,
-        definition: RouteDefinition,
-        generation: u64,
-    ) -> Result<PreparedRoute, CamelError> {
-        self.build_managed_route(
-            definition,
-            &super::step_resolution::FunctionStagingMode::HotReload { generation },
-        )
     }
 
     pub async fn remove_route_preserving_functions(

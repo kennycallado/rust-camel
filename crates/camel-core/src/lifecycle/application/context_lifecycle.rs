@@ -17,8 +17,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
-use crate::lifecycle::application::ports::RouteOrderingPort;
+use crate::lifecycle::application::ports::{RouteDestructiveTeardownPort, RouteOrderingPort};
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::startup_validation::{ConfigCheck, run_startup_validation};
 
@@ -180,36 +179,23 @@ pub(crate) async fn stop_context(
 
 /// Destructive, non-restartable teardown.
 ///
-/// **ACCEPTED §4 EXCEPTION (ADR-0045):** this use-case takes the
-/// **concrete** `&RouteControllerHandle` for the destructive
-/// `shutdown()` call. The narrow-port alternative
-/// (`RouteDestructiveTeardownPort` with only `shutdown()`) was rejected
-/// as YAGNI — one rare destructive call. **Precedent:** none at the
-/// use-case ring — C1 (`ReloadExecutorPort`) removed the prior
-/// use-case→concrete-handle inversion, making this the first such
-/// exception. Closest analog is adapter-internal
-/// (`lifecycle/adapters/runtime_execution.rs` holds a concrete
-/// `RouteControllerHandle` within the adapters ring). Documented in
-/// ADR-0045 §4.
+/// Routes through `RouteOrderingPort` (for `shutdown_route_ids`) and
+/// `RouteDestructiveTeardownPort` (for the destructive `shutdown()`).
+/// Both ports are impl'd on the controller adapter handle in
+/// `lifecycle/adapters/route_ordering_impl.rs` — the use-case ring is pure
+/// of concrete adapter types.
 ///
-/// For health cancellation, the cancel token is passed in (not the whole
-/// `HealthCheckRegistry`) to keep the use-case pure of unrelated state.
-///
-/// Algorithm pasted verbatim from `CamelContext::abort`
-/// (context.rs:807-852) in the pre-Tier-C layout, in the original order:
-/// cancel + supervision abort, route stop loop, **LIFO service stop with
-/// 5s timeout ladder**, controller actor `shutdown()`, health cancel,
-/// actor join 5s ladder.
-///
-/// The LIFO loop and the first-error semantics from `stop_context` are
-/// preserved here too — `abort()` does NOT collect first_error (it returns
-/// `()`), but the per-service timeout ladder and Ok(Ok)/Ok(Err)/Err
-/// match arms must remain intact.
+/// Algorithm pasted verbatim from `CamelContext::abort` (context.rs:807-852)
+/// in the pre-Tier-C layout: cancel + supervision abort, route stop loop,
+/// LIFO service stop with 5s timeout ladder, controller actor `shutdown()`,
+/// health cancel, actor join 5s ladder.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn abort_context(
     cancel_token: &CancellationToken,
     supervision_join: &mut Option<JoinHandle<()>>,
     runtime: &RuntimeBus,
-    route_controller: &RouteControllerHandle,
+    route_ordering: &dyn RouteOrderingPort,
+    route_teardown: &dyn RouteDestructiveTeardownPort,
     services: &mut [Box<dyn Lifecycle>],
     health_cancel_token: CancellationToken,
     actor_join: &mut Option<JoinHandle<()>>,
@@ -218,7 +204,7 @@ pub(crate) async fn abort_context(
     if let Some(join) = supervision_join.take() {
         join.abort();
     }
-    let route_ids = route_controller
+    let route_ids = route_ordering
         .shutdown_route_ids()
         .await
         .unwrap_or_default();
@@ -243,7 +229,7 @@ pub(crate) async fn abort_context(
 
     // Destructive teardown: kill the controller actor and cancel health
     // probes. This is what makes abort() non-restartable vs stop().
-    let _ = route_controller.shutdown().await;
+    let _ = route_teardown.shutdown().await;
     health_cancel_token.cancel();
     if let Some(mut join) = actor_join.take() {
         match tokio::time::timeout(Duration::from_secs(5), &mut join).await {

@@ -235,6 +235,10 @@ pub fn spawn_controller_actor(
                 RouteControllerCommand::InsertPreparedRoute { prepared, reply } => {
                     let _ = reply.send(controller.insert_prepared_route(prepared));
                 }
+                RouteControllerCommand::DiscardPreparedStaging { route_id, reply } => {
+                    controller.discard_prepared_staging(&route_id);
+                    let _ = reply.send(Ok(()));
+                }
                 RouteControllerCommand::RemoveRoutePreservingFunctions { route_id, reply } => {
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting

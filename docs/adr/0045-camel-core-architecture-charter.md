@@ -86,57 +86,13 @@ justification; every new bypass must land a line here, or it is a boundary viola
 
 **Use-case purity gaps (Tier C C2):**
 
-- **`abort_context` takes concrete `&RouteControllerHandle`**
-  (`lifecycle/application/context_lifecycle.rs::abort_context`) — ACCEPTED EXCEPTION
-  (`rc-d0pu.3`): the abort use-case holds the concrete `RouteControllerHandle` to invoke the
-  destructive `shutdown()` method. `start_context` and `stop_context` go through the
-  `RouteOrderingPort` abstraction, but `shutdown()` is destructive and non-restartable
-  (vs. the restartable start/stop ordering queries), so it does not fit the ordering
-  port. The narrow-port alternative (`RouteDestructiveTeardownPort` with only `shutdown()`)
-  was rejected as YAGNI — one rare destructive call. **Precedent:** none at the use-case
-  ring — C1 (`ReloadExecutorPort`) removed `hot_reload/application`'s concrete-handle
-  inversion, making this the first use-case→concrete-adapter exception in the crate.
-  Closest analog is adapter-internal: `lifecycle/adapters/runtime_execution.rs` holds a
-  concrete `RouteControllerHandle`, and `hot_reload/adapters/reload_watcher.rs` holds a
-  concrete `RuntimeExecutionHandle` — both within the adapters ring (adapter-to-adapter,
-  not use-case-to-adapter). The exception here stands on YAGNI alone. Health
-  cancellation still goes through the cancel token (no whole-registry leak).
+- ✅ **`abort_context` takes concrete `&RouteControllerHandle`** — REMEDIATED (`rc-d0pu.3`-purge): abort_context now takes `&dyn RouteOrderingPort + &dyn RouteDestructiveTeardownPort` (two-param split — Rust stable does not support multi-trait objects); the destructive `shutdown()` is exposed via the new narrow `RouteDestructiveTeardownPort` (one method). Impl on the concrete controller handle lives in `lifecycle/adapters/route_ordering_impl.rs`. Kept here for the historical record.
 
 **Port → adapter type leak (Tier C C1):**
 
-- **`ReloadExecutorPort` references `PreparedRoute` from `lifecycle::adapters`**
-  (`hot_reload/ports/mod.rs`) — ACCEPTED EXCEPTION (`rc-d0pu.3`): the port's
-  `prepare_route_definition_with_generation` / `insert_prepared_route` methods
-  reference `PreparedRoute`, which lives in `lifecycle::adapters::route_controller`.
-  `PreparedRoute::managed: ManagedRoute` bundles adapter-internal state
-  (`JoinHandle`, `CancellationToken`, `SharedPipeline`, `Arc<AggregatorService>`,
-  `CompiledRoute`) and cannot be relocated to domain without a port-semantics
-  redesign (thin `{ route_id }` contract + controller-internal `HashMap` keyed by
-  route_id). That redesign changes `prepare`/`insert` semantics and is out of
-  Tier C's "extract the port" scope. The companion `CompiledPipeline` WAS
-  relocated to `lifecycle/domain/route_compilation.rs` (pure contract type).
-  The exception is bounded to exactly this one import, pinned by the
-  `port_traits_do_not_import_from_adapter_ring` boundary test allow-list
-  (`["PreparedRoute"]`); when the redesign lands, the allow-list goes empty.
+- ✅ **`ReloadExecutorPort` references `PreparedRoute` from `lifecycle::adapters`** — REMEDIATED (`rc-d0pu.3`-purge): `PreparedRoute` is now a thin `{ route_id: String }` token in `lifecycle/domain/route_compilation.rs`; the heavy `ManagedRoute` is staged internally on `DefaultRouteController.prepared_staging`. The `port_traits_do_not_import_from_adapter_ring` allow-list is now `[]`. Kept here for the historical record.
 
-**Domain ring framework field types (pre-existing, surfaced by Tier C C3):**
-
-- **`health_registry/domain.rs` + `datasource/domain.rs` hold framework-typed
-  fields** — ACCEPTED EXCEPTION (pre-existing, made explicit by C3's slice
-  labeling): the aggregates `HealthCheckRegistry` (fields: `tokio_util::sync::CancellationToken`,
-  `tokio::time::Duration`, `parking_lot::RwLock`) and `RuntimeDatasourceCatalog`
-  (fields: `dashmap::DashMap`, `tokio::sync::OnceCell`) plus `camel_api` traits
-  (`AsyncHealthCheck`) carry framework field types despite living in the
-  domain-ring file. These imports are identical to the pre-Tier-C flat modules
-  (verified at `4aca5ac6`); C3's 3-ring split labeled the file `domain.rs`,
-  making the pre-existing impurity explicit rather than introducing it. Strict
-  domain purification (extracting the stateful registries behind ports, leaving
-  only pure value types in domain) is a separate refactor out of Tier C's
-  "slice homes" scope. The aggregates are documented in-file as "field types
-  — the domain does not perform I/O; orchestration lives in the sibling
-  application module." The `domain_does_not_import_application_or_adapters`
-  boundary test still holds (no cross-ring imports); the framework-field
-  impurity is crate-internal `pub(crate)` state, not a public contract leak.
+**Domain ring framework field types** — REMEDIATED (`rc-d0pu.3`-purge): `health_registry` + `datasource` were collapsed to single-ring adapter modules (stateful infra + framework-typed value types are correctly labeled Interface Adapters, no false "domain" ring remains). Kept here for the historical record.
 
 **Pre-1.0 deprecation removals (Tier C C5):**
 
@@ -164,12 +120,8 @@ the vertical slice):
 |---|---|---|
 | `context.rs` | composition root (thinned in C2) | Frameworks & Drivers |
 | `context_builder.rs` | composition root (wiring) | Frameworks & Drivers |
-| `health_registry/domain.rs` | full-slice submodule | Entities |
-| `health_registry/application.rs` | full-slice submodule | Use Cases |
-| `health_registry/adapters.rs` | full-slice submodule | Interface Adapters |
-| `datasource/domain.rs` | full-slice submodule | Entities |
-| `datasource/application.rs` | full-slice submodule | Use Cases |
-| `datasource/adapters.rs` | full-slice submodule | Interface Adapters |
+| `health_registry.rs` | single-ring adapter module (stateful probe registry: `RwLock<HashMap>` + `CancellationToken` + `Duration` fields; `check_all` use-case orchestrates `tokio::timeout` + `futures::join_all`) | Interface Adapters |
+| `datasource.rs` | single-ring adapter module (`DashMap<CacheKey, OnceCell<Handle>>` + `RwLock<HashMap<PoolFactory>>` fields; `get_pool`/`resolve_factory` orchestrate lazy pool creation + health wiring) | Interface Adapters |
 | `startup_validation.rs` | single-ring slice (has trait, zero I/O) | Entities |
 | `template.rs` | single-ring slice (`TemplateRegistry` Mutex store) | Interface Adapters |
 | `language_registry.rs` | single-ring slice | Use Cases |

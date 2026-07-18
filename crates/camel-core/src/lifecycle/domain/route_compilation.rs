@@ -7,11 +7,10 @@
 //! live in the domain ring and be referenced by application-ring ports without
 //! violating the dependency rule (`domain ← application ← adapters`).
 //!
-//! (`PreparedRoute` — the companion type one might expect here — is NOT
-//! relocatable to domain: its `managed: ManagedRoute` field bundles
-//! adapter-internal state. It stays in `lifecycle::adapters` and the port
-//! references it under a documented charter §4 exception. See
-//! `port_traits_do_not_import_from_adapter_ring` test doc + ADR-0045 §4.)
+//! `PreparedRoute` is a thin `{ route_id: String }` token returned by the
+//! prepare/insert two-phase commit. The heavy `ManagedRoute` is staged
+//! internally on `DefaultRouteController::prepared_staging`; this token
+//! carries only the lookup key across the port boundary.
 //!
 //! ADR-0045 §1 rings — domain is the innermost ring; ports (application ring)
 //! depend on domain types, never on adapter types.
@@ -27,4 +26,18 @@ use camel_api::{BoxProcessor, StepLifecycle};
 pub(crate) struct CompiledPipeline {
     pub(crate) processor: BoxProcessor,
     pub(crate) lifecycle: Vec<Arc<dyn StepLifecycle>>,
+}
+
+/// Thin token returned by `ReloadExecutorPort::prepare_route_definition_with_generation`.
+///
+/// The companion `ManagedRoute` (heavy adapter-internal bundle of
+/// `JoinHandle`, `CancellationToken`, `SharedPipeline`, `Arc<AggregatorService>`,
+/// `CompiledRoute`) is staged internally on the `DefaultRouteController`'s
+/// `prepared_staging: HashMap<String, ManagedRoute>` map; this token carries
+/// only the `route_id` lookup key across the port boundary. Living in
+/// `lifecycle/domain`, the type satisfies the dependency rule (ports may
+/// import contract types from domain).
+#[derive(Debug)]
+pub(crate) struct PreparedRoute {
+    pub(crate) route_id: String,
 }

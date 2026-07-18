@@ -11,9 +11,9 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{BoxProcessor, CamelError, FunctionInvoker, RuntimeHandle, StepLifecycle};
 use tokio::sync::{mpsc, oneshot};
 
-use super::route_helpers::PreparedRoute;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::domain::CompiledPipeline;
+use crate::lifecycle::domain::route_compilation::PreparedRoute;
 use crate::shared::observability::domain::TracerConfig;
 
 pub(crate) enum RouteControllerCommand {
@@ -91,6 +91,10 @@ pub(crate) enum RouteControllerCommand {
     },
     InsertPreparedRoute {
         prepared: PreparedRoute,
+        reply: oneshot::Sender<Result<(), CamelError>>,
+    },
+    DiscardPreparedStaging {
+        route_id: String,
         reply: oneshot::Sender<Result<(), CamelError>>,
     },
     RemoveRoutePreservingFunctions {
@@ -426,6 +430,20 @@ impl RouteControllerHandle {
         self.tx
             .send(RouteControllerCommand::InsertPreparedRoute {
                 prepared,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    pub(crate) async fn discard_prepared_staging(&self, route_id: &str) -> Result<(), CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::DiscardPreparedStaging {
+                route_id: route_id.to_string(),
                 reply: reply_tx,
             })
             .await

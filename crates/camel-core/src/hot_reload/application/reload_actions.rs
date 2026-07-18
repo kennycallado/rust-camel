@@ -392,6 +392,9 @@ pub(super) async fn apply_add(
         };
 
         if let Err(e) = controller.insert_prepared_route(prepared).await {
+            // F2: drain the staged ManagedRoute to avoid orphan
+            // CancellationToken / SharedPipeline task leak.
+            let _ = controller.discard_prepared_staging(&route_id).await;
             let _ = ctx
                 .invoker
                 .rollback_reload(prepare_token, ctx.generation)
@@ -697,6 +700,9 @@ pub(super) async fn apply_restart(
         }
 
         if let Err(e) = controller.insert_prepared_route(prepared).await {
+            // F2: drain the staged ManagedRoute to avoid orphan
+            // CancellationToken / SharedPipeline task leak.
+            let _ = controller.discard_prepared_staging(&route_id).await;
             let _ = ctx
                 .invoker
                 .rollback_reload(prepare_token, ctx.generation)

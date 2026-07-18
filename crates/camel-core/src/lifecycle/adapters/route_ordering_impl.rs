@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use camel_api::CamelError;
 
 use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
-use crate::lifecycle::application::ports::RouteOrderingPort;
+use crate::lifecycle::application::ports::{RouteDestructiveTeardownPort, RouteOrderingPort};
 
 #[async_trait]
 impl RouteOrderingPort for RouteControllerHandle {
@@ -21,5 +21,12 @@ impl RouteOrderingPort for RouteControllerHandle {
 
     async fn shutdown_route_ids(&self) -> Result<Vec<String>, CamelError> {
         RouteControllerHandle::shutdown_route_ids(self).await
+    }
+}
+
+#[async_trait]
+impl RouteDestructiveTeardownPort for RouteControllerHandle {
+    async fn shutdown(&self) -> Result<(), CamelError> {
+        RouteControllerHandle::shutdown(self).await
     }
 }

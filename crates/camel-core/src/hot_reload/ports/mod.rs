@@ -18,17 +18,10 @@ use async_trait::async_trait;
 
 use camel_api::{BoxProcessor, CamelError, RuntimeCommand, RuntimeCommandResult, StepLifecycle};
 
-// §4 ACCEPTED EXCEPTION (ADR-0045): PreparedRoute lives in the adapter ring
-// because its `managed: ManagedRoute` field bundles adapter-internal state
-// (JoinHandle, CancellationToken, SharedPipeline, AggregatorService,
-// CompiledRoute). Relocating it requires a port-semantics redesign (thin
-// { route_id } contract + controller-internal HashMap) out of Tier C's scope.
-// The companion CompiledPipeline WAS relocated to lifecycle::domain (pure
-// contract). This is the ONLY adapter import allowed in a port — pinned by the
-// `port_traits_do_not_import_from_adapter_ring` boundary test allow-list.
-use crate::lifecycle::adapters::route_controller::PreparedRoute;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::domain::CompiledPipeline;
+// PreparedRoute is a thin domain contract token (lifecycle::domain).
+use crate::lifecycle::domain::route_compilation::PreparedRoute;
 
 /// Read-model introspection over active routes, used by the reload diff tests.
 /// Implemented by `DefaultRouteController`; deliberately camel-core-internal and
@@ -78,6 +71,9 @@ pub(crate) trait ReloadExecutorPort: Send + Sync {
     ) -> Result<PreparedRoute, CamelError>;
 
     async fn insert_prepared_route(&self, prepared: PreparedRoute) -> Result<(), CamelError>;
+
+    /// Drain a staged ManagedRoute on insert-error paths (prevents orphan leaks).
+    async fn discard_prepared_staging(&self, route_id: &str) -> Result<(), CamelError>;
 
     async fn remove_route_preserving_functions(&self, route_id: String) -> Result<(), CamelError>;
 

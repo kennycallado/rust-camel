@@ -2,13 +2,13 @@
 //!
 //! Extracted from [`route_controller`](super::route_controller) to reduce its size.
 //! These are the concrete types (`CrashNotification`, `AggregateSplitInfo`,
-//! `ManagedRoute`, `PreparedRoute`) and pure helper functions that do not depend
+//! `ManagedRoute`) and pure helper functions that do not depend
 //! on `DefaultRouteController` state.
 //!
-//! `CompiledPipeline` previously lived here too; it has been moved to
-//! [`crate::lifecycle::domain::route_compilation`] because it is a pure
-//! contract type and was being imported by `ReloadExecutorPort` (an
-//! application-ring port), which violated the dependency rule.
+//! `PreparedRoute` previously lived here too; it has been moved to
+//! [`crate::lifecycle::domain::route_compilation`] as a thin `{ route_id }` token
+//! (the heavy `ManagedRoute` is now staged internally on the controller).
+//! `CompiledPipeline` also lives in domain as a pure contract type.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -148,20 +148,6 @@ impl Drop for DrainGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
-}
-
-/// A prepared route (compiled but not yet inserted into the registry).
-///
-/// NOTE: This type carries `managed: ManagedRoute` (an adapter-internal bundle
-/// of runtime handles, cancellation tokens, shared pipelines, etc.). It is
-/// therefore NOT a pure contract type and cannot be relocated to the domain
-/// ring without a separate refactor — the `ReloadExecutorPort` still imports
-/// it from `crate::lifecycle::adapters::route_controller::PreparedRoute`,
-/// which violates the dependency rule (application → adapters). The full
-/// F2 fix is BLOCKED on this coupling; see Tier C blessing-gate report.
-pub(crate) struct PreparedRoute {
-    pub(crate) route_id: String,
-    pub(super) managed: ManagedRoute,
 }
 
 /// Check if a task handle is still running.

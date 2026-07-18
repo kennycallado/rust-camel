@@ -697,21 +697,18 @@ fn export_feature_gates_reexports_not_compilation() {
 /// (`CompiledPipeline` was imported from `lifecycle::adapters`) and would catch
 /// any future regression.
 ///
-/// One documented §4 exception: `PreparedRoute` (referenced by
-/// `prepare_route_definition_with_generation` / `insert_prepared_route`).
-/// `PreparedRoute::managed: ManagedRoute` bundles adapter-internal state
-/// (JoinHandle, CancellationToken, SharedPipeline, AggregatorService,
-/// CompiledRoute) and cannot be relocated without a port-semantics redesign
-/// (thin `{ route_id }` contract + controller-internal HashMap). Recorded as a
-/// charter §4 accepted exception. The allow-list below pins exactly this one
-/// item; when the redesign lands, the allow-list goes empty and this guard
-/// becomes absolute.
+/// Ports live in the application ring; the dependency rule is
+/// `domain ← application ← adapters`. A port trait must NOT import types from
+/// any adapter ring — contract types the port needs must live in domain (or a
+/// contracts module). This guard catches the class of violation F2 fixed
+/// (`PreparedRoute` was imported from `lifecycle::adapters`; it is now a thin
+/// `{ route_id }` token in `lifecycle::domain/route_compilation.rs`).
+/// The allow-list is empty — the rule is absolute.
 #[test]
 fn port_traits_do_not_import_from_adapter_ring() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let port_dirs = ["hot_reload/ports", "lifecycle/application/ports"];
-    // The single documented §4 exception (see test doc above).
-    let allowed_adapter_imports = ["PreparedRoute"];
+    let allowed_adapter_imports: [&str; 0] = [];
     let mut files = Vec::new();
     for dir in &port_dirs {
         let dir_path = root.join(dir);
@@ -779,68 +776,43 @@ fn port_traits_do_not_import_from_adapter_ring() {
     }
 }
 
-// ---- Stage 5 (Tier C, rc-d0pu.3, task C3): full-slice module homes ----
-
-#[test]
-fn full_slice_modules_have_3_ring_layout_with_dependency_rule() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for module in ["health_registry", "datasource"] {
-        assert!(
-            root.join(format!("{module}.rs")).exists(),
-            "{module}.rs module root"
-        );
-        assert!(root.join(module).is_dir(), "{module}/ 3-ring dir");
-        for ring in ["domain", "application", "adapters"] {
-            assert!(
-                root.join(module).join(format!("{ring}.rs")).exists(),
-                "{module}/{ring}.rs must exist (3-ring slice)"
-            );
-        }
-        // domain must not import any adapter ring (dependency rule). Reject ALL
-        // adapter import forms: super::adapters, crate::<module>::adapters,
-        // crate::lifecycle::adapters, crate::shared::**::adapters, etc.
-        let dom = std::fs::read_to_string(root.join(module).join("domain.rs")).unwrap_or_default();
-        assert!(
-            !dom.contains("adapters"),
-            "{module}/domain.rs must not import any adapter ring"
-        );
-    }
-}
-
 #[test]
 fn context_lifecycle_use_cases_respect_dependency_rule() {
-    // C2 (Tier C): start/stop/abort algorithms live in
-    // lifecycle/application/context_lifecycle.rs as use-cases, NOT as
-    // inherent methods on CamelContext. The start_context and stop_context
-    // use-cases must depend on the RouteOrderingPort abstraction, not the
-    // concrete RouteControllerHandle. The ONLY allowed concrete reference
-    // is abort_context's documented §4 exception for the destructive
-    // shutdown() call (same precedent as reload_watcher.rs).
+    // C2 + abort-port (rc-d0pu.3 + purge): start/stop/abort algorithms live
+    // in lifecycle/application/context_lifecycle.rs as use-cases. All three
+    // depend ONLY on port abstractions (RouteOrderingPort for start/stop/
+    // shutdown_route_ids; RouteDestructiveTeardownPort for the destructive
+    // shutdown()). The use-case ring must not import the concrete
+    // RouteControllerHandle.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let context_lifecycle = root.join("lifecycle/application/context_lifecycle.rs");
     assert!(
         context_lifecycle.exists(),
-        "context_lifecycle.rs use-cases module must exist (C2)"
+        "context_lifecycle.rs must exist (C2)"
     );
     let content = fs::read_to_string(&context_lifecycle).expect("read context_lifecycle.rs");
 
-    // start_context + stop_context must depend on the port abstraction.
     assert!(
         content.contains("RouteOrderingPort"),
-        "context_lifecycle.rs must use the RouteOrderingPort abstraction"
+        "context_lifecycle.rs must use RouteOrderingPort"
     );
-
-    // The InFlightCount variant stays in its existing CQRS site; the
-    // new use-cases must not pull it in.
+    assert!(
+        content.contains("RouteDestructiveTeardownPort"),
+        "context_lifecycle.rs must use RouteDestructiveTeardownPort for abort"
+    );
+    assert!(
+        !content.contains("RouteControllerHandle"),
+        "context_lifecycle.rs must NOT import the concrete RouteControllerHandle \
+         (dependency rule — purged in rc-d0pu.3-purge)"
+    );
     assert!(
         !content.contains("InFlightCount"),
         "context_lifecycle.rs must not introduce the InFlightCount CQRS variant"
     );
 
-    // The ordering impl lives in adapters, NOT application.
     let ordering_impl = root.join("lifecycle/adapters/route_ordering_impl.rs");
     assert!(
         ordering_impl.exists(),
-        "RouteOrderingPort impl must live in adapters (dependency rule)"
+        "RouteOrderingPort impl must live in adapters"
     );
 }

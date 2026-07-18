@@ -185,7 +185,7 @@ impl RuntimeExecutionHandle {
         &self,
         definition: RouteDefinition,
         generation: u64,
-    ) -> Result<crate::lifecycle::adapters::route_controller::PreparedRoute, CamelError> {
+    ) -> Result<crate::lifecycle::domain::route_compilation::PreparedRoute, CamelError> {
         self.controller
             .prepare_route_definition_with_generation(definition, generation)
             .await
@@ -193,9 +193,13 @@ impl RuntimeExecutionHandle {
 
     pub(crate) async fn insert_prepared_route(
         &self,
-        prepared: crate::lifecycle::adapters::route_controller::PreparedRoute,
+        prepared: crate::lifecycle::domain::route_compilation::PreparedRoute,
     ) -> Result<(), CamelError> {
         self.controller.insert_prepared_route(prepared).await
+    }
+
+    pub(crate) async fn discard_prepared_staging(&self, route_id: &str) -> Result<(), CamelError> {
+        self.controller.discard_prepared_staging(route_id).await
     }
 
     pub(crate) async fn remove_route_preserving_functions(
@@ -351,7 +355,7 @@ impl crate::hot_reload::ports::ReloadExecutorPort for RuntimeExecutionHandle {
         &self,
         definition: RouteDefinition,
         generation: u64,
-    ) -> Result<crate::lifecycle::adapters::route_controller::PreparedRoute, CamelError> {
+    ) -> Result<crate::lifecycle::domain::route_compilation::PreparedRoute, CamelError> {
         RuntimeExecutionHandle::prepare_route_definition_with_generation(
             self, definition, generation,
         )
@@ -360,9 +364,13 @@ impl crate::hot_reload::ports::ReloadExecutorPort for RuntimeExecutionHandle {
 
     async fn insert_prepared_route(
         &self,
-        prepared: crate::lifecycle::adapters::route_controller::PreparedRoute,
+        prepared: crate::lifecycle::domain::route_compilation::PreparedRoute,
     ) -> Result<(), CamelError> {
         RuntimeExecutionHandle::insert_prepared_route(self, prepared).await
+    }
+
+    async fn discard_prepared_staging(&self, route_id: &str) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::discard_prepared_staging(self, route_id).await
     }
 
     async fn remove_route_preserving_functions(&self, route_id: String) -> Result<(), CamelError> {
@@ -709,16 +717,18 @@ impl CamelContext {
     /// Immediate abort — kills all tasks without draining.
     ///
     /// Algorithm lives in `lifecycle::application::context_lifecycle::abort_context`
-    /// (Tier C C2). Public signature is unchanged. The destructive
-    /// `RouteControllerHandle::shutdown()` call is taken via a documented
-    /// §4 exception (ADR-0045); the rest of the algorithm uses port
-    /// abstractions.
+    /// (Tier C C2). Public signature is unchanged. The use-case routes
+    /// through `RouteOrderingPort` + `RouteDestructiveTeardownPort`; the
+    /// same underlying `RouteControllerHandle` is passed twice as both
+    /// trait objects.
     pub async fn abort(&mut self) {
         crate::lifecycle::application::context_lifecycle::abort_context(
             &self.cancel_token,
             &mut self.supervision_join,
             &self.runtime,
-            &self.route_controller,
+            &self.route_controller as &dyn crate::lifecycle::application::ports::RouteOrderingPort,
+            &self.route_controller
+                as &dyn crate::lifecycle::application::ports::RouteDestructiveTeardownPort,
             &mut self.services,
             self.health_registry.cancel_token(),
             &mut self.actor_join,

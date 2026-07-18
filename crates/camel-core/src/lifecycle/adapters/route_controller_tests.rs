@@ -2181,3 +2181,97 @@ async fn resequencer_hot_swap_drains_old_service() {
             .expect("new lifecycle shutdown should succeed");
     }
 }
+
+#[tokio::test]
+async fn insert_prepared_route_failure_drains_staging() {
+    // Regression: F2 staging map must be drained when the caller handles
+    // insert_prepared_route failure via discard_prepared_staging. Otherwise
+    // the ManagedRoute (with CancellationToken + SharedPipeline) leaks as
+    // orphan task. This test mirrors the contract reload_actions.rs relies on.
+    let mut controller = build_controller_with_components();
+
+    let route_id = "route-leak-test";
+
+    // Prepare a route (stages the ManagedRoute, returns thin token).
+    let prepared = controller
+        .prepare_route_definition_with_generation(
+            RouteDefinition::new("timer:tick?period=100", vec![BuilderStep::Stop])
+                .with_route_id(route_id),
+            1,
+        )
+        .expect("prepare must succeed (staging now has 1 entry)");
+
+    // Force insert to fail by pre-inserting the route via the staging-bypass
+    // path (add_route_with_generation uses build_managed_route directly
+    // without staging — use it to plant a route with the same id).
+    controller
+        .add_route_with_generation(
+            RouteDefinition::new("timer:tick?period=100", vec![BuilderStep::Stop])
+                .with_route_id(route_id),
+            1,
+        )
+        .await
+        .expect("seed route must install");
+
+    // insert_prepared_route must fail (route exists). On failure, the
+    // staging entry is RESTORED (not silently dropped) so the caller can
+    // retry or drain explicitly.
+    let err = controller
+        .insert_prepared_route(prepared)
+        .expect_err("insert must fail (duplicate route_id)");
+    assert!(err.to_string().contains("already exists"));
+
+    // Pre-drain assertion: staging still holds the entry (caller contract).
+    assert!(
+        !controller.prepared_staging_is_empty(),
+        "staging must be restored on insert failure (caller decides drain)"
+    );
+
+    // Caller explicitly drains. Safe because build_managed_route initializes
+    // handles to None (no spawned tasks at prepare-time); without this drain,
+    // the staged SharedPipeline would accumulate across reload iterations.
+    controller.discard_prepared_staging(route_id);
+
+    // Post-drain assertion: staging is empty (no leak).
+    assert!(
+        controller.prepared_staging_is_empty(),
+        "staging must be drained after discard_prepared_staging (F2 regression)"
+    );
+}
+
+#[tokio::test]
+async fn prepare_twice_same_route_id_does_not_overwrite_staging() {
+    // Regression: F2 staging must reject double-prepare of the same route_id.
+    // Without the guard, the second prepare would overwrite the first staged
+    // ManagedRoute, orphaning its CancellationToken + SharedPipeline.
+    let mut controller = build_controller_with_components();
+
+    let route_id = "route-double-prepare";
+
+    let prepared1 = controller
+        .prepare_route_definition_with_generation(
+            RouteDefinition::new("timer:tick?period=200", vec![BuilderStep::Stop])
+                .with_route_id(route_id),
+            1,
+        )
+        .expect("first prepare must succeed");
+
+    // Second prepare of the same id must fail with RouteError (staging collision).
+    let err = controller
+        .prepare_route_definition_with_generation(
+            RouteDefinition::new("timer:tick?period=200", vec![BuilderStep::Stop])
+                .with_route_id(route_id),
+            1,
+        )
+        .expect_err("second prepare must fail (staging collision)");
+    assert!(err.to_string().contains("staging"));
+
+    // Drain via the consumer side (insert succeeds since route not in routes yet).
+    controller
+        .insert_prepared_route(prepared1)
+        .expect("insert of first-prepared must succeed");
+    assert!(
+        controller.prepared_staging_is_empty(),
+        "staging must be drained after successful insert"
+    );
+}

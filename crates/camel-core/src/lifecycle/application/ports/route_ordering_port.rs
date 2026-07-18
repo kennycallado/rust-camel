@@ -5,9 +5,10 @@
 //
 // Established in Tier C Task C2 (`rc-d0pu.3`): the start_context and
 // stop_context use-cases accept `&dyn RouteOrderingPort` instead of the
-// concrete RouteControllerHandle. The only place the concrete handle is
-// still taken is abort_context, for the destructive `shutdown()` call —
-// recorded as an accepted exception in ADR-0045 §4.
+// concrete controller handle. The destructive `shutdown()` for abort_context
+// is exposed via the separate `RouteDestructiveTeardownPort`
+// (`lifecycle/application/ports/route_destructive_teardown_port.rs`),
+// established in `rc-d0pu.3`-purge to close the last §4 use-case purity gap.
 
 use async_trait::async_trait;
 use camel_api::CamelError;
