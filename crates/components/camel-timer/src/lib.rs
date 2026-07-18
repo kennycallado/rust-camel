@@ -160,7 +160,7 @@ impl Component for TimerComponent {
                 .with_default("0"),
                 UriOption::new(
                     "repeatCount",
-                    "Maximum number of ticks. 0 or omitted means infinite",
+                    "Maximum number of ticks; omit for infinite. 0 = never fires.",
                     OptionKind::Int,
                 ),
                 UriOption::new(
@@ -493,6 +493,40 @@ mod tests {
 
         // Clean up
         consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_repeat_count_omitted_fires_indefinitely() {
+        use tokio_util::sync::CancellationToken;
+
+        let token = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let ctx = ConsumerContext::new(tx, token.clone(), "timer-infinite-route".to_string());
+
+        // No repeatCount in the URI — must fire indefinitely until cancelled.
+        let mut consumer = TimerConsumer {
+            config: TimerConfig::from_uri("timer:infinite-test?period=20").unwrap(),
+            started: AtomicBool::new(false),
+        };
+
+        let handle = tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        // Window long enough that any finite repeat_count <= 5 would have
+        // stopped well before the cap we assert (6 fires at 20ms = ~120ms).
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        token.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert!(
+            count >= 6,
+            "Omitted repeatCount should fire indefinitely; expected >= 6 fires in window, got {count}"
+        );
     }
 
     #[tokio::test]
