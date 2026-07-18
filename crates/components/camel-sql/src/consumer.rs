@@ -51,6 +51,14 @@ fn record_post_process_failure(
     error!(error = %error, "{message}");
 }
 
+/// Outcome of a single poll cycle. Carries whether the poll returned zero rows,
+/// threaded up to the poll loop for `break_on_empty` (without propagating errors,
+/// which are swallowed/bridged by `handle_poll_result`).
+#[derive(Debug, Clone, Copy, Default)]
+struct PollOutcome {
+    was_empty: bool,
+}
+
 pub struct SqlConsumer {
     pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<Arc<AnyPool>>>,
@@ -83,7 +91,7 @@ impl SqlConsumer {
         pool: &AnyPool,
         context: &ConsumerContext,
         template: &QueryTemplate,
-    ) -> Result<(), CamelError> {
+    ) -> Result<PollOutcome, CamelError> {
         // Capture route_id from ConsumerContext for ADR-0012 metrics
         let route_id = context.route_id();
 
@@ -107,8 +115,9 @@ impl SqlConsumer {
 
         debug!(rows = rows.len(), "SQL consumer poll completed");
 
-        if rows.is_empty() && !self.config.route_empty_result_set {
-            return Ok(());
+        let was_empty = rows.is_empty();
+        if was_empty && !self.config.route_empty_result_set {
+            return Ok(PollOutcome { was_empty });
         }
 
         let rows_to_process: Vec<AnyRow> = if let Some(max) = self.config.max_messages_per_poll {
@@ -213,7 +222,7 @@ impl SqlConsumer {
                 .await;
         }
 
-        Ok(())
+        Ok(PollOutcome { was_empty })
     }
 
     async fn poll_database_stream(
@@ -221,7 +230,7 @@ impl SqlConsumer {
         pool: &AnyPool,
         context: &ConsumerContext,
         prepared: &crate::query::PreparedQuery,
-    ) -> Result<(), CamelError> {
+    ) -> Result<PollOutcome, CamelError> {
         let pool_clone = pool.clone();
         let sql_str = prepared.sql.clone();
         let bindings = prepared.bindings.clone();
@@ -266,7 +275,8 @@ impl SqlConsumer {
         }
 
         debug!("StreamList: consumer poll completed (lazy stream emitted)");
-        Ok(())
+        // StreamList ignores break_on_empty, so it always returns was_empty=false
+        Ok(PollOutcome::default())
     }
 
     /// Handle post-processing after a row is processed (onConsume/onConsumeFailed).
@@ -336,31 +346,38 @@ impl SqlConsumer {
 
     /// Handle the result of a single poll cycle, including bridging if configured.
     /// Extracted from `run()` so tests can exercise the error-handling branch directly.
+    /// Returns `PollOutcome` so the poll loop can decide whether to break on empty.
     async fn handle_poll_result(
         &self,
         pool: &AnyPool,
         context: &ConsumerContext,
         template: &QueryTemplate,
-    ) {
-        if let Err(e) = self.poll_database(pool, context, template).await {
-            if self.config.bridge_error_handler {
-                // log-policy: handler-owned
-                // (category b-bridged: error will be wrapped as Exchange
-                // and flow into the route's error handler)
-                warn!(error = %e, "SQL consumer poll failed (bridged)");
-                if let Err(route_err) = self.bridge_poll_error(context, e).await {
-                    // (the bridge channel itself broke — route will CrashNotification per ADR-0007)
-                    // log-policy: system-broken
-                    error!(error = %route_err, "Failed to bridge SQL consumer error to route");
+    ) -> PollOutcome {
+        match self.poll_database(pool, context, template).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Swallow the poll error (do NOT propagate via ? — the loop continues).
+                if self.config.bridge_error_handler {
+                    // log-policy: handler-owned
+                    // (category b-bridged: error will be wrapped as Exchange
+                    // and flow into the route's error handler)
+                    warn!(error = %e, "SQL consumer poll failed (bridged)");
+                    if let Err(route_err) = self.bridge_poll_error(context, e).await {
+                        // (the bridge channel itself broke — route will CrashNotification per ADR-0007)
+                        // log-policy: system-broken
+                        error!(error = %route_err, "Failed to bridge SQL consumer error to route");
+                    }
+                } else {
+                    record_post_process_failure(
+                        self.runtime.as_ref(),
+                        context.route_id(),
+                        "b-prime:sql:poll-failed",
+                        &e,
+                        "SQL consumer poll failed",
+                    );
                 }
-            } else {
-                record_post_process_failure(
-                    self.runtime.as_ref(),
-                    context.route_id(),
-                    "b-prime:sql:poll-failed",
-                    &e,
-                    "SQL consumer poll failed",
-                );
+                // An error is NOT an empty poll — the loop must continue.
+                PollOutcome::default()
             }
         }
     }
@@ -486,11 +503,12 @@ impl Consumer for SqlConsumer {
         if self.config.output_type == SqlOutputType::StreamList
             && (self.config.on_consume.is_some()
                 || self.config.on_consume_failed.is_some()
-                || self.config.on_consume_batch_complete.is_some())
+                || self.config.on_consume_batch_complete.is_some()
+                || self.config.break_on_empty)
         {
             warn!(
-                "onConsume/onConsumeFailed/onConsumeBatchComplete are not executed in StreamList mode \
-                 (rows are consumed lazily downstream)"
+                "onConsume/onConsumeFailed/onConsumeBatchComplete/breakOnEmpty are not executed in \
+                 StreamList mode (rows are consumed lazily downstream)"
             );
         }
 
@@ -557,7 +575,11 @@ impl Consumer for SqlConsumer {
                 }
                 _ = tokio::time::sleep(Duration::from_millis(self.config.delay_ms)) => {
                     poll_count += 1;
-                    self.handle_poll_result(pool.as_ref(), &context, &template).await;
+                    let outcome = self.handle_poll_result(pool.as_ref(), &context, &template).await;
+                    if self.config.break_on_empty && outcome.was_empty {
+                        info!("SQL consumer stopping: break_on_empty triggered (poll returned 0 rows)");
+                        break;
+                    }
                 }
             }
         }
@@ -1407,6 +1429,140 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn break_on_empty_stops_after_drained_table() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        // onConsume marks rows processed=1; query selects only processed=0 → drains in one poll.
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id from jobs where processed = 0 order by id?db_url=sqlite::memory:&onConsume=update jobs set processed=1 where id=:#id&initialDelay=0&delay=50&breakOnEmpty=true&repeatCount=100",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        // Inject the seeded pool — start() otherwise self-initializes a disjoint
+        // sqlite::memory: DB (per-connection private).
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell
+            .set(Arc::new(pool.clone()))
+            .expect("pool cell set");
+        let mut consumer = SqlConsumer::new(config, pool_cell, None, test_rt());
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        let route_cancel = CancellationToken::new();
+        // Count envelopes so we can pin the productive poll's row processing.
+        // With use_iterator=true (default) and 2 seeded rows, the productive poll
+        // must emit exactly 2 envelopes before the empty poll triggers the break.
+        let received = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let echo_cancel = route_cancel.clone();
+        let counter = Arc::clone(&received);
+        // Echo replies so the poll completes.
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = echo_cancel.cancelled() => break,
+                    Some(env) = rx.recv() => {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                }
+            }
+        });
+
+        let ctx = ConsumerContext::new(tx, route_cancel.clone(), "sql-test-route".to_string());
+
+        // start() runs the poll loop to completion (returns when the loop breaks).
+        let start = tokio::time::Instant::now();
+        consumer.start(ctx).await.expect("start must succeed");
+        let elapsed = start.elapsed();
+
+        // Productive poll must have emitted exactly 2 envelopes (one per row in
+        // the seeded table). Locks "no rows skipped, no rows lost".
+        let n = received.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            n, 2,
+            "productive poll should emit 2 envelopes (2 seeded rows), got {}",
+            n
+        );
+
+        // Both rows drained (processed=1) by the productive poll.
+        let count_unprocessed: i64 =
+            sqlx::query_scalar("select count(*) from jobs where processed = 0")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count_unprocessed, 0);
+
+        // Upper bound: with delay=10ms and breakOnEmpty, the consumer should stop
+        // well under the repeatCount=100 ceiling (which would take ~1s).
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "consumer should have stopped on empty poll, took {:?}",
+            elapsed
+        );
+
+        // Lower bound — LOCKS the [productive_poll, empty_poll] ordering.
+        // With delay=50ms:
+        //   - Correct: at least 2 full delays elapse (1st sleep + 2nd sleep) ≈ 100ms+,
+        //     because the loop MUST run a second (empty) poll before breaking.
+        //   - Buggy (break after the productive poll): only the 1st delay elapses
+        //     ≈ 50ms+processing. 100ms threshold sits safely between the two and
+        //     would FAIL if the consumer incorrectly set was_empty=true on the
+        //     productive poll and broke early. Wide margin survives slow CI boxes.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(100),
+            "consumer must run a second (empty) poll before breaking on break_on_empty, \
+             took {:?} — likely broke after the productive poll without seeing the empty one",
+            elapsed
+        );
+    }
+
+    /// Regression: `handle_poll_result` with `break_on_empty=true` must NOT
+    /// signal `was_empty: true` when `poll_database` returns an error — the
+    /// loop should continue past the error.
+    #[tokio::test]
+    async fn handle_poll_result_error_does_not_signal_empty() {
+        let pool = sqlite_pool().await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select * from this_table_does_not_exist?db_url=sqlite::memory:&breakOnEmpty=true&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell.set(Arc::new(pool.clone())).unwrap();
+        // Use RecordingRuntime (not test_rt/PanicRuntime) because
+        // handle_poll_result calls record_post_process_failure → metrics().
+        let consumer = SqlConsumer::new(
+            config.clone(),
+            pool_cell,
+            None,
+            Arc::new(RecordingRuntime::new(Arc::new(Mutex::new(Vec::new())))),
+        );
+
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
+
+        let outcome = consumer.handle_poll_result(&pool, &ctx, &template).await;
+        assert!(
+            !outcome.was_empty,
+            "poll error must NOT signal empty (was_empty should be false)"
+        );
+    }
+
     // ── ADR-0012 (g) regression tests ──────────────────────────────────
 
     /// Fixture: captures `force_unhealthy_for_route` calls.
@@ -1529,5 +1685,261 @@ mod tests {
             3,
             "max_attempts=3 must yield exactly 3 invocations"
         );
+    }
+
+    // ── break_on_empty edge-case tests ──────────────────────────────────
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn break_on_empty_ignored_in_streamlist() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        // StreamList + breakOnEmpty=true: warn must fire, breakOnEmpty ignored
+        // (no break on empty — rows flow lazily). repeatCount=3 to distinguish
+        // "ran 3 polls" from "broke on poll 1".
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id from jobs?db_url=sqlite::memory:&outputType=StreamList&initialDelay=0&delay=1&breakOnEmpty=true&repeatCount=3",
+        )
+        .unwrap();
+        config.resolve_defaults();
+        assert_eq!(config.output_type, SqlOutputType::StreamList);
+        assert!(config.break_on_empty);
+
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell
+            .set(Arc::new(pool.clone()))
+            .expect("pool cell set");
+        let mut consumer = SqlConsumer::new(config, pool_cell, None, test_rt());
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        let route_cancel = CancellationToken::new();
+        let received = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let echo_cancel = route_cancel.clone();
+        let counter = Arc::clone(&received);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = echo_cancel.cancelled() => break,
+                    Some(env) = rx.recv() => {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                }
+            }
+        });
+
+        let ctx = ConsumerContext::new(tx, route_cancel, "sql-test-route".to_string());
+        consumer.start(ctx).await.expect("start must succeed");
+
+        // The startup warn must name breakOnEmpty (FAILS before Step 2 — current
+        // warn message omits it).
+        assert!(
+            logs_contain("breakOnEmpty"),
+            "expected StreamList warn naming breakOnEmpty"
+        );
+
+        // Counter must prove the stream ran multiple polls (no early break).
+        // repeatCount=3 with delay=1ms means 3 polls; even accounting for race
+        // the counter must be >=2 if no early break.
+        assert!(
+            received.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            "StreamList must not break early with breakOnEmpty, got {} exchanges",
+            received.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn break_on_empty_false_default_loops_on_empty() {
+        let pool = sqlite_pool().await;
+        // Empty table (seed then drain) — every poll returns 0 rows.
+        seed_consumer_table(&pool).await;
+        sqlx::query("delete from jobs")
+            .execute(&pool)
+            .await
+            .expect("drain");
+
+        // breakOnEmpty NOT set (default false); repeatCount=3 so the loop must run
+        // all 3 polls (NOT break on the first empty poll). delay=20ms each.
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id from jobs where processed = 0?db_url=sqlite::memory:&initialDelay=0&delay=20&repeatCount=3",
+        )
+        .unwrap();
+        config.resolve_defaults();
+        assert!(!config.break_on_empty);
+
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell
+            .set(Arc::new(pool.clone()))
+            .expect("pool cell set");
+        let mut consumer = SqlConsumer::new(config, pool_cell, None, test_rt());
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        let route_cancel = CancellationToken::new();
+        let echo_cancel = route_cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = echo_cancel.cancelled() => break,
+                    Some(env) = rx.recv() => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                }
+            }
+        });
+
+        let ctx = ConsumerContext::new(tx, route_cancel, "sql-test-route".to_string());
+        let start = tokio::time::Instant::now();
+        consumer.start(ctx).await.expect("start must succeed");
+        let elapsed = start.elapsed();
+
+        // Regression guard: with breakOnEmpty=false + repeatCount=3 + delay=20ms,
+        // the loop runs all 3 polls (~60ms). If breakOnEmpty were mis-defaulted to
+        // true, it would break on poll 1 (~20ms). Assert the full window ran.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(55),
+            "consumer should run all 3 polls (breakOnEmpty=false), took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn break_on_empty_with_route_empty_result_set() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+        sqlx::query("delete from jobs")
+            .execute(&pool)
+            .await
+            .expect("drain");
+        // Side-effect table for onConsumeBatchComplete: each fire of the
+        // batch-complete callback increments `n` exactly once. With
+        // breakOnEmpty=true on an empty table, the spec pins that the
+        // empty-poll fall-through fires the callback exactly once before
+        // termination.
+        sqlx::query("CREATE TABLE batch_marks (n INTEGER NOT NULL DEFAULT 0)")
+            .execute(&pool)
+            .await
+            .expect("create batch_marks");
+        sqlx::query("INSERT INTO batch_marks (n) VALUES (0)")
+            .execute(&pool)
+            .await
+            .expect("seed batch_marks");
+
+        // Empty table + routeEmptyResultSet=true: empty polls fall through to the
+        // batch path (emit empty result) instead of early-returning. breakOnEmpty=true
+        // must break AFTER that batch processing → exactly one downstream exchange.
+        // onConsumeBatchComplete is wired so we can observe the empty-poll fall-through.
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id from jobs where processed = 0?db_url=sqlite::memory:&routeEmptyResultSet=true&breakOnEmpty=true&useIterator=false&onConsumeBatchComplete=update batch_marks set n = n + 1&initialDelay=0&delay=10&repeatCount=100",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell
+            .set(Arc::new(pool.clone()))
+            .expect("pool cell set");
+        let mut consumer = SqlConsumer::new(config, pool_cell, None, test_rt());
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        let route_cancel = CancellationToken::new();
+        let received = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let echo_cancel = route_cancel.clone();
+        let counter = Arc::clone(&received);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = echo_cancel.cancelled() => break,
+                    Some(env) = rx.recv() => {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                }
+            }
+        });
+
+        let ctx = ConsumerContext::new(tx, route_cancel, "sql-test-route".to_string());
+        let start = tokio::time::Instant::now();
+        consumer.start(ctx).await.expect("start must succeed");
+
+        // Exactly one downstream exchange emitted (the first empty poll's empty result),
+        // then breakOnEmpty stopped the loop. Must NOT be 0 (route_empty honored) and
+        // must NOT be repeatCount=100 (break_on_empty honored).
+        let n = received.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(n, 1, "expected exactly 1 empty-result exchange, got {}", n);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "consumer should have stopped after the first empty poll, took {:?}",
+            start.elapsed()
+        );
+
+        // onConsumeBatchComplete must fire exactly once on the empty-poll
+        // fall-through before the loop breaks. A buggy version that broke
+        // before invoking the batch callback would leave n=0; a version
+        // that looped through repeatCount=100 would leave n=100.
+        let batch_fires: i64 = sqlx::query_scalar("select n from batch_marks")
+            .fetch_one(&pool)
+            .await
+            .expect("batch_marks n");
+        assert_eq!(
+            batch_fires, 1,
+            "onConsumeBatchComplete must fire exactly once on the empty-poll \
+             fall-through before break_on_empty, got {}",
+            batch_fires
+        );
+    }
+
+    #[tokio::test]
+    async fn repeat_count_zero_polls_never() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        // repeatCount=0 → consumer exits before the first poll (guard at loop top).
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id from jobs?db_url=sqlite::memory:&initialDelay=0&delay=1&repeatCount=0&onConsume=update jobs set processed=1 where id=:#id",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        // Inject the seeded pool — start() otherwise self-initializes a disjoint
+        // sqlite::memory: DB (per-connection private). Pattern: consumer.rs:967-970.
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell
+            .set(Arc::new(pool.clone()))
+            .expect("pool cell set");
+        let mut consumer = SqlConsumer::new(config, pool_cell, None, test_rt());
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        let route_cancel = CancellationToken::new();
+        let echo_cancel = route_cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = echo_cancel.cancelled() => break,
+                    Some(env) = rx.recv() => {
+                        if let Some(reply_tx) = env.reply_tx {
+                            let _ = reply_tx.send(Ok(env.exchange));
+                        }
+                    }
+                }
+            }
+        });
+
+        let ctx = ConsumerContext::new(tx, route_cancel, "sql-test-route".to_string());
+        consumer.start(ctx).await.expect("start must succeed");
+
+        // No poll ran → rows are untouched (processed=0).
+        let count_processed: i64 =
+            sqlx::query_scalar("select count(*) from jobs where processed = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count_processed, 0, "repeatCount=0 must not poll");
     }
 }

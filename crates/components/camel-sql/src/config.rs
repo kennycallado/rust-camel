@@ -360,9 +360,17 @@ pub struct SqlEndpointConfig {
     pub bridge_error_handler: bool,
 
     // SQL-015: repeat count for consumer polling
-    /// When set, the consumer only polls up to `repeat_count` times before stopping.
-    /// None = poll indefinitely (default).
+    /// Maximum number of polls before the consumer stops. Omit (None) for infinite
+    /// polling. `0` = never poll (the consumer exits before its first poll); useful
+    /// for disabling a route via config without removing it. See also camel-timer's
+    /// `repeatCount`, which implements the same `0 = never` semantic.
     pub repeat_count: Option<u32>,
+
+    // SQL-020: break on empty poll
+    /// When true, the consumer stops after a poll that returns zero rows
+    /// (SelectList mode only; ignored with a warning in StreamList mode).
+    /// Default: false.
+    pub break_on_empty: bool,
 
     // SQL-017: processing strategy
     /// Processing strategy for consumer. Default: Direct.
@@ -435,6 +443,7 @@ impl std::fmt::Debug for SqlEndpointConfig {
             )
             .field("bridge_error_handler", &self.bridge_error_handler)
             .field("repeat_count", &self.repeat_count)
+            .field("break_on_empty", &self.break_on_empty)
             .field("processing_strategy", &self.processing_strategy)
             .field("poll_strategy", &self.poll_strategy)
             .field("batch", &self.batch)
@@ -808,6 +817,13 @@ impl UriConfig for SqlEndpointConfig {
         // SQL-015: repeatCount
         let repeat_count = params.get("repeatCount").and_then(|v| v.parse().ok());
 
+        // SQL-020: breakOnEmpty
+        let break_on_empty = params
+            .get("breakOnEmpty")
+            .map(|v| parse_bool_param("breakOnEmpty", v))
+            .transpose()?
+            .unwrap_or(false);
+
         // SQL-017: processingStrategy
         let processing_strategy = params
             .get("processingStrategy")
@@ -962,6 +978,7 @@ impl UriConfig for SqlEndpointConfig {
             break_batch_on_consume_fail,
             bridge_error_handler,
             repeat_count,
+            break_on_empty,
             processing_strategy,
             poll_strategy,
             batch,
@@ -1869,6 +1886,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.repeat_count, Some(10));
+    }
+
+    // SQL-020: breakOnEmpty
+    #[test]
+    fn break_on_empty_defaults_to_false() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert!(!c.break_on_empty);
+    }
+
+    #[test]
+    fn break_on_empty_true_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&breakOnEmpty=true",
+        )
+        .unwrap();
+        assert!(c.break_on_empty);
+    }
+
+    #[test]
+    fn break_on_empty_explicit_false_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&breakOnEmpty=false",
+        )
+        .unwrap();
+        assert!(!c.break_on_empty);
     }
 
     // SQL-017: processingStrategy
