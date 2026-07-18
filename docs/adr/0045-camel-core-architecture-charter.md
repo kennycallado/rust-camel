@@ -64,13 +64,32 @@ Implementation deviations from the design contract are recorded here so they do 
 silently. Each is either remediated pre-1.0 or recorded as an accepted exception with
 justification; every new bypass must land a line here, or it is a boundary violation.
 
-**CQRS contract gaps:**
+**CQRS contract gaps (ACCEPTED — not remediated; remediation would regress correctness):**
 
-- **Single store wired for repository + projection + events + dedup**
-  (`context_builder.rs`) — target: separate the wiring or document why one store is acceptable for
-  the in-process control plane.
-- **In-flight reads bypass the projection port** (`lifecycle/application/queries.rs`) — target:
-  route through the projection port, or record as an explicit low-latency read exception here.
+- ✅ **Single backing store for repository + projection + events + dedup**
+  (`context_builder.rs` wires one `InMemoryRuntimeStore` via `Arc::clone` into 4 typed
+  ports) — ACCEPTED PERMANENT. The ports are fully segregated at the trait level
+  (`RouteRepositoryPort` / `ProjectionStorePort` / `EventPublisherPort` /
+  `CommandDedupPort`); `RuntimeBus` depends only on `dyn Port`, never on the adapter, so
+  the dependency rule holds. The *unified backing store is required*, not incidental:
+  Synchronous-projection CQRS (ADR-0002/0045) mandates that the aggregate and its
+  projection be written in the same optimistic-versioned UnitOfWork
+  (`RuntimeUnitOfWorkPort::persist_upsert`) under a single lock. Splitting the store into
+  separate instances would break UoW atomicity and reintroduce projection lag — i.e. the
+  eventual-consistency CQRS that ADR-0045 explicitly rejected. One adapter satisfying
+  multiple segregated ports is a legitimate hexagonal pattern for a transactionally-unified
+  infrastructure store. No boundary violation.
+
+- ✅ **`InFlightCount` is served by the execution port, not the projection port**
+  (`lifecycle/application/queries.rs` returns an exhaustiveness-guard error;
+  `RuntimeBus::ask` intercepts and delegates to `RuntimeExecutionPort::in_flight_count`) —
+  ACCEPTED PERMANENT as an explicit low-latency operational read. The in-flight counter is
+  volatile runtime telemetry held by the controller actor; it is never persisted,
+  journaled, or recovered, and is therefore not a CQRS read model. Routing it through
+  `ProjectionStorePort` would require mirroring the live counter into the projection store
+  on every in-flight increment/decrement — adding projection writes to the data-plane hot
+  path to serve an O(1) in-memory read. The execution port *is* the correct port for
+  volatile operational state; this is not a bypass of the right port but selection of it.
 
 **Entity-purity gaps (the dependency rule):**
 
