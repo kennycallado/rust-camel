@@ -71,6 +71,12 @@ pub enum CompletionCondition {
     /// Emit when predicate returns true for current bucket.
     #[allow(clippy::type_complexity)]
     Predicate(Arc<dyn Fn(&[Exchange]) -> bool + Send + Sync>),
+    /// Configuration-time counterpart to `Predicate`: carries a serialized
+    /// language expression (`expr` + `language`) resolvable via the language
+    /// registry at runtime. Unlike `Predicate` (a closure), this variant is
+    /// declarable from YAML/DSL. The serializable wire representation lives
+    /// on `CanonicalAggregateSpec.completion_predicate`.
+    PredicateExpr { expr: String, language: String },
     /// Emit when the bucket has been inactive for the given duration.
     Timeout(Duration),
 }
@@ -80,6 +86,11 @@ impl std::fmt::Debug for CompletionCondition {
         match self {
             CompletionCondition::Size(n) => f.debug_tuple("Size").field(n).finish(),
             CompletionCondition::Predicate(_) => f.write_str("Predicate(..)"),
+            CompletionCondition::PredicateExpr { expr, language } => f
+                .debug_struct("PredicateExpr")
+                .field("expr", expr)
+                .field("language", language)
+                .finish(),
             CompletionCondition::Timeout(d) => f.debug_tuple("Timeout").field(d).finish(),
         }
     }
@@ -480,6 +491,19 @@ mod tests {
 
         let f = CorrelationStrategy::Fn(Arc::new(|_| Some("k".to_string())));
         assert_eq!(format!("{:?}", f), "Fn(..)");
+    }
+
+    #[test]
+    fn completion_condition_predicate_expr_debug_and_clone() {
+        let c = CompletionCondition::PredicateExpr {
+            expr: "${body} == 'DONE'".to_string(),
+            language: "simple".to_string(),
+        };
+        let debugged = format!("{:?}", c);
+        assert!(debugged.contains("PredicateExpr"), "debug: {}", debugged);
+        assert!(debugged.contains("DONE"), "debug: {}", debugged);
+        // Clone must compile (the enum derives Clone).
+        let _cloned = c.clone();
     }
 
     #[test]

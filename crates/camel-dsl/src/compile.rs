@@ -548,6 +548,35 @@ fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<Builder
     }
 
     let mut agg_config = builder.build()?;
+
+    // When a completion_predicate is present, rebuild completion from the
+    // explicitly-configured conditions (no default Size injection — predicate-
+    // alone routes get Single(PredicateExpr)). MUST run BEFORE the
+    // correlation_key partial-move below (config.correlation_key is moved by
+    // value, so accessing other config fields after it is illegal; this block
+    // only clones/borrows).
+    if let Some(led) = config.completion_predicate.clone() {
+        use camel_api::aggregator::{CompletionCondition, CompletionMode};
+        let mut conds: Vec<CompletionCondition> = Vec::new();
+        if let Some(n) = config.completion_size {
+            conds.push(CompletionCondition::Size(n));
+        }
+        let timeout_ms = config.completion_timeout_ms.unwrap_or(0);
+        if timeout_ms > 0 {
+            conds.push(CompletionCondition::Timeout(Duration::from_millis(
+                timeout_ms,
+            )));
+        }
+        conds.push(CompletionCondition::PredicateExpr {
+            expr: led.source,
+            language: led.language,
+        });
+        agg_config.completion = match conds.as_slice() {
+            [one] => CompletionMode::Single(one.clone()),
+            _ => CompletionMode::Any(conds),
+        };
+    }
+
     if let Some(expr) = config.correlation_key {
         use camel_api::aggregator::CorrelationStrategy;
         agg_config.correlation = CorrelationStrategy::Expression {
@@ -1376,12 +1405,6 @@ fn compile_split_step_to_canonical(def: SplitStepDef) -> Result<CanonicalStepSpe
 fn compile_aggregate_step_to_canonical(
     def: AggregateStepDef,
 ) -> Result<CanonicalStepSpec, CamelError> {
-    if def.completion_predicate.is_some() {
-        return Err(CamelError::RouteError(
-            "aggregate.completion_predicate is not yet implemented".to_string(),
-        ));
-    }
-
     let strategy = match def.strategy {
         AggregateStrategyDef::CollectAll => CanonicalAggregateStrategySpec::CollectAll,
     };
@@ -1396,6 +1419,7 @@ fn compile_aggregate_step_to_canonical(
         strategy,
         max_buckets: def.max_buckets,
         bucket_ttl_ms: def.bucket_ttl_ms,
+        completion_predicate: def.completion_predicate,
     }))
 }
 
@@ -1520,7 +1544,9 @@ fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelErr
 
     if def.completion_predicate.is_some() {
         return Err(CamelError::RouteError(
-            "aggregate.completion_predicate is not yet implemented".to_string(),
+            "aggregate.completion_predicate requires the canonical route path \
+             (the builder path does not lower expression predicates or correlation keys)"
+                .to_string(),
         ));
     }
 
@@ -2857,7 +2883,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_aggregate_step_rejects_predicate() {
+    fn compile_aggregate_step_accepts_predicate() {
         let def = AggregateStepDef {
             header: "corr".into(),
             correlation_key: None,
@@ -2870,7 +2896,44 @@ mod tests {
             force_completion_on_stop: None,
             discard_on_timeout: None,
         };
-        assert!(compile_aggregate_step(def).is_err());
+        let result = compile_aggregate_step_to_canonical(def);
+        assert!(
+            result.is_ok(),
+            "canonical path must accept predicate: {:?}",
+            result.err()
+        );
+        if let Ok(CanonicalStepSpec::Aggregate(spec)) = result {
+            assert!(
+                spec.completion_predicate.is_some(),
+                "canonical spec must carry the predicate"
+            );
+        } else {
+            panic!("expected Aggregate canonical step");
+        }
+    }
+
+    #[test]
+    fn compile_aggregate_step_builder_path_rejects_predicate() {
+        let def = AggregateStepDef {
+            header: "corr".into(),
+            correlation_key: None,
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: Some(make_predicate("true")),
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let result = compile_aggregate_step(def);
+        assert!(result.is_err(), "builder path must reject predicate");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("canonical route path"),
+            "reject message must name the canonical path: {}",
+            msg
+        );
     }
 
     #[test]
@@ -2889,6 +2952,84 @@ mod tests {
         };
         let result = compile_aggregate_step(def);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_canonical_aggregate_predicate_only_is_single_predicate_expr() {
+        // predicate alone, no size, no timeout → Single(PredicateExpr), NOT Size(1)+predicate.
+        let spec = CanonicalAggregateSpec {
+            header: "corr".into(),
+            completion_size: None,
+            completion_timeout_ms: None,
+            correlation_key: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+            strategy: CanonicalAggregateStrategySpec::CollectAll,
+            max_buckets: None,
+            bucket_ttl_ms: None,
+            completion_predicate: Some(LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${body} == 'DONE'".into(),
+            }),
+        };
+        let step = compile_canonical_aggregate(spec).expect("must compile");
+        match step {
+            BuilderStep::Aggregate { config } => {
+                use camel_api::aggregator::{CompletionCondition, CompletionMode};
+                match &config.completion {
+                    CompletionMode::Single(CompletionCondition::PredicateExpr { .. }) => {}
+                    other => panic!("expected Single(PredicateExpr), got {:?}", other),
+                }
+            }
+            _ => panic!("expected BuilderStep::Aggregate"),
+        }
+    }
+
+    #[test]
+    fn compile_canonical_aggregate_size_timeout_predicate_is_any_of_three() {
+        let spec = CanonicalAggregateSpec {
+            header: "corr".into(),
+            completion_size: Some(3),
+            completion_timeout_ms: Some(5000),
+            correlation_key: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+            strategy: CanonicalAggregateStrategySpec::CollectAll,
+            max_buckets: None,
+            bucket_ttl_ms: None,
+            completion_predicate: Some(LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${body} == 'DONE'".into(),
+            }),
+        };
+        let step = compile_canonical_aggregate(spec).expect("must compile");
+        match step {
+            BuilderStep::Aggregate { config } => {
+                use camel_api::aggregator::{CompletionCondition, CompletionMode};
+                match &config.completion {
+                    CompletionMode::Any(conds) => {
+                        assert_eq!(conds.len(), 3, "size + timeout + predicate = 3 conditions");
+                        assert!(
+                            conds
+                                .iter()
+                                .any(|c| matches!(c, CompletionCondition::Size(_)))
+                        );
+                        assert!(
+                            conds
+                                .iter()
+                                .any(|c| matches!(c, CompletionCondition::Timeout(_)))
+                        );
+                        assert!(
+                            conds
+                                .iter()
+                                .any(|c| matches!(c, CompletionCondition::PredicateExpr { .. }))
+                        );
+                    }
+                    other => panic!("expected Any with 3 conditions, got {:?}", other),
+                }
+            }
+            _ => panic!("expected BuilderStep::Aggregate"),
+        }
     }
 
     #[test]
@@ -3492,6 +3633,7 @@ mod tests {
                 strategy: CanonicalAggregateStrategySpec::CollectAll,
                 max_buckets: Some(100),
                 bucket_ttl_ms: Some(60000),
+                completion_predicate: None,
             }),
             threshold,
         )

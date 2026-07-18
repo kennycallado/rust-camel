@@ -73,6 +73,18 @@
           "format": "uint64",
           "minimum": 0
         },
+        "completion_predicate": {
+          "description": "Language expression predicate; completes the bucket when it evaluates\ntrue against the incoming exchange (runtime-resolved via the language\nregistry). Mirrors `CorrelationStrategy::Expression`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LanguageExpressionDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "completion_size": {
           "type": [
             "integer",

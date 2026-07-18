@@ -33,6 +33,7 @@ zip.workspace = true
 async-stream.workspace = true
 
 [dev-dependencies]
+camel-language-simple = { path = "../languages/camel-language-simple" }
 criterion.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 

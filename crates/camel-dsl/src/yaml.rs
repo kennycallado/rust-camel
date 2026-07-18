@@ -2039,6 +2039,77 @@ routes:
     }
 
     #[test]
+    fn test_parse_yaml_to_canonical_aggregate_completion_predicate() {
+        let yaml = r#"
+routes:
+  - id: "canonical-aggregate-predicate"
+    from: "direct:start"
+    steps:
+      - aggregate:
+          header: orderId
+          correlation_key: "${header.orderId}"
+          completion_predicate:
+            simple: "${body} == 'DONE'"
+"#;
+        let routes = parse_yaml_to_canonical(yaml, false).unwrap();
+        assert_eq!(routes.len(), 1);
+        let (route, _loss) = &routes[0];
+        let agg = route
+            .steps
+            .iter()
+            .find_map(|step| {
+                if let camel_api::runtime::CanonicalStepSpec::Aggregate(spec) = step {
+                    Some(spec)
+                } else {
+                    None
+                }
+            })
+            .expect("expected an Aggregate step");
+        assert!(
+            agg.completion_predicate.is_some(),
+            "completion_predicate must survive YAML -> canonical round-trip"
+        );
+        let pred = agg
+            .completion_predicate
+            .as_ref()
+            .expect("predicate present");
+        assert_eq!(pred.language, "simple");
+        assert_eq!(pred.source, "${body} == 'DONE'");
+    }
+
+    #[test]
+    fn test_parse_yaml_to_canonical_aggregate_no_completion_predicate() {
+        let yaml = r#"
+routes:
+  - id: "canonical-aggregate-no-predicate"
+    from: "direct:start"
+    steps:
+      - aggregate:
+          header: orderId
+          correlation_key: "${header.orderId}"
+          completion_size: 2
+"#;
+        let routes = parse_yaml_to_canonical(yaml, false).unwrap();
+        assert_eq!(routes.len(), 1);
+        let (route, _loss) = &routes[0];
+        let agg = route
+            .steps
+            .iter()
+            .find_map(|step| {
+                if let camel_api::runtime::CanonicalStepSpec::Aggregate(spec) = step {
+                    Some(spec)
+                } else {
+                    None
+                }
+            })
+            .expect("expected an Aggregate step");
+        assert!(
+            agg.completion_predicate.is_none(),
+            "aggregate without completion_predicate must yield None"
+        );
+    }
+
+    #[test]
     fn test_parse_yaml_to_canonical_rejects_unsupported_steps() {
         let yaml = r#"
 routes:

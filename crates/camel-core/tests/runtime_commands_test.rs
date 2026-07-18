@@ -768,6 +768,7 @@ async fn register_route_accepts_advanced_canonical_steps() {
                 strategy: CanonicalAggregateStrategySpec::CollectAll,
                 max_buckets: Some(100),
                 bucket_ttl_ms: Some(60_000),
+                completion_predicate: None,
             }),
             CanonicalStepSpec::WireTap {
                 uri: "mock:tap".to_string(),

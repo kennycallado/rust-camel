@@ -2250,6 +2250,7 @@ dependencies = [
  "camel-api",
  "camel-component-api",
  "camel-language-api",
+ "camel-language-simple",
  "criterion",
  "csv",
  "futures",

@@ -242,6 +242,11 @@ pub struct CanonicalAggregateSpec {
     pub max_buckets: Option<usize>,
     #[ts(type = "number")]
     pub bucket_ttl_ms: Option<u64>,
+    /// Language expression predicate; completes the bucket when it evaluates
+    /// true against the incoming exchange (runtime-resolved via the language
+    /// registry). Mirrors `CorrelationStrategy::Expression`.
+    #[serde(default)]
+    pub completion_predicate: Option<LanguageExpressionDef>,
 }
 
 #[derive(
@@ -761,6 +766,7 @@ mod tests {
             strategy: CanonicalAggregateStrategySpec::CollectAll,
             max_buckets: None,
             bucket_ttl_ms: None,
+            completion_predicate: None,
         })];
         let err = spec.validate_contract().unwrap_err().to_string();
         assert!(err.contains("aggregate.header cannot be empty"));
@@ -775,6 +781,7 @@ mod tests {
             strategy: CanonicalAggregateStrategySpec::CollectAll,
             max_buckets: None,
             bucket_ttl_ms: None,
+            completion_predicate: None,
         })];
         let err = spec.validate_contract().unwrap_err().to_string();
         assert!(err.contains("aggregate.completion_size must be > 0"));

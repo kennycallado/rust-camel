@@ -994,9 +994,13 @@ fn extract_completion_fields(
         CompletionMode::Single(cond) => match cond {
             CompletionCondition::Size(n) => Ok((Some(*n), None)),
             CompletionCondition::Timeout(d) => Ok((None, Some(d.as_millis() as u64))),
-            CompletionCondition::Predicate(_) => Err(CamelError::RouteError(
-                "canonical v1 does not support aggregate predicate completion".to_string(),
-            )),
+            CompletionCondition::Predicate(_) | CompletionCondition::PredicateExpr { .. } => {
+                Err(CamelError::RouteError(
+                    "aggregate PredicateExpr/Predicate completion cannot reverse-map to canonical \
+                     (forward-only in rc-zit); build the canonical spec directly"
+                        .to_string(),
+                ))
+            }
         },
         CompletionMode::Any(conds) => {
             let mut size = None;
@@ -1005,9 +1009,11 @@ fn extract_completion_fields(
                 match cond {
                     CompletionCondition::Size(n) => size = Some(*n),
                     CompletionCondition::Timeout(d) => timeout_ms = Some(d.as_millis() as u64),
-                    CompletionCondition::Predicate(_) => {
+                    CompletionCondition::Predicate(_)
+                    | CompletionCondition::PredicateExpr { .. } => {
                         return Err(CamelError::RouteError(
-                            "canonical v1 does not support aggregate predicate completion"
+                            "aggregate PredicateExpr/Predicate completion cannot reverse-map to \
+                             canonical (forward-only in rc-zit); build the canonical spec directly"
                                 .to_string(),
                         ));
                     }
@@ -1067,6 +1073,7 @@ fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregate
         strategy,
         max_buckets: config.max_buckets,
         bucket_ttl_ms,
+        completion_predicate: None,
     })
 }
 
@@ -3343,7 +3350,52 @@ mod tests {
             .build_canonical()
             .unwrap_err();
 
-        assert!(format!("{err}").contains("predicate completion"));
+        assert!(
+            format!("{err}").contains("cannot reverse-map"),
+            "reject message must explain forward-only: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn extract_completion_fields_rejects_predicate_expr() {
+        let mode = CompletionMode::Single(CompletionCondition::PredicateExpr {
+            expr: "${body} == 'DONE'".to_string(),
+            language: "simple".to_string(),
+        });
+        let result = extract_completion_fields(&mode);
+        assert!(
+            result.is_err(),
+            "PredicateExpr must be rejected (forward-only)"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("cannot reverse-map"),
+            "reject message must explain forward-only: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn extract_completion_fields_rejects_predicate_expr_any_mode() {
+        let mode = CompletionMode::Any(vec![
+            CompletionCondition::Size(5),
+            CompletionCondition::PredicateExpr {
+                expr: "${body} == 'DONE'".to_string(),
+                language: "simple".to_string(),
+            },
+        ]);
+        let result = extract_completion_fields(&mode);
+        assert!(
+            result.is_err(),
+            "PredicateExpr in Any must be rejected (forward-only)"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("cannot reverse-map"),
+            "reject message must explain forward-only: {}",
+            msg
+        );
     }
 
     #[test]
@@ -4100,7 +4152,11 @@ mod tests {
             .build_canonical()
             .unwrap_err();
 
-        assert!(format!("{err}").contains("predicate completion"));
+        assert!(
+            format!("{err}").contains("cannot reverse-map"),
+            "reject message must explain forward-only: {}",
+            err
+        );
     }
 
     // ── BUILDER-004: Validation errors for missing required fields ────────────
