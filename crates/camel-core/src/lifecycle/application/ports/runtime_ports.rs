@@ -123,10 +123,11 @@ pub trait RuntimeExecutionPort: Send + Sync {
     async fn remove_route(&self, route_id: &str) -> Result<(), DomainError>;
     async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError>;
 
-    // TODO(CORE-003): Missing RuntimeEndpointRegistry parity. The following methods are needed:
+    // TODO(CORE-003, bd rc-56vk): Missing RuntimeEndpointRegistry parity. The following methods are needed:
     // - health_check_endpoint(uri: &str) -> Result<HealthStatus, DomainError> — per-endpoint health
     // - route_for_endpoint(uri: &str) -> Option<String> — map endpoint URI to owning route ID
     // These are currently absent and block runtime introspection / management API completeness.
+    // Tracked as post-1.0 work in bd issue rc-56vk (not blocking ADR-0045 charter compliance).
 
     /// List all registered endpoint URIs across all routes.
     ///
