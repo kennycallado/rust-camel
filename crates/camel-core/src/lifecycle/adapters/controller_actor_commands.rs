@@ -11,8 +11,9 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{BoxProcessor, CamelError, FunctionInvoker, RuntimeHandle, StepLifecycle};
 use tokio::sync::{mpsc, oneshot};
 
-use super::route_helpers::{CompiledPipeline, PreparedRoute};
+use super::route_helpers::PreparedRoute;
 use crate::lifecycle::application::route_definition::RouteDefinition;
+use crate::lifecycle::domain::CompiledPipeline;
 use crate::shared::observability::domain::TracerConfig;
 
 pub(crate) enum RouteControllerCommand {

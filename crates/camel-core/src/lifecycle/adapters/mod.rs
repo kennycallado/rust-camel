@@ -14,6 +14,7 @@ pub(crate) mod route_compiler_ext;
 pub mod route_controller;
 pub(crate) mod route_controller_trait;
 pub(crate) mod route_helpers;
+pub(crate) mod route_ordering_impl;
 pub(crate) mod route_registry;
 pub(crate) mod route_runtime_state;
 pub mod route_types;

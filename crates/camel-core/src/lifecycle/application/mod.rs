@@ -1,4 +1,5 @@
 pub mod commands;
+pub(crate) mod context_lifecycle;
 pub(crate) mod ports;
 pub mod queries;
 pub mod route_definition;

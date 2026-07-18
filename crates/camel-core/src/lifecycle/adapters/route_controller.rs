@@ -27,11 +27,11 @@ pub use camel_processor::aggregator::SharedLanguageRegistry;
 use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::route_compiler_ext::{RouteCompilerExt, build_eh_config_pipeline};
+pub(crate) use crate::lifecycle::adapters::route_helpers::PreparedRoute;
 use crate::lifecycle::adapters::route_helpers::{
     AggregateSplitInfo, CrashNotification, ManagedRoute, assert_no_mixed_top_level_splits,
     handle_is_running, inferred_lifecycle_label, is_pending,
 };
-pub(crate) use crate::lifecycle::adapters::route_helpers::{CompiledPipeline, PreparedRoute};
 #[cfg(test)]
 pub(super) use crate::lifecycle::adapters::route_helpers::{
     emit_start_route_event, set_start_route_event_hook,
@@ -40,6 +40,7 @@ use crate::lifecycle::adapters::route_registry::RouteRegistry;
 use crate::lifecycle::adapters::route_runtime_state;
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
+pub(crate) use crate::lifecycle::domain::CompiledPipeline;
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::{DetailLevel, TracerConfig};
 use camel_bean::BeanRegistry;

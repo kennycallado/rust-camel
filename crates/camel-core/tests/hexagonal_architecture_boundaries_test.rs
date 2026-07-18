@@ -319,9 +319,15 @@ fn domain_has_no_tower_or_framework_types() {
     let mut files = Vec::new();
     collect_rust_files(&root, &mut files);
 
+    // `BoxProcessor` is the contract-level type alias for a Tower
+    // `BoxCloneService<Exchange, Exchange, CamelError>` re-exported by
+    // `camel_api`. Domain value objects (`CompiledPipeline`) are allowed to
+    // hold it as a field because it is the canonical exchange-processor
+    // contract, not a framework-integration point. The direct tower usage
+    // (`tower::`), composition helpers, and component framework imports are
+    // still forbidden — those are the framework-coupling vectors.
     let forbidden = &[
         "tower::",
-        "BoxProcessor",
         "compose_pipeline",
         "TracingProcessor",
         "use camel_component_api::",
@@ -390,9 +396,34 @@ fn lifecycle_application_does_not_import_hot_reload() {
 
 #[test]
 fn hot_reload_does_not_import_lifecycle_domain_directly() {
-    // hot_reload may use lifecycle application/adapters types directly (by design),
-    // but must never bypass the layering by importing raw domain types.
-    assert_no_forbidden_imports("hot_reload", &["crate::lifecycle::domain"]);
+    // The port (`hot_reload/ports/`) is the LEGITIMATE crossing point: it
+    // names domain contract types (`CompiledPipeline`, etc.) as the language
+    // of its trait surface, because the dependency rule is
+    // `domain ← application ← adapters` and the port is the application-ring
+    // façade for the hot-reload bounded context. Application code must go
+    // THROUGH the port — it must not import domain types directly.
+    //
+    // `assert_no_forbidden_imports` is directory-recursive, so we cannot use
+    // it here: the ports subdir must be excluded. Walk the subdirs manually.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hot_reload");
+    for ring in ["application", "adapters", "domain"] {
+        let ring_dir = root.join(ring);
+        if !ring_dir.is_dir() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&ring_dir, &mut files);
+        for file in &files {
+            let content = fs::read_to_string(file).expect("failed to read source file");
+            assert!(
+                !content.contains("crate::lifecycle::domain"),
+                "hot_reload/{ring} must not import lifecycle::domain directly \
+                 (use the ReloadExecutorPort surface, not raw domain types); \
+                 found import in {}",
+                file.display()
+            );
+        }
+    }
 }
 
 #[test]
@@ -424,6 +455,28 @@ fn hot_reload_does_not_use_old_flat_config_path() {
         "hot_reload",
         &["crate::config::", "crate::tracer::", "crate::registry::"],
     );
+}
+
+// ---- Stage 3 (Tier C, rc-d0pu.3, task C1): hot_reload/application internals depend on port not concrete handle ----
+
+/// `reload.rs` is deliberately exempt: it owns the PUBLIC
+/// `execute_reload_actions(&RuntimeExecutionHandle)` wrapper which coerces
+/// to `&dyn ReloadExecutorPort` at internal call sites. Only the internal
+/// handlers (`reload_actions.rs`, `drain.rs`) must depend on the port.
+#[test]
+fn hot_reload_application_internals_depend_on_port_not_concrete_handle() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for file in [
+        "hot_reload/application/reload_actions.rs",
+        "hot_reload/application/drain.rs",
+    ] {
+        let path = root.join(file);
+        let content = fs::read_to_string(&path).expect("file must exist");
+        assert!(
+            !content.contains("RuntimeExecutionHandle"),
+            "{file} must not reference concrete RuntimeExecutionHandle (use &dyn ReloadExecutorPort)"
+        );
+    }
 }
 
 // ---- Stage 1 (Tier A, rc-d0pu.1): extend coverage to shared/ + confine CQRS bypass ----
@@ -492,27 +545,27 @@ fn cqrs_inflight_bypass_is_confined_to_two_production_sites() {
 }
 
 #[test]
-fn flat_root_modules_are_recorded_as_pending_tier_c_slices() {
-    // These flat-root modules have NO hexagonal structure yet. They are Tier C (rc-d0pu.3) reorg
-    // targets. This test only enumerates them so they stay visible — it asserts existence, NOT
-    // layering (enforcing layering that does not exist would generate false violations).
+fn flat_root_modules_are_classified_as_slices() {
+    // These flat-root modules are classified as single-ring slices or composition
+    // roots in ADR-0045 §5. They stay flat by the right-sizing decision (a 3-ring
+    // split is only warranted for modules with genuine entity/use-case/adapter
+    // separation — see health_registry + datasource). This test asserts the flat
+    // files still exist; ring discipline is enforced elsewhere where applicable.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let pending = [
+    let classified = [
         "context.rs",
         "context_builder.rs",
-        "health_registry.rs",
-        "datasource.rs",
         "template.rs",
         "registry.rs",
         "language_registry.rs",
         "component_metadata_catalog.rs",
         "startup_validation.rs",
     ];
-    for name in pending {
+    for name in classified {
         let p = root.join(name);
         assert!(
             p.exists(),
-            "expected flat-root slice {} to still exist at {}",
+            "expected classified flat-root slice {} to still exist at {}",
             name,
             p.display()
         );
@@ -632,5 +685,162 @@ fn export_feature_gates_reexports_not_compilation() {
         "the \"internal-adapters\" literal must not appear in any src file (Cargo.toml-only alias); \
          found in: {}",
         alias_offenders.join(", ")
+    );
+}
+
+// ---- Stage 7 (Tier C, rc-d0pu.3, fixes F2 + F3): port → adapter import guard ----
+
+/// Ports live in the application ring; the dependency rule is
+/// `domain ← application ← adapters`. A port trait must NOT import types from
+/// any adapter ring — contract types the port needs must live in domain (or a
+/// contracts module). This guard catches the class of violation F2 fixed
+/// (`CompiledPipeline` was imported from `lifecycle::adapters`) and would catch
+/// any future regression.
+///
+/// One documented §4 exception: `PreparedRoute` (referenced by
+/// `prepare_route_definition_with_generation` / `insert_prepared_route`).
+/// `PreparedRoute::managed: ManagedRoute` bundles adapter-internal state
+/// (JoinHandle, CancellationToken, SharedPipeline, AggregatorService,
+/// CompiledRoute) and cannot be relocated without a port-semantics redesign
+/// (thin `{ route_id }` contract + controller-internal HashMap). Recorded as a
+/// charter §4 accepted exception. The allow-list below pins exactly this one
+/// item; when the redesign lands, the allow-list goes empty and this guard
+/// becomes absolute.
+#[test]
+fn port_traits_do_not_import_from_adapter_ring() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let port_dirs = ["hot_reload/ports", "lifecycle/application/ports"];
+    // The single documented §4 exception (see test doc above).
+    let allowed_adapter_imports = ["PreparedRoute"];
+    let mut files = Vec::new();
+    for dir in &port_dirs {
+        let dir_path = root.join(dir);
+        if dir_path.is_dir() {
+            collect_rust_files(&dir_path, &mut files);
+        }
+    }
+    for file in &files {
+        let content = fs::read_to_string(file).expect("failed to read port file");
+        // Normalize whitespace so multiline `use ...::{ A, B };` imports
+        // (cargo fmt places `{` at line end, items on following lines) collapse
+        // to a single parseable statement. Line-by-line parsing would miss them.
+        let normalized: String = content
+            .chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
+            .collect();
+        for stmt in normalized.split(';') {
+            let stmt = stmt.trim();
+            if !stmt.starts_with("use ") || !stmt.contains("crate::") {
+                continue;
+            }
+            // Does the statement reference the `adapters` module at all?
+            // Token-level check avoids false positives on identifiers like
+            // `not_adapters` (which would falsely match a substring scan).
+            let has_adapters_token = stmt
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|tok| tok == "adapters");
+            if !has_adapters_token {
+                continue;
+            }
+            if stmt.contains("adapters::") {
+                // Item import `use crate::<...>::adapters::<mod>::Item` or
+                // `use crate::<...>::adapters::<mod>::{ A, B }`: extract the
+                // imported items and check against the allow-list.
+                let after_adapters = stmt.split("::adapters::").nth(1).unwrap_or("");
+                let last_segment = after_adapters.rsplit("::").next().unwrap_or(after_adapters);
+                let items: Vec<&str> = last_segment
+                    .trim_matches(|c: char| c == '{' || c == '}' || c == ' ')
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                for item in items {
+                    assert!(
+                        allowed_adapter_imports.contains(&item),
+                        "port file {} imports adapter type '{}' via `{stmt}`: ports must not \
+                         import from any adapter ring (dependency rule). Only {:?} allowed \
+                         (§4 exception).",
+                        file.display(),
+                        item,
+                        allowed_adapter_imports
+                    );
+                }
+            } else {
+                // `adapters` appears as a LEAF — a whole-module import
+                // (`::adapters;`, `::{adapters}`, `::adapters as x;`, etc.).
+                // ALWAYS forbidden: cannot be granularly allow-listed.
+                panic!(
+                    "port file {} imports the whole adapter module (`{stmt}`): ports must not \
+                     import from any adapter ring (dependency rule).",
+                    file.display()
+                );
+            }
+        }
+    }
+}
+
+// ---- Stage 5 (Tier C, rc-d0pu.3, task C3): full-slice module homes ----
+
+#[test]
+fn full_slice_modules_have_3_ring_layout_with_dependency_rule() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for module in ["health_registry", "datasource"] {
+        assert!(
+            root.join(format!("{module}.rs")).exists(),
+            "{module}.rs module root"
+        );
+        assert!(root.join(module).is_dir(), "{module}/ 3-ring dir");
+        for ring in ["domain", "application", "adapters"] {
+            assert!(
+                root.join(module).join(format!("{ring}.rs")).exists(),
+                "{module}/{ring}.rs must exist (3-ring slice)"
+            );
+        }
+        // domain must not import any adapter ring (dependency rule). Reject ALL
+        // adapter import forms: super::adapters, crate::<module>::adapters,
+        // crate::lifecycle::adapters, crate::shared::**::adapters, etc.
+        let dom = std::fs::read_to_string(root.join(module).join("domain.rs")).unwrap_or_default();
+        assert!(
+            !dom.contains("adapters"),
+            "{module}/domain.rs must not import any adapter ring"
+        );
+    }
+}
+
+#[test]
+fn context_lifecycle_use_cases_respect_dependency_rule() {
+    // C2 (Tier C): start/stop/abort algorithms live in
+    // lifecycle/application/context_lifecycle.rs as use-cases, NOT as
+    // inherent methods on CamelContext. The start_context and stop_context
+    // use-cases must depend on the RouteOrderingPort abstraction, not the
+    // concrete RouteControllerHandle. The ONLY allowed concrete reference
+    // is abort_context's documented §4 exception for the destructive
+    // shutdown() call (same precedent as reload_watcher.rs).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let context_lifecycle = root.join("lifecycle/application/context_lifecycle.rs");
+    assert!(
+        context_lifecycle.exists(),
+        "context_lifecycle.rs use-cases module must exist (C2)"
+    );
+    let content = fs::read_to_string(&context_lifecycle).expect("read context_lifecycle.rs");
+
+    // start_context + stop_context must depend on the port abstraction.
+    assert!(
+        content.contains("RouteOrderingPort"),
+        "context_lifecycle.rs must use the RouteOrderingPort abstraction"
+    );
+
+    // The InFlightCount variant stays in its existing CQRS site; the
+    // new use-cases must not pull it in.
+    assert!(
+        !content.contains("InFlightCount"),
+        "context_lifecycle.rs must not introduce the InFlightCount CQRS variant"
+    );
+
+    // The ordering impl lives in adapters, NOT application.
+    let ordering_impl = root.join("lifecycle/adapters/route_ordering_impl.rs");
+    assert!(
+        ordering_impl.exists(),
+        "RouteOrderingPort impl must live in adapters (dependency rule)"
     );
 }

@@ -132,15 +132,15 @@ pub use crate::lifecycle::adapters::{
     InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore, InMemoryRouteRepository,
     InMemoryRuntimeStore, RuntimeExecutionAdapter,
 };
+pub use crate::lifecycle::application::ports::{
+    CommandDedupPort, EventPublisherPort, InFlightCountResult, ProjectionStorePort,
+    RouteRepositoryPort, RouteStatusProjection, RuntimeEventJournalPort, RuntimeExecutionPort,
+    RuntimeUnitOfWorkPort,
+};
 pub use crate::lifecycle::application::runtime_bus::RuntimeBus;
 pub use crate::lifecycle::application::{BuilderStep, RouteDefinition};
 pub use crate::lifecycle::domain::{
     RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
-};
-pub use crate::lifecycle::ports::{
-    CommandDedupPort, EventPublisherPort, InFlightCountResult, ProjectionStorePort,
-    RouteRepositoryPort, RouteStatusProjection, RuntimeEventJournalPort, RuntimeExecutionPort,
-    RuntimeUnitOfWorkPort,
 };
 pub use crate::shared::components::domain::Registry;
 pub use crate::shared::observability::adapters::TracingProcessor;

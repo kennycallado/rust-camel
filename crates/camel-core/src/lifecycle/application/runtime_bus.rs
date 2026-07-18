@@ -11,14 +11,14 @@ use camel_api::{
 use crate::lifecycle::application::commands::{
     CommandDeps, execute_command, handle_register_internal,
 };
-use crate::lifecycle::application::queries::{QueryDeps, execute_query};
-use crate::lifecycle::application::route_definition::RouteDefinition;
-use crate::lifecycle::domain::DomainError;
-use crate::lifecycle::ports::RouteRegistrationPort;
-use crate::lifecycle::ports::{
+use crate::lifecycle::application::ports::RouteRegistrationPort;
+use crate::lifecycle::application::ports::{
     CommandDedupPort, EventPublisherPort, InFlightCountResult, ProjectionStorePort,
     RouteRepositoryPort, RuntimeExecutionPort, RuntimeUnitOfWorkPort,
 };
+use crate::lifecycle::application::queries::{QueryDeps, execute_query};
+use crate::lifecycle::application::route_definition::RouteDefinition;
+use crate::lifecycle::domain::DomainError;
 use camel_component_api::HealthCheckRegistry as HealthCheckRegistryTrait;
 
 impl From<InFlightCountResult> for RuntimeQueryResult {
@@ -259,10 +259,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
+    use crate::lifecycle::application::ports::RouteRegistrationPort as InternalRuntimeCommandBus;
+    use crate::lifecycle::application::ports::RouteStatusProjection;
     use crate::lifecycle::application::route_definition::RouteDefinition;
     use crate::lifecycle::domain::{RouteRuntimeAggregate, RuntimeEvent};
-    use crate::lifecycle::ports::RouteRegistrationPort as InternalRuntimeCommandBus;
-    use crate::lifecycle::ports::RouteStatusProjection;
 
     #[derive(Clone, Default)]
     struct InMemoryTestRepo {

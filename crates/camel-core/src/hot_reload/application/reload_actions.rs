@@ -10,9 +10,9 @@ use std::time::Duration;
 use camel_api::function::{FunctionDiff, PrepareToken};
 use camel_api::{BoxProcessor, CamelError, StepLifecycle};
 
-use crate::context::RuntimeExecutionHandle;
 use crate::hot_reload::application::drain::drain_route;
 use crate::hot_reload::application::reload::{FunctionReloadContext, ReloadError};
+use crate::hot_reload::ports::ReloadExecutorPort;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 
 // ============================================================================
@@ -98,7 +98,7 @@ pub(super) fn should_start_after_restart(runtime_status: Option<&str>) -> bool {
 pub(super) async fn apply_swap(
     route_id: String,
     new_definitions: &mut Vec<RouteDefinition>,
-    controller: &RuntimeExecutionHandle,
+    controller: &dyn ReloadExecutorPort,
     drain_timeout: Duration,
     function_ctx: Option<&FunctionReloadContext>,
     errors: &mut Vec<ReloadError>,
@@ -161,12 +161,13 @@ pub(super) async fn apply_swap(
             }
         };
 
-    // Inject lifecycle from the test-only field on RuntimeExecutionHandle,
+    // Inject lifecycle from the test-only seam on the executor port,
     // simulating a lifecycle-bearing route (e.g. resequencer).  In production
-    // the field does not exist — this block is compiled out.
+    // the method does not exist on `ReloadExecutorPort` — this block is compiled
+    // out (the port method itself is `#[cfg(test)]`).
     #[cfg(test)]
     {
-        if let Some(injected) = controller.test_lifecycle_inject.lock().unwrap().take() {
+        if let Some(injected) = controller.take_test_lifecycle_inject() {
             lifecycle = injected;
         }
     }
@@ -336,7 +337,7 @@ async fn rollback_staging(
 pub(super) async fn apply_add(
     route_id: String,
     new_definitions: &mut Vec<RouteDefinition>,
-    controller: &RuntimeExecutionHandle,
+    controller: &dyn ReloadExecutorPort,
     function_ctx: Option<&FunctionReloadContext>,
     errors: &mut Vec<ReloadError>,
 ) {
@@ -459,7 +460,7 @@ pub(super) async fn apply_add(
 /// Apply a Remove action: stop and delete a route (with function context or with raw controller).
 pub(super) async fn apply_remove(
     route_id: String,
-    controller: &RuntimeExecutionHandle,
+    controller: &dyn ReloadExecutorPort,
     drain_timeout: Duration,
     function_ctx: Option<&FunctionReloadContext>,
     errors: &mut Vec<ReloadError>,
@@ -583,7 +584,7 @@ pub(super) async fn apply_remove(
 pub(super) async fn apply_restart(
     route_id: String,
     new_definitions: &mut Vec<RouteDefinition>,
-    controller: &RuntimeExecutionHandle,
+    controller: &dyn ReloadExecutorPort,
     drain_timeout: Duration,
     function_ctx: Option<&FunctionReloadContext>,
     errors: &mut Vec<ReloadError>,

@@ -4,6 +4,11 @@
 //! These are the concrete types (`CrashNotification`, `AggregateSplitInfo`,
 //! `ManagedRoute`, `PreparedRoute`) and pure helper functions that do not depend
 //! on `DefaultRouteController` state.
+//!
+//! `CompiledPipeline` previously lived here too; it has been moved to
+//! [`crate::lifecycle::domain::route_compilation`] because it is a pure
+//! contract type and was being imported by `ReloadExecutorPort` (an
+//! application-ring port), which violated the dependency rule.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -145,17 +150,15 @@ impl Drop for DrainGuard {
     }
 }
 
-/// A compiled pipeline bundle carrying both the processor and its lifecycle
-/// handles.  Returned by [`RouteCompilerExt::compile_route_impl`] so that the
-/// hot-reload Restart path can thread lifecycle into
-/// [`swap_pipeline_raw`](super::pipeline_runtime::swap_pipeline_raw).
-#[derive(Debug)]
-pub(crate) struct CompiledPipeline {
-    pub(crate) processor: camel_api::BoxProcessor,
-    pub(crate) lifecycle: Vec<Arc<dyn camel_api::StepLifecycle>>,
-}
-
 /// A prepared route (compiled but not yet inserted into the registry).
+///
+/// NOTE: This type carries `managed: ManagedRoute` (an adapter-internal bundle
+/// of runtime handles, cancellation tokens, shared pipelines, etc.). It is
+/// therefore NOT a pure contract type and cannot be relocated to the domain
+/// ring without a separate refactor — the `ReloadExecutorPort` still imports
+/// it from `crate::lifecycle::adapters::route_controller::PreparedRoute`,
+/// which violates the dependency rule (application → adapters). The full
+/// F2 fix is BLOCKED on this coupling; see Tier C blessing-gate report.
 pub(crate) struct PreparedRoute {
     pub(crate) route_id: String,
     pub(super) managed: ManagedRoute,

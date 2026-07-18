@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use camel_api::{CamelError, RuntimeQuery, RuntimeQueryResult};
 
-use crate::lifecycle::ports::ProjectionStorePort;
+use crate::lifecycle::application::ports::ProjectionStorePort;
 
 pub struct QueryDeps {
     pub projections: Arc<dyn ProjectionStorePort>,
@@ -53,7 +53,7 @@ mod tests {
     use crate::lifecycle::domain::DomainError;
 
     use super::*;
-    use crate::lifecycle::ports::{ProjectionStorePort, RouteStatusProjection};
+    use crate::lifecycle::application::ports::{ProjectionStorePort, RouteStatusProjection};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use camel_api::CamelError;
 use tracing::{debug, info, warn};
 
-use crate::context::RuntimeExecutionHandle;
+use crate::hot_reload::ports::ReloadExecutorPort;
 
 const DRAIN_POLL_INTERVAL_MS: u64 = 50;
 
@@ -15,7 +15,7 @@ pub(crate) enum DrainResult {
 pub(crate) async fn drain_route(
     route_id: &str,
     action: &str,
-    controller: &RuntimeExecutionHandle,
+    controller: &dyn ReloadExecutorPort,
     timeout: Duration,
 ) -> DrainResult {
     let timeout_ms = timeout.as_millis() as u64;

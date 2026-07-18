@@ -1,10 +1,8 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace};
 
 #[cfg(test)]
 use camel_api::StepLifecycle;
@@ -27,10 +25,8 @@ use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::registry::RegistryError;
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::TracerConfig;
-use crate::startup_validation::{ConfigCheck, run_startup_validation};
+use crate::startup_validation::ConfigCheck;
 use crate::template::TemplateRegistry;
-
-static CONTEXT_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub use crate::context_builder::CamelContextBuilder;
 
@@ -136,7 +132,7 @@ impl RuntimeExecutionHandle {
         &self,
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
-        use crate::lifecycle::ports::RouteRegistrationPort;
+        use crate::lifecycle::application::ports::RouteRegistrationPort;
         self.runtime
             .register_route(definition)
             .await
@@ -168,7 +164,7 @@ impl RuntimeExecutionHandle {
         &self,
         definition: RouteDefinition,
         generation: u64,
-    ) -> Result<crate::lifecycle::adapters::route_helpers::CompiledPipeline, CamelError> {
+    ) -> Result<crate::lifecycle::domain::CompiledPipeline, CamelError> {
         self.controller
             .compile_route_definition_pipeline(definition, generation)
             .await
@@ -179,7 +175,7 @@ impl RuntimeExecutionHandle {
     pub(crate) async fn compile_route_definition_dry_pipeline(
         &self,
         definition: RouteDefinition,
-    ) -> Result<crate::lifecycle::adapters::route_helpers::CompiledPipeline, CamelError> {
+    ) -> Result<crate::lifecycle::domain::CompiledPipeline, CamelError> {
         self.controller
             .compile_route_definition_dry_pipeline(definition)
             .await
@@ -329,6 +325,106 @@ impl RuntimeExecutionHandle {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::hot_reload::ports::ReloadExecutorPort for RuntimeExecutionHandle {
+    async fn add_route_definition(&self, definition: RouteDefinition) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::add_route_definition(self, definition).await
+    }
+
+    async fn compile_route_definition_pipeline(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<crate::lifecycle::domain::CompiledPipeline, CamelError> {
+        RuntimeExecutionHandle::compile_route_definition_pipeline(self, definition, generation)
+            .await
+    }
+
+    async fn compile_route_definition_dry_pipeline(
+        &self,
+        definition: RouteDefinition,
+    ) -> Result<crate::lifecycle::domain::CompiledPipeline, CamelError> {
+        RuntimeExecutionHandle::compile_route_definition_dry_pipeline(self, definition).await
+    }
+
+    async fn prepare_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<crate::lifecycle::adapters::route_controller::PreparedRoute, CamelError> {
+        RuntimeExecutionHandle::prepare_route_definition_with_generation(
+            self, definition, generation,
+        )
+        .await
+    }
+
+    async fn insert_prepared_route(
+        &self,
+        prepared: crate::lifecycle::adapters::route_controller::PreparedRoute,
+    ) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::insert_prepared_route(self, prepared).await
+    }
+
+    async fn remove_route_preserving_functions(&self, route_id: String) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::remove_route_preserving_functions(self, route_id).await
+    }
+
+    async fn register_route_aggregate(&self, route_id: String) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::register_route_aggregate(self, route_id).await
+    }
+
+    async fn swap_route_pipeline(
+        &self,
+        route_id: &str,
+        pipeline: camel_api::BoxProcessor,
+    ) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::swap_route_pipeline(self, route_id, pipeline).await
+    }
+
+    async fn stop_route_reload(&self, route_id: &str) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::stop_route_reload(self, route_id).await
+    }
+
+    async fn start_route_reload(&self, route_id: &str) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::start_route_reload(self, route_id).await
+    }
+
+    async fn swap_route_pipeline_raw(
+        &self,
+        route_id: &str,
+        pipeline: camel_api::BoxProcessor,
+        lifecycle: Vec<std::sync::Arc<dyn camel_api::StepLifecycle>>,
+    ) -> Result<(), CamelError> {
+        RuntimeExecutionHandle::swap_route_pipeline_raw(self, route_id, pipeline, lifecycle).await
+    }
+
+    async fn execute_runtime_command(
+        &self,
+        cmd: camel_api::RuntimeCommand,
+    ) -> Result<camel_api::RuntimeCommandResult, CamelError> {
+        RuntimeExecutionHandle::execute_runtime_command(self, cmd).await
+    }
+
+    async fn runtime_route_status(&self, route_id: &str) -> Result<Option<String>, CamelError> {
+        RuntimeExecutionHandle::runtime_route_status(self, route_id).await
+    }
+
+    async fn in_flight_count(&self, route_id: &str) -> Result<u64, CamelError> {
+        RuntimeExecutionHandle::in_flight_count(self, route_id).await
+    }
+
+    async fn route_has_lifecycle(&self, route_id: &str) -> bool {
+        RuntimeExecutionHandle::route_has_lifecycle(self, route_id).await
+    }
+
+    #[cfg(test)]
+    fn take_test_lifecycle_inject(
+        &self,
+    ) -> Option<Vec<std::sync::Arc<dyn camel_api::StepLifecycle>>> {
+        self.test_lifecycle_inject.lock().unwrap().take()
+    }
+}
+
 impl CamelContext {
     pub fn builder() -> CamelContextBuilder {
         CamelContextBuilder::new()
@@ -462,7 +558,7 @@ impl CamelContext {
         &self,
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
-        use crate::lifecycle::ports::RouteRegistrationPort;
+        use crate::lifecycle::application::ports::RouteRegistrationPort;
         debug!(
             from = definition.from_uri(),
             route_id = %definition.route_id(),
@@ -472,11 +568,6 @@ impl CamelContext {
             .register_route(definition)
             .await
             .map_err(Into::into)
-    }
-
-    fn next_context_command_id(op: &str, route_id: &str) -> String {
-        let seq = CONTEXT_COMMAND_SEQ.fetch_add(1, Ordering::Relaxed);
-        format!("context:{op}:{route_id}:{seq}")
     }
 
     /// Access the component registry.
@@ -559,68 +650,18 @@ impl CamelContext {
     ///
     /// Only routes with `auto_startup == true` will be started, in order of their
     /// `startup_order` (lower values start first).
+    ///
+    /// Algorithm lives in `lifecycle::application::context_lifecycle::start_context`
+    /// (Tier C C2). Public signature is unchanged.
     pub async fn start(&mut self) -> Result<(), CamelError> {
-        info!("Starting CamelContext");
-
-        // Reset cancellation state so a restart after stop() gets a fresh token.
-        self.cancel_token = CancellationToken::new();
-
-        // Start lifecycle services first
-        for (i, service) in self.services.iter_mut().enumerate() {
-            info!("Starting service: {}", service.name());
-            if let Err(e) = service.start().await {
-                // Rollback: stop already started services in reverse order
-                warn!(
-                    "Service {} failed to start, rolling back {} services",
-                    service.name(),
-                    i
-                );
-                for j in (0..i).rev() {
-                    if let Err(rollback_err) = self.services[j].stop().await {
-                        warn!(
-                            "Failed to stop service {} during rollback: {}",
-                            self.services[j].name(),
-                            rollback_err
-                        );
-                    }
-                }
-                return Err(e);
-            }
-        }
-
-        // ADR-0033: fail-closed startup validation. Drain the registered
-        // ConfigCheck list and run every check synchronously. If any check
-        // returns Err, refuse to start the runtime — no route consumer is
-        // started, no reconciliation runs. Drains the registry so a second
-        // call to start() (currently not supported) would not re-run checks.
-        let checks = std::mem::take(&mut self.startup_checks);
-        if let Err(e) = run_startup_validation(checks) {
-            warn!("Startup validation failed: {e}");
-            return Err(e);
-        }
-
-        // H8: boot reconciliation — fail routes stuck in transient state
-        // (Starting/Stopping) from a previous run before auto_startup runs.
-        self.runtime
-            .reconcile_transient_states()
-            .await
-            .map_err(|e| CamelError::RouteError(format!("boot reconciliation failed: {e}")))?;
-
-        // Then start routes via runtime command bus (aggregate-first),
-        // preserving route controller startup ordering metadata.
-        let route_ids = self.route_controller.auto_startup_route_ids().await?;
-        for route_id in route_ids {
-            self.runtime
-                .execute(camel_api::RuntimeCommand::StartRoute {
-                    route_id: route_id.clone(),
-                    command_id: Self::next_context_command_id("start", &route_id),
-                    causation_id: None,
-                })
-                .await?;
-        }
-
-        info!("CamelContext started");
-        Ok(())
+        crate::lifecycle::application::context_lifecycle::start_context(
+            &mut self.services,
+            &mut self.startup_checks,
+            &self.runtime,
+            &self.route_controller,
+            &mut self.cancel_token,
+        )
+        .await
     }
 
     /// Graceful shutdown with default 30-second timeout.
@@ -634,56 +675,18 @@ impl CamelContext {
     /// RouteController's per-route shutdown timeout. The RouteController
     /// uses a hardcoded 5-second default (`DEFAULT_SHUTDOWN_TIMEOUT`).
     /// Full propagation is planned for a future version.
+    ///
+    /// Algorithm lives in `lifecycle::application::context_lifecycle::stop_context`
+    /// (Tier C C2). Public signature is unchanged.
     pub async fn stop_timeout(&mut self, _timeout: std::time::Duration) -> Result<(), CamelError> {
-        info!("Stopping CamelContext");
-
-        // Signal cancellation (for any legacy code that might use it)
-        self.cancel_token.cancel();
-        if let Some(join) = self.supervision_join.take() {
-            join.abort();
-        }
-
-        // Stop all routes via runtime command bus (aggregate-first),
-        // preserving route controller shutdown ordering metadata.
-        let route_ids = self.route_controller.shutdown_route_ids().await?;
-        for route_id in route_ids {
-            if let Err(err) = self
-                .runtime
-                .execute(camel_api::RuntimeCommand::StopRoute {
-                    route_id: route_id.clone(),
-                    command_id: Self::next_context_command_id("stop", &route_id),
-                    causation_id: None,
-                })
-                .await
-            {
-                warn!(route_id = %route_id, error = %err, "Runtime stop command failed during context shutdown");
-            }
-        }
-
-        // The controller actor stays alive — it owns route registrations
-        // needed for a subsequent start(). Destructive teardown (actor kill,
-        // health cancel) happens only in abort().
-
-        // Then stop lifecycle services in reverse insertion order (LIFO)
-        // Continue stopping all services even if some fail
-        let mut first_error = None;
-        for service in self.services.iter_mut().rev() {
-            info!("Stopping service: {}", service.name());
-            if let Err(e) = service.stop().await {
-                warn!("Service {} failed to stop: {}", service.name(), e);
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
-            }
-        }
-
-        info!("CamelContext stopped");
-
-        if let Some(e) = first_error {
-            Err(e)
-        } else {
-            Ok(())
-        }
+        crate::lifecycle::application::context_lifecycle::stop_context(
+            &self.cancel_token,
+            &mut self.supervision_join,
+            &self.runtime,
+            &self.route_controller,
+            &mut self.services,
+        )
+        .await
     }
 
     /// Get the graceful shutdown timeout used by [`stop()`](Self::stop).
@@ -704,51 +707,23 @@ impl CamelContext {
     }
 
     /// Immediate abort — kills all tasks without draining.
+    ///
+    /// Algorithm lives in `lifecycle::application::context_lifecycle::abort_context`
+    /// (Tier C C2). Public signature is unchanged. The destructive
+    /// `RouteControllerHandle::shutdown()` call is taken via a documented
+    /// §4 exception (ADR-0045); the rest of the algorithm uses port
+    /// abstractions.
     pub async fn abort(&mut self) {
-        self.cancel_token.cancel();
-        if let Some(join) = self.supervision_join.take() {
-            join.abort();
-        }
-        let route_ids = self
-            .route_controller
-            .shutdown_route_ids()
-            .await
-            .unwrap_or_default();
-        for route_id in route_ids {
-            let _ = self
-                .runtime
-                .execute(camel_api::RuntimeCommand::StopRoute {
-                    route_id: route_id.clone(),
-                    command_id: Self::next_context_command_id("abort-stop", &route_id),
-                    causation_id: None,
-                })
-                .await;
-        }
-
-        for service in self.services.iter_mut().rev() {
-            let name = service.name().to_string();
-            match timeout(std::time::Duration::from_secs(5), service.stop()).await {
-                Ok(Ok(())) => info!("Aborted service: {}", name),
-                Ok(Err(e)) => warn!("Service {} failed to stop during abort: {}", name, e),
-                Err(_) => warn!("Service {} timed out during abort (5s)", name),
-            }
-        }
-
-        // Destructive teardown: kill the controller actor and cancel health
-        // probes. This is what makes abort() non-restartable vs stop().
-        let _ = self.route_controller.shutdown().await;
-        self.health_registry.cancel_token().cancel();
-        if let Some(mut join) = self.actor_join.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut join).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => warn!("Controller actor task error during abort: {e}"),
-                Err(_) => {
-                    warn!("Controller actor did not stop within 5s during abort; force-aborting");
-                    join.abort();
-                    let _ = join.await;
-                }
-            }
-        }
+        crate::lifecycle::application::context_lifecycle::abort_context(
+            &self.cancel_token,
+            &mut self.supervision_join,
+            &self.runtime,
+            &self.route_controller,
+            &mut self.services,
+            self.health_registry.cancel_token(),
+            &mut self.actor_join,
+        )
+        .await
     }
 
     /// Check health status of all registered services and lifecycle services.

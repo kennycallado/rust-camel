@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use camel_api::CamelError;
 
 use crate::lifecycle::adapters::runtime_event_record::runtime_event_serde;
+use crate::lifecycle::application::ports::RuntimeEventJournalPort;
 use crate::lifecycle::domain::{DomainError, RuntimeEvent};
-use crate::lifecycle::ports::RuntimeEventJournalPort;
 
 // ── Table definitions ─────────────────────────────────────────────────────────
 

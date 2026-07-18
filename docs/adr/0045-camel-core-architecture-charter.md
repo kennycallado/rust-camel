@@ -84,21 +84,99 @@ justification; every new bypass must land a line here, or it is a boundary viola
   A `#[deprecated]` re-export shim at `lifecycle::domain` keeps the old path compiling; shim removal
   tracked in bd `rc-rfr9`. Kept here for the historical record.
 
+**Use-case purity gaps (Tier C C2):**
+
+- **`abort_context` takes concrete `&RouteControllerHandle`**
+  (`lifecycle/application/context_lifecycle.rs::abort_context`) — ACCEPTED EXCEPTION
+  (`rc-d0pu.3`): the abort use-case holds the concrete `RouteControllerHandle` to invoke the
+  destructive `shutdown()` method. `start_context` and `stop_context` go through the
+  `RouteOrderingPort` abstraction, but `shutdown()` is destructive and non-restartable
+  (vs. the restartable start/stop ordering queries), so it does not fit the ordering
+  port. The narrow-port alternative (`RouteDestructiveTeardownPort` with only `shutdown()`)
+  was rejected as YAGNI — one rare destructive call. **Precedent:** none at the use-case
+  ring — C1 (`ReloadExecutorPort`) removed `hot_reload/application`'s concrete-handle
+  inversion, making this the first use-case→concrete-adapter exception in the crate.
+  Closest analog is adapter-internal: `lifecycle/adapters/runtime_execution.rs` holds a
+  concrete `RouteControllerHandle`, and `hot_reload/adapters/reload_watcher.rs` holds a
+  concrete `RuntimeExecutionHandle` — both within the adapters ring (adapter-to-adapter,
+  not use-case-to-adapter). The exception here stands on YAGNI alone. Health
+  cancellation still goes through the cancel token (no whole-registry leak).
+
+**Port → adapter type leak (Tier C C1):**
+
+- **`ReloadExecutorPort` references `PreparedRoute` from `lifecycle::adapters`**
+  (`hot_reload/ports/mod.rs`) — ACCEPTED EXCEPTION (`rc-d0pu.3`): the port's
+  `prepare_route_definition_with_generation` / `insert_prepared_route` methods
+  reference `PreparedRoute`, which lives in `lifecycle::adapters::route_controller`.
+  `PreparedRoute::managed: ManagedRoute` bundles adapter-internal state
+  (`JoinHandle`, `CancellationToken`, `SharedPipeline`, `Arc<AggregatorService>`,
+  `CompiledRoute`) and cannot be relocated to domain without a port-semantics
+  redesign (thin `{ route_id }` contract + controller-internal `HashMap` keyed by
+  route_id). That redesign changes `prepare`/`insert` semantics and is out of
+  Tier C's "extract the port" scope. The companion `CompiledPipeline` WAS
+  relocated to `lifecycle/domain/route_compilation.rs` (pure contract type).
+  The exception is bounded to exactly this one import, pinned by the
+  `port_traits_do_not_import_from_adapter_ring` boundary test allow-list
+  (`["PreparedRoute"]`); when the redesign lands, the allow-list goes empty.
+
+**Domain ring framework field types (pre-existing, surfaced by Tier C C3):**
+
+- **`health_registry/domain.rs` + `datasource/domain.rs` hold framework-typed
+  fields** — ACCEPTED EXCEPTION (pre-existing, made explicit by C3's slice
+  labeling): the aggregates `HealthCheckRegistry` (fields: `tokio_util::sync::CancellationToken`,
+  `tokio::time::Duration`, `parking_lot::RwLock`) and `RuntimeDatasourceCatalog`
+  (fields: `dashmap::DashMap`, `tokio::sync::OnceCell`) plus `camel_api` traits
+  (`AsyncHealthCheck`) carry framework field types despite living in the
+  domain-ring file. These imports are identical to the pre-Tier-C flat modules
+  (verified at `4aca5ac6`); C3's 3-ring split labeled the file `domain.rs`,
+  making the pre-existing impurity explicit rather than introducing it. Strict
+  domain purification (extracting the stateful registries behind ports, leaving
+  only pure value types in domain) is a separate refactor out of Tier C's
+  "slice homes" scope. The aggregates are documented in-file as "field types
+  — the domain does not perform I/O; orchestration lives in the sibling
+  application module." The `domain_does_not_import_application_or_adapters`
+  boundary test still holds (no cross-ring imports); the framework-field
+  impurity is crate-internal `pub(crate)` state, not a public contract leak.
+
+**Pre-1.0 deprecation removals (Tier C C5):**
+
+- **`camel_core::lifecycle::ports::*` glob-shim re-export**
+  (`crates/camel-core/src/lib.rs:140-144`, formerly `lifecycle/ports.rs`) — REMOVED
+  (`rc-rfr9`): the compatibility shim that re-exported `lifecycle::application::ports::*`
+  at the old Tier B path during the slice-homes transition. Canonical replacement:
+  `crate::lifecycle::application::ports::*`. Pre-1.0 `#[deprecated]`-item removal
+  with a canonical replacement available since Tier B; conventional pre-1.0
+  practice. NOT a wire-format break (no serialized form changes).
+- **`camel_core::lifecycle::domain::LanguageRegistryError`** (`lifecycle/domain/mod.rs:6-10`)
+  — REMOVED (`rc-rfr9`): the `#[deprecated]` re-export of `LanguageRegistryError` at
+  the `lifecycle::domain` path. Canonical replacement: `camel_core::LanguageRegistryError`
+  (re-exported at `lib.rs:115` from `crate::language_registry`). Pre-1.0
+  `#[deprecated]`-item removal with a canonical replacement available since
+  Tier B (`rc-d0pu.2`); conventional pre-1.0 practice. NOT a wire-format break
+  (no serialized form changes). Completes the remediation recorded in the
+  entity-purity gap for `LanguageRegistryError` above.
+
 ### 5. Ring → module mapping
-The four Clean Architecture rings map to camel-core modules as follows (vertical slices are the
-decomposition unit):
+The four Clean Architecture rings map to camel-core modules as follows (the decomposition unit is
+the vertical slice):
 
-| Ring | Current modules |
-|---|---|
-| Entities | `lifecycle/domain`, `hot_reload/domain`, `shared/**/domain` |
-| Use Cases | `lifecycle/application`, `hot_reload/application` (ports nested per slice) |
-| Interface Adapters | `lifecycle/adapters` (compilers, converters, catalogs), `shared/**/adapters` |
-| Frameworks & Drivers | Tower/Tokio actors, `redb_journal`, `in_memory`, watchers, `context_builder` composition |
-
-Flat root modules (`context.rs`, `health_registry.rs`, `datasource.rs`, `template.rs`,
-`registry.rs`, `language_registry.rs`, `component_metadata_catalog.rs`, `startup_validation.rs`)
-are **vertical slices awaiting internal hexagonal organization** — addressed by the pre-1.0
-remediation plan (slice homes + re-export shims).
+| Module | Classification | Ring |
+|---|---|---|
+| `context.rs` | composition root (thinned in C2) | Frameworks & Drivers |
+| `context_builder.rs` | composition root (wiring) | Frameworks & Drivers |
+| `health_registry/domain.rs` | full-slice submodule | Entities |
+| `health_registry/application.rs` | full-slice submodule | Use Cases |
+| `health_registry/adapters.rs` | full-slice submodule | Interface Adapters |
+| `datasource/domain.rs` | full-slice submodule | Entities |
+| `datasource/application.rs` | full-slice submodule | Use Cases |
+| `datasource/adapters.rs` | full-slice submodule | Interface Adapters |
+| `startup_validation.rs` | single-ring slice (has trait, zero I/O) | Entities |
+| `template.rs` | single-ring slice (`TemplateRegistry` Mutex store) | Interface Adapters |
+| `language_registry.rs` | single-ring slice | Use Cases |
+| `component_metadata_catalog.rs` | single-ring adapter ("thin wrapper") | Interface Adapters |
+| `registry.rs` | single-ring (private shared-infra types) | Interface Adapters |
+| `claim_check/` | single-ring (already ring-stable; out of Tier C scope) | Interface Adapters |
+| `idempotent/` | single-ring (already ring-stable; out of Tier C scope) | Interface Adapters |
 
 ## Consequences
 - The boundary test (`hexagonal_architecture_boundaries_test.rs`) is extended to cover root/shared

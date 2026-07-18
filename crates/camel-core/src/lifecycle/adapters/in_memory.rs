@@ -6,11 +6,11 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::lifecycle::domain::DomainError;
 
-use crate::lifecycle::domain::{RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent};
-use crate::lifecycle::ports::{
+use crate::lifecycle::application::ports::{
     CommandDedupPort, EventPublisherPort, ProjectionStorePort, RouteRepositoryPort,
     RouteStatusProjection, RuntimeEventJournalPort, RuntimeUnitOfWorkPort,
 };
+use crate::lifecycle::domain::{RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent};
 
 #[derive(Default, Clone)]
 pub struct InMemoryRouteRepository {

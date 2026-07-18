@@ -3,7 +3,7 @@ use crate::lifecycle::domain::RouteRuntimeState;
 
 use super::*;
 use crate::health_registry::HealthCheckRegistry;
-use crate::lifecycle::ports::InFlightCountResult;
+use crate::lifecycle::application::ports::InFlightCountResult;
 use camel_api::{AsyncHealthCheck, CheckResult, HealthStatus};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

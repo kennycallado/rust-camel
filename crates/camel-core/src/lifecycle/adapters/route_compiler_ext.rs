@@ -551,7 +551,7 @@ impl RouteCompilerExt<'_> {
         &self,
         def: RouteDefinition,
         staging_mode: &super::step_resolution::FunctionStagingMode,
-    ) -> Result<super::route_helpers::CompiledPipeline, CamelError> {
+    ) -> Result<crate::lifecycle::domain::CompiledPipeline, CamelError> {
         let route_id = def.route_id().to_string();
 
         let producer_ctx = self.build_producer_context(&route_id)?;
@@ -624,7 +624,7 @@ impl RouteCompilerExt<'_> {
             pipeline = BoxProcessor::new(uow_layer.layer(pipeline));
         }
 
-        Ok(super::route_helpers::CompiledPipeline {
+        Ok(crate::lifecycle::domain::CompiledPipeline {
             processor: pipeline,
             lifecycle,
         })
@@ -665,7 +665,7 @@ impl RouteCompilerExt<'_> {
         &self,
         def: RouteDefinition,
         generation: u64,
-    ) -> Result<super::route_helpers::CompiledPipeline, CamelError> {
+    ) -> Result<crate::lifecycle::domain::CompiledPipeline, CamelError> {
         self.compile_route_impl(
             def,
             &super::step_resolution::FunctionStagingMode::HotReload { generation },
@@ -681,7 +681,7 @@ impl RouteCompilerExt<'_> {
     pub(crate) fn compile_route_definition_dry_pipeline(
         &self,
         def: RouteDefinition,
-    ) -> Result<super::route_helpers::CompiledPipeline, CamelError> {
+    ) -> Result<crate::lifecycle::domain::CompiledPipeline, CamelError> {
         self.compile_route_impl(
             def,
             &super::step_resolution::FunctionStagingMode::DryCompile,
