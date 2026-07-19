@@ -24,6 +24,10 @@ _Avoid_: transformer expression (MutatingExpression is the precise term)
 A Predicate variant that may also modify the Exchange as a side effect of evaluation.
 _Avoid_: mutating condition, side-effecting predicate
 
+## Implementations
+
+- **[MiniJinja](./camel-language-minijinja/CONTEXT.md)** — template rendering language for inline template execution. Produces structured output (HTML, JSON, prompts) from Exchange data via MiniJinja (Python Jinja2-inspired). Phase 1 covers inline templates only; Phase 2 (bd rc-64if, `crates/components/camel-template`) adds external file loading, includes, and hot-reload. Authority: ADR-0047.
+
 ## Example dialogue
 
 > "I want to filter exchanges where the `type` header equals `urgent`."

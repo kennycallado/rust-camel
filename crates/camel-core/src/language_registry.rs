@@ -6,9 +6,9 @@
 //! that want to apply `Camel.toml` limits at registration time.
 //!
 //! Engines are only included when their cargo feature is enabled
-//! (`lang-js`, `lang-rhai`). The `simple` language is always registered.
-//! Languages without configurable limits (jsonpath, xpath) are registered
-//! with their default constructor.
+//! (`lang-js`, `lang-rhai`, `lang-minijinja`). The `simple` language is always
+//! registered. Languages without configurable limits (jsonpath, xpath) are
+//! registered with their default constructor.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -33,10 +33,10 @@ pub enum LanguageRegistryError {
 /// Build a language registry from `[languages.*]` config blocks.
 ///
 /// Engines are only included when their cargo feature is enabled
-/// (`lang-rhai`, `lang-js`). The `simple` language is always registered
-/// (no limits apply). Languages without configurable limits (jsonpath, xpath)
-/// are registered with their default constructor so this helper is the single
-/// source of truth consumed by `built_in_languages()`.
+/// (`lang-rhai`, `lang-js`, `lang-minijinja`). The `simple` language is
+/// always registered (no limits apply). Languages without configurable limits
+/// (jsonpath, xpath) are registered with their default constructor so this
+/// helper is the single source of truth consumed by `built_in_languages()`.
 pub fn from_config(_config: &LanguagesConfig) -> SharedLanguageRegistry {
     let mut languages: HashMap<String, Arc<dyn Language>> = HashMap::new();
 
@@ -56,6 +56,14 @@ pub fn from_config(_config: &LanguagesConfig) -> SharedLanguageRegistry {
     {
         let rhai_lang = camel_language_rhai::RhaiLanguage::with_limits(_config.rhai.limits.clone());
         languages.insert("rhai".to_string(), Arc::new(rhai_lang));
+    }
+
+    #[cfg(feature = "lang-minijinja")]
+    {
+        let minijinja_lang = camel_language_minijinja::MinijinjaLanguage::with_limits(
+            _config.minijinja.limits.clone(),
+        );
+        languages.insert("minijinja".to_string(), Arc::new(minijinja_lang));
     }
 
     // Languages without configurable limits — registered with ::new().
@@ -139,6 +147,30 @@ mod tests {
         #[cfg(not(feature = "lang-js"))]
         {
             assert!(!registry.contains_key("js"));
+        }
+    }
+
+    #[test]
+    fn from_config_succeeds_with_minijinja_limits_when_feature_enabled() {
+        let cfg = LanguagesConfig {
+            minijinja: camel_language_api::MinijinjaEngineConfig {
+                limits: camel_language_api::MinijinjaLimitsConfig {
+                    fuel: Some(10_000),
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        };
+        let registry = from_config(&cfg);
+        let registry = registry.lock().expect("lock registry");
+        #[cfg(feature = "lang-minijinja")]
+        {
+            let lang = registry.get("minijinja").expect("minijinja present");
+            assert_eq!(lang.name(), "minijinja");
+        }
+        #[cfg(not(feature = "lang-minijinja"))]
+        {
+            assert!(!registry.contains_key("minijinja"));
         }
     }
 }

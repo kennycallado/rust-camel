@@ -15,7 +15,8 @@ pub use camel_api::exchange::Exchange;
 pub use camel_api::message::Message;
 pub use error::LanguageError;
 pub use language_limits::{
-    JsEngineConfig, JsLimitsConfig, LanguagesConfig, RhaiEngineConfig, RhaiLimitsConfig,
+    JsEngineConfig, JsLimitsConfig, LanguagesConfig, MinijinjaEngineConfig, MinijinjaLimitsConfig,
+    RhaiEngineConfig, RhaiLimitsConfig,
 };
 
 /// A Language factory: produces Expression and Predicate objects.

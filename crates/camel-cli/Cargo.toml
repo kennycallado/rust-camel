@@ -34,7 +34,7 @@ tracing.workspace = true
 camel-api.workspace = true
 camel-bean.workspace = true
 camel-dsl.workspace = true
-camel-core = { workspace = true, features = ["lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath"] }
+camel-core = { workspace = true, features = ["lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja"] }
 camel-config = { workspace = true, features = ["otel", "kubernetes"] }
 camel-component-api.workspace = true
 camel-component-container.workspace = true

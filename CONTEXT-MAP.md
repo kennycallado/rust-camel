@@ -9,7 +9,7 @@
   - [LLM Component](./crates/components/camel-component-llm/CONTEXT.md) — LLM chat and embedding component (OpenAI, Ollama, Mock) with streaming and materialized modes
   - [File Component](./crates/components/camel-file/CONTEXT.md) — polls directories and writes exchange bodies to disk; `atomic_write` helper powers `Override`/`TryRename` write strategies (`Fail` uses `create_new(true)` directly — already atomic)
   - [Cron Component](./crates/components/camel-cron/CONTEXT.md) — calendar-triggered scheduling via Unix 5-field cron expressions; backed by `CronService` SPI (default: `TokioCronService`) in `component-api`
-- [Languages](./crates/languages/CONTEXT.md) — expression and predicate evaluation against Exchanges (JavaScript, JSONPath, XPath, Simple, Rhai)
+- [Languages](./crates/languages/CONTEXT.md) — expression and predicate evaluation against Exchanges (JavaScript, JSONPath, XPath, Simple, Rhai, MiniJinja)
   - [Language SPI](./crates/languages/camel-language-api/CONTEXT.md) — the trait contract every language implements (Language, Expression, Predicate, MutatingExpression/Predicate) and `LanguageError`
 - [Functions](./crates/services/camel-function/CONTEXT.md) — out-of-process executable units invoked as pipeline steps; inspired by serverless functions, running in isolated containers
 - [Services](./crates/services/CONTEXT.md) — cross-cutting infrastructure services: observability (OTel, Prometheus), auth/security, and platform integration (Kubernetes)
@@ -124,6 +124,7 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **TlsReloadHandler / TlsReloadRegistry** — Trait + process-global registry (OnceLock singleton). Each TLS-terminating component implements `TlsReloadHandler` (`matches(scheme, host, port)` + `async reload()`) and registers it lazily inside `get_or_spawn`'s OnceCell init closure. WS also unregisters on `release(port)`. (camel-component-api)
 - **ServerTlsSource** — Shared cert-file source struct (`cert_path`, `key_path`, `client_ca_path`). `build_server_config()` reads PEM files, parses, and constructs `rustls::ServerConfig` with mTLS support. Used by all three server components (gRPC, HTTP, WS) for both initial TLS setup and reload. (camel-component-api)
 - **ArcSwap<TlsAcceptor>** — gRPC uses `Arc<ArcSwap<TlsAcceptor>>` for atomic cert swap. The accept loop calls `load_full()` per connection (snapshot isolation). HTTP/WS use `axum_server::tls_rustls::RustlsConfig` which internally wraps ArcSwap; `reload_from_config()` swaps the cert. ADR-0004. (camel-component-grpc + camel-http + camel-ws)
+- **template rendering language** — A Language SPI implementation that produces structured output (HTML, JSON, prompts) by rendering templates against Exchange data. Phase 1 (`crates/languages/camel-language-minijinja`) covers inline templates only; Phase 2 (bd rc-64if, `crates/components/camel-template`) adds external file loading, includes, and hot-reload. Authority: ADR-0047.
 
 ## Documentation Authority & Refresh
 

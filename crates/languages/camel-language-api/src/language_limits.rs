@@ -101,6 +101,57 @@ pub struct JsLimitsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// MiniJinja limits
+// ---------------------------------------------------------------------------
+
+/// Tunable resource limits for a single MiniJinja `Environment` instance.
+///
+/// Surfaced in `Camel.toml` as:
+///
+/// ```toml
+/// [languages.minijinja.limits]
+/// max-template-source-size = 1048576
+/// max-context-size = 4194304
+/// max-output-size = 4194304
+/// fuel = 100000
+/// max-recursion-depth = 64
+/// execution-timeout-ms = 5000
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct MinijinjaLimitsConfig {
+    /// Maximum size of the compiled template source in bytes.
+    /// (minijinja: `Environment::set_max_template_source_size`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_template_source_size: Option<usize>,
+
+    /// Maximum serialised context size in bytes.
+    /// (minijinja: `Environment::set_max_context_size`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_size: Option<usize>,
+
+    /// Maximum rendered output size in bytes.
+    /// (minijinja: `Environment::set_max_output_size`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_size: Option<usize>,
+
+    /// Fuel limit for the MiniJinja VM (coarse instruction budget).
+    /// (minijinja: `Environment::set_fuel`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fuel: Option<u64>,
+
+    /// Maximum recursion depth for template includes/blocks.
+    /// (minijinja: `Environment::set_max_recursion_depth`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_recursion_depth: Option<u32>,
+
+    /// Maximum execution wall-clock time in milliseconds.
+    /// The consuming code enforces this via a tokio timeout wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_timeout_ms: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
 // Wrapper structs for Camel.toml sections
 // ---------------------------------------------------------------------------
 
@@ -122,6 +173,15 @@ pub struct JsEngineConfig {
     pub limits: JsLimitsConfig,
 }
 
+/// MiniJinja engine configuration block in `Camel.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct MinijinjaEngineConfig {
+    /// Resource limits for the MiniJinja engine.
+    #[serde(default)]
+    pub limits: MinijinjaLimitsConfig,
+}
+
 /// Top-level `[languages]` section in `Camel.toml`.
 ///
 /// ```toml
@@ -141,6 +201,10 @@ pub struct LanguagesConfig {
     /// JS (Boa) engine configuration.
     #[serde(default)]
     pub js: JsEngineConfig,
+
+    /// MiniJinja engine configuration.
+    #[serde(default)]
+    pub minijinja: MinijinjaEngineConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +396,7 @@ mod tests {
         let cfg = LanguagesConfig::default();
         assert_eq!(cfg.rhai.limits, RhaiLimitsConfig::default());
         assert_eq!(cfg.js.limits, JsLimitsConfig::default());
+        assert_eq!(cfg.minijinja.limits, MinijinjaLimitsConfig::default());
     }
 
     #[test]
@@ -362,9 +427,64 @@ mod tests {
                 },
             },
             js: JsEngineConfig::default(),
+            minijinja: MinijinjaEngineConfig::default(),
         };
         let serialized = toml::to_string(&original).expect("serialize");
         let back: LanguagesConfig = toml::from_str(&serialized).expect("deserialize");
         assert_eq!(original, back);
+    }
+
+    // -- MinijinjaLimitsConfig tests ---------------------------------------
+
+    #[test]
+    fn minijinja_defaults_to_all_none() {
+        let cfg = MinijinjaLimitsConfig::default();
+        assert_eq!(cfg.max_template_source_size, None);
+        assert_eq!(cfg.max_context_size, None);
+        assert_eq!(cfg.max_output_size, None);
+        assert_eq!(cfg.fuel, None);
+        assert_eq!(cfg.max_recursion_depth, None);
+        assert_eq!(cfg.execution_timeout_ms, None);
+    }
+
+    #[test]
+    fn minijinja_deserialises_full_block() {
+        let toml = toml::toml! {
+            max-template-source-size = 1048576i64
+            max-context-size = 4194304i64
+            max-output-size = 4194304i64
+            fuel = 100000i64
+            max-recursion-depth = 64
+            execution-timeout-ms = 5000i64
+        };
+        let cfg: MinijinjaLimitsConfig = toml.try_into().expect("deserialize");
+        assert_eq!(cfg.max_template_source_size, Some(1_048_576));
+        assert_eq!(cfg.max_context_size, Some(4_194_304));
+        assert_eq!(cfg.max_output_size, Some(4_194_304));
+        assert_eq!(cfg.fuel, Some(100_000));
+        assert_eq!(cfg.max_recursion_depth, Some(64));
+        assert_eq!(cfg.execution_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn minijinja_rejects_unknown_field() {
+        let toml = toml::toml! {
+            fuel = 1000i64
+            bogus = 1i64
+        };
+        let result: Result<MinijinjaLimitsConfig, _> = toml.try_into();
+        assert!(result.is_err(), "deny_unknown_fields must reject `bogus`");
+    }
+
+    #[test]
+    fn minijinja_skip_serializing_none_fields() {
+        let cfg = MinijinjaLimitsConfig {
+            fuel: Some(100_000),
+            max_recursion_depth: Some(64),
+            ..Default::default()
+        };
+        let s = toml::to_string(&cfg).expect("serialize");
+        assert!(s.contains("fuel") && s.contains("max-recursion-depth"));
+        assert!(!s.contains("max-template-source-size") && !s.contains("max-context-size"));
     }
 }
