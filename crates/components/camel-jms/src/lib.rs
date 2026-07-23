@@ -35,7 +35,7 @@ pub use config::{
 pub use health::JmsHealthCheck;
 
 /// Version of the Java bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.4.0";
+pub const BRIDGE_VERSION: &str = "0.5.0";
 
 pub mod proto {
     tonic::include_proto!("jms_bridge");
