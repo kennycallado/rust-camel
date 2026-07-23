@@ -481,10 +481,22 @@ fn build_bridge_native(bridge: &str, version: Option<&str>, target: &str) -> Res
         args.extend(extra_gradle_args.split_whitespace().map(String::from));
     }
 
+    // Native-image args: windows/macos get ONLY the platform-neutral list from
+    // native-build-args.env (the same single source of truth the linux/docker
+    // build-native.sh sources, where it additionally appends --static/--libc=musl).
+    // musl/static args are linux-only and must NOT reach windows/macos.
+    //
+    // We pass them via the env var (comma form) rather than application.yml so
+    // there is exactly ONE source: setting additional-build-args in YAML *and*
+    // the env var makes SmallRye prioritize the indexed YAML form and silently
+    // drop these args.
+    let neutral_args = read_neutral_native_build_args(&bridge_path)?;
+
     let status = Command::new(&cmd)
         .args(&args)
         .current_dir(&bridge_path)
         .env("GRADLE_USER_HOME", bridge_path.join(".gradle-local-cache"))
+        .env("QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS", &neutral_args)
         .status()
         .map_err(|e| format!("Failed to run Gradle: {e}"))?;
 
@@ -521,6 +533,42 @@ fn build_bridge_native(bridge: &str, version: Option<&str>, target: &str) -> Res
     package_release(&final_binary, binary_name, ver, target, &bridge_path)?;
 
     Ok(())
+}
+
+/// Read the platform-neutral native-image build args from a bridge's
+/// `native-build-args.env` file (the single source of truth shared with
+/// `build-native.sh`).
+///
+/// The file defines a single shell-style assignment:
+/// `NATIVE_BUILD_ARGS_NEUTRAL="arg1,arg2,..."`. We extract the quoted value and
+/// return it verbatim for use as `QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS`.
+fn read_neutral_native_build_args(bridge_path: &Path) -> Result<String, String> {
+    let file = bridge_path.join("native-build-args.env");
+    let contents = std::fs::read_to_string(&file)
+        .map_err(|e| format!("Cannot read {}: {e}", file.display()))?;
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("NATIVE_BUILD_ARGS_NEUTRAL=") {
+            // Strip surrounding double quotes if present.
+            let value = rest
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(rest);
+            if value.is_empty() {
+                return Err(format!(
+                    "NATIVE_BUILD_ARGS_NEUTRAL is empty in {}",
+                    file.display()
+                ));
+            }
+            return Ok(value.to_string());
+        }
+    }
+
+    Err(format!(
+        "NATIVE_BUILD_ARGS_NEUTRAL not defined in {}",
+        file.display()
+    ))
 }
 
 fn locate_native_runner(

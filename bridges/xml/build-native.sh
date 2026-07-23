@@ -121,7 +121,12 @@ echo ""
 
 # Invoke Gradle via the wrapper jar directly (avoids JAVA_HOME lookup issues
 # when bash is used as --entrypoint in the container).
-# Inject musl/static args here so application.yml stays platform-neutral.
+#
+# Native-image args come from TWO parts:
+#   1. Platform-neutral args from native-build-args.env (the single source of
+#      truth shared with the windows/macos xtask path).
+#   2. Linux-only musl/static args, appended here so application.yml + the
+#      neutral file both stay platform-neutral.
 #
 # -no-pie is REQUIRED: the musl toolchain (more.musl.cc 11.2.1) is built with
 # --enable-default-pie/--enable-static-pie, so musl-gcc defaults to -static-pie.
@@ -131,7 +136,13 @@ echo ""
 # fallback image (the mislabeled-static bug). -H:NativeLinkerOption=-no-pie
 # forces a non-PIE static link; --no-fallback turns any musl link failure into
 # a hard error instead of a silent glibc fallback.
-export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="-H:+AllowVMInspection,-Djdk.xml.entityExpansionLimit=64,-Djdk.xml.totalEntitySizeLimit=5000000,-Djdk.xml.maxGeneralEntitySizeLimit=100000,-Djdk.xml.elementAttributeLimit=10000,--initialize-at-run-time=net.sf.saxon.functions.hof.RandomNumberGenerator,--initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,--initialize-at-run-time=org.xmlresolver,--no-fallback,--static,--libc=musl,-H:NativeLinkerOption=-no-pie"
+#
+# NOTE: the env var is the SOLE source of native-image args. application.yml must
+# NOT set quarkus.native.additional-build-args, or SmallRye prioritizes the
+# indexed YAML form and silently drops these comma-form args.
+# shellcheck source=./native-build-args.env
+source "$(dirname "$0")/native-build-args.env"
+export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="${NATIVE_BUILD_ARGS_NEUTRAL},--no-fallback,--static,--libc=musl,-H:NativeLinkerOption=-no-pie"
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
     build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
     -Pversion="${VERSION}" --no-daemon || {
