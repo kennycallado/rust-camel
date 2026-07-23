@@ -1,0 +1,40 @@
+# Spike 1A: rust-camel HTTP server capability smoke test.
+#
+# Mirrors the v1 fixture shape (Camel.toml + routes/*.yaml) so we can
+# invoke via the existing `camel run` binary at target/release/camel
+# without rebuilding. Two routes:
+#
+# 1. `bench-http`: HTTP consumer on http://0.0.0.0:18099/bench that
+#    reads the request body, sets the response body to "pong" (status
+#    200), and logs the round-trip — validates POST + sync response
+#    + listener bind (smoke test sends POST /bench body=ping, expects
+#    response body=pong).
+#
+# 2. `ready-marker`: one-shot timer that fires after a small delay and
+#    logs `BENCH_ROUTE_READY <unix_ms>` once. Acts as the harness's
+#    M1-readiness signal for T3 (per spec §4.10: M1 marker is
+#    listener-bound AND accepting connections, NOT on first request;
+#    in this spike the timer fires after the listener is bound because
+#    both routes register before the context starts serving).
+#
+#    The marker line is `BENCH_ROUTE_READY <unix_ms>` — the unix-ms
+#    suffix is the timer's `CamelMessageTimestamp` header (epoch
+#    millis, populated by `camel-timer` when `includeMetadata` is
+#    enabled, which is the default). The `log` step's bare-string is
+#    evaluated as Simple language (see spike-t2.yaml: comment + usage),
+#    so `${header.CamelMessageTimestamp}` interpolates the millis.
+#
+# The set_body step in the bench-http route uses the rust-camel YAML
+# DSL shape (`value:`) per the v1 fixture convention.
+routes:
+  - id: "ready-marker"
+    from: "timer:ready?repeatCount=1&delay=200"
+    steps:
+      - log: "BENCH_ROUTE_READY ${header.CamelMessageTimestamp}"
+
+  - id: "bench-http"
+    from: "http://0.0.0.0:18099/bench"
+    steps:
+      - log: "spike-http-server received request"
+      - set_body:
+          value: "pong"

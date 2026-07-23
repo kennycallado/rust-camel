@@ -2,11 +2,22 @@
 /.worktrees
 docs/*
 !docs/adr
+!docs/benchmarks
 docs/adr/*
 !docs/adr/*.md
 bridges/*/build/
 bridges/*/.gradle/
 bridges/*/.gradle-docker-cache/
+bridges/*/.gradle-container-cache/
+benchmarks/**/target/
+benchmarks/**/build/
+benchmarks/**/.gradle/
+# Per-subproject native-image fingerprint (64-byte hash written by
+# the harness's compute_and_check_fingerprint; regenerated per build).
+benchmarks/**/.bench-fingerprint
+# harness v2 raw-sample output (per-cell samples.txt under
+# benchmarks/results/<timestamp>/<cell>/) — regenerated on every run.
+benchmarks/results/
 **/.pi-lens/
 
 # Beads / Dolt files (added by bd init)
@@ -20,3 +31,7 @@ bridges/*/.gradle-docker-cache/
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Benchmark container-runner caches (bind-mounted into container)
+benchmarks/.cache/
+.docker-cache/

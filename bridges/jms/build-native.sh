@@ -90,6 +90,8 @@ fi
 # without LIBRARY_PATH.
 mkdir -p /tmp/musl-bin
 ln -sf "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" /tmp/musl-bin/x86_64-linux-musl-gcc
+# native-image --libc=musl looks for 'musl-gcc' (no arch prefix) in PATH.
+ln -sf "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" /tmp/musl-bin/musl-gcc
 export PATH="/tmp/musl-bin:${PATH}"
 
 # Build static zlib against musl if not already built
@@ -135,10 +137,10 @@ fi
 echo "Native runner: $RUNNER"
 
 # Verify static linking
-if readelf -l "$RUNNER" 2>/dev/null | grep -q PT_INTERP; then
+if readelf -l "$RUNNER" 2>/dev/null | grep -q "Requesting program interpreter"; then
     echo "WARNING: Binary has dynamic interpreter (not fully static)" >&2
 else
-    echo "Verified: binary is statically linked (no PT_INTERP)"
+    echo "Verified: binary is statically linked (no interpreter segment)"
 fi
 
 # Copy to canonical path — use install(1) instead of cp so that if the

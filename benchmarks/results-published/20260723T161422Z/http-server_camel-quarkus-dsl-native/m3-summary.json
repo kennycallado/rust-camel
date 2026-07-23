@@ -1,0 +1,17 @@
+{
+  "cell": "http-server/camel-quarkus-dsl-native",
+  "status": "ok",
+  "median_mean_msgs_per_sec": 37713.180000,
+  "min_mean": 37227.560000,
+  "max_mean": 38346.800000,
+  "per_round_means": [
+    37431.58,
+    37227.56,
+    37713.18,
+    37971.04,
+    38346.8
+  ],
+  "rounds": 5,
+  "duration_secs": 50,
+  "warmup_secs": 10
+}

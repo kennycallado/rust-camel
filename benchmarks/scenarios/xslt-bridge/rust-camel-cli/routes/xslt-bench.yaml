@@ -1,0 +1,90 @@
+# T4a XSLT bridge fixture — rust-camel CLI route (Pair B, bd Task 4).
+#
+# Spec §4.6 / T4a brief route shape, ported to YAML DSL:
+#   from(timer:bench?period=10ms&repeatCount=10000)
+#     .set_body(constant <1KB XML payload>)
+#     .to(xslt:shared/identity-transform.xsl)
+#     .log(BENCH_XSLT_TICK correctness signal)
+#
+# The `to: xslt:...` URI triggers camel-xslt to spawn the bridges/xml
+# binary on first invocation (lazy). The bridge-wrapper.sh script
+# (set as CAMEL_XML_BRIDGE_BINARY_PATH by the wrapper that spawns this
+# process) writes the bridge PID to V3_BRIDGE_PID_FILE before exec.
+#
+# Per-tick BENCH_LATENCY: emitted by the CLI's bench_instrument module
+# (crates/camel-cli/src/commands/bench_instrument.rs), which wraps every
+# top-level `.to()` step with Instant-bracketing processors when
+# BENCH_LATENCY_FILE env var is set. Resolves bd rc-5gcu.
+#
+# Workload pinning (spec §4.8 / T4a brief, bd rc-2vxg I1): the
+# set_body.value payload below is byte-identical to
+# shared/bench-payload.xml. Source of truth = shared/bench-payload.xml;
+# the smoke runner verifies byte-equality on every run via
+# verify_cli_payload_byte_equality (drift = smoke failure). rust-camel's
+# YAML DSL has no file-path or resource-reference mode in set_body
+# (only Literal or Expression — see SetBodyData::Literal in
+# camel-dsl/src/yaml.rs), and env-var interpolation (the dollar-brace
+# env-colon syntax documented in camel-dsl/src/env_interpolation.rs)
+# mangles newlines: sanitize_env_value replaces them with spaces to
+# prevent YAML injection, which would break byte-identity for this
+# multi-line XML. Embedding the bytes verbatim via a YAML pipe block
+# scalar is the only path that preserves them.
+
+routes:
+  - id: "bench-xslt"
+    from: "timer:bench?period=10&repeatCount=10000"
+    steps:
+      # 1KB XML payload — byte-identical to shared/bench-payload.xml.
+      # The smoke runner (smoke/run.sh::verify_cli_payload_byte_equality)
+      # asserts this on every run.
+      - set_body:
+          value: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!--
+              T4a XSLT benchmark shared XML payload (~1KB).
+
+              Byte-identical input across all 4 T4a artifacts. The identity
+              transform (identity-transform.xsl) produces a copy of this doc.
+              Both rust-camel's xml-bridge (Saxon-HE 12.5) and Apache Camel's
+              in-process engine (Saxon-HE 12.5) parse this same input on every
+              tick of the timer-driven route.
+            -->
+            <doc version="3" lang="en" source="bench-v3-t4a">
+              <meta>
+                <id>4a8c2f1e-9b3d-4c7e-8a12-f3e5d6c7b8a9</id>
+                <created>2026-07-18T10:00:00Z</created>
+                <suite>rust-camel-benchmark-v3</suite>
+                <scenario>xslt-bridge</scenario>
+                <payloadSize>1KB</payloadSize>
+              </meta>
+              <section id="intro" type="preamble">
+                <title>Benchmark T4a XSLT Identity Transform</title>
+                <p>This payload is transformed by the XSLT identity transform
+                   on every timer tick. The transform cost is included in the
+                   per-tick latency measurement; the bridge tax is the
+                   additional cost rust-camel pays to delegate this work to a
+                   separate Java native binary via gRPC mTLS.</p>
+              </section>
+              <section id="payload" type="data">
+                <item index="1"><key>alpha</key><value>0xdeadbeef</value></item>
+                <item index="2"><key>beta</key><value>0xcafebabe</value></item>
+                <item index="3"><key>gamma</key><value>0xfeedface</value></item>
+                <item index="4"><key>delta</key><value>0xbaddcafe</value></item>
+                <item index="5"><key>epsilon</key><value>0xdeadc0de</value></item>
+              </section>
+              <footer>
+                <checksum>sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</checksum>
+                <notes>End of T4a benchmark payload.</notes>
+              </footer>
+            </doc>
+      # Delegate to bridges/xml (Saxon-HE 12.5 via gRPC mTLS). The
+      # bridge spawns lazily on first invocation; bridge-wrapper.sh
+      # writes its PID before exec'ing the real binary.
+      - to: "xslt:../shared/identity-transform.xsl"
+      # Per-tick correctness signal (bd rc-2vxg I2): presence of this
+      # log line proves the to:xslt step completed without throwing on
+      # this tick. The smoke runner asserts ≥10 of these per artifact
+      # after the run. Mirrors the BENCH_XSLT_TICK step already present
+      # in the other 3 artifacts (rust-camel-lib main.rs:150, App.java
+      # for camel-standalone-dsl, BenchRoute.java for camel-quarkus-dsl).
+      - log: "BENCH_XSLT_TICK"

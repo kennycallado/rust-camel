@@ -1,0 +1,44 @@
+# Benchmark fixture for rust-camel CLI + YAML (Pair B partner, T3 HTTP
+# server scenario, bd Task 3). Mirrors the v1 / T2 rust-camel-cli
+# fixture's Camel.toml shape — same ADR-0033 fail-closed exec stub,
+# same supervision block — but lives under the T3 scenario dir so the
+# harness picks up the T3 route on a T3 run.
+#
+# T3 Pair B comparison (YAML) is language-subsystem-equivalent to
+# Apache Camel (both use Simple `${...}` interpolation and bare-string
+# log messages). The route shape is `from(http://0.0.0.0:8080/bench)
+# -> log -> set_body(pong)`, parsed at runtime by `camel run --config
+# Camel.toml --routes http-server.yaml`. The marker
+# `BENCH_ROUTE_READY <unix_ms>` is emitted by the wrapper script by
+# detecting the child's `CamelContext started` stdout line (rc-w1u9
+# post-bind signal — see `http-server-cli-wrapper.sh` header
+# docstring for the handshake chain that makes this signal correct).
+# This Camel.toml file does NOT contain the marker line; the marker
+# is a wrapper-side concern.
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+
+# ADR-0033 fail-closed workaround: ExecBundle requires at least one profile
+# to pass startup validation, even when no route uses `exec:` URIs. The stub
+# below registers `true` (a no-op that always exits 0) under the name
+# `bench-stub` so validation succeeds. It is never invoked by the benchmark.
+# NixOS note: bare `true` resolves via PATH at CLI startup; do NOT hardcode
+# `/bin/true` (NixOS has no FHS, /bin/true does not exist).
+[default.components.exec]
+workspace_root = "."
+
+# `profiles` is a Vec<ExecProfile> — TOML array-of-tables syntax ([[...]]),
+# NOT a map ([default.components.exec.profiles.<name>] would deserialize
+# as a struct/map and fail with "invalid type: map, expected a sequence").
+[[default.components.exec.profiles]]
+name = "bench-stub"
+executable = "true"
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000

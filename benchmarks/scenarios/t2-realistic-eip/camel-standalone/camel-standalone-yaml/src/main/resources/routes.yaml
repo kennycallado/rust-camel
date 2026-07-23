@@ -1,0 +1,44 @@
+# T2 scenario route for camel-standalone-yaml (Pair B, bd rc-p9ki Task 3).
+#
+# Same logical route as App.java (Pair A hardcoded Java-DSL) but
+# authored in Apache Camel YAML DSL. Implements spec §4.1 T2 route:
+# timer -> set_body -> set_header -> filter(simple) -> choice ->
+# log. The marker `BENCH_ROUTE_READY body=pong-bench` carries the
+# post-choice body — a wrong-branch run (otherwise -> `pong-other`)
+# is observable, not silent.
+#
+# Behavioral equivalence: the rust-camel-cli YAML counterpart
+# (rust-camel-cli/routes/t2-realistic-eip.yaml) is language-subsystem-
+# equivalent to this one (both use `${body}` / `${header.X}` Simple).
+# This is the property that makes T2 Pair B a fair comparison
+# between Apache Camel and rust-camel. Pair A is NOT language-
+# subsystem-equivalent (rust-camel-lib uses closure predicates —
+# see that fixture's source comment).
+
+- route:
+    from:
+      uri: "timer:bench"
+      parameters:
+        repeatCount: 1
+        delay: 0
+      steps:
+        - setBody:
+            constant: "ping"
+        - setHeader:
+            name: "source"
+            constant: "bench"
+        - filter:
+            simple: "${body} == 'ping'"
+            steps:
+              - choice:
+                  when:
+                    - simple: "${header.source} == 'bench'"
+                      steps:
+                        - setBody:
+                            constant: "pong-bench"
+                  otherwise:
+                    steps:
+                      - setBody:
+                          constant: "pong-other"
+        - log:
+            message: "BENCH_ROUTE_READY body=${body}"

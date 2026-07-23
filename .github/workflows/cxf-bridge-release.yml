@@ -77,7 +77,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           BINARY=$(find bridges/cxf/build/native -name 'cxf-bridge' -type f)
-          if readelf -l "$BINARY" | grep -q PT_INTERP; then
+          if readelf -l "$BINARY" | grep -q "Requesting program interpreter"; then
             echo "::error::Binary is NOT statically linked"
             exit 1
           fi

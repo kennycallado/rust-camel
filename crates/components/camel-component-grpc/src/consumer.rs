@@ -10,7 +10,8 @@ use bytes::BytesMut;
 use camel_api::store_principal_properties;
 use camel_api::{AuthorizationDecision, Body, CamelError, Exchange, Message, Value};
 use camel_component_api::{
-    ConcurrencyModel, Consumer, ConsumerContext, ExchangeEnvelope, SecurityContext,
+    ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
+    SecurityContext,
 };
 use camel_proto_compiler::ProtoCache;
 use prost::Message as _;
@@ -589,6 +590,9 @@ impl Consumer for GrpcConsumer {
                 Arc::clone(&self.runtime),
             )
             .await?;
+        // gRPC listener is bound inside get_or_spawn (TcpListener::bind
+        // before tokio::spawn). Signal readiness now that the bind succeeded.
+        ctx.mark_ready();
         self.start_inner(ctx, dispatch).await
     }
 
@@ -608,6 +612,10 @@ impl Consumer for GrpcConsumer {
 
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Concurrent { max: None }
+    }
+
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
     }
 
     fn set_security_context(&mut self, ctx: SecurityContext) {

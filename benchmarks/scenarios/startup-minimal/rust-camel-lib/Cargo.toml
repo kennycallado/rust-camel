@@ -1,0 +1,31 @@
+[package]
+name = "startup-minimal-rust-camel-lib"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Path deps resolve to the worktree's own checkout of rust-camel crates
+# (4 levels up: rust-camel-lib/ -> startup-minimal/ -> scenarios/ -> benchmarks/ -> worktree root).
+camel-api = { path = "../../../../crates/camel-api" }
+camel-builder = { path = "../../../../crates/camel-builder" }
+camel-core = { path = "../../../../crates/camel-core" }
+camel-processor = { path = "../../../../crates/camel-processor" }
+camel-component-timer = { path = "../../../../crates/components/camel-timer" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+# Workspace member of the parent rust-camel workspace (see root Cargo.toml
+# `members`), but excluded from `default-members` so `cargo build` at root
+# does not pick it up. Build with `cargo build -p startup-minimal-rust-camel-lib`
+# or `cargo build --release` from this directory. Sharing the workspace
+# Cargo.lock guarantees that transitive dep versions (tokio, futures, uuid,
+# serde, ...) match what `cargo build --release -p camel-cli` (Pair B) sees,
+# so Pair A vs Pair B isolates only parser/CLI overhead, not dep drift.
+# The release profile (lto/strip/codegen-units=1) is inherited unchanged
+# from the workspace root [profile.release].
+
+[[bin]]
+name = "startup-minimal"
+path = "src/main.rs"

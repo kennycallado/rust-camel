@@ -1,0 +1,9 @@
+# Exclude heavy dirs from build context (kept small for fast rebuilds).
+.git
+target/
+**/target/
+**/build/
+node_modules/
+*.log
+benchmarks/results/
+benchmarks/spike-results.md

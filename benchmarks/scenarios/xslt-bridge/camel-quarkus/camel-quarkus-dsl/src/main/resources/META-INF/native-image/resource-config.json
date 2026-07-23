@@ -1,0 +1,35 @@
+{
+  "resources": {
+    "includes": [
+      {
+        "pattern": "\\Qidentity-transform.xsl\\E"
+      },
+      {
+        "pattern": "org/apache/xerces/impl/msg/.*\\.properties"
+      },
+      {
+        "pattern": "org/apache/xerces/impl/xpath/regex/message.*\\.properties"
+      }
+    ]
+  },
+  "bundles": [
+    {
+      "name": "org.apache.xerces.impl.msg.SAXMessages"
+    },
+    {
+      "name": "org.apache.xerces.impl.msg.XMLMessages"
+    },
+    {
+      "name": "org.apache.xerces.impl.msg.XMLSchemaMessages"
+    },
+    {
+      "name": "org.apache.xerces.impl.msg.XIncludeMessages"
+    },
+    {
+      "name": "org.apache.xerces.impl.msg.DatatypeMessages"
+    },
+    {
+      "name": "org.apache.xerces.impl.msg.JAXPValidationMessages"
+    }
+  ]
+}

@@ -32,8 +32,8 @@ use tracing::{debug, info, warn};
 
 use camel_api::datasource::DatasourceCatalog;
 use camel_component_api::{
-    Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message,
-    RuntimeObservability, Value,
+    Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, Exchange,
+    Message, RuntimeObservability, Value,
 };
 use surrealdb::types::Action;
 use surrealdb::types::Value as SurrealValue;
@@ -128,6 +128,10 @@ impl Consumer for SurrealDbConsumer {
             .map_err(|e| {
                 CamelError::ProcessorError(format!("surrealdb LIVE SELECT failed: {e}"))
             })?;
+
+        // LIVE SELECT bind succeeded — signal readiness before entering the
+        // background task so the runtime knows the route is fully started.
+        context.mark_ready();
 
         let route_id = context.route_id().to_string();
         let route_id_for_task = route_id.clone();
@@ -265,6 +269,10 @@ impl Consumer for SurrealDbConsumer {
     fn concurrency_model(&self) -> ConcurrencyModel {
         // LIVE SELECT is sequential: one notification at a time, in order.
         ConcurrencyModel::Sequential
+    }
+
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
     }
 
     fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {

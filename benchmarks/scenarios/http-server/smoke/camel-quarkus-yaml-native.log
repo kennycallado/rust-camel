@@ -1,0 +1,19 @@
+2026-07-19 18:56:57,910 INFO  [org.apa.cam.qua.cor.CamelBootstrapRecorder] (main) Apache Camel Quarkus 3.20.0 is starting
+2026-07-19 18:56:57,910 INFO  [org.apa.cam.mai.MainSupport] (main) Apache Camel (Main) 4.10.2 is starting
+2026-07-19 18:56:57,915 INFO  [org.apa.cam.mai.BaseMainSupport] (main) Auto-configuration summary
+2026-07-19 18:56:57,915 INFO  [org.apa.cam.mai.BaseMainSupport] (main)     [MicroProfilePropertiesSource] camel.main.routesIncludePattern = classpath:camel/routes.yaml
+2026-07-19 18:56:57,916 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Apache Camel 4.10.2 (camel-1) is starting
+2026-07-19 18:56:57,917 INFO  [org.ecl.jet.ser.Server] (main) jetty-12.0.16; built: 2024-12-09T21:02:54.535Z; git: c3f88bafb4e393f23204dc14dc57b042e84debc7; jvm 21.0.2+13-jvmci-23.1-b30
+2026-07-19 18:56:57,917 INFO  [org.ecl.jet.ser.han.ContextHandler] (main) Started oeje10s.ServletContextHandler@721b033a{ROOT,/,b=null,a=AVAILABLE,h=oeje10s.ServletHandler@398a7693{STARTED}}
+2026-07-19 18:56:57,917 INFO  [org.ecl.jet.ee1.ser.ServletContextHandler] (main) Started oeje10s.ServletContextHandler@721b033a{ROOT,/,b=null,a=AVAILABLE,h=oeje10s.ServletHandler@398a7693{STARTED}}
+2026-07-19 18:56:57,918 INFO  [org.ecl.jet.ser.AbstractConnector] (main) Started ServerConnector@12e3507a{HTTP/1.1, (http/1.1)}{0.0.0.0:8080}
+2026-07-19 18:56:57,918 INFO  [org.ecl.jet.ser.Server] (main) Started oejs.Server@181e5f2b{STARTING}[12.0.16,sto=0] @15ms
+BENCH_ROUTE_READY 1784480217918
+2026-07-19 18:56:57,918 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Routes startup (total:1)
+2026-07-19 18:56:57,918 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main)     Started route1 (jetty:http://0.0.0.0:8080/bench)
+2026-07-19 18:56:57,918 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Apache Camel 4.10.2 (camel-1) started in 1ms (build:0ms init:0ms start:1ms)
+2026-07-19 18:56:57,918 INFO  [io.quarkus] (main) camel-quarkus-yaml-native 1.0.0 native (powered by Quarkus 3.20.0) started in 0.014s. 
+2026-07-19 18:56:57,918 INFO  [io.quarkus] (main) Profile prod activated. 
+2026-07-19 18:56:57,918 INFO  [io.quarkus] (main) Installed features: [camel-bean, camel-core, camel-yaml-dsl, cdi]
+2026-07-19 18:56:58,020 INFO  [route1] (qtp1589250541-80) BENCH_HTTP_REQUEST received
+BENCH_HTTP_REQUEST id=1

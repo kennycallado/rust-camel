@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_component_api::{
-    Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message,
-    NetworkRetryPolicy, RuntimeObservability,
+    Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, Exchange,
+    Message, NetworkRetryPolicy, RuntimeObservability,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -479,7 +479,17 @@ impl Consumer for JmsConsumer {
         // Store all handles so stop() can abort/join every concurrent consumer.
         self.task_handles = handles;
 
+        // NOTE: The actual JMS connection (consumer_loop with SubscribeRequest)
+        // happens inside each spawned task. mark_ready is best-effort — the
+        // bridge slot was already probed above, so the bridge process is
+        // running, but individual subscriptions are not confirmed.
+        ctx.mark_ready();
+
         Ok(())
+    }
+
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {

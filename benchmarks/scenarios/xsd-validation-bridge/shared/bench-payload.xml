@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  T4b XSD validation benchmark shared XML payload (~1KB).
+
+  Byte-identical input across all 4 T4b artifacts. This payload
+  validates successfully against schema.xsd (the validator component
+  produces no exception when the body matches the schema).
+
+  Note: schema.xsd defines targetNamespace
+  "https://rust-camel.local/bench/t4b" and the doc root must be
+  namespace-qualified. We use a default namespace declaration to
+  keep the payload compact while still being schema-valid.
+-->
+<doc version="3" lang="en" source="bench-v3-t4b"
+     xmlns="https://rust-camel.local/bench/t4b">
+  <meta>
+    <id>4b8c2f1e-9b3d-4c7e-8a12-f3e5d6c7b8a9</id>
+    <created>2026-07-18T10:00:00Z</created>
+    <suite>rust-camel-benchmark-v3</suite>
+    <scenario>xsd-validation-bridge</scenario>
+    <payloadSize>1KB</payloadSize>
+  </meta>
+  <section id="intro" type="preamble">
+    <title>Benchmark T4b XSD Validation</title>
+    <p>This payload is validated against schema.xsd on every timer
+       tick. The validation cost is included in the per-tick latency
+       measurement; the bridge tax is the additional cost rust-camel
+       pays to delegate this work to a Java native binary via gRPC
+       mTLS while Apache Camel runs Xerces-J in-process.</p>
+  </section>
+  <section id="payload" type="data">
+    <item index="1"><key>alpha</key><value>0xdeadbeef</value></item>
+    <item index="2"><key>beta</key><value>0xcafebabe</value></item>
+    <item index="3"><key>gamma</key><value>0xfeedface</value></item>
+    <item index="4"><key>delta</key><value>0xbaddcafe</value></item>
+    <item index="5"><key>epsilon</key><value>0xdeadc0de</value></item>
+  </section>
+  <footer>
+    <checksum>sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</checksum>
+    <notes>End of T4b benchmark payload.</notes>
+  </footer>
+</doc>

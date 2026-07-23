@@ -1,0 +1,12 @@
+[main] INFO org.apache.camel.impl.engine.AbstractCamelContext - Apache Camel 4.8.0 (camel-1) is starting
+[main] INFO org.eclipse.jetty.server.Server - jetty-12.0.12; built: 2024-07-25T21:58:37.668Z; git: cc6f1b74db755fed228b50701ad967aeaa68e83f; jvm 21.0.2+13-jvmci-23.1-b30
+[main] INFO org.eclipse.jetty.server.handler.ContextHandler - Started oeje10s.ServletContextHandler@798162bc{ROOT,/,b=null,a=AVAILABLE,h=oeje10s.ServletHandler@1df8da7a{STARTED}}
+[main] INFO org.eclipse.jetty.ee10.servlet.ServletContextHandler - Started oeje10s.ServletContextHandler@798162bc{ROOT,/,b=null,a=AVAILABLE,h=oeje10s.ServletHandler@1df8da7a{STARTED}}
+[main] INFO org.eclipse.jetty.server.AbstractConnector - Started ServerConnector@32115b28{HTTP/1.1, (http/1.1)}{0.0.0.0:8080}
+[main] INFO org.eclipse.jetty.server.Server - Started oejs.Server@6440112d{STARTING}[12.0.12,sto=0] @398ms
+BENCH_ROUTE_READY 1784480214694
+[main] INFO org.apache.camel.impl.engine.AbstractCamelContext - Routes startup (total:1)
+[main] INFO org.apache.camel.impl.engine.AbstractCamelContext -     Started route1 (jetty:http://0.0.0.0:8080/bench)
+[main] INFO org.apache.camel.impl.engine.AbstractCamelContext - Apache Camel 4.8.0 (camel-1) started in 153ms (build:0ms init:0ms start:153ms)
+[qtp1647766367-39] INFO route1 - BENCH_HTTP_REQUEST received
+BENCH_HTTP_REQUEST id=1

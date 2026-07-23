@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_component_api::{
-    Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message, Value,
+    Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, Exchange,
+    Message, Value,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -147,6 +148,7 @@ impl Consumer for CxfConsumer {
         self.cancel_token = Some(cancel.clone());
 
         let runtime = Arc::clone(&self.runtime);
+        let startup = ctx.startup_signal();
         let handle: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
             let mut consecutive_transport_failures: u32 = 0;
             let mut reconnect_attempt: u32 = 0;
@@ -200,6 +202,7 @@ impl Consumer for CxfConsumer {
                     Ok(resp) => {
                         consecutive_transport_failures = 0;
                         reconnect_attempt = 0;
+                        startup.mark_ready();
                         info!("CXF consumer stream opened successfully");
                         resp.into_inner()
                     }
@@ -370,6 +373,10 @@ impl Consumer for CxfConsumer {
 
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Sequential
+    }
+
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
     }
 
     fn background_task_handle(

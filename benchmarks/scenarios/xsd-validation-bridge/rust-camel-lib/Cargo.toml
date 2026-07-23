@@ -1,0 +1,21 @@
+[package]
+name = "xsd-validation-bridge-rust-camel-lib"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+camel-api = { path = "../../../../crates/camel-api" }
+camel-builder = { path = "../../../../crates/camel-builder" }
+camel-core = { path = "../../../../crates/camel-core" }
+camel-processor = { path = "../../../../crates/camel-processor" }
+camel-component-timer = { path = "../../../../crates/components/camel-timer" }
+camel-component-validator = { path = "../../../../crates/components/camel-validator" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+rustls = { workspace = true }
+
+[[bin]]
+name = "xsd-validation-bridge"
+path = "src/main.rs"

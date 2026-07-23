@@ -1,0 +1,36 @@
+# T2 scenario route for camel-quarkus-yaml (JVM, Pair B).
+# Same logical route as the camel-quarkus-dsl BenchRoute (Pair A) but
+# authored in Apache Camel YAML DSL: timer -> setBody -> setHeader ->
+# filter(simple) -> choice.when(simple)/otherwise -> log. The marker
+# `BENCH_ROUTE_READY body=pong-bench` is the exact grep target.
+#
+# Uses `setBody` / `setHeader` (camelCase) per Spike 1B finding that
+# `set-body` / `set-header` (kebab-case) is deprecated in Quarkus
+# 3.20.0 (still parses but emits a deprecation warning).
+- route:
+    from:
+      uri: "timer:bench"
+      parameters:
+        repeatCount: 1
+        delay: 0
+      steps:
+        - setBody:
+            constant: "ping"
+        - setHeader:
+            name: "source"
+            constant: "bench"
+        - filter:
+            simple: "${body} == 'ping'"
+            steps:
+              - choice:
+                  when:
+                    - simple: "${header.source} == 'bench'"
+                      steps:
+                        - setBody:
+                            constant: "pong-bench"
+                  otherwise:
+                    steps:
+                      - setBody:
+                          constant: "pong-other"
+        - log:
+            message: "BENCH_ROUTE_READY body=${body}"

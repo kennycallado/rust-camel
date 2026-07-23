@@ -1,0 +1,23 @@
+{
+  "git_commit": "21c123323f7a38bd183751a1d8537b89c2c859ed",
+  "git_dirty": false,
+  "date": "2026-07-23T16:15:47Z",
+  "host_cpu": "AMD Ryzen 5 5600G with Radeon Graphics",
+  "host_cores": 6,
+  "host_ram_gb": 27,
+  "docker_image": "benchmark-runner:latest",
+  "kernel_version": "6.18.38",
+  "tool_versions": {
+    "bash": "4.4.20(1)-release",
+    "loadgen": "/work/target/release/bench-loadgen"
+  },
+  "topology": {
+    "physical_cores": 6,
+    "server_cores": "0-2,6-8",
+    "loadgen_cores": "3-5,9-11"
+  },
+  "server_cpuset": "0-2,6-8",
+  "loadgen_cpuset": "3-5,9-11",
+  "loadgen_workers": 6,
+  "raw_results_note": "raw result artifacts are gitignored and live only on the measurement host at /work/benchmarks/results/20260723T161422Z"
+}

@@ -1,0 +1,17 @@
+{
+  "cell": "http-server/camel-standalone-yaml",
+  "status": "ok",
+  "median_mean_msgs_per_sec": 67192.080000,
+  "min_mean": 66836.980000,
+  "max_mean": 67883.000000,
+  "per_round_means": [
+    67192.08,
+    66836.98,
+    67296.2,
+    67883.0,
+    66870.3
+  ],
+  "rounds": 5,
+  "duration_secs": 50,
+  "warmup_secs": 10
+}

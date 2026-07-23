@@ -1,0 +1,32 @@
+# Spike 1B — T2 EIP route in Apache Camel YAML DSL (Quarkus YAML
+# subproject uses the Apache Camel shape, not the rust-camel shape).
+# Same logic as the rust-camel spike 1A route: timer -> set_body ->
+# set_header -> filter(simple) -> choice(simple)/otherwise -> log.
+# Marker `BENCH_ROUTE_READY body=pong-bench` is the exact grep target.
+- route:
+    from:
+      uri: "timer:bench"
+      parameters:
+        repeatCount: 1
+        delay: 0
+      steps:
+        - set-body:
+            constant: "ping"
+        - set-header:
+            name: "source"
+            constant: "bench"
+        - filter:
+            simple: "${body} == 'ping'"
+            steps:
+              - choice:
+                  when:
+                    - simple: "${header.source} == 'bench'"
+                      steps:
+                        - set-body:
+                            constant: "pong-bench"
+                  otherwise:
+                    steps:
+                      - set-body:
+                          constant: "pong-other"
+        - log:
+            message: "BENCH_ROUTE_READY body=${body}"

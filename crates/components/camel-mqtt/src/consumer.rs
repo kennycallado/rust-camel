@@ -10,7 +10,8 @@ use tracing::{error, info, warn};
 
 use camel_api::CamelError;
 use camel_component_api::{
-    ConcurrencyModel, Consumer, ConsumerContext, NetworkRetryPolicy, RuntimeObservability,
+    ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, NetworkRetryPolicy,
+    RuntimeObservability,
 };
 use rumqttc::{AsyncClient, Event, MqttOptions, NetworkOptions, Packet, QoS};
 
@@ -123,6 +124,16 @@ impl Consumer for MqttConsumer {
         let broker = self.broker.clone();
         let runtime = self.runtime.clone();
 
+        // rumqttc v0.33 has no synchronous connect path: the TCP/ConnAck exchange
+        // is driven entirely by EventLoop::poll() inside the spawned task, so we
+        // cannot await a "broker connected" signal here without duplicating the
+        // entire eventloop state machine. We mark ready before the spawn —
+        // readiness here means "consumer task is being started and will
+        // (re)connect asynchronously", not "broker handshake has completed".
+        // The 10s connect_timeout inside run_consumer_loop bounds how long
+        // the first handshake can take.
+        ctx.mark_ready();
+
         let handle = tokio::spawn(run_consumer_loop(
             config,
             broker,
@@ -174,6 +185,14 @@ impl Consumer for MqttConsumer {
 
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Sequential
+    }
+
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        // MQTT is a networked, broker-binding consumer: an unreachable broker
+        // would otherwise leave the route marked "started" while the spawned
+        // task silently retries forever. Declaring Explicit lets the runtime
+        // await mark_ready() (see start() note for the rumqttc limitation).
+        ConsumerStartupMode::Explicit
     }
 
     fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {

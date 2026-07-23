@@ -9,7 +9,8 @@ use tracing::{error, info, warn};
 
 use camel_api::{CamelError, RuntimeHandle, StepLifecycle, StepShutdownReason};
 use camel_component_api::{
-    ComponentContext, ConcurrencyModel, Consumer, ConsumerContext, RuntimeObservability,
+    ComponentContext, ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode,
+    RuntimeObservability, StartupReceiver, StartupSignal,
 };
 use camel_endpoint::parse_uri;
 
@@ -38,6 +39,23 @@ pub(crate) fn create_route_consumer(
     Ok((consumer, concurrency))
 }
 
+/// Await the consumer startup handshake and map any failure to a
+/// `CamelError::RouteError("Consumer {op} failed: …")`.
+///
+/// `op` is the operation name used in the error message (e.g. `"startup"`,
+/// `"resume"`). Centralises the three controller call sites that previously
+/// inlined identical `startup_rx.await_ready().map_err(...)` blocks
+/// (rc-w1u9 review I-3).
+pub(crate) async fn await_consumer_startup(
+    startup_rx: StartupReceiver,
+    op: &str,
+) -> Result<(), CamelError> {
+    startup_rx
+        .await_ready()
+        .await
+        .map_err(|e| CamelError::RouteError(format!("Consumer {op} failed: {e}")))
+}
+
 pub(crate) fn spawn_consumer_task(
     route_id: String,
     mut consumer: Box<dyn Consumer>,
@@ -45,9 +63,41 @@ pub(crate) fn spawn_consumer_task(
     crash_notifier: Option<mpsc::Sender<CrashNotification>>,
     runtime_for_consumer: Option<Weak<dyn RuntimeHandle>>,
     is_resume: bool,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        if let Err(e) = consumer.start(consumer_ctx.clone()).await {
+) -> (JoinHandle<()>, StartupReceiver) {
+    // rc-w1u9: Explicit consumers (HTTP, WebSocket, …) signal readiness via
+    // ctx.mark_ready() AFTER binding their resource. Immediate consumers
+    // keep the original fire-and-forget semantics via a pre-resolved
+    // receiver, so `start_route` can uniformly await the receiver without
+    // changing behaviour for timer/file/direct/… consumers.
+    let (startup_signal, startup_receiver) = match consumer.startup_mode() {
+        ConsumerStartupMode::Immediate => {
+            let immediate = StartupReceiver::immediate();
+            // The signal below is never used by the consumer (Immediate
+            // consumers don't call mark_ready), but we still install a
+            // fresh pair so the context has something valid to carry.
+            let (signal, _drop_rx) = StartupSignal::pair();
+            let _ = _drop_rx;
+            (signal, immediate)
+        }
+        ConsumerStartupMode::Explicit => {
+            let (signal, receiver) = StartupSignal::pair();
+            (signal, receiver)
+        }
+    };
+    let startup_for_task = startup_signal.clone();
+    let consumer_ctx = consumer_ctx.with_startup(startup_signal);
+
+    let handle = tokio::spawn(async move {
+        let result = consumer.start(consumer_ctx.clone()).await;
+        if let Err(e) = &result {
+            // Propagate the failure to any controller awaiting startup.
+            // For Immediate consumers this is a no-op (their signal is
+            // never awaited); for Explicit consumers it surfaces the bind
+            // failure as a proper startup error instead of a silent
+            // background log (rc-w1u9).
+            startup_for_task.mark_failed(e.to_string());
+
+            let error_msg = e.to_string();
             if is_resume {
                 // log-policy: system-broken
                 error!(route_id = %route_id, "Consumer error on resume: {e}");
@@ -56,7 +106,6 @@ pub(crate) fn spawn_consumer_task(
                 error!(route_id = %route_id, "Consumer error: {e}");
             }
 
-            let error_msg = e.to_string();
             if let Some(tx) = crash_notifier
                 && tx
                     .send(CrashNotification {
@@ -80,7 +129,33 @@ pub(crate) fn spawn_consumer_task(
         // Consumer started successfully. If it detached a background task,
         // monitor the handle for unexpected exits (crash propagation per
         // ADR-0007).
-        if let Some(mut bg_handle) = consumer.background_task_handle() {
+        let bg_handle = consumer.background_task_handle();
+
+        // rc-w1u9: Defensive fallback. An Explicit consumer whose `start()`
+        // returned Ok without ever calling `mark_ready` would otherwise hang
+        // the route controller on the startup receiver. If the consumer is
+        // done (Ok returned), it is definitionally ready — surface that to
+        // any pending awaiter. No-op for Immediate consumers (already Ready)
+        // and for Explicit consumers that correctly called mark_ready.
+        //
+        // mark_ready returns true ONLY when the state was still Pending —
+        // i.e. the consumer violated the Explicit contract. Warn loudly so
+        // the regression is not silently papered over (review I-1).
+        //
+        // rc-gu5n: Skip the fallback when the consumer has a background task
+        // handle — these consumers (CXF, Redis, Kafka) intentionally defer
+        // mark_ready to the spawned task where the resource bind happens.
+        // The fallback would fire before the task runs, defeating the
+        // handshake and logging a false "contract violation" warning.
+        if bg_handle.is_none() && startup_for_task.mark_ready() {
+            warn!(
+                route_id = %route_id,
+                "Explicit consumer returned Ok without calling ctx.mark_ready(); \
+                 applied defensive fallback. This indicates a contract violation."
+            );
+        }
+
+        if let Some(mut bg_handle) = bg_handle {
             tokio::select! {
                 result = &mut bg_handle => {
                     match result {
@@ -142,7 +217,9 @@ pub(crate) fn spawn_consumer_task(
 
         // "finally" — always call stop() after start() succeeds
         let _ = consumer.stop().await;
-    })
+    });
+
+    (handle, startup_receiver)
 }
 
 pub(super) async fn stop_route_internal(
@@ -465,7 +542,7 @@ mod tests {
         );
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
-        let handle = spawn_consumer_task(
+        let (handle, _startup_rx) = spawn_consumer_task(
             "route-resume".to_string(),
             Box::new(FailingConsumer::new("resume start failed")),
             ctx,
@@ -493,7 +570,7 @@ mod tests {
 
         let (consumer, stop_called) = FailingConsumer::with_stop_tracking("start failed");
 
-        let handle = spawn_consumer_task(
+        let (handle, _startup_rx) = spawn_consumer_task(
             "route-h9".to_string(),
             Box::new(consumer),
             ctx,
@@ -551,7 +628,7 @@ mod tests {
         let ctx = ConsumerContext::new(exchange_tx, cancel, "consumer-mgmt-test-route".to_string());
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
-        let handle = spawn_consumer_task(
+        let (handle, _startup_rx) = spawn_consumer_task(
             "route-deferred".to_string(),
             Box::new(DeferredFailConsumer::new("broker lost")),
             ctx,
@@ -581,7 +658,7 @@ mod tests {
         // Cancel BEFORE the bg task exits — simulates graceful shutdown
         cancel.cancel();
 
-        let handle = spawn_consumer_task(
+        let (handle, _startup_rx) = spawn_consumer_task(
             "route-cancel".to_string(),
             Box::new(DeferredFailConsumer::new("shutdown error")),
             ctx,
@@ -623,7 +700,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, cancel.clone(), "consumer-mgmt-test-route".to_string());
 
-        let handle = spawn_consumer_task(
+        let (handle, _startup_rx) = spawn_consumer_task(
             "test-route".into(),
             Box::new(StopTrackingConsumer),
             ctx,
@@ -863,7 +940,7 @@ mod tests {
         let (crash_tx, crash_rx) = mpsc::channel::<CrashNotification>(1);
         drop(crash_rx); // close the channel so send fails
 
-        let handle = spawn_consumer_task(
+        let (handle, _startup_rx) = spawn_consumer_task(
             "route-warn".to_string(),
             Box::new(FailingConsumer::new("start failed")),
             ctx,
@@ -880,4 +957,12 @@ mod tests {
              D-L7: let _ = silently drops send error, no restart triggered"
         );
     }
+
+    // ── rc-w1u9: ConsumerStartupMode handshake tests live in
+    // `handshake_tests.rs` (declared at the bottom of this file). They were
+    // extracted to keep this file under the thermo-nuclear size ceiling. ──
 }
+
+#[cfg(test)]
+#[path = "handshake_tests.rs"]
+mod handshake_tests;

@@ -337,6 +337,15 @@ impl RouteDefinition {
         &self.steps
     }
 
+    /// Transform the step list, consuming and returning self.
+    /// Used for post-parse instrumentation (e.g. benchmark timing injection
+    /// around `To` steps). The field stays private; callers rebuild via this
+    /// consuming method rather than holding a `&mut` alias.
+    pub fn map_steps(mut self, f: impl FnOnce(Vec<BuilderStep>) -> Vec<BuilderStep>) -> Self {
+        self.steps = f(self.steps);
+        self
+    }
+
     /// Set a per-route error handler, overriding the global one.
     pub fn with_error_handler(mut self, config: ErrorHandlerConfig) -> Self {
         self.error_handler = Some(config);
@@ -1316,5 +1325,28 @@ mod tests {
         let def = RouteDefinition::new("direct:test".to_string(), vec![])
             .with_security_authenticator(auth);
         assert!(def.security_authenticator().is_some());
+    }
+
+    #[test]
+    fn test_map_steps_swaps_steps_and_preserves_other_fields() {
+        let original = RouteDefinition::new(
+            "direct:test".to_string(),
+            vec![BuilderStep::To("mock:a".into()), BuilderStep::Stop],
+        )
+        .with_route_id("my-route");
+
+        let mapped = original.map_steps(|steps| {
+            let mut out = Vec::with_capacity(steps.len() + 1);
+            out.push(BuilderStep::To("mock:prefix".into()));
+            out.extend(steps);
+            out
+        });
+
+        // Steps were transformed.
+        assert_eq!(mapped.steps().len(), 3);
+        assert!(matches!(mapped.steps()[0], BuilderStep::To(ref s) if s == "mock:prefix"));
+        assert!(matches!(mapped.steps()[1], BuilderStep::To(ref s) if s == "mock:a"));
+        // Other fields preserved.
+        assert_eq!(mapped.route_id(), "my-route");
     }
 }

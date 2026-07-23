@@ -1,0 +1,7 @@
+# rust-camel-lib fixture-local target dir (per v1 / T2 fairness
+# convention: pins the release binary to a fixed path the harness
+# resolves; do NOT use a shared target dir — the shared thing is the
+# workspace Cargo.lock, not the target dir). On NixOS hosts the env var
+# CARGO_TARGET_DIR may be set by CI caches — see AGENTS.md gotcha.
+[build]
+target-dir = "target"

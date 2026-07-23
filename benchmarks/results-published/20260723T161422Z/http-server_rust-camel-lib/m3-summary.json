@@ -1,0 +1,17 @@
+{
+  "cell": "http-server/rust-camel-lib",
+  "status": "ok",
+  "median_mean_msgs_per_sec": 78627.840000,
+  "min_mean": 77636.140000,
+  "max_mean": 78871.880000,
+  "per_round_means": [
+    77636.14,
+    78871.88,
+    78841.52,
+    78627.84,
+    78157.12
+  ],
+  "rounds": 5,
+  "duration_secs": 50,
+  "warmup_secs": 10
+}

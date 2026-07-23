@@ -1,0 +1,45 @@
+{
+  "seed": 1784823360,
+  "order": [
+    [
+      "http-server/camel-standalone-yaml",
+      "http-server/rust-camel-cli",
+      "http-server/camel-quarkus-yaml-native",
+      "http-server/camel-quarkus-dsl-native",
+      "http-server/camel-standalone-dsl",
+      "http-server/rust-camel-lib"
+    ],
+    [
+      "http-server/camel-quarkus-yaml-native",
+      "http-server/camel-standalone-dsl",
+      "http-server/camel-standalone-yaml",
+      "http-server/rust-camel-lib",
+      "http-server/rust-camel-cli",
+      "http-server/camel-quarkus-dsl-native"
+    ],
+    [
+      "http-server/rust-camel-cli",
+      "http-server/camel-quarkus-dsl-native",
+      "http-server/rust-camel-lib",
+      "http-server/camel-standalone-dsl",
+      "http-server/camel-quarkus-yaml-native",
+      "http-server/camel-standalone-yaml"
+    ],
+    [
+      "http-server/rust-camel-lib",
+      "http-server/rust-camel-cli",
+      "http-server/camel-quarkus-yaml-native",
+      "http-server/camel-standalone-yaml",
+      "http-server/camel-quarkus-dsl-native",
+      "http-server/camel-standalone-dsl"
+    ],
+    [
+      "http-server/camel-standalone-yaml",
+      "http-server/camel-quarkus-dsl-native",
+      "http-server/camel-standalone-dsl",
+      "http-server/rust-camel-cli",
+      "http-server/rust-camel-lib",
+      "http-server/camel-quarkus-yaml-native"
+    ]
+  ]
+}

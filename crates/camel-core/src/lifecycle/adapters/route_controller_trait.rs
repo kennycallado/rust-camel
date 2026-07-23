@@ -254,7 +254,7 @@ impl camel_api::RouteController for DefaultRouteController {
 
         // Start consumer after pipeline task is spawned to minimize the chance of
         // fire-and-forget events being produced before the pipeline loop is active.
-        let consumer_handle = consumer_management::spawn_consumer_task(
+        let (consumer_handle, startup_rx) = consumer_management::spawn_consumer_task(
             route_id.to_string(),
             consumer,
             consumer_ctx,
@@ -264,6 +264,12 @@ impl camel_api::RouteController for DefaultRouteController {
         );
         #[cfg(test)]
         emit_start_route_event("consumer_spawned");
+
+        // rc-w1u9: await consumer startup handshake before returning. For
+        // Immediate consumers this is a no-op (pre-resolved receiver); for
+        // Explicit consumers (HTTP, WebSocket) it propagates bind failures as
+        // proper startup errors instead of silent background logs.
+        consumer_management::await_consumer_startup(startup_rx, "startup").await?;
 
         // Store handles and update status
         let managed = self
@@ -430,7 +436,7 @@ impl camel_api::RouteController for DefaultRouteController {
             ConsumerContext::new(sender, consumer_cancel.clone(), route_id.to_string());
 
         // Spawn consumer task
-        let consumer_handle = consumer_management::spawn_consumer_task(
+        let (consumer_handle, startup_rx) = consumer_management::spawn_consumer_task(
             route_id.to_string(),
             consumer,
             consumer_ctx,
@@ -438,6 +444,10 @@ impl camel_api::RouteController for DefaultRouteController {
             runtime_for_consumer,
             true,
         );
+
+        // rc-w1u9: await consumer startup handshake on resume too — bind
+        // failures during resume must surface as resume errors.
+        consumer_management::await_consumer_startup(startup_rx, "resume").await?;
 
         // Store consumer handle and update status
         let managed = self

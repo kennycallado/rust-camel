@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.rustcamel.bench</groupId>
+    <artifactId>camel-standalone-xslt-bridge-parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+
+  <artifactId>camel-standalone-dsl</artifactId>
+  <packaging>jar</packaging>
+
+  <properties>
+    <camel.main.class>com.rustcamel.bench.App</camel.main.class>
+  </properties>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-main</artifactId>
+      <version>${camel.version}</version>
+    </dependency>
+    <!-- camel-timer: provides the `timer:` consumer that drives the
+         bench route. NOT pulled transitively by camel-main. -->
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-timer</artifactId>
+      <version>${camel.version}</version>
+    </dependency>
+    <!-- camel-xslt: in-process XSLT 3.0 component (Saxon-HE 12.5
+         via the explicit dep below). This is the Apache Camel
+         counterpart to rust-camel's bridges/xml XSLT delegation —
+         the tax comparison is in-process engine vs bridge sidecar. -->
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-xslt</artifactId>
+      <version>${camel.version}</version>
+    </dependency>
+    <!-- Explicit engine pinning per spec §4.8 + Task 1 Spike 1B.
+         camel-xslt does NOT pull Saxon-HE transitively; without these
+         explicit deps Apache Camel falls back to the JDK 21 bundled
+         XSLT/XSD engines and the tax comparison becomes invalid
+         (strawman). Saxon-HE + Xerces-J mirror bridges/xml's pins.
+
+         Note on xml-apis: the bridge (Quarkus native) needs
+         xml-apis:1.4.01 because native-image doesn't include all JDK
+         XML classes by default. The Apache Camel JVM side CANNOT add
+         xml-apis:1.4.01 — it conflicts with the JDK's java.xml module
+         (ClassCastException at XSLT processing). The JDK's java.xml
+         module IS the JAXP spec, so functionally the same API; the
+         pinning-asymmetry is documented as a known limitation. -->
+    <dependency>
+      <groupId>net.sf.saxon</groupId>
+      <artifactId>Saxon-HE</artifactId>
+      <version>12.5</version>
+      <exclusions>
+        <!-- xmlresolver 5.2.2 is a Saxon-HE transitive dep that this
+             JVM fixture does not need: the JDK 21 java.xml module
+             already provides JAXP + entity resolution, so Saxon-HE
+             12.5 runs fine without it. The exclusion is hygiene, not
+             a workaround for the ClassCastException documented in
+             task-4-bug-investigation.md — that bug lives in Camel
+             4.8.0's TypeConverter chain (XmlSourceHandlerFactoryImpl
+             returns a Class where a Source is expected), NOT in
+             xmlresolver; the original "may be the faulty converter"
+             hypothesis was disproven and is no longer claimed here.
+             The bridges/xml native binary DOES need xmlresolver for
+             native-image compatibility; the resolver asymmetry
+             (engine versions identical; resolver differs) is the
+             documented known limitation. (bd rc-2vxg M1.) -->
+        <exclusion>
+          <groupId>org.xmlresolver</groupId>
+          <artifactId>xmlresolver</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- xercesImpl 2.12.2 is included for engine-version pinning
+         parity with bridges/xml, but the JDK's built-in XML parser
+         is preferred at runtime via the java.xml module. No code
+         in this fixture references Xerces directly; the dep is on
+         the classpath for version-resolution parity only. -->
+    <dependency>
+      <groupId>xerces</groupId>
+      <artifactId>xercesImpl</artifactId>
+      <version>2.12.2</version>
+    </dependency>
+    <!-- SLF4J binding so `log` DSL output is visible at runtime. -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.16</version>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- NO camel-yaml-dsl here — Pair A's whole point is "no
+         route-file parsing". -->
+  </dependencies>
+</project>

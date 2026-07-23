@@ -1,0 +1,17 @@
+2026-07-19 18:56:57,014 INFO  [org.apa.cam.qua.cor.CamelBootstrapRecorder] (main) Apache Camel Quarkus 3.20.0 is starting
+2026-07-19 18:56:57,016 INFO  [org.apa.cam.mai.MainSupport] (main) Apache Camel (Main) 4.10.2 is starting
+2026-07-19 18:56:57,173 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Apache Camel 4.10.2 (camel-1) is starting
+2026-07-19 18:56:57,286 INFO  [org.ecl.jet.ser.Server] (main) jetty-12.0.16; built: 2024-12-09T21:02:54.535Z; git: c3f88bafb4e393f23204dc14dc57b042e84debc7; jvm 21.0.2+13-jvmci-23.1-b30
+2026-07-19 18:56:57,301 INFO  [org.ecl.jet.ser.han.ContextHandler] (main) Started oeje10s.ServletContextHandler@31cb96e1{ROOT,/,b=null,a=AVAILABLE,h=oeje10s.ServletHandler@3eed0f5{STARTED}}
+2026-07-19 18:56:57,303 INFO  [org.ecl.jet.ee1.ser.ServletContextHandler] (main) Started oeje10s.ServletContextHandler@31cb96e1{ROOT,/,b=null,a=AVAILABLE,h=oeje10s.ServletHandler@3eed0f5{STARTED}}
+2026-07-19 18:56:57,309 INFO  [org.ecl.jet.ser.AbstractConnector] (main) Started ServerConnector@78c1a023{HTTP/1.1, (http/1.1)}{0.0.0.0:8080}
+2026-07-19 18:56:57,314 INFO  [org.ecl.jet.ser.Server] (main) Started oejs.Server@2d195ee4{STARTING}[12.0.16,sto=0] @690ms
+BENCH_ROUTE_READY 1784480217317
+2026-07-19 18:56:57,318 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Routes startup (total:1)
+2026-07-19 18:56:57,318 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main)     Started route1 (jetty:http://0.0.0.0:8080/bench)
+2026-07-19 18:56:57,318 INFO  [org.apa.cam.imp.eng.AbstractCamelContext] (main) Apache Camel 4.10.2 (camel-1) started in 144ms (build:0ms init:0ms start:144ms boot:366ms)
+2026-07-19 18:56:57,324 INFO  [io.quarkus] (main) camel-quarkus-yaml 1.0.0 on JVM (powered by Quarkus 3.20.0) started in 0.653s. 
+2026-07-19 18:56:57,324 INFO  [io.quarkus] (main) Profile prod activated. 
+2026-07-19 18:56:57,324 INFO  [io.quarkus] (main) Installed features: [camel-bean, camel-core, camel-yaml-dsl, cdi]
+2026-07-19 18:56:57,421 INFO  [route1] (qtp1850646717-46) BENCH_HTTP_REQUEST received
+BENCH_HTTP_REQUEST id=1

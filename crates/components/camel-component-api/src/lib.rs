@@ -27,7 +27,8 @@ pub use bundle::ComponentBundle;
 pub use component::Component;
 pub use component_context::{ComponentContext, NoOpComponentContext};
 pub use consumer::{
-    ConcurrencyModel, Consumer, ConsumerContext, ExchangeEnvelope, SecurityContext,
+    ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
+    SecurityContext, StartupReceiver, StartupSignal,
 };
 pub use endpoint::{Endpoint, PollingConsumer};
 pub use health_registry::{

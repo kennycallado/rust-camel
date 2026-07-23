@@ -1,0 +1,33 @@
+[package]
+name = "bench-loadgen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = """\
+M2 benchmark harness load generator (spec §4.5). Persistent HTTP client \
+for Protocol A measurement, plus the novel statistical + sampling logic \
+(calibration, BCa CI, warmup stability, process-tree RSS, bridge PID \
+tracking) used by the v3 harness. Library + multi-subcommand binary.\
+"""
+
+[lib]
+name = "bench_loadgen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bench-loadgen"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench-devnull"
+path = "src/bin/devnull.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time", "net", "fs"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time", "net", "fs", "test-util"] }

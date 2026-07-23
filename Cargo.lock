@@ -673,6 +673,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-loadgen"
+version = "0.0.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1164,7 +1175,7 @@ dependencies = [
  "percent-encoding",
  "pkcs1",
  "pkcs8",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -1228,7 +1239,7 @@ dependencies = [
  "libc",
  "prost",
  "rcgen",
- "reqwest",
+ "reqwest 0.13.4",
  "rustls-pemfile",
  "serde",
  "serde_json",
@@ -1541,7 +1552,7 @@ dependencies = [
  "flate2",
  "futures",
  "http",
- "reqwest",
+ "reqwest 0.13.4",
  "rustls-pemfile",
  "serde",
  "serde_json",
@@ -1616,7 +1627,7 @@ dependencies = [
  "camel-component-api",
  "camel-endpoint",
  "indexmap 2.14.0",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -1642,7 +1653,7 @@ dependencies = [
  "camel-core",
  "dashmap",
  "futures",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "siumai",
@@ -2068,7 +2079,7 @@ dependencies = [
  "camel-api",
  "dashmap",
  "futures",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2085,7 +2096,7 @@ dependencies = [
  "axum",
  "camel-api",
  "chrono",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
@@ -2298,7 +2309,7 @@ dependencies = [
  "camel-health",
  "dashmap",
  "prometheus",
- "reqwest",
+ "reqwest 0.13.4",
  "serde_json",
  "tokio",
  "tower",
@@ -2373,7 +2384,7 @@ dependencies = [
  "kube",
  "rcgen",
  "redis",
- "reqwest",
+ "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
@@ -5223,6 +5234,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-server-rust-camel-lib"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-http",
+ "camel-core",
+ "camel-processor",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "http-streaming"
 version = "0.24.0"
 dependencies = [
@@ -5231,7 +5256,7 @@ dependencies = [
  "camel-component-api",
  "camel-component-http",
  "futures",
- "reqwest",
+ "reqwest 0.13.4",
  "tokio",
  "tokio-util",
  "tracing-subscriber",
@@ -5316,6 +5341,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -7047,7 +7073,7 @@ dependencies = [
  "dyn-clone",
  "lazy_static",
  "percent-encoding",
- "reqwest",
+ "reqwest 0.13.4",
  "rustc_version 0.4.1",
  "serde",
  "serde_json",
@@ -7067,7 +7093,7 @@ dependencies = [
  "camel-component-timer",
  "camel-core",
  "chrono",
- "reqwest",
+ "reqwest 0.13.4",
  "serde_json",
  "testcontainers",
  "tokio",
@@ -7138,7 +7164,7 @@ dependencies = [
  "bytes",
  "http",
  "opentelemetry",
- "reqwest",
+ "reqwest 0.13.4",
 ]
 
 [[package]]
@@ -7153,7 +7179,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "reqwest",
+ "reqwest 0.13.4",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -8512,6 +8538,44 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
+version = "0.12.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+dependencies = [
+ "base64",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tower-http 0.6.11",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "webpki-roots 1.0.8",
+]
+
+[[package]]
+name = "reqwest"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
@@ -9684,7 +9748,7 @@ dependencies = [
  "infer",
  "lru",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -9758,7 +9822,7 @@ dependencies = [
  "once_cell",
  "rand 0.10.2",
  "regex",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -9790,7 +9854,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -9821,7 +9885,7 @@ dependencies = [
  "infer",
  "lru",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -9853,7 +9917,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -9885,7 +9949,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -9917,7 +9981,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -9941,7 +10005,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "eventsource-stream",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "siumai-core",
@@ -9968,7 +10032,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -9992,7 +10056,7 @@ dependencies = [
  "chrono",
  "futures",
  "futures-util",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10020,7 +10084,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10046,7 +10110,7 @@ dependencies = [
  "chrono",
  "futures",
  "futures-util",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10069,7 +10133,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "futures-util",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10095,7 +10159,7 @@ dependencies = [
  "infer",
  "lru",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10127,7 +10191,7 @@ dependencies = [
  "infer",
  "lru",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10161,7 +10225,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10196,7 +10260,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10229,7 +10293,7 @@ dependencies = [
  "infer",
  "lru",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10261,7 +10325,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10295,7 +10359,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10328,7 +10392,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10353,7 +10417,7 @@ dependencies = [
  "infer",
  "rand 0.10.2",
  "regex",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "siumai-spec",
@@ -10378,7 +10442,7 @@ dependencies = [
  "lru",
  "once_cell",
  "rand 0.10.2",
- "reqwest",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -10406,7 +10470,7 @@ dependencies = [
  "futures",
  "lru",
  "once_cell",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "siumai-core",
@@ -10800,6 +10864,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "startup-minimal-rust-camel-lib"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10926,7 +11004,7 @@ dependencies = [
  "indexmap 2.14.0",
  "js-sys",
  "path-clean",
- "reqwest",
+ "reqwest 0.13.4",
  "ring",
  "rustls",
  "rustls-pki-types",
@@ -11122,7 +11200,7 @@ dependencies = [
  "papaya",
  "rand 0.9.4",
  "regex",
- "reqwest",
+ "reqwest 0.13.4",
  "rust_decimal",
  "semver 1.0.28",
  "serde",
@@ -11222,6 +11300,20 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows",
+]
+
+[[package]]
+name = "t2-realistic-eip-rust-camel-lib"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -13593,6 +13685,38 @@ dependencies = [
  "camel-api",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "xsd-validation-bridge-rust-camel-lib"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-timer",
+ "camel-component-validator",
+ "camel-core",
+ "camel-processor",
+ "rustls",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "xslt-bridge-rust-camel-lib"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "camel-xslt",
+ "rustls",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

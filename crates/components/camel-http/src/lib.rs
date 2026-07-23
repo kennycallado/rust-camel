@@ -1278,6 +1278,16 @@ impl Consumer for HttpConsumer {
                 .await;
         }
 
+        // rc-w1u9: Signal readiness AFTER (1) TcpListener::bind succeeded
+        // (inside get_or_spawn above), (2) the axum server task was spawned,
+        // and (3) this route's path/REST endpoint was registered. At this
+        // point the listener is genuinely accepting connections and any
+        // request to this route will be dispatched (not 404'd). The runtime
+        // uses this signal to publish RouteStarted and to release
+        // ctx.start() so external benchmarks can emit a reliable
+        // listener-bound marker.
+        ctx.mark_ready();
+
         let path = self.config.path.clone();
         let registry_for_cleanup = registry.clone();
         let cancel_token = ctx.cancel_token();
@@ -1548,6 +1558,16 @@ impl Consumer for HttpConsumer {
 
     fn concurrency_model(&self) -> camel_component_api::ConcurrencyModel {
         camel_component_api::ConcurrencyModel::Concurrent { max: None }
+    }
+
+    // rc-w1u9: HTTP consumer binds a TcpListener inside start() (via
+    // ServerRegistry::get_or_spawn) and only THEN can it accept connections.
+    // Opting into Explicit startup makes ctx.start() await the bind+register
+    // completion so listeners fail fast on bind errors (previously a silent
+    // background log) and external markers can reliably detect listener-bound
+    // state.
+    fn startup_mode(&self) -> camel_component_api::ConsumerStartupMode {
+        camel_component_api::ConsumerStartupMode::Explicit
     }
 }
 
@@ -3976,6 +3996,86 @@ mod tests {
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 201);
 
+        token.cancel();
+    }
+
+    /// rc-w1u9: HttpConsumer MUST declare Explicit startup_mode so the runtime
+    /// waits for the listener bind before publishing RouteStarted.
+    #[test]
+    fn test_http_consumer_startup_mode_is_explicit() {
+        use camel_component_api::ConsumerStartupMode;
+        let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            path: "/x".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 1024,
+            method: None,
+            tls_config: None,
+        };
+        let consumer = HttpConsumer::new(consumer_cfg, test_rt());
+        assert_eq!(
+            consumer.startup_mode(),
+            ConsumerStartupMode::Explicit,
+            "HttpConsumer must opt into Explicit startup"
+        );
+    }
+
+    /// rc-w1u9: HttpConsumer::start() MUST call ctx.mark_ready() AFTER bind
+    /// + route registration. The StartupSignal resolves Ok only when that
+    /// happens. Verified here by injecting our own signal pair into the
+    /// ConsumerContext and asserting the receiver resolves within a bounded
+    /// window even before any HTTP request is made.
+    #[tokio::test]
+    async fn test_http_consumer_emits_mark_ready_after_bind() {
+        use camel_component_api::{ConsumerContext, StartupSignal};
+
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/ready-probe".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 1024,
+            method: None,
+            tls_config: None,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "ready-probe-route".to_string());
+
+        // Inject our own startup signal so we can observe mark_ready.
+        let (signal, startup_rx) = StartupSignal::pair();
+        let ctx = ctx.with_startup(signal);
+
+        // Spawn start() — it MUST call mark_ready once the listener is bound
+        // and the path is registered.
+        tokio::spawn(async move {
+            let _ = consumer.start(ctx).await;
+        });
+
+        // The receiver MUST resolve Ok within a bounded window — proving
+        // mark_ready was called by start(). A short timeout catches the
+        // regression where mark_ready is never called (the old behaviour
+        // would hang the receiver forever, which is exactly the rc-w1u9 bug).
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), startup_rx.await_ready())
+                .await
+                .expect("HttpConsumer must call ctx.mark_ready() after bind (rc-w1u9)");
+        assert!(result.is_ok(), "mark_ready must resolve Ok after bind");
+
+        // Cancellation tears down the spawned start() loop.
         token.cancel();
     }
 

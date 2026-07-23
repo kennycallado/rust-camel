@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.rustcamel.bench</groupId>
+    <artifactId>camel-standalone-xsd-validation-bridge-parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+
+  <artifactId>camel-standalone-dsl</artifactId>
+  <packaging>jar</packaging>
+
+  <properties>
+    <camel.main.class>com.rustcamel.bench.App</camel.main.class>
+  </properties>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-main</artifactId>
+      <version>${camel.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-timer</artifactId>
+      <version>${camel.version}</version>
+    </dependency>
+    <!-- camel-validator: in-process XSD validation component (Xerces-J
+         2.12.2 via the explicit dep below). This is the Apache Camel
+         counterpart to rust-camel's bridges/xml XSD delegation — the
+         tax comparison is in-process Xerces-J vs bridge sidecar. -->
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-validator</artifactId>
+      <version>${camel.version}</version>
+    </dependency>
+    <!-- Explicit engine pinning per spec §4.8 + Task 1 Spike 1B.
+         camel-validator does NOT pull Xerces-J transitively; without
+         these explicit deps Apache Camel falls back to the JDK 21
+         bundled XSD engine and the tax comparison becomes invalid.
+         Saxon-HE + Xerces-J mirror bridges/xml's pins. xml-apis is
+         provided by the JDK's java.xml module on the JVM side (see
+         xslt-bridge/.../pom.xml for the asymmetry rationale). -->
+    <dependency>
+      <groupId>net.sf.saxon</groupId>
+      <artifactId>Saxon-HE</artifactId>
+      <version>12.5</version>
+    </dependency>
+    <dependency>
+      <groupId>xerces</groupId>
+      <artifactId>xercesImpl</artifactId>
+      <version>2.12.2</version>
+    </dependency>
+    <!-- SLF4J binding so `log` DSL output is visible at runtime. -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.16</version>
+      <scope>runtime</scope>
+    </dependency>
+  </dependencies>
+</project>

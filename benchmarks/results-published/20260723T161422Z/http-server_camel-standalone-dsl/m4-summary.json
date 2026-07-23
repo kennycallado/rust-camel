@@ -1,0 +1,180 @@
+{
+  "cell": "http-server/camel-standalone-dsl",
+  "rss_initial_kib": 599928,
+  "rss_final_kib": 600468,
+  "rss_delta_kib": 540,
+  "rss_max_kib": 600468,
+  "representative_round": 1,
+  "measurement_window_secs": 50,
+  "interval_ms": 2000,
+  "delta_median": 540,
+  "delta_min": 404,
+  "delta_max": 684,
+  "delta_p25": 532,
+  "delta_p75": 636,
+  "delta_distribution": [
+    684,
+    540,
+    636,
+    404,
+    532
+  ],
+  "rss_samples": [
+    {
+      "sample_offset_ns": 0,
+      "summed_vmrss_kib": 599928,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 2000000000,
+      "summed_vmrss_kib": 599936,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 4000000000,
+      "summed_vmrss_kib": 599984,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 6000000000,
+      "summed_vmrss_kib": 599988,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 8000000000,
+      "summed_vmrss_kib": 599992,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 10000000000,
+      "summed_vmrss_kib": 600024,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 12000000000,
+      "summed_vmrss_kib": 600068,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 14000000000,
+      "summed_vmrss_kib": 600076,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 16000000000,
+      "summed_vmrss_kib": 600092,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 18000000000,
+      "summed_vmrss_kib": 600104,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 20000000000,
+      "summed_vmrss_kib": 600104,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 22000000000,
+      "summed_vmrss_kib": 600188,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 24000000000,
+      "summed_vmrss_kib": 600220,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 26000000000,
+      "summed_vmrss_kib": 600232,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 28000000000,
+      "summed_vmrss_kib": 600252,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 30000000000,
+      "summed_vmrss_kib": 600300,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 32000000000,
+      "summed_vmrss_kib": 600304,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 34000000000,
+      "summed_vmrss_kib": 600344,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 36000000000,
+      "summed_vmrss_kib": 600364,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 38000000000,
+      "summed_vmrss_kib": 600384,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 40000000000,
+      "summed_vmrss_kib": 600396,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 42000000000,
+      "summed_vmrss_kib": 600408,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 44000000000,
+      "summed_vmrss_kib": 600412,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 46000000000,
+      "summed_vmrss_kib": 600424,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 48000000000,
+      "summed_vmrss_kib": 600452,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    },
+    {
+      "sample_offset_ns": 50000000000,
+      "summed_vmrss_kib": 600468,
+      "summed_vmhwm_kib": 602796,
+      "process_count": 1
+    }
+  ]
+}

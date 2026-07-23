@@ -1,0 +1,13 @@
+info: spawned child 'camel run' with pid 843703
+2026-07-19T16:56:54.088039Z  WARN camel_cli::commands::run: camel run trusts the current working directory and will execute route scripts, WASM modules, and beans resolved from it; only run from a trusted directory
+2026-07-19T16:56:54.088990Z  INFO camel_cli::commands::run: camel-cli: loading routes from patterns: ["/home/kenny/dev/rust-camel/.worktrees/rc-f3g9-startup-benchmark/benchmarks/scenarios/http-server/rust-camel-cli/routes/http-server.yaml"]
+2026-07-19T16:56:54.089939Z  INFO camel_core::lifecycle::application::context_lifecycle: Starting CamelContext
+2026-07-19T16:56:54.089948Z  INFO camel_core::lifecycle::application::context_lifecycle: Starting service: function-runtime
+2026-07-19T16:56:54.089960Z  INFO camel_core::lifecycle::application::context_lifecycle: Starting service: bridge-cleanup
+2026-07-19T16:56:54.090016Z  INFO camel_core::lifecycle::adapters::route_controller_trait: Starting route route_id=bench-http
+2026-07-19T16:56:54.090986Z  INFO camel_core::lifecycle::adapters::route_controller_trait: Route started route_id=bench-http
+2026-07-19T16:56:54.091005Z  INFO camel_core::lifecycle::application::context_lifecycle: CamelContext started
+2026-07-19T16:56:54.091011Z  INFO camel_cli::commands::run: camel-cli: context started
+2026-07-19T16:56:54.091014Z  INFO camel_cli::commands::run: camel-cli: running (hot-reload disabled). Press Ctrl+C to stop.
+BENCH_ROUTE_READY 1784480214103
+2026-07-19T16:56:54.195939Z  INFO camel_processor::log: "BENCH_HTTP_REQUEST received" exchange_id=25770da9-3bee-477f-b8a6-6fbad509cc7a

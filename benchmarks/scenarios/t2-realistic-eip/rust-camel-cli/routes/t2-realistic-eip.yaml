@@ -1,0 +1,46 @@
+# T2 scenario route for rust-camel-cli (Pair B, bd rc-p9ki Task 3).
+#
+# Mirrors the v1 `routes/startup-minimal.yaml` structure (`routes:` array
+# of route objects with `from` / `steps` keys) but exercises the full T2
+# EIP shape from spec §4.1: timer -> set_body -> set_header -> filter ->
+# choice.when/otherwise -> log. Same logical route as the Apache Camel
+# YAML subproject's `camel/routes.yaml`; only the field names differ
+# (rust-camel uses `key:` / `value:` for set_header and `value:` for
+# set_body literal, NOT Apache Camel's `name:` / `constant:` — see
+# spike `benchmarks/spikes/spike-yaml-predicate/routes/spike-t2.yaml`
+# for the proven rust-camel shape).
+#
+# The `log` step uses the bare-string form which is always evaluated as
+# Simple language (yaml.rs L588-593: LogMessageData::Literal wraps the
+# value as a Simple expression). The log EIP therefore evaluates
+# `${body}` and emits `BENCH_ROUTE_READY body=pong-bench` on stdout —
+# the exact grep target the harness watches for.
+#
+# Behavioral equivalence with the Apache Camel YAML fixture (same filter
+# / choice semantics, same Simple predicate strings) — this is what
+# makes T2 Pair B language-subsystem-equivalent to Apache Camel Pair B.
+# (Pair A is NOT language-subsystem-equivalent: rust-camel-lib uses
+# closure predicates — see that fixture's source comment.)
+
+routes:
+  - id: "bench-route"
+    from: "timer:bench?repeatCount=1&delay=0"
+    steps:
+      - set_body:
+          value: "ping"
+      - set_header:
+          key: "source"
+          value: "bench"
+      - filter:
+          simple: "${body} == 'ping'"
+          steps:
+            - choice:
+                when:
+                  - simple: "${header.source} == 'bench'"
+                    steps:
+                      - set_body:
+                          value: "pong-bench"
+                otherwise:
+                  - set_body:
+                      value: "pong-other"
+      - log: "BENCH_ROUTE_READY body=${body}"

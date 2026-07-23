@@ -641,8 +641,8 @@ fn package_release(
 }
 
 /// Check if a binary is statically linked by looking for the absence of
-/// `PT_INTERP` in its ELF program headers. Static binaries have no dynamic
-/// interpreter segment.
+/// a dynamic interpreter (`Requesting program interpreter`) in its ELF
+/// program headers. Static binaries have no interpreter segment.
 #[cfg(target_os = "linux")]
 fn is_static_binary(binary: &Path) -> bool {
     let output = Command::new("readelf")
@@ -651,7 +651,7 @@ fn is_static_binary(binary: &Path) -> bool {
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            !stdout.contains("PT_INTERP")
+            !stdout.contains("Requesting program interpreter")
         }
         Err(_) => {
             eprintln!("Warning: readelf failed, assuming dynamic binary");

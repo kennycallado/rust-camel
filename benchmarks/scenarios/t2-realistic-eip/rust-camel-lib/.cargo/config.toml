@@ -1,0 +1,12 @@
+# Force a fixture-local target directory so the release binary always lands
+# at benchmarks/scenarios/t2-realistic-eip/rust-camel-lib/target/release/,
+# regardless of any inherited CARGO_TARGET_DIR env var or workspace root
+# target dir. Mirrors the v1 lib fixture's config exactly.
+#
+# NOTE: cargo's precedence is --target-dir > CARGO_TARGET_DIR env >
+# build.target-dir config. If a host sets CARGO_TARGET_DIR (e.g. CI shared
+# cache), this config alone is insufficient. Builds of this fixture MUST
+# be invoked with CARGO_TARGET_DIR unset, or with an explicit
+# --target-dir target / --target-dir benchmarks/.../target flag.
+[build]
+target-dir = "target"

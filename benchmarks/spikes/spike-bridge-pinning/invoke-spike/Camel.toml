@@ -1,0 +1,33 @@
+# Spike 1B-bridge-invocation: rust-camel route invokes the freshly built
+# bridges/xml native binary via the xslt component. Smoke test only:
+# confirms that `cargo xtask build-xml-bridge` produces a binary that
+# rust-camel can spawn + invoke end-to-end.
+#
+# This complements the version-pinning artifacts under
+# spike-bridge-pinning/{standalone-pin,quarkus-pin}/. Those prove the
+# engines resolve to the same versions; this spike proves the *binary*
+# produced by `cargo xtask build-xml-bridge` actually works when
+# invoked from a rust-camel route. Together: Task 4 T4a/T4b fixtures
+# can rely on `cargo xtask build-xml-bridge` as the canonical binary
+# build path (no manual native-image invocation needed).
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+# ADR-0033: fail-closed startup validation requires at least one exec
+# profile even when no route uses `exec:`. This stub is intentionally
+# inert — the route uses `timer:` + `xslt:`, not `exec:`. The profile
+# costs ~µs to load.
+[default.components.exec]
+workspace_root = "."
+
+[[default.components.exec.profiles]]
+name = "inert-scaffolding"
+executable = "true"
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000

@@ -1,0 +1,17 @@
+{
+  "cell": "http-server/camel-quarkus-yaml-native",
+  "status": "ok",
+  "median_mean_msgs_per_sec": 37705.260000,
+  "min_mean": 37584.980000,
+  "max_mean": 38642.180000,
+  "per_round_means": [
+    37584.98,
+    37624.58,
+    38458.26,
+    38642.18,
+    37705.26
+  ],
+  "rounds": 5,
+  "duration_secs": 50,
+  "warmup_secs": 10
+}

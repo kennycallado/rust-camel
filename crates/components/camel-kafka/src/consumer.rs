@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use camel_component_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::{
-    ConcurrencyModel, Consumer, ConsumerContext, NetworkRetryPolicy, RuntimeObservability,
+    ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, NetworkRetryPolicy,
+    RuntimeObservability,
 };
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
@@ -31,12 +32,20 @@ use crate::manual_commit::{CommitRequest, KafkaManualCommit};
 // ReadyContext — notifies when the consumer gets its first partition assignment
 // ---------------------------------------------------------------------------
 
-/// A custom rdkafka context that fires an `Arc<Notify>` when the consumer
-/// receives its first partition assignment via the rebalance callback.
-/// This avoids polling `assignment()` in a tight loop (which itself requires
-/// `recv()` to drive the rebalance protocol — a deadlock).
+/// A custom rdkafka context that fires when the consumer receives its first
+/// partition assignment via the rebalance callback. This avoids polling
+/// `assignment()` in a tight loop (which itself requires `recv()` to drive
+/// the rebalance protocol — a deadlock).
+///
+/// On the first `Rebalance::Assign` the callback signals BOTH:
+///   - the legacy `Arc<Notify>` exposed via `KafkaConsumer::ready_signal()`
+///     (kept for test synchronization), and
+///   - the runtime's standard `ConsumerContext::mark_ready()` so the
+///     `ConsumerStartupMode::Explicit` startup signal resolves once the
+///     consumer is bound and partitions have been assigned.
 struct ReadyContext {
     ready: Arc<Notify>,
+    ctx: ConsumerContext,
 }
 
 impl ClientContext for ReadyContext {}
@@ -46,6 +55,14 @@ impl RdConsumerContext for ReadyContext {
         if matches!(rebalance, Rebalance::Assign(_)) {
             // Partitions were assigned — signal any waiters.
             self.ready.notify_waiters();
+            // KAFKA-STARTUP-MIGRATION: the actual resource acquisition
+            // (consumer.create + subscribe + first assignment) is async and
+            // happens inside the spawned task, so `mark_ready` cannot be
+            // called from `start()`. Firing it here unifies the startup
+            // signal with the standard `ConsumerStartupMode::Explicit`
+            // contract: the runtime now awaits this same callback rather
+            // than a custom Notify.
+            self.ctx.mark_ready();
         }
     }
 }
@@ -179,6 +196,16 @@ impl Consumer for KafkaConsumer {
         // Kafka consumers process messages sequentially within a partition group
         // to preserve offset ordering and at-least-once commit semantics.
         ConcurrencyModel::Sequential
+    }
+
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        // Resource acquisition (rdkafka client create + subscribe + first
+        // rebalance assignment) is async and happens inside the spawned
+        // consumer task, so the runtime must wait for an explicit
+        // `mark_ready()` from the consumer's rebalance callback rather than
+        // treating `start()`'s Ok return as ready. See
+        // `ReadyContext::post_rebalance` for the signal site.
+        ConsumerStartupMode::Explicit
     }
 
     fn background_task_handle(
@@ -411,7 +438,10 @@ async fn run_consumer_loop(
     apply_rdkafka_config(&config, &mut client_cfg);
 
     let consumer: ReadyStreamConsumer = client_cfg
-        .create_with_context(ReadyContext { ready })
+        .create_with_context(ReadyContext {
+            ready,
+            ctx: ctx.clone(),
+        })
         .map_err(|e| {
             CamelError::ProcessorError(format!("Failed to create Kafka consumer: {}", e))
         })?;

@@ -1,0 +1,24 @@
+# Spike 1A: rust-camel HTTP server smoke-test config.
+#
+# Same ADR-0033 fail-closed workaround as the v1 fixture (ExecBundle
+# requires at least one exec profile even though no route uses exec:).
+# See benchmarks/scenarios/startup-minimal/rust-camel-cli/Camel.toml
+# for the full reasoning.
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+
+[default.components.exec]
+workspace_root = "."
+
+[[default.components.exec.profiles]]
+name = "bench-stub"
+executable = "true"
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000

@@ -1,0 +1,29 @@
+[package]
+name = "spike-loadgen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Detach from the rust-camel workspace: this spike is a standalone
+# feasibility validation of the M2 loadgen design, with no shared
+# dependencies on rust-camel crates. Per the workspace convention,
+# benchmark fixtures that DO share deps are added to `members` in the
+# root Cargo.toml instead.
+[workspace]
+
+[[bin]]
+name = "devnull"
+path = "src/devnull.rs"
+
+[[bin]]
+name = "loadgen"
+path = "src/loadgen.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

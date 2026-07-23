@@ -1,0 +1,86 @@
+# T4b XSD validation bridge fixture — rust-camel CLI route (Pair B, bd Task 4).
+#
+# Spec §4.6 / T4b brief route shape, ported to YAML DSL:
+#   from(timer:bench?period=10&repeatCount=10000)
+#     .set_body(constant <1KB XML payload>)
+#     .to(validator:shared/schema.xsd)
+#     .log(BENCH_XSD_TICK correctness signal)
+#
+# The `to: validator:...` URI triggers camel-validator to spawn the
+# bridges/xml binary on first invocation (lazy). The bridge-wrapper.sh
+# writes the bridge PID before exec'ing the real binary.
+#
+# Per-tick BENCH_LATENCY: emitted by the CLI's bench_instrument module
+# (crates/camel-cli/src/commands/bench_instrument.rs), which wraps every
+# top-level `.to()` step with Instant-bracketing processors when
+# BENCH_LATENCY_FILE env var is set. Resolves bd rc-5gcu.
+#
+# Workload pinning (spec §4.8 / T4b brief, bd rc-2vxg I1): the
+# set_body.value payload below is byte-identical to
+# shared/bench-payload.xml. Source of truth = shared/bench-payload.xml;
+# the smoke runner verifies byte-equality on every run via
+# verify_cli_payload_byte_equality (drift = smoke failure). See
+# xslt-bridge/rust-camel-cli/routes/xslt-bench.yaml header for the
+# full rationale (env interpolation mangles newlines; DSL has no
+# file-path mode).
+
+routes:
+  - id: "bench-xsd"
+    from: "timer:bench?period=10&repeatCount=10000"
+    steps:
+      # 1KB XML payload — byte-identical to shared/bench-payload.xml.
+      # The smoke runner (smoke/run.sh::verify_cli_payload_byte_equality)
+      # asserts this on every run.
+      - set_body:
+          value: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!--
+              T4b XSD validation benchmark shared XML payload (~1KB).
+
+              Byte-identical input across all 4 T4b artifacts. This payload
+              validates successfully against schema.xsd (the validator component
+              produces no exception when the body matches the schema).
+
+              Note: schema.xsd defines targetNamespace
+              "https://rust-camel.local/bench/t4b" and the doc root must be
+              namespace-qualified. We use a default namespace declaration to
+              keep the payload compact while still being schema-valid.
+            -->
+            <doc version="3" lang="en" source="bench-v3-t4b"
+                 xmlns="https://rust-camel.local/bench/t4b">
+              <meta>
+                <id>4b8c2f1e-9b3d-4c7e-8a12-f3e5d6c7b8a9</id>
+                <created>2026-07-18T10:00:00Z</created>
+                <suite>rust-camel-benchmark-v3</suite>
+                <scenario>xsd-validation-bridge</scenario>
+                <payloadSize>1KB</payloadSize>
+              </meta>
+              <section id="intro" type="preamble">
+                <title>Benchmark T4b XSD Validation</title>
+                <p>This payload is validated against schema.xsd on every timer
+                   tick. The validation cost is included in the per-tick latency
+                   measurement; the bridge tax is the additional cost rust-camel
+                   pays to delegate this work to a Java native binary via gRPC
+                   mTLS while Apache Camel runs Xerces-J in-process.</p>
+              </section>
+              <section id="payload" type="data">
+                <item index="1"><key>alpha</key><value>0xdeadbeef</value></item>
+                <item index="2"><key>beta</key><value>0xcafebabe</value></item>
+                <item index="3"><key>gamma</key><value>0xfeedface</value></item>
+                <item index="4"><key>delta</key><value>0xbaddcafe</value></item>
+                <item index="5"><key>epsilon</key><value>0xdeadc0de</value></item>
+              </section>
+              <footer>
+                <checksum>sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</checksum>
+                <notes>End of T4b benchmark payload.</notes>
+              </footer>
+            </doc>
+      # Delegate to bridges/xml (Xerces-J 2.12.2 via gRPC mTLS). The
+      # bridge spawns lazily on first invocation.
+      - to: "validator:../shared/schema.xsd"
+      # Per-tick correctness signal (bd rc-2vxg I2): presence of this
+      # log line proves the to:validator step accepted the payload
+      # without throwing on this tick (validation succeeded). The smoke
+      # runner asserts ≥10 of these per artifact after the run. Mirrors
+      # the BENCH_XSD_TICK step in the other 3 T4b artifacts.
+      - log: "BENCH_XSD_TICK"

@@ -1,0 +1,31 @@
+[package]
+name = "t2-realistic-eip-rust-camel-lib"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Path deps resolve to the worktree's own checkout of rust-camel crates
+# (4 levels up: t2-realistic-eip/rust-camel-lib/ -> scenarios/ ->
+# benchmarks/ -> worktree root). Same pattern as the v1 lib fixture.
+camel-api = { path = "../../../../crates/camel-api" }
+camel-builder = { path = "../../../../crates/camel-builder" }
+camel-core = { path = "../../../../crates/camel-core" }
+camel-processor = { path = "../../../../crates/camel-processor" }
+camel-component-timer = { path = "../../../../crates/components/camel-timer" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+# Workspace member of the parent rust-camel workspace (auto-discovered
+# by cargo from the root Cargo.toml — same mechanism as the v1 lib
+# fixture at benchmarks/scenarios/startup-minimal/rust-camel-lib).
+# Sharing the workspace Cargo.lock guarantees that transitive dep
+# versions (tokio, futures, uuid, serde, ...) match what
+# `cargo build --release -p camel-cli` (Pair B for T2) sees, so
+# T2 Pair A vs T2 Pair B isolates only parser/CLI overhead, not
+# dep drift.
+
+[[bin]]
+name = "t2-realistic-eip"
+path = "src/main.rs"

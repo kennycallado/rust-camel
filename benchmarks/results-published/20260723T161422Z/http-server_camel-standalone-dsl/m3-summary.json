@@ -1,0 +1,17 @@
+{
+  "cell": "http-server/camel-standalone-dsl",
+  "status": "ok",
+  "median_mean_msgs_per_sec": 66808.240000,
+  "min_mean": 65325.920000,
+  "max_mean": 67001.300000,
+  "per_round_means": [
+    65325.92,
+    66100.88,
+    66808.24,
+    66910.3,
+    67001.3
+  ],
+  "rounds": 5,
+  "duration_secs": 50,
+  "warmup_secs": 10
+}

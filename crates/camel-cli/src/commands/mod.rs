@@ -1,3 +1,4 @@
+pub mod bench_instrument;
 pub mod errors;
 pub mod journal;
 pub mod new;

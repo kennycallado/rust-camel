@@ -1,0 +1,31 @@
+# Spike 1B-bridge-invocation: rust-camel route that invokes the
+# bridges/xml native binary (just produced by `cargo xtask
+# build-xml-bridge`).
+#
+# Route shape:
+#   1. `xslt-invocation` — timer fires once; the route then:
+#      a. set_body to a tiny XML payload,
+#      b. to xslt:<path to transform.xslt> (this is what triggers
+#         camel-xslt to spawn the bridge binary and call Saxon-HE
+#         through gRPC),
+#      c. log the transformed body so we can grep the result.
+#
+# Success criterion: stdout shows the marker
+#   SPIKE_XSLT_INVOKE result=<result><orderId>42</orderId></result>
+# proving the bridge binary was spawned, accepted the request, and
+# returned the Saxon-HE transformed XML.
+#
+# The `to: "xslt:..."` URI uses a CWD-relative path to `transform.xslt`
+# (which lives under the `invoke-spike/` directory alongside routes/).
+# rust-camel's `camel run` does not expand ${ENV} / @vars@ in URIs —
+# the path is read as-is. The spike is throwaway; future work will
+# not need this fixture.
+
+routes:
+  - id: "xslt-invocation"
+    from: "timer:xslt-invoke?repeatCount=1&delay=200"
+    steps:
+      - set_body:
+          value: "<order><id>42</id></order>"
+      - to: "xslt:benchmarks/spikes/spike-bridge-pinning/invoke-spike/transform.xslt"
+      - log: "SPIKE_XSLT_INVOKE result=${body}"

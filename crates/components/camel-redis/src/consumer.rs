@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use camel_component_api::{Body, CamelError, Exchange, Message};
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext, RuntimeObservability};
+use camel_component_api::{
+    ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, RuntimeObservability,
+};
 use futures_util::StreamExt;
 use redis::Msg;
 use std::sync::Arc;
@@ -226,6 +228,10 @@ impl Consumer for RedisConsumer {
         ConcurrencyModel::Sequential
     }
 
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
+    }
+
     fn background_task_handle(
         &mut self,
     ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
@@ -283,6 +289,7 @@ async fn run_pubsub_consumer(
     }
 
     info!("PubSub consumer started, waiting for messages");
+    ctx.mark_ready();
 
     // Message loop
     let mut stream = pubsub.on_message();
@@ -353,6 +360,7 @@ async fn run_queue_consumer(
     .map_err(|e| CamelError::ProcessorError(format!("Failed to create connection: {}", e)))?;
 
     info!("Queue consumer started, waiting for items");
+    ctx.mark_ready();
 
     // Blocking pop loop (BLPOP/BRPOP) with capped exponential backoff via NetworkRetryPolicy (REDIS-004)
     let queue_cmd = queue_command_name(pop_command);

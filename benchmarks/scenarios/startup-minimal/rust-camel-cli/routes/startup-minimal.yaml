@@ -1,0 +1,22 @@
+# Benchmark fixture for rust-camel CLI + YAML (Pair B partner, bd rc-f3g9).
+#
+# Same `timer -> log` route shape as `hello.yaml`, but the URI and log
+# message mirror `rust-camel-lib`'s Pair A programmatic route so the
+# Pair A vs Pair B comparison isolates "YAML parsing cost" and nothing
+# else:
+#   - `repeatCount=1` fires exactly one tick after the (zero) delay,
+#     then the consumer stops (period is irrelevant).
+#   - `delay=0` skips Camel's 1000ms default initial delay so the
+#     cold-start number is not contaminated by idle wait. The JVM Pair
+#     B contenders set the same parameter; rust-camel's timer component
+#     accepts `delay` natively (crates/components/camel-timer), so this
+#     is parity of route semantics, not a workaround.
+#   - Log step emits the `BENCH_ROUTE_READY` marker that the harness
+#     watches for. No `${...}` interpolation - literal text only.
+#
+# Do not mutate `hello.yaml` (onboarding example, not a benchmark fixture).
+routes:
+  - id: "bench-route"
+    from: "timer:bench?repeatCount=1&delay=0"
+    steps:
+      - log: "BENCH_ROUTE_READY"

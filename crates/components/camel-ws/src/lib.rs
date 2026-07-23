@@ -26,8 +26,9 @@ use camel_api::security_policy::AuthorizationDecision;
 use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{
     Body as CamelBody, BoxProcessor, CamelError, Component, ConcurrencyModel, Consumer,
-    ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, Message as CamelMessage,
-    NetworkRetryPolicy, ProducerContext, RuntimeObservability, retry_async,
+    ConsumerContext, ConsumerStartupMode, Endpoint, Exchange, ExchangeEnvelope,
+    Message as CamelMessage, NetworkRetryPolicy, ProducerContext, RuntimeObservability,
+    retry_async,
 };
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
@@ -998,6 +999,12 @@ impl Consumer for WsConsumer {
             )
             .await?;
 
+        // TCP listener is bound inside get_or_spawn/spawn_server
+        // (TcpListener::bind before tokio::spawn for plain WS; for TLS the
+        // bind is deferred inside a spawned task). Signal readiness now
+        // that the synchronous bind succeeded.
+        ctx.mark_ready();
+
         let (env_tx, mut env_rx) = mpsc::channel::<ExchangeEnvelope>(64);
         {
             let mut table = state.dispatch.write().await;
@@ -1104,6 +1111,10 @@ impl Consumer for WsConsumer {
         ConcurrencyModel::Concurrent {
             max: Some(self.cfg.inner.max_connections as usize),
         }
+    }
+
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
     }
 
     fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {

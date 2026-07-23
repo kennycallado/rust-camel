@@ -1,0 +1,26 @@
+# Pair B route for T3 HTTP server scenario (bd Task 3).
+#
+# Same logical route as camel-standalone-dsl/App.java
+# (`from(jetty:http://0.0.0.0:8080/bench).setBody(pong)`) but
+# authored in Apache Camel YAML DSL. The marker
+# `BENCH_ROUTE_READY <unix_ms>` is emitted by AppYaml.java's
+# `RouteStarted` event notifier (NOT a route step) — the
+# notifier is the listener-bind signal, fired by Apache
+# Camel's `EventNotifierSupport` when the `jetty:` consumer
+# has bound the listener and the route is fully started.
+#
+# Canonical minimal: no per-request counter, no process step,
+# no log emission, no bean invocation. The harness measures
+# cold-start + RSS, not request latency; per-request
+# observability belongs to the loadgen, not the fixture.
+#
+# No method restriction on the consumer: the loadgen drives
+# only POST `/bench`, so restricting it is unnecessary and
+# would diverge from the rust-camel fixtures (which accept any
+# method). All fixtures are kept identical on this axis.
+- route:
+    from:
+      uri: "jetty:http://0.0.0.0:8080/bench"
+      steps:
+        - setBody:
+            constant: "pong"

@@ -875,7 +875,7 @@ impl DefaultRouteController {
 
         // Start consumer after pipeline loop is spawned to avoid startup races
         // where consumers emit exchanges before the route pipeline begins polling.
-        let consumer_handle = super::consumer_management::spawn_consumer_task(
+        let (consumer_handle, startup_rx) = super::consumer_management::spawn_consumer_task(
             route_id.to_string(),
             consumer,
             consumer_ctx,
@@ -883,6 +883,10 @@ impl DefaultRouteController {
             runtime_for_consumer,
             false,
         );
+
+        // rc-w1u9: await consumer startup handshake for aggregate routes too
+        // so bind failures surface as route-start errors.
+        super::consumer_management::await_consumer_startup(startup_rx, "startup").await?;
 
         // Extend the stored consumer handle through aggregate force-completion.
         // While this monitor drains pending buckets, handle_is_running still reports

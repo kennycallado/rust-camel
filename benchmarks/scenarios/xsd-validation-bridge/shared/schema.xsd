@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  T4b XSD validation benchmark shared schema (~2KB).
+
+  Spec §4.8: pinning Xerces-J 2.12.2 + xml-apis 1.4.01 across all 4
+  T4b artifacts. Used byte-identical by Java standalone, Java Quarkus
+  native, rust-camel-lib, and rust-camel-cli. Validates the 1KB
+  bench-payload.xml input via the validator component.
+
+  The schema is intentionally non-trivial (mixed content model +
+  required attributes + nested complex types) so Xerces-J does real
+  parsing work per invocation — the bridge tax measurement would be
+  meaningless if validation was a single-element check.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="https://rust-camel.local/bench/t4b"
+           xmlns:tns="https://rust-camel.local/bench/t4b"
+           elementFormDefault="qualified"
+           attributeFormDefault="unqualified"
+           version="1.0">
+
+  <!-- Root: bench-doc -->
+  <xs:element name="doc">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="meta" type="tns:MetaType" minOccurs="1" maxOccurs="1"/>
+        <xs:element name="section" type="tns:SectionType" minOccurs="1" maxOccurs="unbounded"/>
+        <xs:element name="footer" type="tns:FooterType" minOccurs="0" maxOccurs="1"/>
+      </xs:sequence>
+      <xs:attribute name="version" type="xs:string" use="required"/>
+      <xs:attribute name="lang" type="xs:language" use="required"/>
+      <xs:attribute name="source" type="xs:string" use="optional"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="MetaType">
+    <xs:sequence>
+      <xs:element name="id" type="xs:string"/>
+      <xs:element name="created" type="xs:dateTime"/>
+      <xs:element name="suite" type="xs:string"/>
+      <xs:element name="scenario" type="xs:string"/>
+      <xs:element name="payloadSize" type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="SectionType" mixed="true">
+    <xs:sequence>
+      <xs:element name="title" type="xs:string" minOccurs="0"/>
+      <xs:element name="p" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="item" type="tns:ItemType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="id" type="xs:ID" use="required"/>
+    <xs:attribute name="type" type="xs:string" use="optional"/>
+  </xs:complexType>
+
+  <xs:complexType name="ItemType">
+    <xs:sequence>
+      <xs:element name="key" type="xs:string"/>
+      <xs:element name="value" type="xs:string"/>
+    </xs:sequence>
+    <xs:attribute name="index" type="xs:positiveInteger" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="FooterType">
+    <xs:sequence>
+      <xs:element name="checksum" type="xs:string"/>
+      <xs:element name="notes" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>

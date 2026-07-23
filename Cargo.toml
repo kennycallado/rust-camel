@@ -9,6 +9,33 @@ members = [
     "crates/platforms/*",
     "crates/dataformats/*",
     "examples/*",
+    # Benchmark fixtures live under benchmarks/ and pull benchmark-specific
+    # deps (tracing-subscriber without env-filter, etc). They share the
+    # workspace Cargo.lock so transitive dep versions match the production
+    # crates they compare against, but are excluded from default-members
+    # below so `cargo build` at root does not compile them.
+    "benchmarks/scenarios/startup-minimal/rust-camel-lib",
+    "benchmarks/scenarios/t2-realistic-eip/rust-camel-lib",
+    "benchmarks/scenarios/http-server/rust-camel-lib",
+    "benchmarks/scenarios/xslt-bridge/rust-camel-lib",
+    "benchmarks/scenarios/xsd-validation-bridge/rust-camel-lib",
+    # M2 harness load generator (spec §4.5). Workspace member so it shares
+    # the workspace Cargo.lock with the rust-camel fixtures it measures
+    # against (dep-version parity); excluded from default-members below.
+    "benchmarks/harness/loadgen",
+]
+default-members = [
+    "scripts/xtask",
+    "crates/camel-*",
+    "crates/components/*",
+    "crates/languages/*",
+    "crates/services/*",
+    "crates/platforms/*",
+    "crates/dataformats/*",
+    "examples/*",
+    # NOTE: benchmarks/* fixtures + harness/loadgen are intentionally NOT
+    # default-members — `cargo build` at root skips them. Build them with
+    # `cargo build -p <pkg>` or `cargo build --workspace`.
 ]
 exclude = [
     "examples/camel-cli-run",

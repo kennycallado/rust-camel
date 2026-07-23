@@ -1,0 +1,35 @@
+[package]
+name = "xslt-bridge-rust-camel-lib"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Path deps resolve to the worktree's own checkout of rust-camel crates
+# (4 levels up: rust-camel-lib/ -> xslt-bridge/ -> scenarios/ ->
+# benchmarks/ -> worktree root). Same layout as v1 / T2 / T3 lib fixtures.
+camel-api = { path = "../../../../crates/camel-api" }
+camel-builder = { path = "../../../../crates/camel-builder" }
+camel-core = { path = "../../../../crates/camel-core" }
+camel-processor = { path = "../../../../crates/camel-processor" }
+camel-component-timer = { path = "../../../../crates/components/camel-timer" }
+camel-xslt = { path = "../../../../crates/components/camel-xslt" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+# Install the rustls CryptoProvider explicitly — camel-bridge / rcgen
+# use rustls for ephemeral mTLS to the bridge subprocess, and rustls
+# 0.23 refuses to auto-pick when both aws-lc-rs and ring are in the
+# dep graph (transitively via hyper/reqwest). Ring matches the
+# workspace dep `rustls = { features = ["ring"] }`.
+rustls = { workspace = true }
+
+# Workspace member of the parent rust-camel workspace (auto-discovered
+# by cargo from the root Cargo.toml). Sharing the workspace Cargo.lock
+# guarantees transitive dep version parity with the rust-camel-cli T4a
+# fixture (Pair B) so Pair A vs Pair B isolates only parser/CLI
+# overhead, not dep drift (per the v1 / T2 / T3 fairness invariant).
+
+[[bin]]
+name = "xslt-bridge"
+path = "src/main.rs"

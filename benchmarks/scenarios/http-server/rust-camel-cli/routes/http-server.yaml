@@ -1,0 +1,35 @@
+# Benchmark fixture for rust-camel CLI + YAML (Pair B partner, T3 HTTP
+# server scenario, bd Task 3). Mirrors the v1 / T2 rust-camel-cli
+# fixture's `routes/<scenario>.yaml` structure but implements the
+# canonical minimal T3 route shape: `from(http://0.0.0.0:8080/bench)
+# → set_body("pong") → 200`.
+#
+# The marker `BENCH_ROUTE_READY <unix_ms>` is emitted by the
+# wrapper script (`http-server-cli-wrapper.sh`) by detecting
+# the child's `CamelContext started` stdout line (rc-w1u9
+# post-bind signal — see the wrapper's header docstring for
+# the full handshake chain). This YAML file does NOT contain
+# the marker line; the marker is a wrapper-side concern.
+#
+# `set_body: { value: "pong" }` — literal form (rust-camel shape, NOT
+# Apache Camel's `setBody: { constant: "..." }`). The response Body
+# variant is Text → `Content-Type: text/plain; charset=utf-8` + 200
+# status (default per ADR-0024) — exactly the spec §4.10
+# `respond(200, body=pong)` contract.
+#
+# No `httpMethod` URI parameter — the camel-http consumer accepts any
+# method by default, including POST. The smoke test (Task 1 spike
+# 1A) confirmed `POST /bench body=ping → 200 body=pong` end-to-end
+# without method restriction.
+#
+# Canonical minimal: no per-request counter, no process step, no log
+# emission. The harness measures cold-start + RSS, not request
+# latency; per-request observability belongs to the loadgen, not
+# the fixture.
+
+routes:
+  - id: "bench-http"
+    from: "http://0.0.0.0:8080/bench"
+    steps:
+      - set_body:
+          value: "pong"

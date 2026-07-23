@@ -1,0 +1,9 @@
+- route:
+    from:
+      uri: "timer:bench"
+      parameters:
+        repeatCount: 1
+        delay: 0
+      steps:
+        - log:
+            message: "BENCH_ROUTE_READY"

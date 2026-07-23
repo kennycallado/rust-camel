@@ -1,0 +1,54 @@
+# Benchmark v2 Spike 1A — rust-camel YAML DSL T2 route (bd rc-p9ki).
+#
+# Standalone throwaway fixture (NOT under scenarios/) that exercises the
+# full T2 EIP shape (set_body, set_header, filter, choice, log) on the
+# actual rust-camel YAML DSL, with Simple-language predicates. The T2
+# route shape comes from spec §4.1; the YAML syntax is the rust-camel
+# format (key/value, value, simple) — see crates/camel-dsl/src/route_ast.rs
+# and examples/yaml-dsl/config/routes.yaml for the canonical shape.
+#
+# This is intentionally placed under benchmarks/spikes/ (auto-discovery
+# excluded — see plan Task 4a). The harness never picks it up; this
+# fixture exists to validate that the spec's T2 route can be expressed
+# in rust-camel's YAML DSL before committing to the full Task 3 build.
+#
+# The `log` step uses the bare-string form which is always evaluated as
+# Simple language (yaml.rs L588-593: LogMessageData::Literal wraps the
+# value as a Simple expression). The log EIP therefore evaluates
+# `${body}` and emits `SPIKE_T2_OK body=pong-bench` on stdout — the
+# exact grep target the spec mandates.
+#
+# Filter predicate (`${body} == 'ping'`) and choice/when predicate
+# (`${header.source} == 'bench'`) are Simple-language strings, exactly
+# as the spec promises. A successful run proves:
+#   - rust-camel's YAML DSL accepts `simple:` for filter and choice/when
+#   - Simple language evaluates `${body}` and `${header.<name>}`
+#   - The `set_body: { value: "..." }` literal form is honored
+#   - The `set_header: { key: ..., value: ... }` form is honored
+#   - The `choice` when/otherwise ordering matches Camel semantics
+#   - The `log: "..."` bare-string is treated as a Simple expression
+#
+# If this fails, the T2 Pair B claim "language-subsystem-equivalent to
+# Apache Camel" cannot be honored — escalate to e_gpt.
+routes:
+  - id: "spike-t2"
+    from: "timer:spike?repeatCount=1&delay=0"
+    steps:
+      - set_body:
+          value: "ping"
+      - set_header:
+          key: "source"
+          value: "bench"
+      - filter:
+          simple: "${body} == 'ping'"
+          steps:
+            - choice:
+                when:
+                  - simple: "${header.source} == 'bench'"
+                    steps:
+                      - set_body:
+                          value: "pong-bench"
+                otherwise:
+                  - set_body:
+                      value: "pong-other"
+      - log: "SPIKE_T2_OK body=${body}"

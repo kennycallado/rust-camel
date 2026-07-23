@@ -1,0 +1,37 @@
+# Benchmark fixture for rust-camel CLI + YAML (Pair B partner, bd rc-f3g9).
+#
+# Self-contained config so the benchmark can invoke `camel run --config <this>
+# --routes <route>` from any cwd without depending on examples/camel-cli-run's
+# Camel.toml (which has no [components.exec] section and would fail ADR-0033's
+# fail-closed validation: "exec: no profiles configured").
+#
+# The stub profile below satisfies the ExecBundle's startup validation without
+# enabling any real exec capability. The benchmark route uses only `timer` and
+# `log` — no `exec:` URI ever resolves.
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+
+# ADR-0033 fail-closed workaround: ExecBundle requires at least one profile
+# to pass startup validation, even when no route uses `exec:` URIs. The stub
+# below registers `true` (a no-op that always exits 0) under the name
+# `bench-stub` so validation succeeds. It is never invoked by the benchmark.
+# NixOS note: bare `true` resolves via PATH at CLI startup; do NOT hardcode
+# `/bin/true` (NixOS has no FHS, /bin/true does not exist).
+[default.components.exec]
+workspace_root = "."
+
+# `profiles` is a Vec<ExecProfile> — TOML array-of-tables syntax ([[...]]),
+# NOT a map ([default.components.exec.profiles.<name>] would deserialize
+# as a struct/map and fail with "invalid type: map, expected a sequence").
+[[default.components.exec.profiles]]
+name = "bench-stub"
+executable = "true"
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -19,12 +19,163 @@ pub struct ExchangeEnvelope {
     pub reply_tx: Option<oneshot::Sender<Result<Exchange, CamelError>>>,
 }
 
+/// Declares when the runtime may consider a Consumer "started".
+///
+/// `Immediate` (default) preserves the classic fire-and-forget semantics:
+/// `spawn_consumer_task` returns as soon as the consumer task is spawned,
+/// matching the behaviour of timer, file, direct and similar polling
+/// consumers whose `start()` IS the lifetime loop.
+///
+/// `Explicit` is for resource-binding consumers (HTTP, WebSocket, …) whose
+/// `start()` returns control only after the resource (e.g. `TcpListener`)
+/// is bound and ready. The consumer MUST call `ConsumerContext::mark_ready`
+/// after a successful bind so the runtime can await readiness and propagate
+/// pre-ready `start()` errors as proper startup failures.
+///
+/// Adding this as a default-returning trait method keeps every existing
+/// `Consumer` impl backward compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsumerStartupMode {
+    /// Consumer's `start()` IS the lifetime loop. The runtime treats the
+    /// consumer as ready the moment `start()` is invoked. (Default)
+    #[default]
+    Immediate,
+    /// Consumer binds/registers a resource inside `start()` and signals
+    /// readiness explicitly via `ConsumerContext::mark_ready()`.
+    Explicit,
+}
+
+/// Internal state of a [`StartupSignal`].
+#[derive(Clone, Debug)]
+enum StartupState {
+    /// Consumer has not yet signalled readiness or failure.
+    Pending,
+    /// Consumer signalled readiness via `mark_ready()`.
+    Ready,
+    /// Consumer's `start()` returned an `Err` before signalling readiness.
+    Failed(String),
+}
+
+/// Shared handle used by a Consumer to signal readiness (or failure) to the
+/// runtime's [`StartupReceiver`].
+///
+/// Constructed in a pair via [`StartupSignal::pair`]. The signal is held by
+/// the consumer side (via [`ConsumerContext`]); the receiver is returned to
+/// the route controller.
+#[derive(Clone)]
+pub struct StartupSignal {
+    tx: watch::Sender<StartupState>,
+}
+
+impl StartupSignal {
+    /// Create a `(signal, receiver)` pair seeded in the `Pending` state.
+    pub fn pair() -> (Self, StartupReceiver) {
+        let (tx, rx) = watch::channel(StartupState::Pending);
+        (Self { tx }, StartupReceiver { rx })
+    }
+
+    /// Mark the consumer as ready. Idempotent — subsequent calls are no-ops
+    /// once the state has transitioned out of `Pending`.
+    ///
+    /// Returns `true` if this call transitioned `Pending → Ready`, `false`
+    /// if the state was already `Ready` or `Failed`. The runtime uses the
+    /// return value to detect Explicit consumers that returned `Ok` from
+    /// `start()` without calling `mark_ready` (a contract violation that
+    /// would hang the controller without the defensive fallback in
+    /// `spawn_consumer_task`).
+    pub fn mark_ready(&self) -> bool {
+        self.tx.send_if_modified(|s| {
+            if matches!(*s, StartupState::Pending) {
+                *s = StartupState::Ready;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Mark the consumer's startup as failed with `err`. Idempotent.
+    pub fn mark_failed(&self, err: String) {
+        self.tx.send_if_modified(|s| {
+            if matches!(*s, StartupState::Pending) {
+                *s = StartupState::Failed(err);
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+impl std::fmt::Debug for StartupSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartupSignal")
+            .field("state", &self.tx.borrow())
+            .finish()
+    }
+}
+
+/// Receiver half of the consumer startup handshake. Resolves once the
+/// consumer calls [`ConsumerContext::mark_ready`] (Ok) or its `start()`
+/// returns an `Err` first (Err).
+///
+/// For [`ConsumerStartupMode::Immediate`] consumers the receiver is
+/// pre-resolved at construction time (see [`StartupReceiver::immediate`]).
+pub struct StartupReceiver {
+    rx: watch::Receiver<StartupState>,
+}
+
+impl StartupReceiver {
+    /// Construct a receiver that is already resolved as `Ok`. Used for
+    /// [`ConsumerStartupMode::Immediate`] consumers so the controller can
+    /// uniformly `await` every receiver without changing behaviour.
+    pub fn immediate() -> Self {
+        let (tx, rx) = watch::channel(StartupState::Ready);
+        // Drop the sender — state is fixed at Ready. Receiver will never
+        // observe a closure error since it already holds Ready.
+        let _ = tx;
+        Self { rx }
+    }
+
+    /// Wait for the consumer to become ready or fail. Resolves:
+    /// - `Ok(())` if the consumer signalled readiness.
+    /// - `Err(CamelError::RouteError(_))` if the consumer's `start()`
+    ///   returned an error before signalling readiness.
+    /// - `Err(CamelError::RouteError(_))` if the signal sender was dropped
+    ///   without either transition (programming-contract violation).
+    pub async fn await_ready(mut self) -> Result<(), CamelError> {
+        loop {
+            match &*self.rx.borrow() {
+                StartupState::Pending => {}
+                StartupState::Ready => return Ok(()),
+                StartupState::Failed(msg) => {
+                    return Err(CamelError::RouteError(msg.clone()));
+                }
+            }
+            if self.rx.changed().await.is_err() {
+                return Err(CamelError::RouteError(
+                    "consumer startup signal dropped without resolving".to_string(),
+                ));
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for StartupReceiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartupReceiver")
+            .field("state", &self.rx.borrow())
+            .finish()
+    }
+}
+
 /// Context provided to a Consumer, allowing it to send exchanges into the route.
 #[derive(Clone)]
 pub struct ConsumerContext {
     sender: mpsc::Sender<ExchangeEnvelope>,
     cancel_token: CancellationToken,
     route_id: String,
+    startup: StartupSignal,
 }
 
 impl ConsumerContext {
@@ -32,16 +183,52 @@ impl ConsumerContext {
     ///
     /// The `route_id` identifies the route this consumer is bound to, enabling
     /// ADR-0012 per-route metrics and health observations.
+    ///
+    /// The startup signal defaults to a fresh `Pending` pair; the consumer
+    /// can call [`Self::mark_ready`] once it has bound its resource. For
+    /// [`ConsumerStartupMode::Immediate`] consumers the runtime ignores
+    /// the signal (it constructs an already-resolved receiver instead).
     pub fn new(
         sender: mpsc::Sender<ExchangeEnvelope>,
         cancel_token: CancellationToken,
         route_id: String,
     ) -> Self {
+        let (startup, _unused_receiver) = StartupSignal::pair();
+        // The receiver is dropped here: `spawn_consumer_task` constructs its
+        // own `(signal, receiver)` pair and replaces this one via
+        // `with_startup` so the controller holds the matching receiver.
+        let _ = _unused_receiver;
         Self {
             sender,
             cancel_token,
             route_id,
+            startup,
         }
+    }
+
+    /// Replace the startup signal carried by this context. Used by
+    /// `spawn_consumer_task` to install the signal whose matching receiver
+    /// is returned to the route controller.
+    pub fn with_startup(mut self, startup: StartupSignal) -> Self {
+        self.startup = startup;
+        self
+    }
+
+    /// Returns a clone of the internal [`StartupSignal`] so callers (e.g.
+    /// `spawn_consumer_task`) can drive failure propagation independently of
+    /// the consumer's own `mark_ready()` call.
+    pub fn startup_signal(&self) -> StartupSignal {
+        self.startup.clone()
+    }
+
+    /// Mark this consumer's startup as complete. Only meaningful for
+    /// [`ConsumerStartupMode::Explicit`] consumers — `Immediate` consumers
+    /// never need to call this because the runtime resolves their startup
+    /// receiver at construction time.
+    ///
+    /// Idempotent.
+    pub fn mark_ready(&self) {
+        let _ = self.startup.mark_ready();
     }
 
     /// Returns a future that resolves when shutdown is requested.
@@ -241,6 +428,24 @@ pub trait Consumer: Send + Sync {
         ConcurrencyModel::Sequential
     }
 
+    /// Declares how the runtime should wait for this consumer's startup.
+    ///
+    /// - [`ConsumerStartupMode::Immediate`] (default): the consumer's
+    ///   `start()` IS the lifetime loop. The runtime treats the route as
+    ///   started as soon as `start()` is invoked, preserving the existing
+    ///   fire-and-forget semantics for timer/file/direct/… consumers.
+    /// - [`ConsumerStartupMode::Explicit`]: the consumer binds/registers a
+    ///   resource inside `start()` and MUST call
+    ///   [`ConsumerContext::mark_ready`] after a successful bind. The
+    ///   runtime awaits this signal (or an early `start()` error) before
+    ///   treating the route as started, so HTTP/WebSocket listeners fail
+    ///   fast when the bind fails instead of crashing the background task.
+    ///
+    /// Default: `Immediate`.
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Immediate
+    }
+
     /// Return a handle to the consumer's long-running background task so the
     /// runtime can monitor it for unexpected exits after `start()` returns `Ok`.
     ///
@@ -332,6 +537,127 @@ mod tests {
             consumer.concurrency_model(),
             ConcurrencyModel::Concurrent { max: Some(16) }
         );
+    }
+
+    // --- ConsumerStartupMode tests ---
+
+    #[test]
+    fn test_default_startup_mode_is_immediate() {
+        struct DummyConsumer;
+
+        #[async_trait::async_trait]
+        impl super::Consumer for DummyConsumer {
+            async fn start(&mut self, _ctx: super::ConsumerContext) -> Result<(), CamelError> {
+                Ok(())
+            }
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+        }
+
+        let consumer = DummyConsumer;
+        assert_eq!(
+            consumer.startup_mode(),
+            super::ConsumerStartupMode::Immediate
+        );
+    }
+
+    #[test]
+    fn test_startup_mode_explicit_override() {
+        struct ExplicitConsumer;
+
+        #[async_trait::async_trait]
+        impl super::Consumer for ExplicitConsumer {
+            async fn start(&mut self, _ctx: super::ConsumerContext) -> Result<(), CamelError> {
+                Ok(())
+            }
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+            fn startup_mode(&self) -> super::ConsumerStartupMode {
+                super::ConsumerStartupMode::Explicit
+            }
+        }
+
+        let consumer = ExplicitConsumer;
+        assert_eq!(
+            consumer.startup_mode(),
+            super::ConsumerStartupMode::Explicit
+        );
+    }
+
+    #[tokio::test]
+    async fn test_startup_signal_mark_ready_resolves_receiver_ok() {
+        let (signal, receiver) = StartupSignal::pair();
+        // Not yet signalled — receiver should still be pending.
+        assert!(matches!(*receiver.rx.borrow(), StartupState::Pending));
+
+        // Mark ready — receiver must observe Ok.
+        signal.mark_ready();
+        let result = receiver.await_ready().await;
+        assert!(result.is_ok(), "expected Ok after mark_ready");
+    }
+
+    #[tokio::test]
+    async fn test_startup_signal_mark_failed_propagates_error() {
+        let (signal, receiver) = StartupSignal::pair();
+        signal.mark_failed("bind failed".to_string());
+        let err = receiver
+            .await_ready()
+            .await
+            .expect_err("expected Err after mark_failed");
+        match err {
+            CamelError::RouteError(msg) => assert!(msg.contains("bind failed")),
+            other => panic!("expected RouteError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_startup_signal_idempotent_first_wins() {
+        let (signal, receiver) = StartupSignal::pair();
+        signal.mark_ready();
+        // mark_failed after mark_ready must NOT override.
+        signal.mark_failed("late failure".to_string());
+        let result = receiver.await_ready().await;
+        assert!(result.is_ok(), "first transition (Ready) wins");
+    }
+
+    #[tokio::test]
+    async fn test_startup_receiver_immediate_is_pre_resolved_ok() {
+        let receiver = StartupReceiver::immediate();
+        let result = receiver.await_ready().await;
+        assert!(result.is_ok(), "immediate receiver must resolve Ok");
+    }
+
+    #[tokio::test]
+    async fn test_consumer_context_mark_ready_drives_signal() {
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(
+            tx,
+            CancellationToken::new(),
+            "startup-test-route".to_string(),
+        );
+        let (signal, receiver) = StartupSignal::pair();
+        let ctx = ctx.with_startup(signal);
+        ctx.mark_ready();
+        let result = receiver.await_ready().await;
+        assert!(result.is_ok(), "ctx.mark_ready must resolve the receiver");
+    }
+
+    #[tokio::test]
+    async fn test_startup_receiver_dropped_sender_returns_err() {
+        // Build a signal/receiver pair and drop the signal without ever
+        // transitioning — receiver must surface a contract-violation error.
+        let (_signal, receiver) = StartupSignal::pair();
+        drop(_signal);
+        let err = receiver
+            .await_ready()
+            .await
+            .expect_err("dropped signal must surface as Err");
+        match err {
+            CamelError::RouteError(msg) => assert!(msg.contains("dropped")),
+            other => panic!("expected RouteError, got {other:?}"),
+        }
     }
 
     #[tokio::test]

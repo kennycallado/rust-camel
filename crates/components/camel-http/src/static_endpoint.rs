@@ -229,6 +229,11 @@ impl Consumer for HttpStaticConsumer {
 
         registry.register_static_mount(mount).await?;
 
+        // rc-w1u9: Signal readiness AFTER bind + spawn + static mount
+        // registration. Same contract as HttpConsumer: the listener is
+        // accepting and this mount's path will be served (not 404'd).
+        ctx.mark_ready();
+
         let mount_path_for_cleanup = self.config.mount_path.clone();
         let registry_for_cleanup = registry.clone();
 
@@ -249,6 +254,13 @@ impl Consumer for HttpStaticConsumer {
 
     fn concurrency_model(&self) -> camel_component_api::ConcurrencyModel {
         camel_component_api::ConcurrencyModel::Sequential
+    }
+
+    // rc-w1u9: HttpStaticConsumer also binds a TcpListener inside start()
+    // (via ServerRegistry::get_or_spawn). Same Explicit contract as
+    // HttpConsumer — bind failures now surface as route-start errors.
+    fn startup_mode(&self) -> camel_component_api::ConsumerStartupMode {
+        camel_component_api::ConsumerStartupMode::Explicit
     }
 }
 
@@ -336,6 +348,67 @@ mod tests {
         } else {
             panic!("Expected Config error");
         }
+    }
+
+    /// rc-w1u9: HttpStaticConsumer MUST declare Explicit startup_mode so the
+    /// runtime waits for the listener bind before publishing RouteStarted.
+    #[test]
+    fn test_static_consumer_startup_mode_is_explicit() {
+        use camel_component_api::ConsumerStartupMode;
+        let config = HttpStaticConfig {
+            dir: PathBuf::from("/tmp"),
+            port: 0,
+            ..HttpStaticConfig::default()
+        };
+        let consumer = HttpStaticConsumer::new(config, test_rt());
+        assert_eq!(
+            consumer.startup_mode(),
+            ConsumerStartupMode::Explicit,
+            "HttpStaticConsumer must opt into Explicit startup"
+        );
+    }
+
+    /// rc-w1u9: HttpStaticConsumer::start() MUST call ctx.mark_ready() after
+    /// the static mount is registered. Inject our own StartupSignal pair and
+    /// assert the receiver resolves within a bounded window.
+    #[tokio::test]
+    async fn test_static_consumer_emits_mark_ready_after_register() {
+        use camel_component_api::{ConsumerContext, StartupSignal};
+
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+
+        let dir = std::env::temp_dir();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let config = HttpStaticConfig {
+            dir,
+            port,
+            host: "127.0.0.1".to_string(),
+            ..HttpStaticConfig::default()
+        };
+        let mut consumer = HttpStaticConsumer::new(config, test_rt());
+
+        let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "static-ready-probe".to_string());
+
+        let (signal, startup_rx) = StartupSignal::pair();
+        let ctx = ctx.with_startup(signal);
+
+        tokio::spawn(async move {
+            let _ = consumer.start(ctx).await;
+        });
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), startup_rx.await_ready())
+                .await
+                .expect("HttpStaticConsumer must call ctx.mark_ready() after register (rc-w1u9)");
+        assert!(result.is_ok(), "mark_ready must resolve Ok after register");
+
+        token.cancel();
     }
 
     #[tokio::test]

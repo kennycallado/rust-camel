@@ -1,0 +1,45 @@
+# T4a XSLT bridge fixture — rust-camel CLI + YAML (Pair B partner, bd Task 4).
+#
+# Mirror of the v1/T2/T3 rust-camel-cli Camel.toml shape: same ADR-0033
+# fail-closed exec stub, same supervision block, lives under the T4a
+# scenario dir so the harness picks up the T4a route on a T4a run.
+#
+# The route itself is in routes/xslt-bench.yaml; the per-tick latency
+# emit is handled by the wrapper script (rust-camel's YAML DSL has no
+# `process:` step — bd rc-5gcu — so the wrapper extracts BENCH_LATENCY
+# lines from the child's stdout and writes them to the tmpfs file in
+# the contract format `BENCH_LATENCY <id> <unix_ms>`).
+#
+# The marker `BENCH_ROUTE_READY <unix_ms>` is emitted by the wrapper
+# (xslt-bridge-cli-wrapper.sh) by detecting the child's "CamelContext
+# started" stdout line (rc-w1u9 post-start signal — same pattern as
+# Task 3's http-server-cli-wrapper.sh).
+#
+# Engine pinning (spec §4.8): the rust-camel-lib side gets Saxon-HE
+# 12.5 from the bridge binary (`bridges/xml/build.gradle.kts:32-33`).
+# The bridge binary is the same one the rust-camel-lib fixture uses;
+# `cargo xtask build-xml-bridge` produces it. No version drift is
+# possible at the fixture layer.
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+
+# ADR-0033 fail-closed workaround: ExecBundle requires at least one
+# profile to pass startup validation, even when no route uses `exec:`
+# URIs. The stub registers `true` (resolves via PATH on NixOS; do NOT
+# use `/bin/true` — NixOS has no FHS) under the name `bench-stub` so
+# validation succeeds. It is never invoked by the benchmark.
+[default.components.exec]
+workspace_root = "."
+
+[[default.components.exec.profiles]]
+name = "bench-stub"
+executable = "true"
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000
