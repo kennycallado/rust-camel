@@ -43,7 +43,7 @@ rust-camel separates two planes:
 ┌─────────▼──────────┐   ┌───────────▼────────────────┐
 │   camel-processor  │   │   Components               │
 │   EIP patterns     │   │   timer, log, http, file,  │
-│   (Tower layers)   │   │   kafka, redis, sql, opensearch, ...,  │
+│   (Tower layers)   │   │   kafka, redis, sql, ...,  │
 └────────────────────┘   └────────────────────────────┘
 ```
 
@@ -221,7 +221,7 @@ runnable example with in-memory CRUD storage and static file co-hosting.
 ## Crate Map
 
 | Crate                       | Description                                                                                                                                                                                                                                                  |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --- | ------------------------------------ |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `camel-api`                 | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent`, `FromBody`, `impl_from_body_via_serde!`                                                                            |
 | `camel-core`                | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal                                                                                                                                                              |
 | `camel-config`              | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                                                                                                                                             |
@@ -261,7 +261,7 @@ runnable example with in-memory CRUD storage and static file co-hosting.
 | `camel-container`           | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                                                                                               |
 | `camel-component-llm`       | LLM chat (streaming + materialized), embeddings, tool calling, multi-turn conversations, response cache, cost observability, retry, and concurrency control via OpenAI, Ollama, or Mock. Strict siumai adapter boundary (ADR-0020) (`llm:chat`, `llm:embed`) |
 | `camel-language-api`        | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                                                                                                    |
-| `camel-language-simple`     | Simple Language: `${header.x}`, `${body}`, operators, `&&`/\`                                                                                                                                                                                                |     | \`, boolean literals, null semantics |
+| `camel-language-simple`     | Simple Language: `${header.x}`, `${body}`, operators, `&&`/`\|\|`, boolean literals, null semantics |
 | `camel-language-js`         | JavaScript scripting language for expressions and side effects                                                                                                                                                                                               |
 | `camel-language-rhai`       | Rhai scripting language for full expression power                                                                                                                                                                                                            |
 | `camel-language-jsonpath`   | RFC 9535 JSONPath expressions: `$.items[*].price`. Requires `lang-jsonpath` feature.                                                                                                                                                                         |
