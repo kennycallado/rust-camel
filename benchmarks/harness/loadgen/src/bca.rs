@@ -107,8 +107,10 @@ pub fn bca_ci(samples: &[u64], n_resamples: usize, seed: u64) -> Option<BcaCi> {
             let idx = (rng.next_u64() as usize) % n;
             buf.push(samples[idx]);
         }
-        // SAFETY: buf is non-empty (n >= 2), median returns Some.
-        resample_medians.push(median(&buf).expect("non-empty resample"));
+        // buf is non-empty (n >= 2); median returns Some. Fallback is
+        // defensive only — unreachable in practice.
+        let m = median(&buf).unwrap_or(buf[0]);
+        resample_medians.push(m);
     }
     resample_medians.sort_unstable();
 

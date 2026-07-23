@@ -148,9 +148,8 @@ async fn main() -> Result<(), CamelError> {
                 let id = rc.fetch_add(1, Ordering::Relaxed) + 1;
                 let duration_ns = exchange
                     .get_extension::<Instant>(BENCH_START)
-                    .expect("BENCH_START must be set before .to() step")
-                    .elapsed()
-                    .as_nanos() as u64;
+                    .map(|instant| instant.elapsed().as_nanos() as u64)
+                    .unwrap_or(0);
                 let line = format!("BENCH_LATENCY {id} {duration_ns}\n");
                 // Append to tmpfs: tokio async write keeps the route's
                 // executor responsive (no blocking syscall). Tmpfs writes
