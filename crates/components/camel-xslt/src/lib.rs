@@ -17,7 +17,7 @@ mod error;
 pub mod health;
 mod producer;
 
-pub const BRIDGE_VERSION: &str = "0.4.0";
+pub const BRIDGE_VERSION: &str = "0.5.0";
 
 pub use client::{BridgeState, StylesheetId, XsltBridgeClient, XsltTransformBackend};
 pub use component::{XsltBridgeRuntime, XsltComponent};
