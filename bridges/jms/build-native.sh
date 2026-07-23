@@ -94,6 +94,10 @@ ln -sf "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" /tmp/musl-bin/x86_64-linux-mus
 ln -sf "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" /tmp/musl-bin/musl-gcc
 export PATH="/tmp/musl-bin:${PATH}"
 
+# native-image ignores --libc=musl and falls back to the system gcc (glibc),
+# producing a dynamic binary. Force the musl cross-compiler for compile + link.
+export CC="/tmp/musl-bin/x86_64-linux-musl-gcc"
+
 # Build static zlib against musl if not already built
 if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
     echo "  Building static zlib ${ZLIB_VERSION} against musl..."
