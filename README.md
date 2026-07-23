@@ -1,136 +1,105 @@
 # rust-camel
 
-A Rust-native, Tower-native integration framework inspired by [Apache Camel](https://camel.apache.org/), built for async pipelines, EIP patterns, and production observability.
+[![CI](https://github.com/kennycallado/rust-camel/actions/workflows/ci.yml/badge.svg)](https://github.com/kennycallado/rust-camel/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
+[![Status](https://img.shields.io/badge/status-pre--release-orange.svg)](#status--roadmap)
 
-> **Status:** Pre-release (`0.24.0`). APIs will change.
+Build integration routes in Rust or YAML using Tower-native pipelines.
 
-## Overview
+**rust-camel** connects timers, HTTP APIs, files, Kafka, Redis, SQL, and other
+systems through composable message routes. Use it when you need Apache
+[Camel](https://camel.apache.org/)-style routing and Enterprise Integration
+Patterns (EIP) without a JVM — every processor and producer is a
+`Service<Exchange>`, so EIP patterns compose as Tower middleware.
 
-rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
+> **Status:** Pre-release. APIs may change.
+> Requires **Rust 1.89** or newer (stable).
 
-Current components: `timer`, `cron`, `log`, `direct`, `exec`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `mqtt`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`, `llm`, `surrealdb`, `grpc`, `seda`, `keycloak`, `wasm`.
+---
 
-## Architecture
+## Table of Contents
 
-rust-camel separates two planes:
+- [What is rust-camel?](#what-is-rust-camel)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Components & EIP Patterns](#components--eip-patterns)
+- [REST DSL & OpenAPI](#rest-dsl--openapi)
+- [Configuration](#configuration)
+- [Error Handling](#error-handling)
+- [Observability](#observability)
+- [Security](#security)
+- [Docker](#docker)
+- [Examples](#examples)
+- [Architecture](#architecture)
+- [Building & Testing](#building--testing)
+- [Status & Roadmap](#status--roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
-- **Data plane** — Tower-native. Every processor and producer is a `Service<Exchange>`. EIP patterns compose as Tower middleware.
-- **Control plane** — its own trait hierarchy: `Component`, `Endpoint`, `Consumer`, route lifecycle, supervision, hot-reload.
+## What is rust-camel?
 
-```
-┌──────────────────────────────────────────────────────┐
-│                    Your Application                  │
-│         RouteBuilder / YAML DSL / camel-config       │
-└──────────────────────┬───────────────────────────────┘
-                       │
-┌──────────────────────▼───────────────────────────────┐
-│                    camel-core                        │
-│  CamelContext — composition root                     │
-│                                                      │
-│  ┌──────────────────────────────────────────────┐    │
-│  │  Data plane (Tower)                          │    │
-│  │  Exchange → Service<Exchange> pipeline       │    │
-│  │  EIP processors as Tower middleware          │    │
-│  └──────────────────────────────────────────────┘    │
-│                                                      │
-│  ┌──────────────────────────────────────────────┐    │
-│  │  Control plane                               │    │
-│  │  Route lifecycle, supervision, hot-reload    │    │
-│  │  RuntimeBus (CQRS), event journal (redb)     │    │
-│  └──────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────┘
-          │                          │
-┌─────────▼──────────┐   ┌───────────▼────────────────┐
-│   camel-processor  │   │   Components               │
-│   EIP patterns     │   │   timer, log, http, file,  │
-│   (Tower layers)   │   │   kafka, redis, sql, ...,  │
-└────────────────────┘   └────────────────────────────┘
-```
+A Rust-native integration framework that routes messages between components
+using a fluent builder API or a declarative YAML DSL. The **data plane**
+(processing, EIP patterns, middleware) is Tower-native; the **control plane**
+(components, endpoints, consumers, route lifecycle, supervision) uses its own
+trait hierarchy.
 
-> The internal DDD/CQRS/hexagonal structure of `camel-core` is an implementation detail — see [`crates/camel-core/README.md`](crates/camel-core/README.md) for those internals.
+### Who is it for?
 
-### Runtime Bus
+- **Integration, platform, and DevOps engineers** — design and run routes with
+  `camel-cli` and YAML, with configuration profiles, health endpoints,
+  Prometheus/OpenTelemetry, and container images — often **without writing
+  Rust**.
+- **Backend, data, and API teams** — connect APIs, brokers, databases, files,
+  and event streams (HTTP, WebSocket, Kafka, MQTT, JMS, gRPC, SOAP, SQL, XML,
+  LLMs) using reusable routing and transformation patterns, and expose them
+  through the REST DSL with schema validation and OpenAPI generation.
+- **Rust and Tower developers** — embed routes with `RouteBuilder`, add custom
+  processors or components, and compose pipelines as Tower `Service<Exchange>`
+  services.
+- **Apache Camel users and JVM migration teams** — evaluate Camel-inspired
+  routing in native Rust, with single-binary deployment and scratch
+  `amd64`/`arm64` images, without assuming drop-in compatibility.
 
-```rust
-// Commands modify state
-ctx.runtime().execute(RuntimeCommand::StartRoute {
-    route_id: "my-route".into(),
-    command_id: "cmd-1".into(),
-    causation_id: None,
-}).await?;
+From glue scripts to AI pipelines, edge deployments to legacy-system bridges —
+if it involves routing messages between systems, rust-camel is built for the
+shape of the problem.
 
-// Queries read from projections (not controller)
-let status = ctx.runtime_route_status("my-route").await?;
-```
+### Why rust-camel?
 
-### Optional Durability
+- **Composable by construction** — EIP patterns are Tower layers; chain them
+  the same way you chain `tower::Service`.
+- **Single binary, scratch containers** — ship routes as one Rust binary or a
+  minimal Docker image.
+- **Declarative or code** — define routes in YAML with JSON-Schema validation
+  and editor autocomplete, or in pure Rust.
 
-```rust
-// Enable redb-backed event journal for runtime state recovery
-let ctx = CamelContext::builder()
-    .runtime_store(camel_core::InMemoryRuntimeStore::default().with_journal(std::sync::Arc::new(
-        camel_core::RedbRuntimeEventJournal::new(
-            ".camel/runtime.redb",
-            RedbJournalOptions::default(),
-        )
-        .await?,
-    )))
-    .build()
-    .await?;
-```
+### When not to use it
 
-## Quick Start with the CLI
+- You need a **stable, production-hardened** integration runtime — rust-camel
+  is pre-release; APIs will change.
+- You already live on the **JVM** and depend on Apache Camel's ecosystem.
+- Your workload is pure request/response **without** routing, EIP patterns, or
+  multi-system orchestration (a plain web framework is simpler).
 
-```bash
-cargo install camel-cli
-camel new my-integration
-cd my-integration
-camel run
-```
+## Quick Start
 
-This scaffolds a project with a `Camel.toml`, `routes/hello.yaml`, and runs it.
-See [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for all CLI commands.
+### Run an example
 
 ```bash
-# Generate OpenAPI document from REST route files
-camel openapi generate routes.yaml --title "My API"
+git clone https://github.com/kennycallado/rust-camel.git
+cd rust-camel
+cargo run -p hello-world
 ```
 
-## Docker
+A route receives an `Exchange` from `timer:tick` and sends it to `log:info`.
 
-Pre-built images are available on [GHCR](https://github.com/kennycallado/rust-camel/pkgs/container/rust-camel) and [Docker Hub](https://hub.docker.com/r/kennycallado/rust-camel).
-
-```bash
-# Pull the scratch image (production)
-docker pull ghcr.io/kennycallado/rust-camel:latest
-
-# Pull the alpine image (debugging)
-docker pull ghcr.io/kennycallado/rust-camel:latest-alpine
-
-# Run with routes mounted
-docker run -v $(pwd)/routes:/app/routes ghcr.io/kennycallado/rust-camel:latest camel run
-
-# Interactive shell (alpine)
-docker run -it -v $(pwd):/app ghcr.io/kennycallado/rust-camel:latest-alpine sh
-
-# Docker Hub equivalent
-docker pull kennycallado/rust-camel:latest
-```
-
-Two image variants are published per release:
-
-| Tag suffix | Base        | Use case                            |
-| ---------- | ----------- | ----------------------------------- |
-| _(none)_   | scratch     | Production. Minimal attack surface. |
-| `-alpine`  | alpine:3.21 | Debugging. Includes busybox shell.  |
-
-Both variants support `linux/amd64` and `linux/arm64`.
-
-## Quick Rust Example
+### Your first route (Rust)
 
 ```rust
 use camel_api::{CamelError, Value};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulation};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
@@ -150,23 +119,84 @@ async fn main() -> Result<(), CamelError> {
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;
-
-    println!("Press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await.ok();
-
     ctx.stop().await?;
     Ok(())
 }
 ```
 
-```sh
-cargo run
+### Your first route (YAML)
+
+```yaml
+# routes/hello.yaml
+routes:
+  - id: "hello-timer"
+    from: "timer:tick?period=1000"
+    steps:
+      - to: "log:info"
 ```
+
+Save it as `routes/hello.yaml` and run with `camel run`.
+
+### Use the CLI
+
+```bash
+cargo install camel-cli
+camel new my-integration   # scaffolds Camel.toml + routes/hello.yaml
+cd my-integration
+camel run
+```
+
+See [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for all commands.
+
+## Core Concepts
+
+- **Route** — a pipeline from a source (`from:`) through a sequence of steps
+  (`to:`, processors, EIP patterns) to one or more sinks.
+- **Exchange** — the message envelope flowing through a route: headers, body,
+  and a unique correlation id for tracing.
+- **Component** — a connector (`timer`, `http`, `kafka`, ...) that creates
+  **Endpoints** from URIs like `timer:tick?period=1000`.
+- **EIP pattern** — a routing/transformation step (filter, split, choice,
+  aggregate, ...) applied as Tower middleware on the data plane.
+
+## Components & EIP Patterns
+
+**Components:** `timer`, `cron`, `log`, `direct`, `seda`, `file`, `http`,
+`ws`/`wss`, `kafka`, `mqtt`, `redis`, `sql`, `surrealdb`, `opensearch`, `jms`,
+`grpc`, `cxf` (SOAP), `xslt`, `xj` (XML↔JSON), `validator`, `container`
+(Docker), `controlbus`, `master`, `exec`, `keycloak`, `wasm`, `llm`. See
+[`crates/components/`](crates/components/) for the full set of
+implementations.
+
+**Enterprise Integration Patterns** (all chainable as Tower layers):
+
+| Pattern                    | Builder method                                |
+| -------------------------- | --------------------------------------------- |
+| Content-Based Router       | `.choice()` / `.when()`                       |
+| Filter                     | `.filter(predicate)`                          |
+| Splitter (incl. streaming) | `.split(config)`                              |
+| Aggregator                 | `.aggregate(config)`                          |
+| Multicast                  | `.multicast()`                                |
+| Recipient List             | `.recipient_list(config)`                     |
+| Routing Slip               | `.routing_slip(expr)`                         |
+| Dynamic Router             | `.dynamic_router(expr)`                       |
+| Wire Tap                   | `.wire_tap(uri)`                              |
+| Load Balancer              | `.load_balance()`                             |
+| Throttler                  | `.throttle(n, duration)`                      |
+| Delayer                    | `.delay()`                                    |
+| Loop                       | `.loop_count(n)`                              |
+| Content Enricher           | `.enrich(uri)` / `.poll_enrich(uri, timeout)` |
+| Marshal / Unmarshal        | `.marshal(fmt)` / `.unmarshal(fmt)`           |
+| Stream Cache               | `.stream_cache(n)`                            |
+| try / catch / finally      | `.do_try()` / `.do_catch()` / `.do_finally()` |
+
+Marshal formats: JSON, XML, CSV, ZIP.
 
 ## REST DSL & OpenAPI
 
 Define REST APIs declaratively in YAML with automatic JSON binding, path
-templates, schema validation, and OpenAPI document generation.
+templates, schema validation, and OpenAPI generation.
 
 ```yaml
 rest:
@@ -187,490 +217,33 @@ rest:
         request_schema:
           type: object
           properties:
-            name:
-              type: string
-            email:
-              type: string
+            name: { type: string }
+            email: { type: string }
           required: [name, email]
-      - method: GET
-        path: /{id}
-        operation_id: getUser
-        to: direct:getUser
-      - method: DELETE
-        path: /{id}
-        operation_id: deleteUser
-        to: direct:deleteUser
-        success_status: 204
 ```
 
-The `rest:` block lowers to `http:` consumer routes with:
-- `unmarshal(json)` for body verbs (POST/PUT/PATCH)
-- JSON schema validation when `request_schema` is present (→ 400 on failure)
-- `marshal(json)` + `Content-Type: application/json` on the response path
-- Default status codes (200/201/204) via `CamelHttpResponseCode` header
+The `rest:` block lowers to `http:` consumer routes with JSON unmarshalling,
+schema validation (→ 400 on failure), and default status codes.
 
-Generate an OpenAPI 3.0.3 document from REST routes:
+Generate an OpenAPI 3.0.3 document:
 
 ```bash
 camel openapi generate routes.yaml --title "Users API" --version "1.0.0"
 ```
 
-See [`examples/rest-crud/`](examples/rest-crud/README.md) for a complete
-runnable example with in-memory CRUD storage and static file co-hosting.
-
-## Crate Map
-
-| Crate                       | Description                                                                                                                                                                                                                                                  |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `camel-api`                 | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent`, `FromBody`, `impl_from_body_via_serde!`                                                                            |
-| `camel-core`                | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal                                                                                                                                                              |
-| `camel-config`              | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                                                                                                                                             |
-| `camel-builder`             | Fluent `RouteBuilder` API                                                                                                                                                                                                                                    |
-| `camel-component`           | `Component`, `Endpoint`, `Consumer` traits                                                                                                                                                                                                                   |
-| `camel-processor`           | EIP processors: `Filter`, `Choice`, `Splitter`, `StreamingSplitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody`, `Marshal`/`Unmarshal` + Tower `Layer` types                                                                               |
-| `camel-endpoint`            | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config                                                                                                                                                                          |
-| `camel-endpoint-macros`     | Proc-macro crate backing `#[derive(UriConfig)]`                                                                                                                                                                                                              |
-| `camel-wit`                 | WIT interface definitions crate for camel components                                                                                                                                                                                                            |
-| `camel-bean`                | Bean/Registry system for dependency injection and business logic integration                                                                                                                                                                                 |
-| `camel-bean-macros`         | Proc-macro crate for `#[bean]` attribute                                                                                                                                                                                                                     |
-| `camel-dsl`                 | YAML DSL: load and run routes from `.yaml` files                                                                                                                                                                                                             |
-| `camel-health`              | Health check types and endpoint support                                                                                                                                                                                                                      |
-| `camel-platform-kubernetes` | Kubernetes-native platform SPI: leader election, readiness gates, pod identity                                                                                                                                                                               |
-| `camel-timer`               | Timer source component                                                                                                                                                                                                                                       |
-| `camel-cron`                | Cron source component — calendar-triggered scheduling via Unix 5-field cron expressions, backed by `CronService` SPI                                                                                                                                        |
-| `camel-log`                 | Log sink component                                                                                                                                                                                                                                           |
-| `camel-direct`              | In-memory synchronous component                                                                                                                                                                                                                              |
-| `camel-mock`                | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`)                                                                                                                                                                   |
-| `camel-test`                | Integration test harness                                                                                                                                                                                                                                     |
-| `camel-controlbus`          | Control routes dynamically from within routes                                                                                                                                                                                                                |
-| `camel-validator`           | Validate body against JSON/YAML schemas, plus XSD via xml-bridge                                                                                                                                                                                             |
-| `camel-http`                | HTTP producer (client) and HTTP consumer (server, native streaming)                                                                                                                                                                                          |
-| `camel-file`                | File producer and consumer                                                                                                                                                                                                                                   |
-| `camel-kafka`               | Kafka producer and consumer with SSL/SASL and manual commit                                                                                                                                                                                                  |
-| `camel-mqtt`                | MQTT 3.1.1 producer and consumer (rumqttc-v4-next) with QoS 0/1/2, manual/auto ack, TLS via mqtts://                                                                                                                                                         |
-| `camel-redis`               | Redis producer and consumer                                                                                                                                                                                                                                  |
-| `camel-opensearch`          | OpenSearch producer with 7 operations (INDEX, SEARCH, GET, DELETE, UPDATE, BULK, MULTIGET)                                                                                                                                                                   |
-| `camel-sql`                 | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                                                                                                            |
-| `camel-surrealdb`           | SurrealDB multi-model (document, graph, vector, live) with 9 operations                                                                                                                                                                                      |
-| `camel-jms`                 | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                                                                                                |
-| `camel-component-cxf`       | SOAP/Web Services via Apache CXF native-image bridge: SOAP 1.1/1.2, WSDL, WS-Security, multi-tenant profiles, PAYLOAD mode                                                                                                                                   |
-| `camel-component-exec`      | Fail-closed system command execution with profile-pinned binaries, per-element arg-policy, env sanitization, cwd confinement, timeout with process-group kill (`exec:{profile}`)                                                                             |
-| `camel-grpc`                | gRPC producer and consumer with dynamic proto resolution, unary + server/client/bidi streaming                                                                                                                                                               |
-| `camel-xslt`                | XSLT 3.0 transformation via xml-bridge (`xslt:<stylesheet>`) — [example](examples/xslt-example/README.md)                                                                                                                                                    |
-| `camel-xj`                  | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                                                                                              |
-| `camel-container`           | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                                                                                               |
-| `camel-component-llm`       | LLM chat (streaming + materialized), embeddings, tool calling, multi-turn conversations, response cache, cost observability, retry, and concurrency control via OpenAI, Ollama, or Mock. Strict siumai adapter boundary (ADR-0020) (`llm:chat`, `llm:embed`) |
-| `camel-language-api`        | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                                                                                                    |
-| `camel-language-simple`     | Simple Language: `${header.x}`, `${body}`, operators, `&&`/`\|\|`, boolean literals, null semantics |
-| `camel-language-js`         | JavaScript scripting language for expressions and side effects                                                                                                                                                                                               |
-| `camel-language-rhai`       | Rhai scripting language for full expression power                                                                                                                                                                                                            |
-| `camel-language-jsonpath`   | RFC 9535 JSONPath expressions: `$.items[*].price`. Requires `lang-jsonpath` feature.                                                                                                                                                                         |
-| `camel-language-xpath`      | XPath 1.0 language for XML body queries: `/books/book[1]/title`. Requires `lang-xpath` feature.                                                                                                                                                              |
-| `camel-language-minijinja`  | MiniJinja inline template rendering (HTML/JSON/none autoescape). Requires `lang-minijinja` feature. Phase 1: inline only; Phase 2 (bd rc-64if) adds external file loading.                                                                                    |
-| `camel-prometheus`          | Prometheus metrics exporter with /metrics endpoint                                                                                                                                                                                                           |
-| `camel-otel`                | OpenTelemetry tracing and metrics exporter                                                                                                                                                                                                                   |
-| [`examples/rest-crud`]       | REST DSL + OpenAPI example — CRUD API with schema validation, static co-hosting                                                                                                                                                                               |
-
-## Building & Testing
-
-```sh
-cargo build --workspace
-cargo test --workspace
-cargo bench --workspace
-```
-
-The benchmark suite uses [Criterion](https://bheisler.github.io/criterion.rs/book/) with HTML reports. Per-crate inline benchmarks cover core types, processors, and the DSL. The `camel-bench` crate provides integration pipeline benchmarks.
-
-### Test Coverage
-
-```sh
-scripts/coverage.sh
-```
-
-Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (currently 75% minimum). Adjust the baseline there if coverage changes intentionally.
-
-## Implemented EIP Patterns
-
-| Pattern                     | Builder Method                                | Description                                                                                                                                               |
-| --------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Aggregator                  | `.aggregate(config)`                          | Correlate and aggregate exchanges with size/timeout completion, expression correlation, force-complete-on-stop                                            |
-| Content-Based Router        | `.choice()` / `.when()`                       | Route based on exchange content                                                                                                                           |
-| Content Enricher            | `.enrich(uri)` / `.poll_enrich(uri, timeout)` | Merge additional content mid-route via producer (`enrich`) or polling consumer (`pollEnrich`); pluggable `EnrichmentStrategy` (default `UseEnrichedBody`) |
-| Delayer                     | `.delay()` / `delay:`                         | Fixed or dynamic delay (header-based)                                                                                                                     |
-| doTry / doCatch / doFinally | `.do_try()` / `do_try:`                       | Lexical-scope try/catch/finally with ADR-0019 dispositions                                                                                                |
-| Dynamic Router              | `.dynamic_router(expr)`                       | Expression-based routing with slip pattern                                                                                                                |
-| Routing Slip                | `.routing_slip(expr)`                         | Route through a sequence of endpoints determined at runtime                                                                                               |
-| Filter                      | `.filter(predicate)`                          | Forward exchange only when predicate is true                                                                                                              |
-| Load Balancer               | `.load_balance()`                             | Distribute across endpoints with RoundRobin/Random/Weighted/Failover                                                                                      |
-| Loop                        | `.loop_count(n)` / `loop:`                    | Iterate a sub-pipeline N times or while a predicate holds true                                                                                            |
-| Marshal / Unmarshal         | `.marshal(fmt)` / `.unmarshal(fmt)`           | Serialize/deserialize bodies using pluggable data formats (JSON, XML, ZIP, CSV)                                                                           |
-| Multicast                   | `.multicast()`                                | Send the same exchange to multiple endpoints                                                                                                              |
-| RecipientList               | `.recipient_list(config)`                     | Dynamically resolve endpoint URIs from an expression at runtime                                                                                           |
-| Splitter                    | `.split(config)`                              | Split one exchange into multiple fragments (body lines, ZIP entries, streaming)                                                                           |
-| Stream Cache                | `.stream_cache(n)` / `stream_cache:`          | Materialize `Body::Stream` into `Body::Bytes` with configurable threshold (128 KB default)                                                                |
-| Throttler                   | `.throttle(n, duration)`                      | Rate limiting with Delay/Reject/Drop strategies                                                                                                           |
-| WireTap                     | `.wire_tap(uri)`                              | Fire-and-forget copy to a tap endpoint                                                                                                                    |
-
-Run an example:
-
-```sh
- cargo run -p aggregator
- cargo run -p bean-demo
- cargo run -p circuit-breaker
- cargo run -p config-basic
- cargo run -p config-profiles
- cargo run -p container-example
- cargo run -p content-based-routing
- cargo run -p controlbus
- cargo run -p do-try
- cargo run -p dynamic-router
- cargo run -p recipientlist
- cargo run -p routing-slip
- cargo run -p error-handling
- cargo run -p file-pipeline
- cargo run -p file-polling
- cargo run -p hello-world
- cargo run -p http-client
- cargo run -p http-server
- cargo run -p http-streaming
- cargo run -p kafka-example
- cargo run -p jms-example
- cargo run -p opensearch-example
- cargo run -p language-rhai
- cargo run -p language-simple
- cargo run -p lazy-route
- cargo run -p load-balancer
- cargo run -p loop-example
- cargo run -p log-eip
- cargo run -p marshal-unmarshal
- cargo run -p metrics-demo
- cargo run -p multicast
- cargo run -p multi-route-direct
- cargo run -p otel-demo
- cargo run -p pipeline-concurrency
- cargo run -p prometheus-demo
- cargo run -p showcase
- cargo run -p splitter
- cargo run -p sql-example
- cargo run -p sql-streaming
- cargo run -p throttler
- cargo run -p transform-pipeline
- cargo run -p wiretap
- cargo run -p xml-body
- cargo run -p yaml-dsl
-```
-
-## Security Features
-
-rust-camel includes production-ready security features:
-
-### SSRF Protection (HTTP Component)
-
-```rust
-// Block private IPs by default
-RouteBuilder::from("direct:start")
-    .to("http://api.example.com?allowInternal=false")
-    .build()?
-
-// Custom blocked hosts
-RouteBuilder::from("direct:start")
-    .to("http://api.example.com?blockedHosts=localhost,internal.company.com")
-    .build()?
-```
-
-### Path Traversal Protection (File Component)
-
-All file operations validate that resolved paths remain within the configured base directory. Attempts to use `../` or absolute paths outside base are rejected.
-
-### Timeouts
-
-All I/O operations have configurable timeouts:
-
-- File: `readTimeout`, `writeTimeout` (default: 30s)
-- HTTP: `connectTimeout`, `responseTimeout`
-
-### Memory Limits
-
-Aggregator supports `max_buckets` and `bucket_ttl` to prevent memory leaks.
-
-## Observability
-
-### Correlation IDs
-
-Every exchange has a unique `correlation_id` for distributed tracing.
-
-### Metrics
-
-Implement `MetricsCollector` trait to integrate with Prometheus, OpenTelemetry, etc.
-
-### Prometheus Metrics
-
-Export metrics to Prometheus with automatic lifecycle management:
-
-```rust
-use camel_prometheus::PrometheusService;
-
-let ctx = CamelContext::builder().build().await?
-    .with_lifecycle(PrometheusService::new(9090))
-    .with_tracing();
-
-ctx.start().await?;
-// Prometheus server starts automatically
-```
-
-Available metrics:
-
-- `camel_exchanges_total{route}` - Total exchanges processed
-- `camel_errors_total{route, error_type}` - Total errors
-- `camel_exchange_duration_seconds{route}` - Exchange processing duration (histogram)
-- `camel_queue_depth{route}` - Current queue depth
-- `camel_circuit_breaker_state{route}` - Circuit breaker state
-
-**Architecture:** `PrometheusService` implements `Lifecycle` trait (following Apache Camel's Service pattern, adapted to avoid tower::Service confusion).
-
-### Health Monitoring
-
-Built-in health endpoints for Kubernetes:
-
-- `/healthz` - Liveness probe
-- `/readyz` - Readiness probe
-- `/health` - Detailed health report
-
-Platform SPI support for Kubernetes:
-
-- Leader election via Kubernetes Leases
-- Readiness gate via pod status conditions
-- Pod identity auto-detection from Downward API
-
-```yaml
-livenessProbe:
-  httpGet:
-    path: /healthz
-    port: 9090
-```
-
-## Route Lifecycle Management
-
-rust-camel supports controlling when and how routes start:
-
-### Auto Startup
-
-By default, all routes start automatically when `ctx.start()` is called. You can disable this:
-
-```rust
-let route = RouteBuilder::from("timer:tick")
-    .route_id("lazy-route")
-    .auto_startup(false)  // Won't start automatically
-    .to("log:info")
-    .build()?;
-```
-
-### Startup Order
-
-Control the order in which routes start (useful for dependencies):
-
-```rust
-let route_a = RouteBuilder::from("direct:a")
-    .route_id("route-a")
-    .startup_order(10)  // Starts first
-    .to("log:info")
-    .build()?;
-
-let route_b = RouteBuilder::from("direct:b")
-    .route_id("route-b")
-    .startup_order(20)  // Starts after route-a
-    .to("direct:a")
-    .build()?;
-```
-
-### Runtime Control
-
-Control routes dynamically from code or from other routes:
-
-```rust
-// From code:
-let runtime = ctx.runtime();
-runtime.execute(RuntimeCommand::StartRoute {
-    route_id: "lazy-route".into(),
-    command_id: "cmd-start-lazy-route".into(),
-    causation_id: None,
-}).await?;
-runtime.execute(RuntimeCommand::StopRoute {
-    route_id: "route-a".into(),
-    command_id: "cmd-stop-route-a".into(),
-    causation_id: None,
-}).await?;
-
-// From another route (using controlbus):
-RouteBuilder::from("timer:monitor")
-    .set_header("CamelRouteId", Value::String("backup-route".into()))
-    .to("controlbus:route?action=start")
-    .build()?
-```
-
-See `examples/lazy-route` for a complete example.
-
-## Type Converters
-
-The pipeline automatically coerces the exchange body to the type a component endpoint declares via `body_contract()`. No manual casting needed in `.process()` closures.
-
-```rust
-// Declare what your endpoint expects (component author):
-fn body_contract(&self) -> Option<BodyType> {
-    Some(BodyType::Text)  // pipeline coerces to Text before calling producer
-}
-
-// Deserialize body into any type (route author):
-use camel_api::impl_from_body_via_serde;
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-struct Order { id: u64, amount: f64 }
-impl_from_body_via_serde!(Order);
-
-RouteBuilder::from("direct:orders")
-    .process(|ex| async move {
-        let order: Order = ex.body_as::<Order>()?;
-        // ...
-        Ok(ex)
-    })
-    .to("sql:insert into orders ...")
-    .build()?;
-```
-
-Built-in `FromBody` impls: `String`, `Vec<u8>`, `Bytes`, `serde_json::Value`.
-
-## Error Handling
-
-rust-camel provides sophisticated error handling with retry policies and dead letter channels.
-
-### RedeliveryPolicy with Jitter
-
-Configure retry behavior with exponential backoff and jitter:
-
-```rust
-use camel_api::error_handler::{ErrorHandlerConfig, RedeliveryPolicy};
-use std::time::Duration;
-
-let error_handler = ErrorHandlerConfig::dead_letter_channel("log:errors")
-    .on_exception(|e| matches!(e, CamelError::Io(_)))
-    .retry(3)  // Max 3 retry attempts
-    .with_backoff(
-        Duration::from_millis(100),  // Initial delay: 100ms
-        2.0,                          // Multiplier: 2x
-        Duration::from_secs(10)      // Max delay: 10s
-    )
-    .with_jitter(0.2)  // ±20% randomization (recommended: 0.1-0.3)
-    .build();
-```
-
-**Jitter Benefits:**
-
-- Prevents thundering herd in distributed systems
-- Recommended values: 0.1-0.3 (10-30%)
-- Adds randomization: `delay ± (delay * jitter_factor)`
-
-### Camel-Compatible Headers
-
-During retries, these headers are automatically set:
-
-- `CamelRedelivered` - `true` when exchange is being retried
-- `CamelRedeliveryCounter` - Current retry attempt (1-indexed)
-- `CamelRedeliveryMaxCounter` - Maximum retry attempts
-
-### RouteBuilder shorthand
-
-```rust
-RouteBuilder::from("direct:input")
-    .route_id("shorthand")
-    .dead_letter_channel("log:dlc")
-    .on_exception(|e| matches!(e, CamelError::Io(_)))
-        .retry(3)
-        .handled_by("log:io-errors")
-    .end_on_exception()
-    .to("mock:result")
-    .build()?;
-```
-
-### YAML Configuration
-
-```yaml
-routes:
-  - id: "retry-example"
-    from: "timer:tick"
-    error_handler:
-      dead_letter_channel: "log:dlc"
-      retry:
-        max_attempts: 3
-        initial_delay_ms: 100
-        multiplier: 2.0
-        max_delay_ms: 10000
-        jitter_factor: 0.2
-      on_exceptions:
-        - kind: "ProcessorError"
-          message_contains: "validation"
-          retry:
-            max_attempts: 1
-    steps:
-      - to: "direct:processor"
-```
-
-### Exception Disposition — Propagate, Handled, Continued
-
-Every `on_exception` clause has a **disposition** that controls what happens after the error handler runs:
-
-| Disposition | Behavior                                                                                                    |
-| ----------- | ----------------------------------------------------------------------------------------------------------- |
-| `Propagate` | Error is re-thrown to upstream after DLC/handler runs (default)                                             |
-| `Handled`   | Error is absorbed as `Ok(Exchange)`. Pipeline stops — subsequent steps do NOT run                           |
-| `Continued` | Error is cleared from the Exchange. Pipeline **continues** to the next step — subsequent steps run normally |
-
-In the builder API, use `ErrorHandlerConfig` with `.continued(true)` or `.handled(true)`:
-
-```rust
-use camel_api::error_handler::ErrorHandlerConfig;
-
-let eh = ErrorHandlerConfig::dead_letter_channel("log:dlc")
-    .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
-    .continued(true)    // ← clear error, pipeline continues
-    .retry(1)
-    .build();
-
-let route = RouteBuilder::from("direct:input")
-    .route_id("continued-example")
-    .error_handler(eh)
-    .to("log:result")       // ← runs even after the error
-    .build()?;
-```
-
-In YAML, use the `continued: true` field:
-
-```yaml
-error_handler:
-  dead_letter_channel: "log:errors"
-  on_exceptions:
-    - kind: ProcessorError
-      continued: true
-```
-
-The `continued` and `handled` fields are mutually exclusive — setting both to `true` is a compile error.
-
-See `examples/error-handling` for complete examples, including Route 10 which demonstrates `continued=true`.
+See [`examples/rest-crud/`](examples/rest-crud/) for a complete runnable CRUD
+example with in-memory storage and static file co-hosting.
 
 ## Configuration
 
-rust-camel supports external configuration via `Camel.toml` files using the `camel-config` crate:
-
-### Configuration File
-
-Create a `Camel.toml` file:
+External configuration via `Camel.toml` (loaded by the `camel-config` crate):
 
 ```toml
 [default]
 routes = ["routes/**/*.yaml"]
 log_level = "INFO"
 
-# Component defaults - apply to all endpoints
+# Component defaults — apply to all endpoints; URI params always override these
 [default.components.http]
 connect_timeout_ms = 5000
 allow_internal = false
@@ -683,20 +256,6 @@ group_id = "camel"
 host = "localhost"
 port = 6379
 
-[default.components.opensearch]
-host = "localhost"
-port = 9200
-
-[default.components.sql]
-max_connections = 5
-
-[default.components.file]
-delay_ms = 500
-
-[default.components.container]
-docker_host = "unix:///var/run/docker.sock"
-
-# Observability
 [default.observability.prometheus]
 enabled = true
 port = 9090
@@ -706,158 +265,246 @@ log_level = "ERROR"
 
 [production.components.kafka]
 brokers = "prod-kafka:9092"
-
-[production.components.redis]
-host = "prod-redis"
 ```
 
-### Component Defaults
+### Profiles, discovery, and overrides
 
-Each component supports global defaults that apply to all endpoints. URI parameters always take precedence:
+- **Profiles** — multiple environments (`[default]`, `[production]`, ...) in
+  one file, selected with `CAMEL_PROFILE=production`.
+- **Route discovery** — `routes = ["routes/**/*.yaml"]` loads routes via glob.
+- **Environment overrides** — any value via `CAMEL_*` env vars
+  (`CAMEL_LOG_LEVEL=DEBUG`, `CAMEL_ROUTES_0="custom/*.yaml"`).
+- **Deep merge** — nested configs merge; URI parameters always win.
+
+Optional components (http, ws, kafka, redis, sql, jms, file, container)
+implement `ComponentBundle`, owning their config key and schemes. See
+[`examples/custom-component-bundle/`](examples/custom-component-bundle/) to
+build your own.
+
+## Error Handling
+
+Retry with exponential backoff and jitter, plus a dead-letter channel:
 
 ```rust
-// Uses global connect_timeout_ms (5000) from Camel.toml
-.to("http://api.example.com/data")
+use camel_api::error_handler::ErrorHandlerConfig;
+use std::time::Duration;
 
-// Overrides global setting with URI parameter
-.to("http://api.example.com/data?connectTimeout=10000")
+let error_handler = ErrorHandlerConfig::dead_letter_channel("log:errors")
+    .on_exception(|e| matches!(e, CamelError::Io(_)))
+    .retry(3)
+    .with_backoff(
+        Duration::from_millis(100), // initial delay
+        2.0,                        // multiplier
+        Duration::from_secs(10),    // max delay
+    )
+    .with_jitter(0.2) // ±20% (recommended 0.1–0.3)
+    .build();
 ```
 
-Supported component configurations:
-
-- **`[components.http]`**: `connect_timeout_ms`, `response_timeout_ms`, `max_connections`, `max_body_size`, `max_request_body`, `allow_internal`
-- **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`, `partition_assignment_strategy`. Named clusters under `[components.kafka.brokers_named.<name>]` each with `brokers`, optional `security_protocol`, `sasl_auth_type`, `client_id`, and `rdkafka_config` escape hatch. Reference via `?brokerName=<name>` in the endpoint URI.
-- **`[components.redis]`**: `host`, `port`
-- **`[components.sql]`**: `max_connections`, `min_connections`, `idle_timeout_secs`, `max_lifetime_secs`, `ssl_mode`, `ssl_root_cert`, `ssl_cert`, `ssl_key`
-- **`[components.jms]`**: `default_broker`, `max_bridges`, `bridge_cache_dir`, `bridge_start_timeout_ms`, `broker_reconnect_interval_ms`. Brokers are declared as named entries under `[components.jms.brokers.<name>]`, each with `broker_url`, `broker_type` (`activemq`|`artemis`), and optional `username`/`password`. URI schemes `activemq:` and `artemis:` lock the broker type automatically and support shorthand destinations (e.g. `activemq:orders` → queue). Use the `broker=<name>` URI query param to select a specific broker from the pool.
-- **`[components.file]`**: `delay_ms`, `initial_delay_ms`, `read_timeout_ms`, `write_timeout_ms`
-- **`[components.container]`**: `docker_host`
-- **`[components.ws]`**: `max_connections`, `max_message_size`, `heartbeat_interval_ms`, `idle_timeout_ms`
-
-Each optional component (http, ws, kafka, redis, sql, jms, file, container) implements `ComponentBundle` — it owns its config key, deserializes its own TOML block, and registers one or more schemes. See `examples/custom-component-bundle` for a full walkthrough of implementing your own bundle.
-
-### Loading Configuration
-
-```rust
-use camel_api::CamelError;
-use camel_component_log::LogComponent;
-use camel_component_timer::TimerComponent;
-use camel_config::{CamelConfig, discover_routes};
-use camel_core::CamelContext;
-
-// Load configuration
-let config = CamelConfig::from_file("Camel.toml")
-    .map_err(|e| CamelError::Config(e.to_string()))?;
-
-// Create context and register components
-let mut ctx = CamelContext::builder().build().await?;
-ctx.register_component(TimerComponent::new());
-ctx.register_component(LogComponent::new());
-
-// Discover and load routes from config patterns
-let routes = discover_routes(&config.routes)
-    .map_err(|e| CamelError::Config(e.to_string()))?;
-for route in routes {
-    ctx.add_route_definition(route).await?;
-}
-
-ctx.start().await?;
-```
-
-### Route Files
-
-Create YAML route files:
+The same route in YAML:
 
 ```yaml
-# routes/hello.yaml
+# routes/retry.yaml
 routes:
-  - id: "hello-timer"
-    from: "timer:tick?period=1000"
+  - id: "retry-example"
+    from: "direct:input"
+    error_handler:
+      dead_letter_channel: "log:errors"
+      on_exceptions:
+        - kind: "Io"
+          retry:
+            max_attempts: 3
+            initial_delay_ms: 100
+            multiplier: 2.0
+            max_delay_ms: 10000
+            jitter_factor: 0.2
     steps:
       - to: "log:info"
 ```
 
-### Environment Variables
+During retries these headers are set automatically: `CamelRedelivered`,
+`CamelRedeliveryCounter`, `CamelRedeliveryMaxCounter`.
 
-Override configuration with environment variables:
+### Exception disposition
 
-```bash
-# Select profile
-export CAMEL_PROFILE=production
+Each handler controls what happens after it runs:
 
-# Override specific values
-export CAMEL_LOG_LEVEL=DEBUG
-export CAMEL_ROUTES_0="custom/*.yaml"
-```
+| Disposition | Behavior                                             |
+| ----------- | ---------------------------------------------------- |
+| `Propagate` | Re-throw upstream after the handler runs (default)   |
+| `Handled`   | Absorb as `Ok(Exchange)`; pipeline stops             |
+| `Continued` | Clear the error; pipeline continues to the next step |
 
-### Features
+Configure the same in YAML via `error_handler:` with `retry:`, `jitter_factor:`,
+`on_exceptions:`, and `continued: true` / `handled: true` (mutually exclusive).
 
-- **Profile support**: Multiple environments in one file
-- **Route discovery**: Auto-load routes from glob patterns
-- **Component defaults**: Set global defaults for HTTP, Kafka, Redis, SQL, File, Container
-- **Environment overrides**: Override any value with `CAMEL_*` prefix
-- **Deep merging**: Nested configs merge properly
-- **URI precedence**: URI parameters always override global defaults
+See [`examples/error-handling/`](examples/error-handling/) for complete
+examples.
 
-### Component Defaults
+## Observability
 
-Configure global defaults for all component endpoints in `Camel.toml`:
-
-```toml
-[default.components.http]
-connect_timeout_ms = 5000
-allow_internal = false
-
-[default.components.kafka]
-brokers = "localhost:9092"
-group_id = "my-app"
-
-[default.components.redis]
-host = "localhost"
-port = 6379
-
-[default.components.sql]
-max_connections = 10
-
-[default.components.file]
-delay_ms = 1000
-
-[default.components.container]
-docker_host = "unix:///var/run/docker.sock"
-```
-
-URI parameters always take precedence over global defaults:
+- **Correlation IDs** — every exchange carries a unique `correlation_id`.
+- **Prometheus** — export via `PrometheusService` (implements the `Lifecycle`
+  trait); metrics include `camel_exchanges_total`, `camel_errors_total`,
+  `camel_exchange_duration_seconds`, `camel_queue_depth`,
+  `camel_circuit_breaker_state`.
+- **OpenTelemetry** — tracing and metrics export via `camel-otel`.
+- **Health endpoints** — `/healthz` (liveness), `/readyz` (readiness),
+  `/health` (detailed report), ready for Kubernetes probes.
 
 ```rust
-// Uses global connect_timeout_ms (5000) from Camel.toml
-.to("http://api.example.com/data")
+use std::net::SocketAddr;
+use camel_prometheus::PrometheusService;
+use camel_core::context::CamelContext;
 
-// Overrides global setting with URI parameter
-.to("http://api.example.com/data?connectTimeout=10000")
+let prometheus = PrometheusService::new(SocketAddr::from(([0, 0, 0, 0], 9090)));
+
+let mut ctx = CamelContext::builder()
+    .build()
+    .await?
+    .with_lifecycle(prometheus)
+    .with_tracing()
+    .await;
+ctx.start().await?;
+// Prometheus server + /healthz, /readyz start automatically
 ```
 
-See `docs/configuration.md` for full details.
+## Security
 
-## JSON Schema
+rust-camel ships built-in security safeguards:
 
-The full DSL AST has a published JSON Schema:
+- **SSRF protection (HTTP)** — block private IPs by default
+  (`allowInternal=false`) and custom blocklists (`blockedHosts=...`).
+- **Path traversal protection (File)** — resolved paths are validated against
+  the configured base directory; `../` and out-of-base absolute paths are
+  rejected.
+- **Timeouts** — configurable on file and HTTP I/O (file `readTimeout`/`writeTimeout`,
+  HTTP `connectTimeout`/`responseTimeout`; defaults 30s).
+- **Memory limits** — the aggregator caps `max_buckets` and `bucket_ttl`.
+
+See [`SECURITY.md`](SECURITY.md) to report vulnerabilities.
+
+## Docker
+
+Pre-built images on [GHCR](https://github.com/kennycallado/rust-camel/pkgs/container/rust-camel)
+and [Docker Hub](https://hub.docker.com/r/kennycallado/rust-camel). Both
+variants support `linux/amd64` and `linux/arm64`.
+
+| Tag suffix | Base        | Use case                                    |
+| ---------- | ----------- | ------------------------------------------- |
+| _(none)_   | scratch     | Minimal runtime image, small attack surface |
+| `-alpine`  | alpine:3.21 | Debugging — includes a busybox shell        |
+
+```bash
+# Production
+docker run -v $(pwd)/routes:/app/routes \
+  ghcr.io/kennycallado/rust-camel:latest run
+
+# Debugging shell
+docker run -it -v $(pwd):/app \
+  ghcr.io/kennycallado/rust-camel:latest-alpine sh
+```
+
+## Examples
+
+The [`examples/`](examples/) directory contains 90+ runnable examples. A few
+good starting points:
+
+| Example                                                        | Shows                                  |
+| -------------------------------------------------------------- | -------------------------------------- |
+| [`hello-world`](examples/hello-world/)                         | Minimal `timer → log` route            |
+| [`rest-crud`](examples/rest-crud/)                             | REST DSL + OpenAPI + static co-hosting |
+| [`http-server`](examples/http-server/)                         | HTTP consumer with streaming           |
+| [`kafka-example`](examples/kafka-example/)                     | Kafka producer/consumer                |
+| [`error-handling`](examples/error-handling/)                   | Retries, dead-letter, dispositions     |
+| [`custom-component-bundle`](examples/custom-component-bundle/) | Build your own component               |
+| [`bean-demo`](examples/bean-demo/)                             | Bean registry / dependency injection   |
+
+Run any of them with `cargo run -p <name>`.
+
+## Architecture
+
+rust-camel separates two planes:
+
+- **Data plane** — Tower-native. Every processor and producer is a
+  `Service<Exchange>`; EIP patterns compose as Tower middleware.
+- **Control plane** — a trait hierarchy (`Component`, `Endpoint`, `Consumer`)
+  for route lifecycle, supervision, and hot-reload.
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    Your Application                  │
+│         RouteBuilder / YAML DSL / Camel.toml         │
+└──────────────────────┬───────────────────────────────┘
+                       │
+┌──────────────────────▼───────────────────────────────┐
+│                 camel-core                           │
+│         CamelContext — composition root              │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐    │
+│  │  Data plane (Tower)                          │    │
+│  │  Exchange → Service<Exchange> pipeline       │    │
+│  │  EIP processors as Tower middleware          │    │
+│  └──────────────────────────────────────────────┘    │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐    │
+│  │  Control plane                               │    │
+│  │  Route lifecycle, supervision, hot-reload    │    │
+│  └──────────────────────────────────────────────┘    │
+└──────────┬──────────────────────────┬────────────────┘
+           │                          │
+┌──────────▼─────────┐    ┌───────────▼────────────────┐
+│   camel-processor  │    │   Components               │
+│   EIP patterns     │    │   timer, log, http, file,  │
+│   (Tower layers)   │    │   kafka, redis, sql, ...,  │
+└────────────────────┘    └────────────────────────────┘
+```
+
+Internals (domain model, event journaling, runtime state) are an
+implementation detail — see [`crates/camel-core/README.md`](crates/camel-core/README.md)
+and [`docs/ARCHITECT.md`](docs/ARCHITECT.md).
+
+### JSON Schema for the DSL
+
+The full YAML/JSON route DSL has a published JSON Schema for editor
+autocomplete and SDK validation:
 
 - **URL:** `https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/dsl/route-schema.json`
-- **Local:** `schemas/dsl/route-schema.json` (regenerate with `cargo xtask schema`).
-
-### Using `$schema`
-
-Add the `$schema` key to your JSON route files for editor autocomplete and SDK validation:
+- **Local:** `schemas/dsl/route-schema.json` (regenerate with `cargo xtask schema`)
 
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/dsl/route-schema.json",
-  "routes": [...]
+  "routes": []
 }
 ```
 
-The parser silently ignores the key. See [`schemas/dsl/README.md`](./schemas/dsl/README.md) for scope and versioning.
+## Building & Testing
+
+```sh
+cargo build --workspace
+cargo test  --workspace
+cargo bench --workspace     # Criterion reports; camel-bench covers pipelines
+scripts/coverage.sh         # needs cargo-llvm-cov; baseline enforced in coverage.toml
+```
+
+Local lint and schema tools: `cargo fmt --check`, `cargo clippy -- -D warnings`,
+and the `cargo xtask` subcommands (`lint-unwrap`, `lint-secrets`,
+`lint-log-levels`, `schema --check`). See [`AGENTS.md`](AGENTS.md) for the exact
+CI gate set.
+
+## Status & Roadmap
+
+Pre-release — APIs will change. Active development covers
+component coverage, the DSL surface, and observability.
+
+## Contributing
+
+Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for build
+setup, coding standards, the commit convention, and the CI quality gates your
+PR must pass. Open issues and pull requests at
+[kennycallado/rust-camel](https://github.com/kennycallado/rust-camel).
 
 ## License
 
-Apache-2.0
+Apache-2.0.
