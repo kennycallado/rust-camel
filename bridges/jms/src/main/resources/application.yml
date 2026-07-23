@@ -27,8 +27,12 @@ quarkus:
         - tls/placeholder-ca.pem
         - tls/placeholder-server.pem
         - tls/placeholder-server.key
-    additional-build-args:
-      - "-H:+AllowVMInspection"
+    # NOTE: quarkus.native.additional-build-args is intentionally NOT set here.
+    # It is provided solely via the QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS env var
+    # in build-native.sh. Setting it in BOTH places makes SmallRye prioritize the
+    # YAML *indexed* form ([0]..[n]) over the env-var comma form, which silently
+    # DROPS the trailing --static,--libc=musl args and yields a glibc-dynamic
+    # binary. Keep all native-image args in the env var only.
 
 "%test":
   quarkus:

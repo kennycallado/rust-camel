@@ -94,9 +94,8 @@ ln -sf "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" /tmp/musl-bin/x86_64-linux-mus
 ln -sf "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" /tmp/musl-bin/musl-gcc
 export PATH="/tmp/musl-bin:${PATH}"
 
-# native-image ignores --libc=musl and falls back to the system gcc (glibc),
-# producing a dynamic binary. Force the musl cross-compiler for compile + link.
-export CC="/tmp/musl-bin/x86_64-linux-musl-gcc"
+# native-image selects x86_64-linux-musl-gcc on its own from --libc=musl; no
+# CC override is needed (an earlier CC= export here was a proven no-op).
 
 # Build static zlib against musl if not already built
 if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
@@ -125,7 +124,16 @@ echo ""
 # Invoke Gradle via the wrapper jar directly (avoids JAVA_HOME lookup issues
 # when bash is used as --entrypoint in the GraalVM CE container).
 # Inject musl/static args here so application.yml stays platform-neutral.
-export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="-H:+AllowVMInspection,--static,--libc=musl"
+#
+# -no-pie is REQUIRED: the musl toolchain (more.musl.cc 11.2.1) is built with
+# --enable-default-pie/--enable-static-pie, so musl-gcc defaults to -static-pie.
+# GraalVM's .svm_heap carries absolute relocations that are incompatible with
+# -pie, so the link fails with "read-only segment has dynamic relocations".
+# Without --no-fallback native-image then silently emits a glibc-dynamic
+# fallback image (the mislabeled-static bug). -H:NativeLinkerOption=-no-pie
+# forces a non-PIE static link; --no-fallback turns any musl link failure into
+# a hard error instead of a silent glibc fallback.
+export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="-H:+AllowVMInspection,--no-fallback,--static,--libc=musl,-H:NativeLinkerOption=-no-pie"
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
     build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
     -Pversion="${VERSION}" --no-daemon
