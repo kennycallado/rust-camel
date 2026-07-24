@@ -120,6 +120,10 @@
             libclang
             pkgsUnstable.beads # agents memory
             pkgsUnstable.rdkafka
+            # OpenSpec CLI wrapper (avoids global npm install)
+            (writeShellScriptBin "openspec" ''
+              exec npx @fission-ai/openspec@latest "$@"
+            '')
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
