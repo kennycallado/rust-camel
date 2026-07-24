@@ -22,6 +22,16 @@ use support::send_to_direct;
 use support::wait::wait_until;
 use tokio::sync::OnceCell;
 
+/// HTTP client with a hard timeout so consumer tests fail fast instead of
+/// hanging indefinitely when the bridge accepts the TCP connection but never
+/// responds (e.g. still initializing under CI load).
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("reqwest client with timeout")
+}
+
 /// Shared bridge pool for producer-only tests.
 ///
 /// Avoids N parallel JVM/native-binary spawns when producer tests run concurrently.
@@ -266,7 +276,7 @@ async fn cxf_consumer_receives_request_and_returns_response() {
         || {
             let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
             async move {
-                match reqwest::Client::new().get(&url).send().await {
+                match http_client().get(&url).send().await {
                     Ok(_) => Ok(true),
                     Err(_) => Ok(false),
                 }
@@ -276,7 +286,7 @@ async fn cxf_consumer_receives_request_and_returns_response() {
     .await
     .unwrap();
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let res = client
         .post(format!("http://127.0.0.1:{port}/cxf/test_profile"))
         .header("content-type", "text/xml; charset=utf-8")
@@ -529,7 +539,7 @@ async fn cxf_consumer_returns_health_check_on_get() {
         || {
             let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
             async move {
-                match reqwest::Client::new().get(&url).send().await {
+                match http_client().get(&url).send().await {
                     Ok(_) => Ok(true),
                     Err(_) => Ok(false),
                 }
@@ -540,7 +550,7 @@ async fn cxf_consumer_returns_health_check_on_get() {
     .unwrap();
 
     // Send GET request — should return health check (200 OK)
-    let client = reqwest::Client::new();
+    let client = http_client();
     let res = client
         .get(format!("http://127.0.0.1:{port}/cxf/test_profile"))
         .send()
@@ -583,7 +593,7 @@ async fn cxf_consumer_handles_malformed_soap() {
         || {
             let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
             async move {
-                match reqwest::Client::new().get(&url).send().await {
+                match http_client().get(&url).send().await {
                     Ok(_) => Ok(true),
                     Err(_) => Ok(false),
                 }
@@ -594,7 +604,7 @@ async fn cxf_consumer_handles_malformed_soap() {
     .unwrap();
 
     // Send POST with malformed XML body — bridge should handle gracefully, not crash
-    let client = reqwest::Client::new();
+    let client = http_client();
     let res = client
         .post(format!("http://127.0.0.1:{port}/cxf/test_profile"))
         .header("content-type", "text/xml; charset=utf-8")
@@ -645,7 +655,7 @@ async fn cxf_consumer_concurrent_requests() {
         || {
             let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
             async move {
-                match reqwest::Client::new().get(&url).send().await {
+                match http_client().get(&url).send().await {
                     Ok(_) => Ok(true),
                     Err(_) => Ok(false),
                 }
@@ -666,7 +676,7 @@ async fn cxf_consumer_concurrent_requests() {
 </soapenv:Envelope>"#;
 
     // Spawn 10 concurrent requests
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut handles = Vec::new();
     for _ in 0..10 {
         let client = client.clone();
