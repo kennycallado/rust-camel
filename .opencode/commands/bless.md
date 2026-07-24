@@ -34,7 +34,7 @@ Read every artifact file in `openspec/changes/$1/`:
 ### 3. Compute artifact hash
 
 ```bash
-bash .opencode/scripts/artifact-hash.sh "openspec/changes/$1"
+cargo run -p xtask -- hash-artifacts --change-dir "openspec/changes/$1"
 ```
 
 Store the output (format: `sha256:<hash>`).

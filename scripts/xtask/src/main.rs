@@ -127,6 +127,14 @@ enum Commands {
         #[arg(long, default_value = "bless")]
         kind: String,
     },
+    /// Print the artifact hash for an OpenSpec change directory.
+    /// Uses the exact same algorithm as sign-attestation / verify-attestation.
+    /// Used by /bless to show the hash to the expert before signing.
+    HashArtifacts {
+        /// Directory of the OpenSpec change.
+        #[arg(long)]
+        change_dir: String,
+    },
 }
 
 fn main() {
@@ -262,6 +270,15 @@ fn main() {
                 std::process::exit(1);
             }
             println!("verify-attestation: OK ({kind} attestation authentic)");
+        }
+        Commands::HashArtifacts { change_dir } => {
+            match attestation::artifact_hash(&change_dir) {
+                Ok(hash) => println!("{hash}"),
+                Err(e) => {
+                    eprintln!("hash-artifacts: FAIL — {e}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
@@ -3617,7 +3634,11 @@ mod attestation {
     /// `<relpath>\0<len>\0<bytes>` so that renames/moves change the hash.
     /// The attestation file(s) themselves are excluded so signing/verifying is
     /// a fixed point.
-    fn artifact_hash(change_dir: &Path) -> Result<String, String> {
+    pub fn artifact_hash(change_dir: &str) -> Result<String, String> {
+        compute_artifact_hash(std::path::Path::new(change_dir))
+    }
+
+    fn compute_artifact_hash(change_dir: &Path) -> Result<String, String> {
         if !change_dir.is_dir() {
             return Err(format!("change dir '{}' not found", change_dir.display()));
         }
@@ -3685,7 +3706,7 @@ mod attestation {
             return Err("verdict/expert must not contain '|'".to_string());
         }
         let dir = Path::new(change_dir);
-        let hash = artifact_hash(dir)?;
+        let hash = compute_artifact_hash(dir)?;
         let mac = hmac_sha256(key, signed_message(verdict, &hash, expert).as_bytes());
 
         let doc = json!({
@@ -3740,7 +3761,7 @@ mod attestation {
             ));
         }
         // 3. Artifacts must not have drifted since signing.
-        let current_hash = artifact_hash(dir)?;
+        let current_hash = compute_artifact_hash(dir)?;
         if !ct_eq(&current_hash, stored_hash) {
             return Err(format!(
                 "artifact drift: signed {stored_hash}, current {current_hash} — re-bless required"

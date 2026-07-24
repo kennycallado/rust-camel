@@ -61,7 +61,7 @@ spec to a worker.
    For each: read returned template + instruction, read dependencies,
    write to resolved path. STOP after specs.
 4. **SPEC BLESSING**: dispatch `@experts/e_gpt` WITHOUT task_id:
-   - Compute hash: `bash .opencode/scripts/artifact-hash.sh openspec/changes/<name>`
+    - Compute hash: `cargo run -p xtask -- hash-artifacts openspec/changes/<name>`
    - Pass artifact paths + hash + "Bless this spec for planning?"
    - Write `.attestation.json` (hash + verdict)
    - BLESS-WITH-FIXES → fix → re-bless. REJECTED → report, stop.
