@@ -69,6 +69,21 @@ pub mod cxf;
 pub mod xml_bridge;
 
 #[cfg(feature = "integration-tests")]
+pub mod kafka;
+
+#[cfg(feature = "integration-tests")]
+pub mod opensearch;
+
+#[cfg(feature = "integration-tests")]
+pub mod postgres;
+
+#[cfg(feature = "integration-tests")]
+pub mod redis;
+
+#[cfg(feature = "integration-tests")]
+pub mod surrealdb;
+
+#[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
 pub fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};

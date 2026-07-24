@@ -10,6 +10,7 @@
 
 mod support;
 use support::install_crypto_provider;
+use support::opensearch::shared_opensearch;
 
 use std::time::Duration;
 
@@ -19,89 +20,6 @@ use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_opensearch::OpenSearchComponent;
 use camel_test::CamelTestContext;
 use support::wait::wait_until;
-use testcontainers::ContainerAsync;
-use testcontainers::core::{ContainerPort, Image, WaitFor};
-use testcontainers::runners::AsyncRunner;
-
-const OPENSEARCH_HTTP_PORT: u16 = 9200;
-
-#[derive(Debug, Clone)]
-struct OpenSearchImage;
-
-impl Image for OpenSearchImage {
-    fn name(&self) -> &str {
-        "opensearchproject/opensearch"
-    }
-
-    fn tag(&self) -> &str {
-        "2.18.0"
-    }
-
-    fn env_vars(
-        &self,
-    ) -> impl IntoIterator<
-        Item = (
-            impl Into<std::borrow::Cow<'_, str>>,
-            impl Into<std::borrow::Cow<'_, str>>,
-        ),
-    > {
-        vec![
-            ("discovery.type".to_string(), "single-node".to_string()),
-            (
-                "OPENSEARCH_JAVA_OPTS".to_string(),
-                "-Xms512m -Xmx512m".to_string(),
-            ),
-            ("DISABLE_SECURITY_PLUGIN".to_string(), "true".to_string()),
-        ]
-    }
-
-    fn expose_ports(&self) -> &[ContainerPort] {
-        &[ContainerPort::Tcp(OPENSEARCH_HTTP_PORT)]
-    }
-
-    fn ready_conditions(&self) -> Vec<WaitFor> {
-        vec![WaitFor::Nothing]
-    }
-}
-
-async fn setup_opensearch_container() -> ContainerAsync<OpenSearchImage> {
-    OpenSearchImage.start().await.unwrap()
-}
-
-async fn get_opensearch_url(container: &ContainerAsync<OpenSearchImage>) -> String {
-    let port = container
-        .get_host_port_ipv4(OPENSEARCH_HTTP_PORT)
-        .await
-        .unwrap();
-    format!("127.0.0.1:{}", port)
-}
-
-async fn wait_for_opensearch(container: &ContainerAsync<OpenSearchImage>) {
-    let port = container
-        .get_host_port_ipv4(OPENSEARCH_HTTP_PORT)
-        .await
-        .unwrap();
-    let client = reqwest::Client::new();
-    wait_until(
-        "OpenSearch ready",
-        Duration::from_secs(60),
-        Duration::from_millis(500),
-        || {
-            let client = client.clone();
-            let url = format!("http://127.0.0.1:{}/", port);
-            async move {
-                let resp = client.get(&url).send().await;
-                match resp {
-                    Ok(r) if r.status().is_success() => Ok(true),
-                    Ok(r) => Err(format!("non-200 status: {}", r.status())),
-                    Err(e) => Err(format!("connection failed: {}", e)),
-                }
-            }
-        },
-    )
-    .await
-    .unwrap();
-}
 
 /// Index a document directly via HTTP and wait for it to be searchable.
 async fn seed_document(url: &str, index: &str, id: &str, body: serde_json::Value) {
@@ -146,9 +64,7 @@ async fn count_documents(url: &str, index: &str) -> u64 {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_index_operation() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -203,9 +119,7 @@ async fn opensearch_index_operation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_search_operation() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     // Seed a document directly via HTTP (with ?refresh=true for immediate visibility)
     seed_document(
@@ -267,9 +181,7 @@ async fn opensearch_search_operation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_get_and_delete() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     // Seed a document directly via HTTP
     seed_document(
@@ -349,9 +261,7 @@ async fn opensearch_get_and_delete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_bulk_operation() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -406,9 +316,7 @@ async fn opensearch_bulk_operation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_update_operation() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     seed_document(
         &url,
@@ -499,9 +407,7 @@ async fn opensearch_update_operation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_multiget_operation() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     seed_document(
         &url,
@@ -565,9 +471,7 @@ async fn opensearch_multiget_operation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_header_operation_override_delete() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     seed_document(
         &url,
@@ -643,9 +547,7 @@ async fn opensearch_header_operation_override_delete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_index_without_id() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -706,9 +608,7 @@ async fn opensearch_index_without_id() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_invalid_operation_goes_to_error() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -745,9 +645,7 @@ async fn opensearch_invalid_operation_goes_to_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_get_missing_id_goes_to_error() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -799,9 +697,7 @@ async fn opensearch_get_missing_id_goes_to_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_delete_missing_id_goes_to_error() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -901,9 +797,7 @@ async fn opensearch_invalid_host_goes_to_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_auth_username_password_in_uri() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -953,9 +847,7 @@ async fn opensearch_auth_username_password_in_uri() {
 #[tokio::test(flavor = "multi_thread")]
 async fn opensearch_tls_scheme_goes_to_error_without_tls_server() {
     install_crypto_provider();
-    let container = setup_opensearch_container().await;
-    wait_for_opensearch(&container).await;
-    let url = get_opensearch_url(&container).await;
+    let url = shared_opensearch().await.to_string();
 
     let h = CamelTestContext::builder()
         .with_timer()

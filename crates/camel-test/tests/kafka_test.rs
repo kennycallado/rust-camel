@@ -9,78 +9,12 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
-use support::install_crypto_provider;
+use support::kafka::shared_kafka;
 
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_kafka::{KafkaComponent, KafkaEndpointConfig, KafkaProducer};
+use camel_component_kafka::KafkaComponent;
 use camel_test::CamelTestContext;
 use support::wait::wait_until;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::kafka::apache;
-use tower::{Service, ServiceExt};
-
-/// Initialise tracing once per process (ignores the error if already set).
-fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt};
-    let _ = fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("warn,camel=info,rdkafka=off")),
-        )
-        .with_test_writer()
-        .try_init();
-}
-
-/// Start an Apache Kafka container (KRaft, no Zookeeper) and return the bootstrap address.
-async fn start_kafka() -> (testcontainers::ContainerAsync<apache::Kafka>, String) {
-    init_tracing();
-    install_crypto_provider();
-    let container = apache::Kafka::default().start().await.unwrap();
-    let port = container
-        .get_host_port_ipv4(apache::KAFKA_PORT)
-        .await
-        .unwrap();
-    let brokers = format!("127.0.0.1:{port}");
-    wait_for_kafka_ready(&brokers).await;
-    eprintln!("Kafka bootstrap: {brokers}");
-    (container, brokers)
-}
-
-async fn kafka_probe_send(brokers: &str) -> Result<(), String> {
-    let config = KafkaEndpointConfig::from_uri(&format!(
-        "kafka:__camel_ready_probe?brokers={brokers}&acks=all&requestTimeoutMs=1500"
-    ))
-    .map_err(|e| format!("probe config parse failed: {e}"))?
-    .resolve()
-    .map_err(|e| format!("probe config resolve failed: {e}"))?;
-
-    let mut producer =
-        KafkaProducer::new(config).map_err(|e| format!("probe producer create failed: {e}"))?;
-    let exchange = camel_api::Exchange::new(camel_api::Message::new("ready-probe"));
-
-    producer
-        .ready()
-        .await
-        .map_err(|e| format!("probe producer not ready: {e}"))?;
-    producer
-        .call(exchange)
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("probe delivery failed: {e}"))
-}
-
-async fn wait_for_kafka_ready(brokers: &str) {
-    let timeout = std::time::Duration::from_secs(60);
-    wait_until(
-        "kafka broker readiness",
-        timeout,
-        std::time::Duration::from_millis(750),
-        || async { kafka_probe_send(brokers).await.map(|_| true) },
-    )
-    .await
-    .unwrap_or_else(|e| panic!("Kafka broker at {brokers} did not become ready: {e}"));
-    eprintln!("Kafka ready: {brokers}");
-}
 
 // ===========================================================================
 // Producer test — timer → kafka, assert no errors
@@ -88,7 +22,7 @@ async fn wait_for_kafka_ready(brokers: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn kafka_producer_sends_without_error() {
-    let (_container, brokers) = start_kafka().await;
+    let (_, brokers) = shared_kafka().await;
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -141,7 +75,7 @@ async fn kafka_producer_sends_without_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn kafka_consumer_receives_message() {
-    let (_container, brokers) = start_kafka().await;
+    let (_, brokers) = shared_kafka().await;
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -201,7 +135,7 @@ async fn kafka_consumer_receives_message() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn kafka_consumer_sets_headers() {
-    let (_container, brokers) = start_kafka().await;
+    let (_, brokers) = shared_kafka().await;
 
     let h = CamelTestContext::builder()
         .with_timer()
@@ -274,7 +208,7 @@ async fn kafka_consumer_sets_headers() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn kafka_consumer_cooperative_sticky_strategy() {
-    let (_container, brokers) = start_kafka().await;
+    let (_, brokers) = shared_kafka().await;
 
     let h = CamelTestContext::builder()
         .with_timer()

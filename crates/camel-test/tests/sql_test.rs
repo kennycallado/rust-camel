@@ -10,40 +10,21 @@
 
 mod support;
 use support::install_crypto_provider;
-
-use std::io::Write;
+use support::postgres::{shared_postgres, shared_postgres_tls};
 
 use camel_api::CamelError;
 use camel_api::Value;
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_api::test_support::tls;
 use camel_component_mock::MockComponent;
 use camel_component_sql::SqlComponent;
 use camel_test::CamelTestContext;
 use sqlx::AnyPool;
 use support::wait::wait_until;
-use testcontainers::ContainerAsync;
-use testcontainers::core::WaitFor;
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{CopyTargetOptions, GenericImage, ImageExt};
-use testcontainers_modules::postgres::Postgres;
 
 fn install_sqlx_drivers() {
     sqlx::any::install_default_drivers();
-}
-
-async fn setup_postgres_container() -> ContainerAsync<Postgres> {
-    install_sqlx_drivers();
-    Postgres::default().start().await.unwrap()
-}
-
-async fn get_connection_string(container: &ContainerAsync<Postgres>) -> String {
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
-    let conn_str = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
-    eprintln!("PostgreSQL connection: {}", conn_str);
-    conn_str
 }
 
 async fn create_pool(conn_str: &str) -> AnyPool {
@@ -91,8 +72,7 @@ async fn setup_test_table(pool: &AnyPool, table_name: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_select() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_select").await;
@@ -163,8 +143,7 @@ async fn producer_select() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_insert() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_insert").await;
@@ -227,8 +206,7 @@ async fn producer_insert() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_update() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_update").await;
@@ -295,8 +273,7 @@ async fn producer_update() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_delete() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_delete").await;
@@ -362,8 +339,7 @@ async fn producer_delete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_select_one() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_select_one").await;
@@ -425,8 +401,7 @@ async fn producer_select_one() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_batch() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_batch").await;
@@ -490,8 +465,7 @@ async fn producer_batch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_noop() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_noop").await;
@@ -564,8 +538,7 @@ async fn producer_noop() {
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_polling() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_consumer").await;
@@ -632,8 +605,7 @@ async fn consumer_polling() {
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_on_consume() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_on_consume").await;
@@ -696,8 +668,7 @@ async fn consumer_on_consume() {
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_empty_result() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_empty").await;
@@ -749,8 +720,7 @@ async fn consumer_empty_result() {
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_on_consume_failed() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_on_consume_failed_src").await;
@@ -809,8 +779,7 @@ async fn consumer_on_consume_failed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_empty_result_routed() {
     install_crypto_provider();
-    let container = setup_postgres_container().await;
-    let conn_str = get_connection_string(&container).await;
+    let conn_str = shared_postgres().await.to_string();
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_empty_routed").await;
@@ -859,96 +828,10 @@ async fn consumer_empty_result_routed() {
     );
 }
 
-/// Spins up a PostgreSQL container with TLS enabled using generated self-signed
-/// certs. Returns the container and the SSL connection string.
-async fn setup_postgres_tls_container() -> (ContainerAsync<GenericImage>, String) {
-    install_sqlx_drivers();
-
-    // Generate self-signed CA + server cert (SANs: localhost, 127.0.0.1, ::1)
-    let (_ca_pem, cert_pem, key_pem) = tls::gen_server_cert();
-
-    // Write cert/key to temp files for with_copy_to
-    let cert_file = tempfile::NamedTempFile::new().unwrap();
-    let key_file = tempfile::NamedTempFile::new().unwrap();
-    cert_file.as_file().write_all(cert_pem.as_bytes()).unwrap();
-    key_file.as_file().write_all(key_pem.as_bytes()).unwrap();
-    // Persist so the files outlive the TempDir and are available for container copy
-    let cert_path = cert_file.into_temp_path();
-    let key_path = key_file.into_temp_path();
-
-    // Write entrypoint wrapper that initializes DB, sets up SSL certs, then starts postgres
-    let entrypoint_script = r#"#!/bin/sh
-set -e
-if [ ! -f $PGDATA/PG_VERSION ]; then
-    gosu postgres initdb -D $PGDATA
-    # Start temporarily to set password (ssl=off, default host rules work for localhost)
-    gosu postgres pg_ctl -D $PGDATA start -w -o "-c ssl=off"
-    gosu postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
-    gosu postgres pg_ctl -D $PGDATA stop -w
-    # Convert default 'host' rules to 'hostssl' to enforce SSL-only at server level
-    sed -i 's/^host /hostssl /' $PGDATA/pg_hba.conf
-    # Allow SSL connections from Docker bridge network
-    echo "hostssl all all 0.0.0.0/0 md5" >> $PGDATA/pg_hba.conf
-    echo "hostssl all all ::0/0 md5" >> $PGDATA/pg_hba.conf
-fi
-cp /etc/postgresql/tls/server.pem $PGDATA/server.pem
-cp /etc/postgresql/tls/server-key.pem $PGDATA/server-key.pem
-chown postgres:postgres $PGDATA/server.pem $PGDATA/server-key.pem
-chmod 0600 $PGDATA/server-key.pem
-# Start SSL postgres in background
-gosu postgres postgres \
-    -c ssl=on \
-    -c ssl_cert_file=$PGDATA/server.pem \
-    -c ssl_key_file=$PGDATA/server-key.pem &
-PG_PID=$!
-# Wait until actually accepting connections, then emit unique marker
-until pg_isready -h 127.0.0.1 -p 5432 -U postgres 2>/dev/null; do sleep 0.2; done
-echo "SSL_POSTGRES_READY" >&2
-wait $PG_PID
-"#;
-    let entrypoint_file = tempfile::NamedTempFile::new().unwrap();
-    entrypoint_file
-        .as_file()
-        .write_all(entrypoint_script.as_bytes())
-        .unwrap();
-    let entrypoint_path = entrypoint_file.into_temp_path();
-
-    // Build TLS-enabled postgres container.
-    // Custom entrypoint initializes the DB, copies certs into PGDATA with correct
-    // ownership/perms, then starts postgres with SSL enabled.
-    // NOTE: GenericImage methods (with_wait_for, with_entrypoint) must come before ImageExt methods.
-    let image = GenericImage::new("postgres", "16-alpine")
-        .with_wait_for(WaitFor::message_on_stderr("SSL_POSTGRES_READY"))
-        .with_entrypoint("/usr/local/bin/ssl-entrypoint.sh")
-        .with_copy_to(
-            CopyTargetOptions::new("/etc/postgresql/tls/server.pem"),
-            cert_path.to_path_buf(),
-        )
-        .with_copy_to(
-            CopyTargetOptions::new("/etc/postgresql/tls/server-key.pem"),
-            key_path.to_path_buf(),
-        )
-        .with_copy_to(
-            CopyTargetOptions::new("/usr/local/bin/ssl-entrypoint.sh").with_mode(0o755),
-            entrypoint_path.to_path_buf(),
-        );
-
-    let container = image.start().await.unwrap();
-
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
-    let conn_str = format!(
-        "postgres://postgres:postgres@127.0.0.1:{}/postgres?sslmode=require",
-        port
-    );
-    eprintln!("PostgreSQL TLS connection: {}", conn_str);
-
-    (container, conn_str)
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_ssl_connection_roundtrip() {
     install_crypto_provider();
-    let (_container, conn_str) = setup_postgres_tls_container().await;
+    let conn_str = shared_postgres_tls().await.to_string();
 
     // Verify SSL handshake via direct PgPool (bypasses `any` driver)
     let pg_pool = sqlx::postgres::PgPoolOptions::new()

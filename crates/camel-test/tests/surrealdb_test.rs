@@ -10,8 +10,8 @@
 
 mod support;
 use support::install_crypto_provider;
+use support::surrealdb::shared_surrealdb;
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -28,49 +28,7 @@ use camel_component_surrealdb::pool_factory::SurrealDbPoolFactory;
 use camel_core::datasource::RuntimeDatasourceCatalog;
 use camel_test::CamelTestContext;
 use support::wait::wait_until;
-use testcontainers::ContainerAsync;
-use testcontainers::Image;
-use testcontainers::core::{ContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
 use toml::Value as TomlValue;
-
-// ===========================================================================
-// SurrealDB testcontainer image
-// ===========================================================================
-
-#[derive(Debug)]
-struct SurrealDbImage;
-
-impl Image for SurrealDbImage {
-    fn name(&self) -> &str {
-        "surrealdb/surrealdb"
-    }
-
-    fn tag(&self) -> &str {
-        "v3.1.4"
-    }
-
-    fn ready_conditions(&self) -> Vec<WaitFor> {
-        vec![WaitFor::message_on_stdout("Started web server")]
-    }
-
-    fn cmd(&self) -> impl IntoIterator<Item = impl Into<Cow<'_, str>>> {
-        vec![
-            "start".to_string(),
-            "--user".to_string(),
-            "root".to_string(),
-            "--pass".to_string(),
-            "root".to_string(),
-            "--bind".to_string(),
-            "0.0.0.0:8000".to_string(),
-        ]
-    }
-
-    fn expose_ports(&self) -> &[ContainerPort] {
-        static PORTS: [ContainerPort; 1] = [ContainerPort::Tcp(8000)];
-        &PORTS
-    }
-}
 
 // ===========================================================================
 // Setup helpers
@@ -121,27 +79,6 @@ async fn direct_client(endpoint: &str) -> surrealdb::Surreal<surrealdb::engine::
     (*client).clone()
 }
 
-async fn start_surrealdb() -> (ContainerAsync<SurrealDbImage>, String) {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,camel=info".into()),
-        )
-        .with_test_writer()
-        .try_init();
-    let container = SurrealDbImage
-        .start()
-        .await
-        .expect("failed to start surrealdb container");
-    let port = container
-        .get_host_port_ipv4(8000)
-        .await
-        .expect("failed to get host port");
-    let endpoint = format!("ws://127.0.0.1:{port}");
-    eprintln!("SurrealDB endpoint: {endpoint}");
-    (container, endpoint)
-}
-
 /// Build a CamelTestContext with SurrealDB component wired through the catalog.
 async fn setup_harness(endpoint: &str) -> CamelTestContext {
     let catalog = Arc::new(make_catalog(endpoint));
@@ -184,7 +121,7 @@ async fn wait_for_mock_exchanges(
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_create() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
     let h = setup_harness(&endpoint).await;
     h.ctx()
@@ -233,7 +170,7 @@ async fn producer_create() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_select_one() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Seed a record via direct query (setup only, not part of the tested route).
@@ -291,7 +228,7 @@ async fn producer_select_one() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_select_all() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Seed multiple records.
@@ -352,14 +289,14 @@ async fn producer_select_all() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_query() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Seed records directly.
-    db.query("CREATE type::record('users', 'bob') SET name = 'Bob', age = 25")
+    db.query("CREATE type::record('query_test', 'bob') SET name = 'Bob', age = 25")
         .await
         .expect("seed bob");
-    db.query("CREATE type::record('users', 'charlie') SET name = 'Charlie', age = 35")
+    db.query("CREATE type::record('query_test', 'charlie') SET name = 'Charlie', age = 35")
         .await
         .expect("seed charlie");
 
@@ -372,7 +309,7 @@ async fn producer_query() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(Value::String(
-            "SELECT name, age FROM users ORDER BY name".into(),
+            "SELECT name, age FROM query_test ORDER BY name".into(),
         ))
         .to("surrealdb:query?datasource=test")
         .to("mock:result")
@@ -415,7 +352,7 @@ async fn producer_query() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_update() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Seed a record.
@@ -469,7 +406,7 @@ async fn producer_update() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_delete() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Seed a record.
@@ -517,7 +454,7 @@ async fn producer_delete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_upsert() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     let h = setup_harness(&endpoint).await;
@@ -587,7 +524,7 @@ async fn producer_upsert() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_patch() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Seed a record.
@@ -651,7 +588,7 @@ async fn producer_patch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_run() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Define a custom SurrealDB function.
@@ -715,7 +652,7 @@ async fn producer_run() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_relate() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Seed source and target records.
@@ -784,13 +721,13 @@ async fn producer_relate() {
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_relate_body_and_header_carry_edge_id() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
-    db.query("CREATE user:1 SET name = 'Alice'")
+    db.query("CREATE user:10 SET name = 'Alice'")
         .await
         .expect("create alice");
-    db.query("CREATE topic:42 SET title = 'Rust'")
+    db.query("CREATE topic:420 SET title = 'Rust'")
         .await
         .expect("create topic");
 
@@ -803,7 +740,7 @@ async fn producer_relate_body_and_header_carry_edge_id() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(serde_json::json!({"weight": 0.9}))
-        .to("surrealdb:relate?datasource=test&table=user&from=user:1&edge=knows&to=topic:42")
+        .to("surrealdb:relate?datasource=test&table=user&from=user:10&edge=knows&to=topic:420")
         .to("mock:result")
         .route_id("surrealdb-relate-edge-id-test")
         .build()
@@ -862,9 +799,9 @@ async fn producer_relate_body_and_header_carry_edge_id() {
         body_id.starts_with("knows:"),
         "body.id must be an edge record id (knows:...), got: {body_id}"
     );
-    assert_ne!(body_id, "user:1", "body.id must NOT be the source node id");
+    assert_ne!(body_id, "user:10", "body.id must NOT be the source node id");
     assert_ne!(
-        body_id, "topic:42",
+        body_id, "topic:420",
         "body.id must NOT be the target node id"
     );
 
@@ -887,7 +824,7 @@ async fn producer_relate_body_and_header_carry_edge_id() {
 #[tokio::test(flavor = "multi_thread")]
 async fn vector_search_via_producer() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Define HNSW index for 3D float vectors with cosine distance.
@@ -963,7 +900,7 @@ async fn vector_search_via_producer() {
 #[tokio::test(flavor = "multi_thread")]
 async fn vector_store_via_producer() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Define HNSW index first.
@@ -1030,7 +967,7 @@ async fn vector_store_via_producer() {
 #[tokio::test(flavor = "multi_thread")]
 async fn polling_consumer_select() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Seed a record using type::record (v3 syntax).
@@ -1073,7 +1010,7 @@ async fn polling_consumer_select() {
 #[tokio::test(flavor = "multi_thread")]
 async fn polling_consumer_returns_none_when_empty() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Ensure table exists (type::record requires existing table in v3).
@@ -1113,7 +1050,7 @@ async fn polling_consumer_returns_none_when_empty() {
 #[tokio::test(flavor = "multi_thread")]
 async fn consumer_live_receives_notifications() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let db = direct_client(&endpoint).await;
 
     // Per SDK docs (https://surrealdb.com/docs/languages/rust/methods/select-live),
@@ -1271,7 +1208,7 @@ async fn live_rejects_http_scheme() {
 #[tokio::test(flavor = "multi_thread")]
 async fn datasource_health_check() {
     install_crypto_provider();
-    let (_container, endpoint) = start_surrealdb().await;
+    let endpoint = shared_surrealdb().await.to_string();
     let config = make_datasource_config(&endpoint);
 
     let factory = SurrealDbPoolFactory;
