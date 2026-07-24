@@ -187,7 +187,7 @@ fn discover_routes_inner(
         for entry in entries {
             let path = entry.map_err(|e| DiscoveryError::GlobAccess {
                 path: e.path().to_string_lossy().to_string(),
-                source: e.into_error(),
+                source: e.into(),
             })?;
             let path_str = path.to_string_lossy().to_string();
 
