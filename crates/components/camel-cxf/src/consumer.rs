@@ -147,9 +147,35 @@ impl Consumer for CxfConsumer {
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
 
+        // Eagerly create/probe the bridge slot BEFORE spawning the consumer
+        // task so a missing bridge binary or an aborted bridge process is
+        // reported as a startup error instead of hanging the route controller.
+        // Mirrors the JMS consumer's pre-flight (camel-jms/src/consumer.rs).
+        {
+            let key = CxfBridgePool::slot_key();
+            let slot = pool
+                .get_or_create_slot(&key)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("CXF slot error: {e}")))?;
+            match &*slot.state_rx.borrow() {
+                BridgeState::Ready { .. } | BridgeState::Starting => {} // bridge up or coming up
+                BridgeState::Degraded(reason) => {
+                    return Err(CamelError::ProcessorError(format!(
+                        "CXF bridge not available: {reason}"
+                    )));
+                }
+                other => {
+                    return Err(CamelError::ProcessorError(format!(
+                        "CXF bridge not available: {other:?}"
+                    )));
+                }
+            }
+        }
+
         let runtime = Arc::clone(&self.runtime);
-        let startup = ctx.startup_signal();
+        let ctx_task = ctx.clone();
         let handle: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
+            let ctx = ctx_task;
             let mut consecutive_transport_failures: u32 = 0;
             let mut reconnect_attempt: u32 = 0;
             // Manual retry loop (not retry_async) because:
@@ -202,7 +228,13 @@ impl Consumer for CxfConsumer {
                     Ok(resp) => {
                         consecutive_transport_failures = 0;
                         reconnect_attempt = 0;
-                        startup.mark_ready();
+                        // Readiness is signalled from start() (see ctx.mark_ready()
+                        // after spawn), NOT here: open_consumer_stream is a
+                        // bidirectional-streaming RPC whose `.await` only resolves
+                        // once the bridge flushes response headers, which it defers
+                        // until the first inbound SOAP request is dispatched. Gating
+                        // route startup on this would deadlock (no request can arrive
+                        // until the route is started).
                         info!("CXF consumer stream opened successfully");
                         resp.into_inner()
                     }
@@ -352,6 +384,15 @@ impl Consumer for CxfConsumer {
         });
 
         self.task_handle = Some(handle);
+
+        // Signal route-startup readiness now. The bridge slot was probed above
+        // (fail-fast on Degraded/Stopped), so the bridge process is running.
+        // The gRPC consumer stream is opened lazily inside the spawned task and
+        // cannot be gated on here without deadlocking (see the note at the
+        // open_consumer_stream call site). Mirrors camel-jms's best-effort
+        // mark_ready in start().
+        ctx.mark_ready();
+
         Ok(())
     }
 
