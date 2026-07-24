@@ -32,20 +32,21 @@ use crate::manual_commit::{CommitRequest, KafkaManualCommit};
 // ReadyContext — notifies when the consumer gets its first partition assignment
 // ---------------------------------------------------------------------------
 
-/// A custom rdkafka context that fires when the consumer receives its first
-/// partition assignment via the rebalance callback. This avoids polling
-/// `assignment()` in a tight loop (which itself requires `recv()` to drive
-/// the rebalance protocol — a deadlock).
+/// A custom rdkafka context that fires the `Arc<Notify>` exposed via
+/// `KafkaConsumer::ready_signal()` when the consumer receives its first
+/// partition assignment.
 ///
-/// On the first `Rebalance::Assign` the callback signals BOTH:
-///   - the legacy `Arc<Notify>` exposed via `KafkaConsumer::ready_signal()`
-///     (kept for test synchronization), and
-///   - the runtime's standard `ConsumerContext::mark_ready()` so the
-///     `ConsumerStartupMode::Explicit` startup signal resolves once the
-///     consumer is bound and partitions have been assigned.
+/// This is used ONLY for test synchronisation (letting a test await the first
+/// real assignment without arbitrary sleeps). It is deliberately NOT wired to
+/// the runtime startup handshake: readiness is signalled eagerly after
+/// `subscribe()` in `run_consumer_loop` (see the "Startup readiness" note
+/// there). Gating `ConsumerContext::mark_ready()` on the assignment callback
+/// hung route startup — a broker that never assigns (connection dropped during
+/// coordination) or a self-producing route graph (topic not created until the
+/// producer runs, which cannot start until the consumer's `start()` returns)
+/// would deadlock the controller forever.
 struct ReadyContext {
     ready: Arc<Notify>,
-    ctx: ConsumerContext,
 }
 
 impl ClientContext for ReadyContext {}
@@ -53,16 +54,8 @@ impl ClientContext for ReadyContext {}
 impl RdConsumerContext for ReadyContext {
     fn post_rebalance(&self, rebalance: &Rebalance<'_>) {
         if matches!(rebalance, Rebalance::Assign(_)) {
-            // Partitions were assigned — signal any waiters.
+            // Partitions assigned — wake test waiters. NOT tied to startup.
             self.ready.notify_waiters();
-            // KAFKA-STARTUP-MIGRATION: the actual resource acquisition
-            // (consumer.create + subscribe + first assignment) is async and
-            // happens inside the spawned task, so `mark_ready` cannot be
-            // called from `start()`. Firing it here unifies the startup
-            // signal with the standard `ConsumerStartupMode::Explicit`
-            // contract: the runtime now awaits this same callback rather
-            // than a custom Notify.
-            self.ctx.mark_ready();
         }
     }
 }
@@ -199,12 +192,14 @@ impl Consumer for KafkaConsumer {
     }
 
     fn startup_mode(&self) -> ConsumerStartupMode {
-        // Resource acquisition (rdkafka client create + subscribe + first
-        // rebalance assignment) is async and happens inside the spawned
-        // consumer task, so the runtime must wait for an explicit
-        // `mark_ready()` from the consumer's rebalance callback rather than
-        // treating `start()`'s Ok return as ready. See
-        // `ReadyContext::post_rebalance` for the signal site.
+        // Resource acquisition (rdkafka client create + subscribe) is async and
+        // happens inside the spawned consumer task, so the runtime must wait for
+        // an explicit `mark_ready()` from that task rather than treating
+        // `start()`'s Ok return as ready. Readiness is signalled eagerly right
+        // after `subscribe()` succeeds — NOT gated on partition assignment,
+        // which can never arrive (broker drop) or depends on the route already
+        // running (self-producing graph), either of which would hang startup.
+        // See the "Startup readiness" note in `run_consumer_loop`.
         ConsumerStartupMode::Explicit
     }
 
@@ -396,6 +391,61 @@ async fn auto_commit_step(
     }
 }
 
+/// Dispatch a single already-detached Kafka message into the route pipeline,
+/// honouring manual- vs auto-commit mode. Shared by the startup-window path
+/// (which may receive the first record before the assignment notification is
+/// observed) and the main event loop, so neither drops nor double-handles it.
+///
+/// Returns `Err` only for auto-commit failures that must terminate the consumer
+/// (pipeline reject or commit side-effect failure — at-least-once semantics);
+/// manual-commit dispatch failures are logged and swallowed as before.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_message(
+    owned: OwnedMessage,
+    ctx: &ConsumerContext,
+    config: &ResolvedKafkaEndpointConfig,
+    commit_tx: &Option<mpsc::Sender<CommitRequest>>,
+    committer: &dyn KafkaCommitClient,
+    runtime: &dyn RuntimeObservability,
+    route_id: &str,
+) -> Result<(), CamelError> {
+    let mut exchange = build_exchange(&owned, &config.group_id)?;
+
+    if let Some(tx) = commit_tx {
+        // Manual commit mode: store handle in extensions, user commits.
+        let handle = KafkaManualCommit::new(
+            owned.topic().to_string(),
+            owned.partition(),
+            owned.offset(),
+            tx.clone(),
+        );
+        exchange.set_extension("kafka.manual_commit", Arc::new(handle));
+        if let Err(e) = ctx.send(exchange).await {
+            runtime
+                .metrics()
+                .increment_errors(route_id, "b-prime:kafka:manual-commit-dispatch");
+            // log-policy: outside-contract
+            error!(error = %e, "Failed to send exchange to pipeline");
+        }
+        Ok(())
+    } else {
+        // Auto commit mode — Q1 success gate (ADR-0012 b'). Offset committed
+        // ONLY after send_and_wait returns Ok; a pipeline failure returns Err,
+        // terminating the consumer so supervision re-delivers (at-least-once).
+        auto_commit_step(
+            ctx,
+            exchange,
+            owned.topic(),
+            owned.partition(),
+            owned.offset(),
+            committer,
+            runtime,
+            route_id,
+        )
+        .await
+    }
+}
+
 async fn run_consumer_loop(
     config: ResolvedKafkaEndpointConfig,
     ctx: ConsumerContext,
@@ -438,10 +488,7 @@ async fn run_consumer_loop(
     apply_rdkafka_config(&config, &mut client_cfg);
 
     let consumer: ReadyStreamConsumer = client_cfg
-        .create_with_context(ReadyContext {
-            ready,
-            ctx: ctx.clone(),
-        })
+        .create_with_context(ReadyContext { ready })
         .map_err(|e| {
             CamelError::ProcessorError(format!("Failed to create Kafka consumer: {}", e))
         })?;
@@ -457,6 +504,35 @@ async fn run_consumer_loop(
     })?;
 
     info!(topic = %config.topic, "Kafka consumer subscribed");
+
+    // ── Startup readiness ────────────────────────────────────────────────
+    //
+    // Signal readiness as soon as `subscribe()` succeeds — the consumer has
+    // bound its resource (joined the subscription) and the poll loop below
+    // will drive group coordination. This mirrors the eager `mark_ready()`
+    // pattern of the other resource-binding consumers (JMS/MQTT/Redis/gRPC/
+    // SurrealDB): readiness means "bound and about to poll", not "assignment
+    // received".
+    //
+    // Readiness MUST NOT be gated on the first partition assignment (the old
+    // `ReadyContext::post_rebalance` behaviour). That is unsafe for two
+    // reasons, both of which caused route startup to hang forever:
+    //   1. Liveness — a broker that drops the connection during group
+    //      coordination (librdkafka "Disconnected: connection closed by peer")
+    //      never delivers an assignment, so `mark_ready()` never fires.
+    //   2. Ordering — under eager assignment, a consumer on a not-yet-created
+    //      topic is not assigned until the topic exists; if the same route
+    //      graph also produces to that topic, the producer route cannot start
+    //      until the consumer's `start()` returns, which was blocked awaiting
+    //      the assignment. Classic startup deadlock (same family as CXF's
+    //      open_consumer_stream deadlock).
+    //
+    // The `ready` Notify (fired from `ReadyContext::post_rebalance`) remains
+    // available for test synchronisation via `KafkaConsumer::ready_signal`.
+    // The control-plane backstop in `await_consumer_startup` bounds this call
+    // regardless, so a `subscribe()` that somehow never returns still cannot
+    // hang route startup indefinitely.
+    ctx.mark_ready();
 
     // Spawn commit handler task if manual commit is enabled
     let commit_handle = if let Some(mut rx) = commit_rx {
@@ -558,48 +634,18 @@ async fn run_consumer_loop(
                     }
                     Ok(msg) => {
                         attempt = 0;
-
                         // Must detach before await point (BorrowedMessage not 'static)
                         let owned = msg.detach();
-                        let mut exchange = build_exchange(&owned, &config.group_id)?;
-
-                        if let Some(ref tx) = commit_tx {
-                            // Manual commit mode: store handle in extensions, user is responsible for commit
-                            let handle = KafkaManualCommit::new(
-                                owned.topic().to_string(),
-                                owned.partition(),
-                                owned.offset(),
-                                tx.clone(),
-                            );
-                            exchange.set_extension("kafka.manual_commit", Arc::new(handle));
-                            if let Err(e) = ctx.send(exchange).await {
-                                runtime.metrics().increment_errors(
-                                    &route_id,
-                                    "b-prime:kafka:manual-commit-dispatch",
-                                );
-                                // log-policy: outside-contract
-                                error!(error = %e, "Failed to send exchange to pipeline");
-                            }
-                        } else {
-                            // Auto commit mode — Q1 success gate (ADR-0012 b').
-                            // The offset is committed ONLY after send_and_wait returns Ok, proving
-                            // the route pipeline absorbed the exchange. A pipeline failure returns
-                            // Err from run_consumer_loop, terminating the consumer so supervision
-                            // takes over and the failed offset is re-delivered (at-least-once).
-                            // NetworkRetryPolicy does NOT apply to pipeline/commit failures — it
-                            // only backs transient recv() errors.
-                            auto_commit_step(
-                                &ctx,
-                                exchange,
-                                owned.topic(),
-                                owned.partition(),
-                                owned.offset(),
-                                consumer.as_ref(),
-                                runtime.as_ref(),
-                                &route_id,
-                            )
-                            .await?;
-                        }
+                        dispatch_message(
+                            owned,
+                            &ctx,
+                            &config,
+                            &commit_tx,
+                            consumer.as_ref(),
+                            runtime.as_ref(),
+                            &route_id,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1616,9 +1662,10 @@ mod tests {
     fn manual_commit_path_still_fire_and_forget() {
         let source = include_str!("consumer.rs");
 
-        // The manual branch opens with the commit_tx check and attaches the
-        // KafkaManualCommit extension before dispatching via ctx.send.
-        let manual_open = "if let Some(ref tx) = commit_tx";
+        // The manual branch (in `dispatch_message`) opens with the commit_tx
+        // check and attaches the KafkaManualCommit extension before dispatching
+        // via ctx.send.
+        let manual_open = "if let Some(tx) = commit_tx";
         assert!(
             source.contains(manual_open),
             "manual commit branch must open with `{manual_open}`"

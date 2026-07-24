@@ -231,6 +231,19 @@ impl ConsumerContext {
         let _ = self.startup.mark_ready();
     }
 
+    /// Mark this consumer's startup as FAILED with `err`. Only meaningful for
+    /// [`ConsumerStartupMode::Explicit`] consumers whose readiness is gated on
+    /// an asynchronous event that may never arrive (e.g. Kafka partition
+    /// assignment). Calling this resolves the runtime's startup await with a
+    /// startup error instead of hanging.
+    ///
+    /// Idempotent — the first transition out of `Pending` wins, so a later
+    /// `mark_ready()` cannot override an earlier `mark_failed()` and vice
+    /// versa.
+    pub fn mark_failed(&self, err: String) {
+        self.startup.mark_failed(err);
+    }
+
     /// Returns a future that resolves when shutdown is requested.
     /// Use in `tokio::select!` inside consumer loops.
     pub async fn cancelled(&self) {
@@ -642,6 +655,27 @@ mod tests {
         ctx.mark_ready();
         let result = receiver.await_ready().await;
         assert!(result.is_ok(), "ctx.mark_ready must resolve the receiver");
+    }
+
+    #[tokio::test]
+    async fn test_consumer_context_mark_failed_drives_signal() {
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(
+            tx,
+            CancellationToken::new(),
+            "startup-fail-route".to_string(),
+        );
+        let (signal, receiver) = StartupSignal::pair();
+        let ctx = ctx.with_startup(signal);
+        ctx.mark_failed("assignment window elapsed".to_string());
+        let err = receiver
+            .await_ready()
+            .await
+            .expect_err("ctx.mark_failed must resolve the receiver as Err");
+        match err {
+            CamelError::RouteError(msg) => assert!(msg.contains("assignment window elapsed")),
+            other => panic!("expected RouteError, got {other:?}"),
+        }
     }
 
     #[tokio::test]

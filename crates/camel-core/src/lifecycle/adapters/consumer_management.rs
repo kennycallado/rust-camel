@@ -39,6 +39,26 @@ pub(crate) fn create_route_consumer(
     Ok((consumer, concurrency))
 }
 
+/// Hard upper bound on how long the runtime waits for an `Explicit` consumer
+/// to signal readiness (or failure) before treating route startup as failed.
+///
+/// This is defense-in-depth at the control-plane layer: an `Explicit` consumer
+/// that returns `Ok` from `start()` but never calls `ctx.mark_ready()` — for
+/// any reason (contract bug, a resource-bind step that never resolves, an
+/// external dependency that never fires the readiness event) — would otherwise
+/// hang `ctx.start()` / `h.start()` forever on `await_ready()`. Bounding the
+/// await guarantees route startup ALWAYS terminates: either the consumer is
+/// ready, or it fails fast with a clear startup error.
+///
+/// The budget is deliberately generous (90s) so a healthy consumer performing
+/// legitimately slow binding — e.g. Kafka group coordination, whose
+/// `session.timeout.ms` defaults to 45s and whose own assignment window is
+/// `session_timeout_ms + 15s` (60s) — never trips it. Per-consumer bounds
+/// (CXF `bridge_start_timeout` 5-30s, Kafka's ~60s assignment window) are sized
+/// to fire FIRST and surface a precise component-specific error; this 90s net
+/// is the last-resort backstop for consumers that lack (or lose) a local bound.
+pub(crate) const CONSUMER_STARTUP_BUDGET: Duration = Duration::from_secs(90);
+
 /// Await the consumer startup handshake and map any failure to a
 /// `CamelError::RouteError("Consumer {op} failed: …")`.
 ///
@@ -46,14 +66,36 @@ pub(crate) fn create_route_consumer(
 /// `"resume"`). Centralises the three controller call sites that previously
 /// inlined identical `startup_rx.await_ready().map_err(...)` blocks
 /// (rc-w1u9 review I-3).
+///
+/// The await is bounded by [`CONSUMER_STARTUP_BUDGET`]: if the consumer neither
+/// signals readiness nor fails within the budget, route startup fails fast with
+/// a timeout error instead of hanging indefinitely. This makes route startup
+/// non-hanging for ALL `Explicit` consumers, present and future, regardless of
+/// whether the component author wired a local fail-fast bound.
 pub(crate) async fn await_consumer_startup(
     startup_rx: StartupReceiver,
     op: &str,
 ) -> Result<(), CamelError> {
-    startup_rx
-        .await_ready()
-        .await
-        .map_err(|e| CamelError::RouteError(format!("Consumer {op} failed: {e}")))
+    await_consumer_startup_bounded(startup_rx, op, CONSUMER_STARTUP_BUDGET).await
+}
+
+/// Budget-parameterised core of [`await_consumer_startup`]. Split out so the
+/// bounded-await behaviour can be unit-tested with a small budget instead of
+/// the 90s production value.
+async fn await_consumer_startup_bounded(
+    startup_rx: StartupReceiver,
+    op: &str,
+    budget: Duration,
+) -> Result<(), CamelError> {
+    match tokio::time::timeout(budget, startup_rx.await_ready()).await {
+        Ok(inner) => {
+            inner.map_err(|e| CamelError::RouteError(format!("Consumer {op} failed: {e}")))
+        }
+        Err(_elapsed) => Err(CamelError::RouteError(format!(
+            "Consumer {op} timed out after {budget:.0?} without signalling readiness \
+             (Explicit consumer never called mark_ready/mark_failed)"
+        ))),
+    }
 }
 
 pub(crate) fn spawn_consumer_task(
@@ -961,6 +1003,52 @@ mod tests {
     // ── rc-w1u9: ConsumerStartupMode handshake tests live in
     // `handshake_tests.rs` (declared at the bottom of this file). They were
     // extracted to keep this file under the thermo-nuclear size ceiling. ──
+
+    // ── Startup-budget backstop: await_consumer_startup must NEVER hang ──
+
+    #[tokio::test]
+    async fn await_consumer_startup_times_out_when_never_ready() {
+        // An Explicit consumer that never calls mark_ready/mark_failed must
+        // NOT hang route startup: the bounded await surfaces a timeout error.
+        // Hold the signal so the receiver stays Pending forever (dropping it
+        // would resolve via the "sender dropped" path instead of the timeout).
+        let (_signal, receiver) = StartupSignal::pair();
+
+        let result =
+            await_consumer_startup_bounded(receiver, "startup", Duration::from_millis(50)).await;
+
+        let err = result.expect_err("must fail — an unresolved startup cannot succeed");
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_consumer_startup_returns_ready_before_budget() {
+        // A consumer that marks ready promptly resolves without waiting the
+        // full budget (the timeout wrapper is transparent on the happy path).
+        let (signal, receiver) = StartupSignal::pair();
+        signal.mark_ready();
+        let result =
+            await_consumer_startup_bounded(receiver, "startup", Duration::from_secs(30)).await;
+        assert!(result.is_ok(), "prompt readiness must resolve Ok");
+    }
+
+    #[tokio::test]
+    async fn await_consumer_startup_propagates_mark_failed_error() {
+        // A consumer that fails fast (mark_failed) surfaces its error, not the
+        // generic timeout — the failure reason must reach the operator.
+        let (signal, receiver) = StartupSignal::pair();
+        signal.mark_failed("broker unreachable".to_string());
+        let err = await_consumer_startup_bounded(receiver, "startup", Duration::from_secs(30))
+            .await
+            .expect_err("mark_failed must surface as Err");
+        assert!(
+            err.to_string().contains("broker unreachable"),
+            "expected the consumer's failure reason, got: {err}"
+        );
+    }
 }
 
 #[cfg(test)]
