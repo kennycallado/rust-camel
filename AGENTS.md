@@ -1,10 +1,11 @@
 ## CRITICAL
 
 - Always read .opencode/instructions/behavior.md
+- Read .opencode/instructions/openspec-skills.md for skills policy during OpenSpec commands
 - Read CONTEXT-MAP.md for domain language and architecture decisions before any implementation task
 - If you have access to caveman skill, activate it
 - Never add to staging something that is in .gitignore
-- For structured feature workflow, Tab to `conductor`
+- For structured feature workflow, use OpenSpec commands (/opsx:propose, /bless, /opsx:apply, /opsx:archive)
 
 ## IMPORTANT
 

@@ -94,6 +94,39 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Sign a blessing/review attestation: recompute the artifact hash and
+    /// stamp an HMAC-SHA256 over (verdict|hash|expert) using the secret in
+    /// $ATTESTATION_HMAC_SECRET. Writes the signed JSON to `--out`.
+    /// Only agents holding the secret (conductor-light) can produce a
+    /// signature that `verify-attestation` will accept.
+    SignAttestation {
+        /// Directory of the OpenSpec change (contains the artifacts to hash).
+        #[arg(long)]
+        change_dir: String,
+        /// Verdict recorded by the expert (e.g. BLESSED, APPROVE).
+        #[arg(long)]
+        verdict: String,
+        /// Model identifier of the deciding expert/reviewer (e.g. e_opus).
+        #[arg(long)]
+        expert: String,
+        /// Attestation kind: "bless" (writes .attestation.json) or
+        /// "review" (writes .review.json).
+        #[arg(long, default_value = "bless")]
+        kind: String,
+    },
+    /// Verify a blessing/review attestation in CI. Recomputes the artifact
+    /// hash and the HMAC-SHA256, and checks them against the on-disk file.
+    /// Exits non-zero on: missing secret, missing file, hash drift, verdict
+    /// mismatch, or a forged/absent signature. This is the enforcement point.
+    VerifyAttestation {
+        /// Directory of the OpenSpec change to verify.
+        #[arg(long)]
+        change_dir: String,
+        /// Attestation kind: "bless" (reads .attestation.json) or
+        /// "review" (reads .review.json).
+        #[arg(long, default_value = "bless")]
+        kind: String,
+    },
 }
 
 fn main() {
@@ -211,6 +244,24 @@ fn main() {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
+        }
+        Commands::SignAttestation {
+            change_dir,
+            verdict,
+            expert,
+            kind,
+        } => {
+            if let Err(e) = attestation::sign(&change_dir, &verdict, &expert, &kind) {
+                eprintln!("sign-attestation: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::VerifyAttestation { change_dir, kind } => {
+            if let Err(e) = attestation::verify(&change_dir, &kind) {
+                eprintln!("verify-attestation: FAIL — {e}");
+                std::process::exit(1);
+            }
+            println!("verify-attestation: OK ({kind} attestation authentic)");
         }
     }
 }
@@ -3474,6 +3525,300 @@ camel-core = { workspace = true }
             assert!(!is_dependency_section("[target.'cfg(unix)']"));
             // Bare `[target]` table header (no nested dep section) must not match.
             assert!(!is_dependency_section("[target]"));
+        }
+    }
+}
+
+/// Attestation provenance: HMAC-signed blessing/review artifacts.
+///
+/// Trust model: an attestation is only valid if its `hmac` field is a correct
+/// HMAC-SHA256 over the canonical `verdict|artifact_hash|expert` tuple, keyed
+/// by the secret in `$ATTESTATION_HMAC_SECRET`. Only the conductor-light agent
+/// holds the secret, so worker subagents cannot forge a signature that
+/// `verify` will accept — even though they can freely write the JSON file via
+/// bash. Forgery is thus detectable offline, in CI, without trusting the
+/// runtime that produced the file.
+mod attestation {
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use std::path::Path;
+
+    const SECRET_ENV: &str = "ATTESTATION_HMAC_SECRET";
+    const HMAC_BLOCK: usize = 64; // SHA-256 block size in bytes.
+
+    /// Resolve (filename, accepted-verdicts) for the given attestation kind.
+    fn kind_spec(kind: &str) -> Result<(&'static str, &'static [&'static str]), String> {
+        match kind {
+            "bless" => Ok((".attestation.json", &["BLESSED", "TRIVIAL"])),
+            "review" => Ok((".review.json", &["APPROVE"])),
+            other => Err(format!(
+                "unknown kind '{other}' (expected 'bless' or 'review')"
+            )),
+        }
+    }
+
+    /// Load the signing secret, rejecting empty/unset values fail-closed.
+    fn secret() -> Result<Vec<u8>, String> {
+        match std::env::var(SECRET_ENV) {
+            Ok(s) if !s.is_empty() => Ok(s.into_bytes()),
+            _ => Err(format!(
+                "${SECRET_ENV} is unset or empty — cannot sign/verify. \
+                 Only the conductor-light holds this secret."
+            )),
+        }
+    }
+
+    /// HMAC-SHA256(key, msg), returned as lowercase hex. Implemented directly
+    /// over `sha2` (already a workspace dep) to avoid adding the `hmac` crate.
+    fn hmac_sha256(key: &[u8], msg: &[u8]) -> String {
+        // Normalize the key to one block.
+        let mut block = [0u8; HMAC_BLOCK];
+        if key.len() > HMAC_BLOCK {
+            let digest = Sha256::digest(key);
+            block[..digest.len()].copy_from_slice(&digest);
+        } else {
+            block[..key.len()].copy_from_slice(key);
+        }
+
+        let mut ipad = [0x36u8; HMAC_BLOCK];
+        let mut opad = [0x5cu8; HMAC_BLOCK];
+        for i in 0..HMAC_BLOCK {
+            ipad[i] ^= block[i];
+            opad[i] ^= block[i];
+        }
+
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        inner.update(msg);
+        let inner_digest = inner.finalize();
+
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        outer.update(inner_digest);
+        hex::encode(outer.finalize())
+    }
+
+    /// Constant-time comparison of two hex strings (avoids timing oracles on
+    /// the HMAC, which is cheap insurance even in an offline verifier).
+    fn ct_eq(a: &str, b: &str) -> bool {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut diff = 0u8;
+        for i in 0..a.len() {
+            diff |= a[i] ^ b[i];
+        }
+        diff == 0
+    }
+
+    /// Canonical hash of the change's reviewable artifacts. Deterministic:
+    /// files are visited in sorted relative-path order, and each contributes
+    /// `<relpath>\0<len>\0<bytes>` so that renames/moves change the hash.
+    /// The attestation file(s) themselves are excluded so signing/verifying is
+    /// a fixed point.
+    fn artifact_hash(change_dir: &Path) -> Result<String, String> {
+        if !change_dir.is_dir() {
+            return Err(format!("change dir '{}' not found", change_dir.display()));
+        }
+        let mut files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(change_dir)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
+            .filter(|p| {
+                !matches!(
+                    p.file_name().and_then(|n| n.to_str()),
+                    Some(".attestation.json") | Some(".review.json")
+                )
+            })
+            .collect();
+        files.sort();
+
+        let mut hasher = Sha256::new();
+        for path in &files {
+            let rel = path
+                .strip_prefix(change_dir)
+                .map_err(|e| format!("strip_prefix: {e}"))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let raw = std::fs::read(path)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            // Normalize checkbox state (- [x]/- [X] → - [ ]) so marking a
+            // task complete during apply does NOT invalidate the attestation.
+            // Only content changes should drift the hash.
+            let bytes: Vec<u8> = String::from_utf8_lossy(&raw)
+                .replace("- [x]", "- [ ]")
+                .replace("- [X]", "- [ ]")
+                .into_bytes();
+            hasher.update(rel.as_bytes());
+            hasher.update([0u8]);
+            hasher.update(bytes.len().to_le_bytes());
+            hasher.update([0u8]);
+            hasher.update(&bytes);
+        }
+        Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    }
+
+    /// The signed message tuple. Order and separators are fixed; `|` cannot
+    /// appear in a sha256: hash and is disallowed in verdict/expert by
+    /// convention, so this is unambiguous.
+    fn signed_message(verdict: &str, hash: &str, expert: &str) -> String {
+        format!("{verdict}|{hash}|{expert}")
+    }
+
+    /// Sign: recompute the artifact hash, HMAC the tuple, write the JSON.
+    pub fn sign(change_dir: &str, verdict: &str, expert: &str, kind: &str) -> Result<(), String> {
+        sign_with_key(change_dir, verdict, expert, kind, &secret()?)
+    }
+
+    fn sign_with_key(
+        change_dir: &str,
+        verdict: &str,
+        expert: &str,
+        kind: &str,
+        key: &[u8],
+    ) -> Result<(), String> {
+        let (filename, _) = kind_spec(kind)?;
+        if verdict.contains('|') || expert.contains('|') {
+            return Err("verdict/expert must not contain '|'".to_string());
+        }
+        let dir = Path::new(change_dir);
+        let hash = artifact_hash(dir)?;
+        let mac = hmac_sha256(key, signed_message(verdict, &hash, expert).as_bytes());
+
+        let doc = json!({
+            "verdict": verdict,
+            "hash": hash,
+            "expert": expert,
+            "hmac": mac,
+            "alg": "HMAC-SHA256",
+        });
+        let out = dir.join(filename);
+        std::fs::write(
+            &out,
+            format!("{}\n", serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?),
+        )
+        .map_err(|e| format!("write {}: {e}", out.display()))?;
+        println!("signed {} → {}", kind, out.display());
+        Ok(())
+    }
+
+    /// Verify: reload the on-disk attestation, recompute hash + HMAC, and
+    /// enforce the gate. Any mismatch is a hard failure.
+    pub fn verify(change_dir: &str, kind: &str) -> Result<(), String> {
+        verify_with_key(change_dir, kind, &secret()?)
+    }
+
+    fn verify_with_key(change_dir: &str, kind: &str, key: &[u8]) -> Result<(), String> {
+        let (filename, expected_verdict) = kind_spec(kind)?;
+        let dir = Path::new(change_dir);
+        let path = dir.join(filename);
+
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let doc: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("invalid JSON in {filename}: {e}"))?;
+
+        let verdict = doc["verdict"].as_str().ok_or("missing 'verdict'")?;
+        let stored_hash = doc["hash"].as_str().ok_or("missing 'hash'")?;
+        let expert = doc["expert"].as_str().ok_or("missing 'expert'")?;
+        let stored_hmac = doc["hmac"].as_str().ok_or("missing 'hmac'")?;
+
+        // 1. Signature must be authentic for the claimed tuple.
+        let expect_hmac = hmac_sha256(key, signed_message(verdict, stored_hash, expert).as_bytes());
+        if !ct_eq(&expect_hmac, stored_hmac) {
+            return Err(
+                "HMAC mismatch — attestation is forged or was signed without the secret".to_string(),
+            );
+        }
+        // 2. Verdict must be one of the accepted verdicts for this gate.
+        if !expected_verdict.contains(&verdict) {
+            return Err(format!(
+                "verdict '{verdict}' is not one of {expected_verdict:?} — gate does not pass",
+            ));
+        }
+        // 3. Artifacts must not have drifted since signing.
+        let current_hash = artifact_hash(dir)?;
+        if !ct_eq(&current_hash, stored_hash) {
+            return Err(format!(
+                "artifact drift: signed {stored_hash}, current {current_hash} — re-bless required"
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // RFC 4231 Test Case 2: key="Jefe", data="what do ya want for nothing?"
+        #[test]
+        fn hmac_matches_rfc4231() {
+            let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+            assert_eq!(
+                mac,
+                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+            );
+        }
+
+        const KEY: &[u8] = b"top-secret";
+
+        #[test]
+        fn sign_then_verify_roundtrips() {
+            let dir = tempfile::tempdir().unwrap(); // allow-unwrap
+            std::fs::write(dir.path().join("spec.md"), "hello").unwrap(); // allow-unwrap
+            let d = dir.path().to_str().unwrap(); // allow-unwrap
+            sign_with_key(d, "BLESSED", "e_opus", "bless", KEY).unwrap(); // allow-unwrap
+            verify_with_key(d, "bless", KEY).unwrap(); // allow-unwrap
+        }
+
+        #[test]
+        fn forged_verdict_without_secret_fails() {
+            let dir = tempfile::tempdir().unwrap(); // allow-unwrap
+            std::fs::write(dir.path().join("spec.md"), "hello").unwrap(); // allow-unwrap
+            // A worker forges the file by hand: correct-looking JSON, bogus hmac.
+            std::fs::write(
+                dir.path().join(".attestation.json"),
+                r#"{"verdict":"BLESSED","hash":"sha256:deadbeef","expert":"e_opus","hmac":"00"}"#,
+            )
+            .unwrap(); // allow-unwrap
+            let d = dir.path().to_str().unwrap(); // allow-unwrap
+            let err = verify_with_key(d, "bless", KEY).unwrap_err(); // allow-unwrap
+            assert!(err.contains("HMAC mismatch"), "got: {err}");
+        }
+
+        #[test]
+        fn wrong_key_is_rejected() {
+            let dir = tempfile::tempdir().unwrap(); // allow-unwrap
+            std::fs::write(dir.path().join("spec.md"), "hello").unwrap(); // allow-unwrap
+            let d = dir.path().to_str().unwrap(); // allow-unwrap
+            sign_with_key(d, "BLESSED", "e_opus", "bless", KEY).unwrap(); // allow-unwrap
+            let err = verify_with_key(d, "bless", b"attacker-guess").unwrap_err(); // allow-unwrap
+            assert!(err.contains("HMAC mismatch"), "got: {err}");
+        }
+
+        #[test]
+        fn artifact_drift_after_signing_fails() {
+            let dir = tempfile::tempdir().unwrap(); // allow-unwrap
+            std::fs::write(dir.path().join("spec.md"), "hello").unwrap(); // allow-unwrap
+            let d = dir.path().to_str().unwrap(); // allow-unwrap
+            sign_with_key(d, "BLESSED", "e_opus", "bless", KEY).unwrap(); // allow-unwrap
+            // Tamper with the artifact after blessing.
+            std::fs::write(dir.path().join("spec.md"), "hello EVIL").unwrap(); // allow-unwrap
+            let err = verify_with_key(d, "bless", KEY).unwrap_err(); // allow-unwrap
+            assert!(err.contains("drift"), "got: {err}");
+        }
+
+        #[test]
+        fn trivial_verdict_passes_bless_gate() {
+            let dir = tempfile::tempdir().unwrap(); // allow-unwrap
+            std::fs::write(dir.path().join("proposal.md"), "fix typo").unwrap(); // allow-unwrap
+            let d = dir.path().to_str().unwrap(); // allow-unwrap
+            sign_with_key(d, "TRIVIAL", "conductor", "bless", KEY).unwrap(); // allow-unwrap
+            // TRIVIAL is accepted for bless gate — small fixes bypass expert review.
+            verify_with_key(d, "bless", KEY).unwrap();
         }
     }
 }

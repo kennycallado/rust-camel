@@ -1,0 +1,88 @@
+name: expert-gated
+version: 1
+description: Spec-driven workflow with expert blessing gates for rust-camel
+
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    template: proposal.md
+    description: Initial proposal — why and what
+    instruction: |
+      Create a proposal explaining WHY this change is needed.
+      Focus on: problem statement, scope, acceptance criteria, risk budget.
+      Reference CONTEXT-MAP.md for domain language.
+      Keep under 500 words.
+    requires: []
+
+  - id: design
+    generates: design.md
+    template: design.md
+    description: Technical design — how to implement
+    instruction: |
+      Create a technical design explaining HOW to implement.
+      Reference relevant ADRs in CONTEXT-MAP.md.
+      Identify affected crates and architectural boundaries
+      (Runtime, DSL, Components, Services, Languages, Functions).
+      Keep under 800 words.
+    requires: [proposal]
+
+  - id: specs
+    generates: specs/**/*.md
+    template: specs/spec.md
+    description: Delta specs — requirements and scenarios
+    instruction: |
+      Create delta specs with ADDED/MODIFIED/REMOVED requirements.
+      Each requirement needs at least one Given/When/Then scenario.
+      Place files under specs/<domain>/spec.md.
+    requires: [design]
+
+  - id: tasks
+    generates: tasks.md
+    template: tasks.md
+    description: Detailed implementation plan + progress tracker — each task has files, steps, tests, acceptance criteria, ending with a checkbox
+    instruction: |
+      Create a DETAILED implementation plan. This is not a simple checklist —
+      it is the document that enables cheap/fast worker subagents (w_fast)
+      to execute without needing to figure out details.
+
+      For EACH task include:
+      - Task ID and one-line description
+      - Files: exact paths (new or modified)
+      - Steps: ordered implementation actions
+      - Tests: specific test cases to write/verify
+      - Acceptance: criteria for task completion
+      - Checkbox: `- [ ] <task-id>` as the LAST line of each task block
+
+      The checkbox is for OpenSpec progress tracking. Workers read the
+      full block above the checkbox for their instructions.
+
+      Group tasks by crate or module. Max granularity: 30min per task.
+      Created AFTER the spec blessing (proposal + design + specs blessed).
+    requires: [specs]
+
+apply:
+  requires: [tasks]
+  tracks: tasks.md
+  instruction: |
+    BLESSING GATE (mandatory): Verify a valid plan blessing exists.
+
+    1. Read openspec/changes/<change>/.attestation.json
+    2. If missing → STOP. "Run /bless <change> first."
+    3. If verdict != "BLESSED" → STOP. Show fixes required.
+    4. Recompute hash: bash .opencode/scripts/artifact-hash.sh openspec/changes/<change>
+    5. If hash mismatch → STOP. "Artifacts changed since blessing. Re-bless."
+
+    IMPLEMENTATION (subagent-driven pattern):
+    - For each task: read its full block (files/steps/tests/AC) from tasks.md
+    - Dispatch @workers/w_fast with the task details (default)
+    - Bump to @workers/w_balanced or @workers/w_heavy if complex
+    - After each task: dispatch @reviewers/r_glm to review the change
+    - Do NOT advance past a task with critical/important issues
+    - Resolve minor issues or file bd follow-ups before advancing
+    - Escalate to @experts/e_gpt when stuck after 2 honest attempts
+    - Mark checkbox - [x] when task is clean (hash normalization makes
+      this safe — checkbox mutations do NOT invalidate the attestation)
+
+    BD INTEGRATION:
+    - Discovered work: bd create "<desc>" --deps discovered-from:<bd_issue>
+    - Commit body: "Bd: <bd_issue>"

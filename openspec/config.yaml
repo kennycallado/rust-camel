@@ -1,0 +1,22 @@
+schema: expert-gated
+
+context: |
+  Project: rust-camel — Tower-native integration framework (Apache Camel inspired)
+  Language: Rust (edition 2021)
+  Architecture: async pipelines, EIP patterns, data/control plane split
+  Crates: camel-core, camel-processor, camel-component-*, camel-cli
+  Test workspace: camel-tests
+  Conventions: cargo fmt, clippy -D warnings, cargo xtask lints
+  Issue tracking: bd (beads) — dependency-aware
+  AGENTS.md is the project constitution — always read it first
+
+rules:
+  proposal:
+    - Always include affected crates
+    - Reference bd issue if one exists
+  design:
+    - Must respect data/control plane boundary
+    - Must reference relevant ADRs from CONTEXT-MAP.md
+  tasks:
+    - Each task must be independently dispatchable to a worker
+    - Max 30 minutes of work per task
