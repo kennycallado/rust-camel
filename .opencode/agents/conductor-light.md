@@ -52,7 +52,7 @@ anything with design decisions or cross-cutting concerns.
 
 When in doubt, use the full flow.
 
-## The flow — 4 phases, 2 blessing gates, 1 attestation, 1 holistic review
+## The flow — 4 phases, 2 blessing gates, 1 holistic review
 
 Implementation is a subagent-driven autonomous loop: you dispatch one task
 per worker, review each result, then advance. You do NOT dump the whole

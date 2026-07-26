@@ -1,5 +1,5 @@
 ---
-description: Expert blessing gate — dispatches fresh expert and stores machine-readable attestation
+description: Expert blessing gate — dispatches fresh expert and stores machine-readable blessing
 agent: build
 ---
 
