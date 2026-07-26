@@ -71,7 +71,7 @@ Implement tasks from an OpenSpec change.
       "Blessing verdict: <verdict>. Fixes needed: <list>. Run `/bless <name>` after addressing."
    d. **Verify hash freshness**:
       ```bash
-       bash .opencode/scripts/artifact-hash.sh "openspec/changes/<name>"
+      cargo run -p xtask -- hash-artifacts --change-dir "openspec/changes/<name>"
        ```
        Compare output to `bless.json`'s `hash` field.
    e. **If hash mismatch** → STOP. Tell user:
