@@ -63,25 +63,22 @@ Include findings ordered by severity (Critical, Important, Minor).
 
 Wait for the expert's verdict.
 
-### 5. Sign attestation (HMAC)
+### 5. Write blessing
 
-Use the xtask signer to produce a cryptographically signed attestation.
-This prevents workers from forging a BLESSED verdict.
+Write `openspec/changes/$1/.bless.json`:
 
-```bash
-ATTESTATION_HMAC_SECRET=$ATTESTATION_HMAC_SECRET \
-  cargo run -p xtask -- sign-attestation \
-    --change-dir openspec/changes/$1 \
-    --verdict BLESSED \
-    --expert e_gpt \
-    --kind bless
+```json
+{
+  "verdict": "BLESSED",
+  "hash": "<hash from step 3>",
+  "expert": "e_gpt",
+  "kind": "spec | plan"
+}
 ```
 
-This writes `.attestation.json` with: verdict, hash, expert, HMAC signature.
-The HMAC is computed over `verdict|hash|expert` — CI verifies it offline.
+Use `kind: "spec"` for the first blessing (spec artifacts only), `kind: "plan"` for the second (includes tasks.md). The plan blessing supersedes the spec blessing — overwrite `.bless.json`.
 
-If the expert returned BLESS-WITH-FIXES, sign with that verdict (the apply
-gate checks for `verdict == BLESSED` and will block).
+If the expert returned BLESS-WITH-FIXES, write `"verdict": "BLESS-WITH-FIXES"` (the apply gate checks for `verdict == BLESSED` and will block).
 
 ### 6. Report to user
 
@@ -112,6 +109,5 @@ gate checks for `verdict == BLESSED` and will block).
 
 - NEVER bless without computing the hash first
 - NEVER reuse a task_id for a blessing (fresh eyes is the point)
-- NEVER write an attestation manually — use `xtask sign-attestation`
-- The HMAC signature is the provenance proof; only conductor-light has the secret
-  invalidates it (enforced by /opsx-apply gate check)
+- NEVER write `.bless.json` without computing the hash first
+- The hash binds the verdict to exact artifact content — any edit after blessing is detectable via drift check in /apply

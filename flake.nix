@@ -155,12 +155,6 @@
               export CAMEL_CXF_BRIDGE_BINARY_PATH="$CXF_BRIDGE_BIN"
             fi
 
-            # OpenSpec attestation HMAC secret (local, not in git)
-            HMAC_KEY="$HOME/.config/rust-camel/attestation-hmac-key"
-            if [ -f "$HMAC_KEY" ]; then
-              export ATTESTATION_HMAC_SECRET="$(cat "$HMAC_KEY")"
-            fi
-
             echo ""
             echo "  rust-camel dev shell"
             echo ""
@@ -181,12 +175,6 @@
             else
               echo "  CXF bridge: not built"
               echo "    run: cargo xtask build-cxf-bridge"
-            fi
-            if [ -n "''${ATTESTATION_HMAC_SECRET:-}" ]; then
-              echo "  OpenSpec attestation: ready"
-            else
-              echo "  OpenSpec attestation: no key"
-              echo "    run: openssl rand -hex 32 > ~/.config/rust-camel/attestation-hmac-key"
             fi
             echo ""
           '';

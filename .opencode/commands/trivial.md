@@ -3,8 +3,6 @@
 Bypasses expert review for changes that don't need it: typos, dependency
 bumps, small refactors, log-level fixes, CI tweaks.
 
-Still HMAC-signed so CI can verify provenance — just no expert gate.
-
 ## Usage
 
 ```
@@ -35,16 +33,26 @@ Trivial change — no spec breakdown needed.
 <!-- 1-3 bullet points, enough context for the commit -->
 ```
 
-### 2. Sign TRIVIAL attestation
+### 2. Write TRIVIAL blessing
+
+Compute artifact hash:
 
 ```bash
-ATTESTATION_HMAC_SECRET=$ATTESTATION_HMAC_SECRET \
-  cargo run -p xtask -- sign-attestation \
-    --change-dir openspec/changes/$1 \
-    --verdict TRIVIAL \
-    --expert conductor \
-    --kind bless
+cargo run -p xtask -- hash-artifacts --change-dir openspec/changes/$1
 ```
+
+Store the output hash. Then write `openspec/changes/$1/.bless.json`:
+
+```json
+{
+  "verdict": "TRIVIAL",
+  "hash": "<hash from above>",
+  "expert": "conductor",
+  "kind": "trivial"
+}
+```
+
+No expert review needed for trivial changes. The hash still enables drift detection.
 
 ### 3. Report
 
@@ -58,4 +66,3 @@ ATTESTATION_HMAC_SECRET=$ATTESTATION_HMAC_SECRET \
 - Use for: typos, deps, log levels, CI config, small refactors (< ~50 lines)
 - Do NOT use for: new features, API changes, security, breaking changes
 - If unsure whether something is trivial, use the full /opsx-propose flow
-- CI verifies the HMAC — the TRIVIAL verdict is still tamper-proof

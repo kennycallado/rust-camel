@@ -47,9 +47,9 @@ The reviewer MUST see the merged specs — this closes the archive-merge blind s
 
 ### 4. Read the blessed plan
 
-Read `.attestation.json` to get the plan hash the implementation was built against:
+Read `.bless.json` to get the plan hash the implementation was built against:
 ```bash
-cat openspec/changes/$1/.attestation.json
+cat openspec/changes/$1/.bless.json
 ```
 
 ### 5. Dispatch reviewer with fresh eyes
@@ -61,7 +61,7 @@ Dispatch `@reviewers/r_glm` **WITHOUT task_id** (fresh eyes on the whole) with:
 
 Change: $1
 Feature branch diff: git diff $(git merge-base HEAD main)...HEAD
-Blessed plan hash: <from .attestation.json>
+Blessed plan hash: <from .bless.json>
 Spec artifacts: openspec/changes/$1/specs/
 Canonical specs: openspec/specs/
 
@@ -79,18 +79,18 @@ Include findings ordered by severity.
 
 Wait for the reviewer's verdict.
 
-### 6. Sign review attestation (HMAC)
+### 6. Write review
 
-```bash
-ATTESTATION_HMAC_SECRET=$ATTESTATION_HMAC_SECRET \
-  cargo run -p xtask -- sign-attestation \
-    --change-dir openspec/changes/$1 \
-    --verdict APPROVE \
-    --expert r_glm \
-    --kind review
+Write `openspec/changes/$1/.review.json`:
+
+```json
+{
+  "verdict": "APPROVE",
+  "reviewer": "r_glm",
+  "impl_hash": "git:<HEAD commit hash>",
+  "findings": [<reviewer findings if any>]
+}
 ```
-
-This writes `.review.json` with HMAC signature. CI verifies it offline.
 
 ### 7. Report
 

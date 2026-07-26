@@ -29,6 +29,17 @@ Do NOT silently degrade to manual mode — that reintroduces fragility."
 - **Interactive** (default): pause at each gate for human review
 - **Autopilot**: run full flow, pause only on REJECTED / stuck / errors
 
+## Autopilot guardrails
+
+When running in autopilot (no human pauses between gates):
+- **Budget cap**: max 3 total escalations (e_gpt consultations) OR 2 consecutive
+  task rejections from r_glm. Exceeding either → STOP and wait for human.
+  This catches poorly-designed plans before burning excessive tokens.
+- **Terminates in branch**: autopilot commits to the feature branch but does NOT
+  merge to main. The human reviews and merges.
+- Autopilot CAN resolve Critical/Important findings autonomously (apply fixes,
+  re-review). Only outright REJECT or budget exhaustion stops it.
+
 ## Triage
 
 Before starting the full flow, assess: is this trivial?
@@ -62,10 +73,10 @@ spec to a worker.
    write to resolved path. STOP after specs.
 4. **SPEC BLESSING**: dispatch `@experts/e_gpt` WITHOUT task_id:
     - Compute hash: `cargo run -p xtask -- hash-artifacts openspec/changes/<name>`
-   - Pass artifact paths + hash + "Bless this spec for planning?"
-   - Write `.attestation.json` (hash + verdict)
-   - BLESS-WITH-FIXES → fix → re-bless. REJECTED → report, stop.
-   - [INTERACTIVE] "Spec blessed. Continue to planning?"
+    - Pass artifact paths + hash + "Bless this spec for planning?"
+    - Write `.bless.json` (verdict + hash + expert + kind: "spec")
+    - BLESS-WITH-FIXES → fix → re-bless. REJECTED → report, stop.
+    - [INTERACTIVE] "Spec blessed. Continue to planning?"
 
 ### PHASE 2: PLAN (tasks.md = detailed plan)
 
@@ -78,10 +89,10 @@ spec to a worker.
    - Critical/important findings → fix → re-review
    - Once clean: proceed
 7. **PLAN BLESSING**: dispatch `@experts/e_gpt` WITHOUT task_id (fresh):
-   - Recompute hash (now includes tasks.md — supersedes spec blessing)
-   - Write new `.attestation.json` (overwrites previous)
-   - BLESS-WITH-FIXES → fix → re-bless
-   - [INTERACTIVE] "Plan blessed. Continue to implementation?"
+    - Recompute hash (now includes tasks.md — supersedes spec blessing)
+    - Overwrite `.bless.json` (verdict + hash + expert + kind: "plan")
+    - BLESS-WITH-FIXES → fix → re-bless
+    - [INTERACTIVE] "Plan blessed. Continue to implementation?"
 
 ### PHASE 3: IMPLEMENTATION (subagent-driven, autonomous loop)
 
@@ -130,7 +141,7 @@ spec to a worker.
           Look for cross-task interactions, emergent inconsistency, spec
           drift, and anything per-task reviews could not see."
        - Verdict: APPROVE | APPROVE-WITH-FINDINGS | REJECT
-    d. Write `.review.json` (impl_hash + against_plan_hash + verdict)
+    d. Write `.review.json` (verdict + impl_hash)
     e. REJECT/important findings → loop back to PHASE 3 → re-review
     f. [INTERACTIVE] "Holistic review passed. Archive?"
 13. Commit everything (code + spec merge + archive move)
@@ -141,6 +152,6 @@ spec to a worker.
 - Do NOT modify /opsx:propose or other upstream commands
 - Do NOT load brainstorming, writing-plans, executing-plans skills
 - Do NOT create tasks before the spec is blessed
-- Do NOT track "hash A vs hash B" — latest attestation supersedes all prior
 - Do NOT archive without a passing holistic review (.review.json)
 - Do NOT silently degrade when openspec CLI is missing — fail loudly
+- Do NOT merge to main in autopilot — produce a branch for human review

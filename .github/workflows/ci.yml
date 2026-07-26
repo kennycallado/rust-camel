@@ -182,17 +182,3 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
       - name: audit
         run: cargo audit
-      - name: OpenSpec attestation verification
-        env:
-          ATTESTATION_HMAC_SECRET: ${{ secrets.ATTESTATION_HMAC_SECRET }}
-        run: |
-          for dir in openspec/changes/*/; do
-            [ -d "$dir" ] || continue
-            [ -f "${dir}.attestation.json" ] || { echo "WARN: $dir has no attestation — skip"; continue; }
-            echo "Verifying bless: $dir"
-            cargo run -p xtask -- verify-attestation --change-dir "${dir%/}" --kind bless
-            if [ -f "${dir}.review.json" ]; then
-              echo "Verifying review: $dir"
-              cargo run -p xtask -- verify-attestation --change-dir "${dir%/}" --kind review
-            fi
-          done

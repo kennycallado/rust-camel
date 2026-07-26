@@ -64,16 +64,16 @@ Implement tasks from an OpenSpec change.
 
    Before implementing any task, verify a valid expert blessing exists:
 
-   a. Read `openspec/changes/<name>/.attestation.json`
+    a. Read `openspec/changes/<name>/.bless.json`
    b. **If file missing** → STOP. Tell user:
       "No blessing found. Run `/bless <name>` first."
    c. **If verdict != "BLESSED"** → STOP. Show required fixes:
       "Blessing verdict: <verdict>. Fixes needed: <list>. Run `/bless <name>` after addressing."
    d. **Verify hash freshness**:
       ```bash
-      bash .opencode/scripts/artifact-hash.sh "openspec/changes/<name>"
-      ```
-      Compare output to `attestation.artifact_hash`.
+       bash .opencode/scripts/artifact-hash.sh "openspec/changes/<name>"
+       ```
+       Compare output to `bless.json`'s `hash` field.
    e. **If hash mismatch** → STOP. Tell user:
       "Artifacts changed since blessing (expected <stored>, got <computed>).
        Run `/bless <name>` again."
