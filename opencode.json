@@ -5,9 +5,9 @@
     "./.opencode/instructions/ultrathink.md"
   ],
   "permission": {
-    "deny": [
-      "bash(git push*)"
-    ]
+    "bash": {
+      "git push*": "deny"
+    }
   },
   "mcp": {
     "context-mode": { "enabled": true },
