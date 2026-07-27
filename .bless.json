@@ -1,0 +1,15 @@
+{
+  "verdict": "BLESS",
+  "hash": "sha256:3e4ecc453fa203f79ee8fe6bb300fe5a52fdb1de56fd16f1abdb51fea454f862",
+  "expert": "e_gpt",
+  "kind": "plan",
+  "change": "kafka-drop-ready-notify",
+  "bd_issue": "rc-5992",
+  "prior_review": {
+    "reviewer": "r_glm",
+    "verdict": "APPROVE",
+    "critical_findings_resolved": 3,
+    "minor_findings_resolved": 4
+  },
+  "blessed_at": "2026-07-27"
+}
