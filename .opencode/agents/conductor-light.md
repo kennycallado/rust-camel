@@ -56,6 +56,9 @@ When in doubt, use the full flow.
 ROOT="$(git rev-parse --show-toplevel)"
 WT="$ROOT/.worktrees/<name>"
 ```
+NOTE: bash tool calls are separate subshells — variables do NOT
+persist between calls. Always expand `$WT` to the absolute path
+in every command, or pass it explicitly.
 
 Collision guard — if `$WT` already exists, remove it first:
 ```bash
@@ -178,6 +181,8 @@ g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
    NOTE: do NOT run `cargo test --workspace` (full) — it requires
    Docker + native bridges and can hang autopilot. Integration tests
    with infra are CI's responsibility, not the conductor's.
+
+   Run EACH gate as a separate command and record exit codes:
    ```bash
    cargo fmt --check --all
    cargo clippy --workspace --all-features \
@@ -195,28 +200,46 @@ g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
    cargo xtask schema --check
    cargo audit
    ```
+
+   **Gate-coverage self-check**: BEFORE claiming "all gates green",
+   enumerate each of the 12 gates above and confirm it ran with
+   exit code 0. If ANY gate was skipped or not run, you CANNOT
+   claim "all green" — report exactly which gates passed, which
+   were skipped, and why.
+
+   **Pre-existing failure exemption**: if a gate fails due to an
+   issue UNRELATED to this change (pre-existing breakage in code
+   you did not touch), you may skip it ONLY if:
+   1. You verify the failure exists on `main` (not just your branch)
+   2. You file a bd follow-up: `(cd "$ROOT" && bd create "<gate> failure" -t bug -p 2 --deps discovered-from:<id>)`
+   3. You note it explicitly in the final report: "gate X skipped: pre-existing failure <bd-id>"
+
    If the change modifies tests guarded by `#[ignore]` or requiring
    infra (Kafka, Redis, Docker), mark "integration-verification-
    deferred-to-CI" in the final report.
 
 3. **HOLISTIC REVIEW GATE** (mandatory before archive):
-   a. Stage spec merge: `openspec sync --change <name>` (from `$WT`)
-      — merges delta specs into `openspec/specs/`, staged but NOT committed.
-   b. Gather complete diff:
+   a. Gather complete diff:
       ```bash
       git -C "$WT" diff $(git -C "$WT" merge-base HEAD main)...HEAD
       ```
-   c. Dispatch `@reviewers/r_glm` WITHOUT task_id (fresh eyes on the WHOLE):
-      - Pass: complete diff + blessed specs + tasks.md + merged canonical specs
+      NOTE: canonical spec merge (`openspec/specs/`) happens at
+      archive time (step 4d), not here. The reviewer sees delta
+      specs from `openspec/changes/<name>/specs/` — that is
+      sufficient for cross-task drift detection. If `openspec sync`
+      becomes available in a future CLI version, stage it here for
+      the reviewer. Do NOT silently degrade if a command is missing.
+   b. Dispatch `@reviewers/r_glm` WITHOUT task_id (fresh eyes on the WHOLE):
+      - Pass: complete diff + blessed specs + tasks.md + delta specs
       - "Review the COMPLETE implementation against the blessed spec.
          Look for: cross-task interactions, emergent inconsistency, spec
          drift, missing coverage, code quality, AND docs/examples alignment
          (scan diff for API changes → check examples/, CONTEXT-MAP.md,
          per-crate CONTEXT.md, GLOSSARY.md)."
       - Verdict: APPROVE | APPROVE-WITH-FINDINGS | REJECT
-   d. Write `.review.json` (verdict + reviewer + impl_hash)
-   e. REJECT/important findings → loop back to PHASE 3 → re-review
-   f. [INTERACTIVE] "Holistic review passed. Ready for merge review."
+   c. Write `.review.json` (verdict + reviewer + impl_hash)
+   d. REJECT/important findings → loop back to PHASE 3 → re-review
+   e. [INTERACTIVE] "Holistic review passed. Ready for merge review."
 
 4. Commit everything in the worktree:
    ```bash
