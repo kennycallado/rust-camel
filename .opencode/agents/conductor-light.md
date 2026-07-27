@@ -175,6 +175,9 @@ g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
 
 2. **QUALITY GATES** (mandatory, all must pass before review):
    Run from `$WT`. Any failure → loop back to PHASE 3.
+   NOTE: do NOT run `cargo test --workspace` (full) — it requires
+   Docker + native bridges and can hang autopilot. Integration tests
+   with infra are CI's responsibility, not the conductor's.
    ```bash
    cargo fmt --check --all
    cargo clippy --workspace --all-features \
@@ -183,13 +186,18 @@ g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
      -- -D warnings
    cargo clippy -p camel-component-kafka --all-targets -- -D warnings
    cargo clippy -p camel-cli -- -D warnings
+   cargo build --workspace
+   cargo test --workspace --lib
+   cargo test -p camel-core --test hexagonal_architecture_boundaries_test
    cargo xtask lint-unwrap
    cargo xtask lint-secrets
    cargo xtask lint-log-levels
    cargo xtask schema --check
    cargo audit
-   cargo test --workspace
    ```
+   If the change modifies tests guarded by `#[ignore]` or requiring
+   infra (Kafka, Redis, Docker), mark "integration-verification-
+   deferred-to-CI" in the final report.
 
 3. **HOLISTIC REVIEW GATE** (mandatory before archive):
    a. Stage spec merge: `openspec sync --change <name>` (from `$WT`)
