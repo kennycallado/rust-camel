@@ -131,4 +131,4 @@ root `/home/kenny/dev/rust-camel/.worktrees/ste-writing-skill`.
   skill lists are intact; `/bless` still loads only `self-grill-proposals`.
 - No claim that `ste-writing` is mandatory or that it replaces a blessing.
 
-- [ ] 2
+- [x] 2
