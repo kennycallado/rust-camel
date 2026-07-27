@@ -5,8 +5,15 @@
     "./.opencode/instructions/ultrathink.md"
   ],
   "permission": {
+    "external_directory": {
+      "/tmp/**": "allow",
+      "~/.cargo/registry/**": "allow",
+      "~/.config/rust-camel/**": "allow",
+      "*": "ask"
+    },
     "bash": {
-      "git push*": "deny"
+      "git push*": "deny",
+      "*": "allow"
     }
   },
   "mcp": {
