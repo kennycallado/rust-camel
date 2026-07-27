@@ -17,7 +17,7 @@ Six mechanical rules:
 (b) Replace semicolons with periods.
 (c) Expand contractions.
 (d) Make passive voice active when the actor is known.
-(e) Replace -ing main verbs, nominalizations ("perform an analysis" -> "analyze"), and phrasal verbs ("spin up" -> "start") with plain verbs.
+(e) Replace -ing main verbs, nominalizations, and phrasal verbs with plain verbs. Examples: "perform an analysis" -> "analyze", "spin up" -> "start".
 (f) one name per concept.
 
 In flavored mode these are overridable. In strict mode they are mandatory for prose.

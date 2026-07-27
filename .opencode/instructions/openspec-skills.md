@@ -13,7 +13,7 @@ SKIP all skill checks EXCEPT:
 - `ste-writing` — MAY run as a prose pass on the OpenSpec artifacts
   (proposal/design/specs/tasks) DURING artifact-producing `/opsx:*` work
   and BEFORE `/bless` begins. It never replaces or weakens a blessing gate.
-  The blessing hash is computed AFTER the prose pass. Only
+  Compute the blessing hash AFTER the prose pass. Only
   `self-grill-proposals` loads during the `/bless` act itself, and
   `ste-writing` does not run during `/bless`.
 
