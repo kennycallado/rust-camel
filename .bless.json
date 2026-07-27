@@ -1,15 +1,15 @@
 {
   "verdict": "BLESS",
-  "hash": "sha256:baeb7c88f1c297bb23f2e27a5add34a9b226349a00eaa04f9eb436c8dc804484",
+  "hash": "sha256:3e4ecc453fa203f79ee8fe6bb300fe5a52fdb1de56fd16f1abdb51fea454f862",
   "expert": "e_gpt",
-  "kind": "spec",
+  "kind": "plan",
   "change": "kafka-drop-ready-notify",
   "bd_issue": "rc-5992",
-  "prior_verdict": "BLESS-WITH-FIXES",
-  "fixes_applied": [
-    "Added L587-589 second ReadyContext comment to proposal scope, design edits, and delta spec scenario",
-    "Changed API risk from NONE to LOW (source-breaking) acknowledging pub method removal",
-    "Changed behavioural risk from NONE to LOW distinguishing in-repo startup from downstream-observable signaling"
-  ],
+  "prior_review": {
+    "reviewer": "r_glm",
+    "verdict": "APPROVE",
+    "critical_findings_resolved": 3,
+    "minor_findings_resolved": 4
+  },
   "blessed_at": "2026-07-27"
 }
