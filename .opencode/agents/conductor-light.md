@@ -145,7 +145,10 @@ c. **Dispatch worker** with `cwd: "$WT"`:
       first, verify they fail, then implement until they pass.
       Do NOT invent additional test design — if a needed test is
       not specified, STOP and report 'test-design-gap: <what>'
-      instead of guessing."
+      instead of guessing.
+      Before reporting back: run `cargo fmt --check` and
+      `cargo clippy -p <affected-crate> -- -D warnings` on the
+      crates you modified. Fix any issues."
 
 d. Worker implements, runs tests, returns result
 
@@ -170,7 +173,25 @@ g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
 
 1. `openspec status --change <name> --json` (verify all tasks done)
 
-2. **HOLISTIC REVIEW GATE** (mandatory before archive):
+2. **QUALITY GATES** (mandatory, all must pass before review):
+   Run from `$WT`. Any failure → loop back to PHASE 3.
+   ```bash
+   cargo fmt --check --all
+   cargo clippy --workspace --all-features \
+     --exclude camel-cli \
+     --exclude camel-component-kafka \
+     -- -D warnings
+   cargo clippy -p camel-component-kafka --all-targets -- -D warnings
+   cargo clippy -p camel-cli -- -D warnings
+   cargo xtask lint-unwrap
+   cargo xtask lint-secrets
+   cargo xtask lint-log-levels
+   cargo xtask schema --check
+   cargo audit
+   cargo test --workspace
+   ```
+
+3. **HOLISTIC REVIEW GATE** (mandatory before archive):
    a. Stage spec merge: `openspec sync --change <name>` (from `$WT`)
       — merges delta specs into `openspec/specs/`, staged but NOT committed.
    b. Gather complete diff:
@@ -189,18 +210,18 @@ g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
    e. REJECT/important findings → loop back to PHASE 3 → re-review
    f. [INTERACTIVE] "Holistic review passed. Ready for merge review."
 
-3. Commit everything in the worktree:
+4. Commit everything in the worktree:
    ```bash
    git -C "$WT" add -A
    git -C "$WT" commit -m "<conventional commit message>"
    ```
 
-4. Close bd issue (ALWAYS from root):
+5. Close bd issue (ALWAYS from root):
    ```bash
    (cd "$ROOT" && bd close <id> --reason "Completed")
    ```
 
-5. Report to human:
+6. Report to human:
    - Branch: `feature/<name>` in `.worktrees/<name>`
    - Ready for human review and merge to main
    - Do NOT merge yourself. Do NOT remove the worktree yet.
