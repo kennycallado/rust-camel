@@ -1,6 +1,6 @@
 {
   "verdict": "BLESSED",
-  "hash": "sha256:cc900e4f6efa0b56bb63ce3cd81937523814e7631353c318319809f57c6d1853",
+  "hash": "sha256:c9ee25fac07177f602538451c1ba01f49d5f8c5e7a8ffaa2c72d363ecbd47b7f",
   "expert": "e_gpt",
-  "kind": "spec"
+  "kind": "plan"
 }
