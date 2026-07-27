@@ -49,8 +49,16 @@ Dispatch `@experts/e_gpt` **WITHOUT task_id** (fresh eyes) with this context-pac
 Change: $1
 Artifacts directory: openspec/changes/$1/
 
-Read all artifacts in that directory and evaluate whether this change
-is ready for implementation. Apply the reviewer rubric from
+Read all artifacts in that directory. Then **load the skill
+`self-grill-proposals`** and use it to stress-test the proposal
+before producing your verdict. Grill the artifacts:
+- Are edge cases covered?
+- Are there unexamined alternatives?
+- Is the scope correct — too broad, too narrow?
+- Does this need a new ADR?
+- Are acceptance criteria testable and complete?
+
+After grilling, apply the reviewer rubric from
 .opencode/agents/reviewers/r_glm.md as your evaluation baseline.
 
 Return EXACTLY one verdict:

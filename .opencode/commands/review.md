@@ -72,6 +72,10 @@ Look specifically for:
 3. Spec drift — implementation that doesn't match the delta specs
 4. Missing coverage — edge cases no task addressed
 5. Code quality — anything per-task reviews could not see
+6. **Docs/examples alignment** — scan the diff for API changes (pub
+   fn/struct/enum/trait). If any: check relevant examples/ entries,
+   CONTEXT-MAP.md, per-crate CONTEXT.md, docs/GLOSSARY.md. Report
+   factual inconsistencies as findings (don't fix them).
 
 Return verdict: APPROVE | APPROVE-WITH-FINDINGS | REJECT
 Include findings ordered by severity.

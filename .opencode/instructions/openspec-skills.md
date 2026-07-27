@@ -6,10 +6,14 @@ description: Skills policy for the expert-gated OpenSpec workflow. Controls whic
 
 ## When executing OpenSpec commands (/opsx:*, /bless)
 
-SKIP all skill checks. Do NOT invoke the Skill tool during these commands.
+SKIP all skill checks EXCEPT:
+- `self-grill-proposals` — explicitly loaded by /bless to stress-test
+  artifacts before producing a verdict. This is the expert's thinking
+  tool, not a workflow replacement.
+
+Do NOT invoke any other Skill tool during these commands.
 OpenSpec commands are self-contained workflows with their own quality gates
-(blessing attestation). Skill augmentation during these commands causes
-conflicts and breaks autonomy.
+(blessing + drift detection). Other skill augmentation causes conflicts.
 
 The command templates and schema instructions contain everything needed.
 Follow them directly.
