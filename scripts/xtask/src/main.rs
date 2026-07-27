@@ -220,15 +220,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::HashArtifacts { change_dir } => {
-            match artifact_hash::compute(&change_dir) {
-                Ok(hash) => println!("{hash}"),
-                Err(e) => {
-                    eprintln!("hash-artifacts: FAIL — {e}");
-                    std::process::exit(1);
-                }
+        Commands::HashArtifacts { change_dir } => match artifact_hash::compute(&change_dir) {
+            Ok(hash) => println!("{hash}"),
+            Err(e) => {
+                eprintln!("hash-artifacts: FAIL — {e}");
+                std::process::exit(1);
             }
-        }
+        },
     }
 }
 
@@ -3532,8 +3530,7 @@ mod artifact_hash {
                 .map_err(|e| format!("strip_prefix: {e}"))?
                 .to_string_lossy()
                 .replace('\\', "/");
-            let raw = std::fs::read(path)
-                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            let raw = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
             let bytes: Vec<u8> = String::from_utf8_lossy(&raw)
                 .replace("- [x]", "- [ ]")
                 .replace("- [X]", "- [ ]")
