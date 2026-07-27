@@ -108,10 +108,12 @@ spec to a worker.
        - Straightforward (config, docs, simple impl) → `@workers/w_fast`
        - Multi-file logic, trait impls, async → `@workers/w_balanced`
        - Deep system interaction, macro hygiene, cross-crate → `@workers/w_heavy`
-    c. **Dispatch worker** with ONE task's details:
-       - Pass: the task block from tasks.md (files/steps/tests/AC)
-       - Pass: relevant spec paths from openspec/changes/<name>/specs/
-       - "Implement task <id>. Follow the steps exactly. Run tests."
+     c. **Dispatch worker** with ONE task's details:
+        - Pass: the task block from tasks.md (files/steps/tests/AC)
+        - Pass: relevant spec paths from openspec/changes/<name>/specs/
+        - "Implement task <id>. Load skill `test-driven-development`.
+           Write/adjust tests first, then implement, then verify.
+           Follow the steps exactly. Report what tests pass."
     d. Worker implements, runs tests, returns result
     e. **Dispatch `@reviewers/r_glm` for combined spec+code review** (one run):
        - Pass: the task's git diff + blessed spec + tasks.md
