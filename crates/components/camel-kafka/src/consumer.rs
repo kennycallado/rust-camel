@@ -4,11 +4,8 @@ use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, NetworkRetryPolicy,
     RuntimeObservability,
 };
-use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{
-    Consumer as RdConsumer, ConsumerContext as RdConsumerContext, Rebalance, StreamConsumer,
-};
+use rdkafka::consumer::{Consumer as RdConsumer, StreamConsumer};
 // Import rdkafka::Message trait to bring .topic(), .key(), .payload(), etc. into scope.
 // The alias `_` prevents a name conflict with component Message.
 #[cfg(feature = "otel")]
@@ -18,7 +15,7 @@ use rdkafka::message::OwnedMessage;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -28,46 +25,10 @@ use crate::config::ResolvedKafkaEndpointConfig;
 use crate::config::apply_security_config;
 use crate::manual_commit::{CommitRequest, KafkaManualCommit};
 
-// ---------------------------------------------------------------------------
-// ReadyContext — notifies when the consumer gets its first partition assignment
-// ---------------------------------------------------------------------------
-
-/// A custom rdkafka context that fires the `Arc<Notify>` exposed via
-/// `KafkaConsumer::ready_signal()` when the consumer receives its first
-/// partition assignment.
-///
-/// This is used ONLY for test synchronisation (letting a test await the first
-/// real assignment without arbitrary sleeps). It is deliberately NOT wired to
-/// the runtime startup handshake: readiness is signalled eagerly after
-/// `subscribe()` in `run_consumer_loop` (see the "Startup readiness" note
-/// there). Gating `ConsumerContext::mark_ready()` on the assignment callback
-/// hung route startup — a broker that never assigns (connection dropped during
-/// coordination) or a self-producing route graph (topic not created until the
-/// producer runs, which cannot start until the consumer's `start()` returns)
-/// would deadlock the controller forever.
-struct ReadyContext {
-    ready: Arc<Notify>,
-}
-
-impl ClientContext for ReadyContext {}
-
-impl RdConsumerContext for ReadyContext {
-    fn post_rebalance(&self, rebalance: &Rebalance<'_>) {
-        if matches!(rebalance, Rebalance::Assign(_)) {
-            // Partitions assigned — wake test waiters. NOT tied to startup.
-            self.ready.notify_waiters();
-        }
-    }
-}
-
-type ReadyStreamConsumer = StreamConsumer<ReadyContext>;
-
 pub struct KafkaConsumer {
     config: ResolvedKafkaEndpointConfig,
     cancel_token: Option<CancellationToken>,
     task_handle: Option<JoinHandle<Result<(), CamelError>>>,
-    /// Notified once the consumer has received its first partition assignment.
-    ready: Arc<Notify>,
     /// Set from ConsumerContext in `start()`; used for ADR-0012
     /// `increment_errors(route_id, …)` calls in `stop()`.
     route_id: Option<String>,
@@ -85,16 +46,9 @@ impl KafkaConsumer {
             config,
             cancel_token: None,
             task_handle: None,
-            ready: Arc::new(Notify::new()),
             route_id: None,
             runtime,
         }
-    }
-
-    /// Returns a handle that resolves once the consumer has been assigned
-    /// at least one partition.  Useful in tests to avoid arbitrary sleeps.
-    pub fn ready_signal(&self) -> Arc<Notify> {
-        self.ready.clone()
     }
 }
 
@@ -115,7 +69,6 @@ impl Consumer for KafkaConsumer {
         self.route_id = Some(ctx.route_id().to_string());
 
         let config = self.config.clone();
-        let ready = self.ready.clone();
         let runtime = self.runtime.clone();
         let route_id = ctx.route_id().to_string();
 
@@ -130,7 +83,6 @@ impl Consumer for KafkaConsumer {
             config,
             ctx,
             cancel_token,
-            ready,
             runtime,
             route_id,
         ));
@@ -298,7 +250,7 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Result<Exchange, Ca
 }
 
 /// Private seam that lets tests inject commit success/failure without a
-/// real Kafka broker. The production path passes a `&ReadyStreamConsumer`,
+/// real Kafka broker. The production path passes a `&StreamConsumer`,
 /// which has an explicit impl below. Tests implement this trait directly.
 pub(crate) trait KafkaCommitClient: Sync {
     fn commit(
@@ -308,7 +260,7 @@ pub(crate) trait KafkaCommitClient: Sync {
     ) -> Result<(), rdkafka::error::KafkaError>;
 }
 
-impl KafkaCommitClient for ReadyStreamConsumer {
+impl KafkaCommitClient for StreamConsumer {
     fn commit(
         &self,
         tpl: &rdkafka::TopicPartitionList,
@@ -450,7 +402,6 @@ async fn run_consumer_loop(
     config: ResolvedKafkaEndpointConfig,
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
-    ready: Arc<Notify>,
     runtime: Arc<dyn RuntimeObservability>,
     route_id: String,
 ) -> Result<(), CamelError> {
@@ -487,11 +438,9 @@ async fn run_consumer_loop(
     apply_security_config(&config, &mut client_cfg);
     apply_rdkafka_config(&config, &mut client_cfg);
 
-    let consumer: ReadyStreamConsumer = client_cfg
-        .create_with_context(ReadyContext { ready })
-        .map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to create Kafka consumer: {}", e))
-        })?;
+    let consumer: StreamConsumer = client_cfg.create().map_err(|e| {
+        CamelError::ProcessorError(format!("Failed to create Kafka consumer: {}", e))
+    })?;
 
     // Wrap in Arc to share between main loop and commit handler task
     let consumer = Arc::new(consumer);
@@ -515,7 +464,7 @@ async fn run_consumer_loop(
     // received".
     //
     // Readiness MUST NOT be gated on the first partition assignment (the old
-    // `ReadyContext::post_rebalance` behaviour). That is unsafe for two
+    // post_rebalance-gated behaviour). That is unsafe for two
     // reasons, both of which caused route startup to hang forever:
     //   1. Liveness — a broker that drops the connection during group
     //      coordination (librdkafka "Disconnected: connection closed by peer")
@@ -527,8 +476,6 @@ async fn run_consumer_loop(
     //      the assignment. Classic startup deadlock (same family as CXF's
     //      open_consumer_stream deadlock).
     //
-    // The `ready` Notify (fired from `ReadyContext::post_rebalance`) remains
-    // available for test synchronisation via `KafkaConsumer::ready_signal`.
     // The control-plane backstop in `await_consumer_startup` bounds this call
     // regardless, so a `subscribe()` that somehow never returns still cannot
     // hang route startup indefinitely.
@@ -584,9 +531,7 @@ async fn run_consumer_loop(
         None
     };
 
-    // The ReadyContext::post_rebalance callback fires `ready.notify_waiters()`
-    // when partitions are assigned. No polling loop needed — recv() drives the
-    // rebalance protocol automatically.
+    // recv() drives the rebalance protocol automatically — no polling loop needed.
 
     let policy: &NetworkRetryPolicy = &config.reconnect;
     let mut attempt = 0u32;
@@ -1133,14 +1078,6 @@ mod tests {
             ex.input.header("CamelKafkaTimestamp"),
             Some(&Value::Number(123456.into()))
         );
-    }
-
-    #[test]
-    fn test_ready_signal_returns_shared_notify_handle() {
-        let consumer = KafkaConsumer::new(make_resolved_config(), test_rt());
-        let ready_a = consumer.ready_signal();
-        let ready_b = consumer.ready_signal();
-        assert!(Arc::ptr_eq(&ready_a, &ready_b));
     }
 
     #[test]

@@ -149,4 +149,4 @@ will not compile with a partial removal — so this is one atomic task.
   `cargo clippy -p camel-component-kafka --all-targets -- -D warnings`. Fix any
   issues. Run `cargo test -p camel-component-kafka --lib` and confirm green.
 
-- [ ] 1.1
+- [x] 1.1
