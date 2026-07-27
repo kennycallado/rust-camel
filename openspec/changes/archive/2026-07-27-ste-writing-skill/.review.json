@@ -1,0 +1,6 @@
+{
+  "verdict": "APPROVE",
+  "reviewer": "r_glm",
+  "impl_hash": "bb80e31f9f7bf275cd4751994dd24ee6b80ecd42",
+  "note": "holistic review APPROVE-WITH-FINDINGS; 2 minor STE self-consistency nits applied (passive voice, 21-word rule-e). Final APPROVE."
+}
