@@ -66,10 +66,10 @@ apply:
   instruction: |
     BLESSING GATE (mandatory): Verify a valid plan blessing exists.
 
-    1. Read openspec/changes/<change>/.attestation.json
+    1. Read openspec/changes/<change>/.bless.json
     2. If missing → STOP. "Run /bless <change> first."
     3. If verdict != "BLESSED" → STOP. Show fixes required.
-    4. Recompute hash: bash .opencode/scripts/artifact-hash.sh openspec/changes/<change>
+    4. Recompute hash: cargo run -p xtask -- hash-artifacts --change-dir openspec/changes/<change>
     5. If hash mismatch → STOP. "Artifacts changed since blessing. Re-bless."
 
     IMPLEMENTATION (subagent-driven pattern):
@@ -81,7 +81,7 @@ apply:
     - Resolve minor issues or file bd follow-ups before advancing
     - Escalate to @experts/e_gpt when stuck after 2 honest attempts
     - Mark checkbox - [x] when task is clean (hash normalization makes
-      this safe — checkbox mutations do NOT invalidate the attestation)
+      this safe — checkbox mutations do NOT invalidate the hash)
 
     BD INTEGRATION:
     - Discovered work: bd create "<desc>" --deps discovered-from:<bd_issue>
