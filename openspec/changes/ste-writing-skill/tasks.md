@@ -73,7 +73,7 @@ root `/home/kenny/dev/rust-camel/.worktrees/ste-writing-skill`.
 - No claim that the skill rewrites code, `docs/ARCHITECT.md`, commit messages,
   or chat.
 
-- [ ] 1
+- [x] 1
 
 ## Policy
 
