@@ -111,9 +111,12 @@ spec to a worker.
      c. **Dispatch worker** with ONE task's details:
         - Pass: the task block from tasks.md (files/steps/tests/AC)
         - Pass: relevant spec paths from openspec/changes/<name>/specs/
-        - "Implement task <id>. Load skill `test-driven-development`.
-           Write/adjust tests first, then implement, then verify.
-           Follow the steps exactly. Report what tests pass."
+        - "Implement task <id>. The Tests block specifies exact test
+           cases (name/arrange/act/assert). Write EXACTLY those tests
+           first, verify they fail, then implement until they pass.
+           Do NOT invent additional test design — if a needed test is
+           not specified, STOP and report 'test-design-gap: <what>'
+           instead of guessing."
     d. Worker implements, runs tests, returns result
     e. **Dispatch `@reviewers/r_glm` for combined spec+code review** (one run):
        - Pass: the task's git diff + blessed spec + tasks.md

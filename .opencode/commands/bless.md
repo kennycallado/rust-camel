@@ -57,6 +57,11 @@ before producing your verdict. Grill the artifacts:
 - Is the scope correct — too broad, too narrow?
 - Does this need a new ADR?
 - Are acceptance criteria testable and complete?
+- **Are tests specified at executable level?** Each test must have a
+  function name, setup, action, and exact assertion. A vague test
+  like "test that consumer starts" is NOT acceptable — a w_fast
+  worker must be able to transcribe it to code without design
+  decisions. Reject vague tests as BLESS-WITH-FIXES.
 
 After grilling, apply the reviewer rubric from
 .opencode/agents/reviewers/r_glm.md as your evaluation baseline.

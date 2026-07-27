@@ -12,9 +12,9 @@
 1. <specific implementation step>
 2. <specific implementation step>
 
-**Tests:**
-- <test case description>
-- <test case description>
+**Tests:** (executable spec — name, arrange, act, assert)
+- `<test_fn_name>`: <setup> → <action> → <exact assertion>
+- `<test_fn_name>`: <setup> → <action> → <exact assertion>
 
 **Acceptance:**
 - <criterion: e.g. cargo clippy clean>
