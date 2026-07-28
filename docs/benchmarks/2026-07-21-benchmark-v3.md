@@ -647,8 +647,7 @@ To reproduce the v3 measurement:
 # Inside the Mandrel-único container (benchmark-runner:latest,
 # digest sha256:35f5513810b93de9a0183b7cfe560cceff734fec82d345980c8c80d2d46cb767):
 cd /workspace/rust-camel
-git checkout <merge-commit-of-feature/rc-f3g9-startup-benchmark>
-# See bd rc-c0y0 for the pinned tag/SHA post-merge.
+git checkout bench-v3  # = 929b81a2, the squash-merge of feature/rc-f3g9-startup-benchmark
 # Pre-flight: verify toolchains
 java -version  # OpenJDK 21.0.11+10-LTS (Temurin)
 native-image --version  # Mandrel (jdk-21)
