@@ -125,3 +125,43 @@ than run or recorded as a pre-existing-failure exemption.
 - **THEN** each Rust/cargo gate is reported "N/A — no Rust changed", and is
   neither executed nor recorded as a pre-existing-failure exemption.
 
+### Requirement: Merge-to-main Authorization
+
+After PHASE 4 (quality gates + holistic review + archive) the conductor SHALL
+NOT merge to main without explicit human approval. The MERGE GATE SHALL be
+mandatory and never autonomous, even in autopilot. On approval the conductor
+SHALL squash-merge per feature (`git merge --squash` + commit) into the root
+worktree on `main`, after verifying the root is on `main` and clean. On merge
+conflict the conductor SHALL NOT force or auto-resolve; it SHALL report and hand
+back to the human. The conductor SHALL NEVER run `git push` — push is the
+human's exclusive action.
+
+#### Scenario: merge requires human approval
+
+- **GIVEN** PHASE 4 has completed on the feature branch
+- **WHEN** the conductor reaches the MERGE GATE
+- **THEN** it pauses for explicit human approval and does not merge autonomously,
+  even in autopilot mode.
+
+#### Scenario: squash-merge per feature on approval
+
+- **GIVEN** the human approves the merge
+- **WHEN** the root worktree is on `main` and clean
+- **THEN** the conductor runs `git -C "$ROOT" merge --squash feature/<name>`
+  followed by a single caveman-commit on `main`, collapsing all branch commits
+  into one.
+
+#### Scenario: conflict is not force-resolved
+
+- **GIVEN** the squash-merge produces a conflict
+- **WHEN** the conductor handles it
+- **THEN** it does NOT force or auto-resolve; it reports the conflict and hands
+  back to the human.
+
+#### Scenario: push is the human's exclusive action
+
+- **GIVEN** the squash-merge has committed to `main` locally
+- **WHEN** the conductor reports completion
+- **THEN** it states that push is the human's action and the conductor SHALL NOT
+  run `git push`.
+

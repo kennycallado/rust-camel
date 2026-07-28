@@ -368,10 +368,26 @@ i. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
    (cd "$ROOT" && bd close <id> --reason "Completed")
    ```
 
-6. Report to human:
-   - Branch: `feature/<name>` in `.worktrees/<name>`
-   - Ready for human review and merge to main
-   - Do NOT merge yourself. Do NOT remove the worktree yet.
+6. **MERGE GATE** (requires human approval — never autonomous, even in autopilot):
+   - Pause and ask the human: "Approve squash-merge of `<name>` to main?"
+   - On approval, verify root is on `main` and clean (if not, report and wait — do not force):
+     ```bash
+     git -C "$ROOT" rev-parse --abbrev-ref HEAD   # must be main
+     git -C "$ROOT" status --short                 # must be empty
+     ```
+   - Squash-merge PER FEATURE (collapses all branch commits into one on main):
+     ```bash
+     git -C "$ROOT" merge --squash feature/<name>
+     git -C "$ROOT" commit -m "<caveman-commit: type(scope): summary + body + Bd:>"
+     ```
+   - On conflict: do NOT force or auto-resolve — report and hand back to the human.
+   - On success, cleanup the worktree and branch:
+     ```bash
+     git -C "$ROOT" worktree remove --force "$WT"
+     git -C "$ROOT" branch -D feature/<name>
+     ```
+   - Report: "Squash-merged to main locally (commit `<sha>`). Push is the human's exclusive action."
+   - NEVER run `git push`. The human pushes.
 
 ## TEARDOWN (on REJECT or cancel)
 
@@ -394,5 +410,6 @@ If bd was claimed:
 - Do NOT create tasks before the spec is blessed
 - Do NOT archive without a passing holistic review
 - Do NOT silently degrade when openspec CLI is missing — fail loudly
-- Do NOT merge to main — produce a branch for human review
-- Do NOT leave orphan worktrees — TEARDOWN on REJECT/cancel
+- Do NOT merge to main WITHOUT human approval — the MERGE GATE is mandatory and never autonomous (even in autopilot)
+- Do NOT run `git push` — push is the human's exclusive action
+- Do NOT leave orphan worktrees — TEARDOWN on REJECT/cancel, or cleanup after a successful merge
