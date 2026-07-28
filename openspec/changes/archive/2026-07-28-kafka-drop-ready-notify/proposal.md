@@ -1,6 +1,6 @@
 # Proposal: kafka-drop-ready-notify
 
-## Problem
+## Why
 
 The Kafka consumer (`crates/components/camel-kafka/src/consumer.rs`) carries a
 dual source of truth for readiness. After rc-gu5n unified binding consumers to
@@ -27,7 +27,7 @@ assignment, and it hangs under broker-drop or self-producing-route-graph
 conditions — exactly the deadlocks documented in the consumer.rs "Startup
 readiness" note (L508–L534). e_opus verdict on rc-5992: **SHOULD-FIX-SOON**.
 
-## Scope
+## What Changes
 
 **Included:**
 - Delete `ReadyContext` struct + its `ClientContext`/`RdConsumerContext` impls.
