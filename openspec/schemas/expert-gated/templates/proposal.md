@@ -1,10 +1,10 @@
 # Proposal: <change-name>
 
-## Problem
+## Why
 
 <What problem does this change solve? Why is it needed?>
 
-## Scope
+## What Changes
 
 <What's included and explicitly excluded>
 

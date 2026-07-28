@@ -9,7 +9,7 @@ artifacts:
     description: Initial proposal — why and what
     instruction: |
       Create a proposal explaining WHY this change is needed.
-      Focus on: problem statement, scope, acceptance criteria, risk budget.
+      Focus on: why, what changes, acceptance criteria, risk budget.
       Reference CONTEXT-MAP.md for domain language.
       Keep under 500 words.
     requires: []
