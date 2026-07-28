@@ -1,6 +1,6 @@
 # Proposal: ste-writing-skill
 
-## Problem
+## Why
 
 The OpenSpec expert-gated workflow produces persistent prose artifacts — ADRs
 (`docs/adr/`), per-crate `CONTEXT.md`, `CONTEXT-MAP.md`, `README.md`, and the
@@ -19,7 +19,7 @@ manuals since 1986) defines a small machine-checkable ruleset that removes the
 form of slop without rewriting meaning. A distilled skill of this standard is
 the candidate.
 
-## Scope
+## What Changes
 
 **In scope:**
 
