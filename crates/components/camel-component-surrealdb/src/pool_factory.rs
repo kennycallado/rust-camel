@@ -53,16 +53,24 @@ fn extra_str(config: &DatasourceConfig, key: &str) -> Result<String, camel_api::
 ///
 /// # Retry semantics
 ///
-/// Only the `connect(endpoint)` transport-establishment call is wrapped in
-/// `retry_async` (using [`NetworkRetryPolicy::default()`], the canonical
-/// enabled-with-backoff policy). Connection setup is idempotent — reconnecting
-/// twice is harmless — so transient failures (connection refused, DNS hiccup,
-/// TLS negotiation drop) retry with capped exponential backoff per ADR-0013.
+/// Two phases are retried, both with [`NetworkRetryPolicy::default()`] (the
+/// canonical enabled-with-backoff policy):
 ///
-/// The post-connect steps (`signin`, `use_ns`, `use_db`) are NOT retried: auth
-/// failures are permanent (bad credentials), and namespace/database selection
-/// failures on an already-established transport surface as pool-unhealthy via
-/// the `check()` health probe rather than as pool-creation failures.
+/// - **Transport establishment**: `connect(endpoint)` is wrapped in
+///   `retry_async` with [`SurrealDbError::is_retryable`]. Connection setup is
+///   idempotent — reconnecting twice is harmless — so transient failures
+///   (connection refused, DNS hiccup, TLS negotiation drop) retry with capped
+///   exponential backoff per ADR-0013.
+///
+/// - **Post-connect setup** (`signin → use_ns → use_db`): retried with the
+///   [`is_transaction_conflict`] classifier. SurrealDB v3 can return a
+///   retryable `QueryError::TransactionConflict` from these calls when
+///   multiple connections concurrently establish against the same ns/db and
+///   contend on the catalog write transaction (e.g. parallel integration
+///   tests, or concurrent pool creation in production). The setup sequence
+///   is idempotent, so retrying is safe. Auth failures (bad credentials) and
+///   `NotFound` errors are NOT transaction conflicts, so they fail fast
+///   without burning retry attempts.
 ///
 /// This mirrors `camel-sql/src/consumer.rs` (which retries `pool.connect()`)
 /// but differs in policy source: SQL reads `retry` from its endpoint config
@@ -107,31 +115,30 @@ impl PoolFactory for SurrealDbPoolFactory {
                 ))
             })?;
 
-            // Auth (Root fields are String in v3 SDK — clone). Not retried:
-            // see struct-level retry-semantics comment.
-            client
-                .signin(Root {
-                    username: user.clone(),
-                    password: pass.clone(),
-                })
-                .await
-                .map_err(|e| {
-                    camel_api::CamelError::ProcessorError(format!(
-                        "surrealdb signin failed for endpoint {}: {e}",
-                        redact_db_url(endpoint)
-                    ))
-                })?;
-
-            client.use_ns(&ns).await.map_err(|e| {
+            // Post-connect setup: signin → use_ns → use_db. Retried only on
+            // transaction conflicts (see `is_transaction_conflict` and the
+            // struct-level retry-semantics comment). Auth failures, not-found,
+            // and other permanent errors fail fast without burning attempts.
+            retry_async::<_, _, _, _, surrealdb::Error>(
+                &policy,
+                Some("surrealdb-pool-setup"),
+                || async {
+                    client
+                        .signin(Root {
+                            username: user.clone(),
+                            password: pass.clone(),
+                        })
+                        .await?;
+                    client.use_ns(&ns).await?;
+                    client.use_db(&db).await?;
+                    Ok(())
+                },
+                crate::error::is_transaction_conflict,
+            )
+            .await
+            .map_err(|e| {
                 camel_api::CamelError::ProcessorError(format!(
-                    "surrealdb use_ns failed for endpoint {}: {e}",
-                    redact_db_url(endpoint)
-                ))
-            })?;
-
-            client.use_db(&db).await.map_err(|e| {
-                camel_api::CamelError::ProcessorError(format!(
-                    "surrealdb use_db failed for endpoint {}: {e}",
+                    "surrealdb setup (signin/use_ns/use_db) failed for endpoint {}: {e}",
                     redact_db_url(endpoint)
                 ))
             })?;

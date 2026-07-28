@@ -103,6 +103,47 @@ impl From<SurrealDbError> for camel_api::CamelError {
     }
 }
 
+/// Classifies a raw [`surrealdb::Error`] as a transient transaction conflict
+/// that the server explicitly flagged as retriable.
+///
+/// SurrealDB v3 returns this not only from user queries, but also from
+/// connection-setup calls (`signin`, `use_ns`, `use_db`) when multiple
+/// connections concurrently establish against the same namespace/database
+/// and contend on the catalog write transaction. The server's own error text
+/// says "retry the transaction".
+///
+/// # Detection strategy
+///
+/// The surrealdb SDK currently surfaces server-side transaction conflicts as
+/// `ErrorKind::Internal` with no structured `QueryError::TransactionConflict`
+/// details — the structured code is lost when the error crosses the wire
+/// protocol. This mirrors `surrealdb-core`'s own internal tests
+/// (`kvs/index/tests.rs`), which detect this error via
+/// `to_string().starts_with("Transaction conflict:")`. We do the same, while
+/// ALSO checking the structured `QueryError::TransactionConflict` variant as
+/// a fast path for the day the SDK preserves it.
+///
+/// Unlike auth failures (bad credentials) and `NotFound` errors, a
+/// transaction conflict is transient and the setup sequence is idempotent,
+/// so retrying is safe. This classifier is consumed by
+/// [`crate::pool_factory::SurrealDbPoolFactory`] to retry the post-connect
+/// setup phase without also retrying permanent failures.
+pub fn is_transaction_conflict(err: &surrealdb::Error) -> bool {
+    // Structured fast path (future-proof): works once the SDK preserves the
+    // TransactionConflict variant across the wire.
+    if err.is_query()
+        && matches!(
+            err.query_details(),
+            Some(surrealdb::types::QueryError::TransactionConflict),
+        )
+    {
+        return true;
+    }
+    // Canonical pattern (matches surrealdb-core's own detection): the server
+    // emits "Transaction conflict: <reason>. This transaction can be retried".
+    err.message().starts_with("Transaction conflict")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +305,54 @@ mod tests {
             }
             other => panic!("expected ProcessorError for no-source variant, got {other:?}"),
         }
+    }
+
+    // --- is_transaction_conflict classifier (setup retry gateway) ---
+
+    #[test]
+    fn transaction_conflict_struct_variant_is_detected() {
+        // Structured fast path: QueryError::TransactionConflict.
+        let err = surrealdb::Error::query(
+            "Transaction conflict".into(),
+            surrealdb::types::QueryError::TransactionConflict,
+        );
+        assert!(is_transaction_conflict(&err));
+    }
+
+    #[test]
+    fn transaction_conflict_server_wire_form_is_detected() {
+        // What the SDK actually surfaces from the server: ErrorKind::Internal
+        // with the canonical message text. The structured code is lost across
+        // the wire protocol, so detection falls back to message matching
+        // (same pattern surrealdb-core uses in its own tests).
+        let err = surrealdb::Error::internal(
+            "Transaction conflict: Write conflict, retry the transaction. \
+             This transaction can be retried"
+                .into(),
+        );
+        assert!(is_transaction_conflict(&err));
+    }
+
+    #[test]
+    fn timed_out_query_is_not_transaction_conflict() {
+        let err = surrealdb::Error::query(
+            "timed out".into(),
+            surrealdb::types::QueryError::TimedOut {
+                duration: std::time::Duration::from_secs(1),
+            },
+        );
+        assert!(!is_transaction_conflict(&err));
+    }
+
+    #[test]
+    fn generic_internal_error_is_not_transaction_conflict() {
+        let err = surrealdb::Error::internal("some other internal failure".into());
+        assert!(!is_transaction_conflict(&err));
+    }
+
+    #[test]
+    fn connection_error_is_not_transaction_conflict() {
+        let err = surrealdb::Error::connection("refused".into(), None);
+        assert!(!is_transaction_conflict(&err));
     }
 }
