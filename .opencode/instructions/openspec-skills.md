@@ -41,11 +41,21 @@ Writing skills divide by document function, not by persistence:
 
 These skills are REPLACED by OpenSpec. Do NOT load them:
 - `brainstorming` — replaced by /opsx:propose + /bless
-- `writing-plans` — replaced by OpenSpec tasks.md
+- `writing-plans` — replaced by OpenSpec tasks.md. Its task-authoring
+  quality discipline (no placeholders, executable test specs, concrete
+  acceptance, scope-check) has been ported into the in-tree
+  `openspec-task-authoring` skill (see below); `writing-plans` itself
+  stays removed.
 - `executing-plans` — replaced by /opsx:apply
 
 ## Skills available contextually (load only when explicitly relevant)
 
+- `openspec-task-authoring` — loaded by `conductor-light` during PHASE 2
+  (task authoring) before the plan-bless. This is the sanctioned
+  in-tree replacement for `writing-plans`' task-authoring discipline
+  (no placeholders, executable test specs, concrete acceptance, scope-
+  check, escape hatch on phase-validation failure). It is NOT a
+  workflow skill and does not replace the reviewer loop or the bless.
 - `subagent-driven-development` — the implement→review pattern is embedded
   in apply.instruction; load this skill only if you need detailed dispatch guidance
 - `test-driven-development` — for tasks that change behavior

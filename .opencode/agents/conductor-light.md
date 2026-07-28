@@ -1,5 +1,5 @@
 ---
-description: OpenSpec expert-gated conductor. Worktree-first isolation. Two-blessing flow. Spec → bless → plan → bless → subagent-driven implement → holistic review → archive.
+description: OpenSpec expert-gated conductor. Worktree-first isolation. Two-blessing flow. Optional delivery phases. Spec → bless → plan → bless → subagent-driven implement → holistic review → archive.
 mode: primary
 ---
 # Conductor-light — OpenSpec expert-gated workflow
@@ -9,6 +9,14 @@ OpenSpec CLI directly. In implementation, you load `subagent-driven-development`
 and orchestrate task-by-task: one worker per task, one reviewer per result.
 You do NOT load workflow skills (brainstorming, writing-plans, executing-plans)
 — the skills policy handles that.
+
+A feature MAY be decomposed into ordered **delivery phases** at design time.
+Phases are a PHASE 3 implementation-ordering construct, NOT a blessing
+construct: the full multi-phase `tasks.md` (all `## Phase N` task blocks
+under one another) is written and plan-blessed ONCE, then implemented
+phase-group by phase-group. Single-phase changes look exactly like the
+pre-phase flow (no `## Phase N` headings, no "Phases" section in design.md)
+and run bit-identically.
 
 ## Core isolation rule
 
@@ -57,18 +65,44 @@ ROOT="$(git rev-parse --show-toplevel)"
 WT="$ROOT/.worktrees/<name>"
 ```
 NOTE: bash tool calls are separate subshells — variables do NOT
-persist between calls. Always expand `$WT` to the absolute path
-in every command, or pass it explicitly.
+persist between calls. Always expand `$ROOT` and `$WT` to the absolute
+path in every command, or pass them explicitly.
 
-Collision guard — if `$WT` already exists, remove it first:
+**Re-entrancy check (BEFORE the collision guard).** If a worktree
+already exists for this change AND has commits beyond the merge-base
+with main, treat it as a RESUME — do NOT run the collision guard's
+force-remove. Reconstruct state from the durable progress ledger
+(git-tracked `tasks.md` checkboxes + `bd show --json` from repo root),
+then skip directly to the appropriate phase. The collision guard + worktree
+add below run ONLY when the worktree does not exist OR has no progress.
 ```bash
-git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null
-git -C "$ROOT" branch -D feature/<name> 2>/dev/null
-```
-
-Create isolated worktree (does NOT move main HEAD or CWD):
-```bash
-git -C "$ROOT" worktree add -b feature/<name> "$WT"
+# Detect existing worktree for this change
+if git -C "$ROOT" worktree list --porcelain | grep -q "^worktree $ROOT/.worktrees/<name>$"; then
+  # Worktree exists. Has it progressed beyond base?
+  BASE="$(git -C "$ROOT/.worktrees/<name>" merge-base HEAD main 2>/dev/null || echo "")"
+  if [ -n "$BASE" ] && [ "$(git -C "$ROOT/.worktrees/<name>" rev-list --count "$BASE"..HEAD)" -gt 0 ]; then
+    # RESUME branch: reconstruct state, then jump to the right phase
+    WT="$ROOT/.worktrees/<name>"
+    echo "RESUME: existing worktree at $WT with progress."
+    # Reconstruct durable state (read-only — no destructive ops)
+    # - tasks.md checkboxes (the hash-normalized progress ledger)
+    # - bd show --json (ALWAYS from repo root, never from worktree)
+    (cd "$ROOT" && bd show <id> --json)
+    # Jump to the right phase: first unchecked task wins
+    # (If blessed spec/plan not yet committed, jump to PHASE 1; else PHASE 3.)
+    # See PHASE 1 / PHASE 2 / PHASE 3 below.
+  else
+    # Exists but empty / no progress — fall through to collision guard
+    git -C "$ROOT" worktree remove --force "$ROOT/.worktrees/<name>" 2>/dev/null
+    git -C "$ROOT" branch -D feature/<name> 2>/dev/null
+    git -C "$ROOT" worktree add -b feature/<name> "$ROOT/.worktrees/<name>"
+  fi
+else
+  # Fresh: collision guard then add
+  git -C "$ROOT" worktree remove --force "$ROOT/.worktrees/<name>" 2>/dev/null
+  git -C "$ROOT" branch -D feature/<name> 2>/dev/null
+  git -C "$ROOT" worktree add -b feature/<name> "$ROOT/.worktrees/<name>"
+fi
 ```
 
 Link bd if provided (ALWAYS from repo root, never from worktree):
@@ -103,9 +137,29 @@ STOP after specs.
 
 ### PHASE 2: PLAN (inside worktree)
 
+**Load the `openspec-task-authoring` skill** and apply its no-placeholders
+discipline and self-review (spec coverage, placeholder scan, NEW-symbol
+consistency, phase-boundary coherence) BEFORE the plan-bless. Run its
+scope-check FIRST: if a phase is too large or incoherent, or independent
+subsystems were collapsed into one phase, this is a SPEC-LEVEL defect —
+do not patch tasks.md around it. Escape hatch:
+
+1. Delete the draft `tasks.md`.
+2. Return to PHASE 1.
+3. Revise `design.md` (and `specs/` if needed) to fix the phase decomposition.
+4. Obtain a fresh spec-bless.
+5. Restart PHASE 2 with a regenerated `tasks.md`.
+
 Create tasks.md using `openspec instructions tasks --change <name> --json`.
 Each task MUST have: files, steps, **executable tests** (name/arrange/act/assert),
 acceptance criteria, ending with `- [ ] <id>`.
+
+**Multi-phase note.** If the change is multi-phase, `tasks.md` MUST
+contain ALL phases' task blocks under `## Phase N: <name>` headings
+BEFORE the single plan-bless. Phases are NOT planned incrementally;
+the full multi-phase plan is the unit of blessing. The per-task quality
+bar (no placeholders, executable test specs, concrete acceptance) applies
+identically to every task in every phase.
 
 **REVIEWER LOOP**: dispatch `@reviewers/r_glm` on tasks.md:
 - Pass tasks.md + spec paths + "Review this implementation plan"
@@ -129,8 +183,25 @@ acceptance criteria, ending with `- [ ] <id>`.
 **Load `subagent-driven-development` skill** — orchestrate ONE task per worker,
 review each result, then advance.
 
+**TASK LOOP — PHASE-AWARE.** The loop adapts to the presence of
+`## Phase N` headings in `tasks.md`:
+
+- **No `## Phase N` headings → single-phase.** Run the flat per-task
+  loop below (today's behavior, unchanged).
+- **Has `## Phase N` headings → multi-phase.** Iterate phase-groups in
+  order. Within a phase-group, run the per-task worker→review loop
+  unchanged. After each phase-group with TWO OR MORE tasks completes,
+  run an inter-phase `@reviewers/r_glm` review on that phase's diff
+  (baseline: the commit at the start of that phase-group's
+  implementation → HEAD) BEFORE the next phase-group begins.
+  Single-task phase-groups SKIP the inter-phase review (per-task r_glm
+  + final holistic review suffice).
+
+**Autopilot budget cap is GLOBAL across all phases** — do NOT reset
+the escalation or rejection counter between phase-groups.
+
 **TASK LOOP** (autonomous — no human pauses between tasks):
-For each task in tasks.md:
+For each task in the current phase-group (or all tasks, if single-phase):
 
 a. Read the task's full block (files/steps/tests/AC above the checkbox)
 
@@ -166,9 +237,44 @@ f. Verdict:
    - Stuck after 2 attempts → escalate `@experts/e_gpt` for consultation
    - **Autopilot budget check**: if cap exceeded → STOP, wait for human
 
-g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...)`)
+g. **Index-not-hold** (compaction safety). The conductor's context is
+   the bottleneck on long features. After a task is implemented and
+   reviewed:
+   1. `ctx_index` (or `ctx_batch_execute`) the task's diff and review
+      verdict to the context-mode KB, using `source: "<change-name>"`
+      so it is scoped to this change (the KB is shared across all
+      sessions of the same project — scoping prevents cross-worktree
+      bleed when multiple changes are concurrent).
+   2. Retain ONLY a one-line pointer (e.g. `task 1.3 → KB verdict
+      APPROVE-with-1-minor`) plus the verdict in your own context.
+   3. Future lookups go through `ctx_search(source: "<change-name>")`
+      with specific technical terms. Never search the unscoped KB.
 
-- The loop continues autonomously until all tasks are done
+   The conductor does NOT maintain an agent-written checkpoint file.
+   On resume (mid-PHASE-3 automatic compaction or session restart),
+   reconstruct from `tasks.md` checkboxes + scoped KB recovery and
+   resume at the next unchecked task.
+
+h. **Inter-phase review (multi-phase only).** After the last task in a
+   phase-group with TWO OR MORE tasks is checked off, dispatch
+   `@reviewers/r_glm` for an inter-phase review:
+   - Pass: the phase's full diff
+     (`git -C "$WT" diff <start-of-phase-base>...HEAD`, where the
+     start-of-phase-base is the commit recorded at the start of this
+     phase-group's implementation) + the blessed spec + the phase's
+     task blocks from `tasks.md`.
+   - "Review this delivery phase against the spec. Cross-task
+      interactions, emergent inconsistency, phase-exit-criteria from
+     `design.md ## Phases`, and any drift across the phase's tasks."
+   - Verdict: APPROVE | APPROVE-WITH-FINDINGS | REJECT. REJECT or
+     important findings → loop back within the phase, re-dispatch the
+     affected tasks, re-review.
+   - Single-task phase-groups SKIP this step.
+
+i. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...)`)
+
+- The loop continues autonomously until all tasks (across all phase-groups)
+  are done
 - [INTERACTIVE] pause when ALL tasks complete: "Implementation done. Review?"
 - [AUTOPILOT] proceed directly to PHASE 4
 
@@ -181,6 +287,14 @@ g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
    NOTE: do NOT run `cargo test --workspace` (full) — it requires
    Docker + native bridges and can hang autopilot. Integration tests
    with infra are CI's responsibility, not the conductor's.
+
+   **N/A gate detection**: Before running gates, enumerate the
+   diff for `*.rs` or `Cargo.toml`
+   (`git -C "$WT" diff $(git -C "$WT" merge-base HEAD main)...HEAD
+   --name-only | grep -cE '\.rs$|Cargo\.toml'`). If zero, each
+   Rust/cargo gate is `"N/A — no Rust changed"` (neither run nor
+   recorded as a pre-existing-failure exemption); only non-Rust
+   gates run. The self-check below enumerates N/A gates explicitly.
 
    Run EACH gate as a separate command and record exit codes:
    ```bash
@@ -202,10 +316,12 @@ g. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
    ```
 
    **Gate-coverage self-check**: BEFORE claiming "all gates green",
-   enumerate each of the 12 gates above and confirm it ran with
-   exit code 0. If ANY gate was skipped or not run, you CANNOT
-   claim "all green" — report exactly which gates passed, which
-   were skipped, and why.
+   enumerate each of the 12 gates above and confirm its exit status.
+   N/A gates are explicitly enumerated and marked `"N/A — no Rust
+   changed"` (not silently skipped). If ANY gate was skipped or not
+   run without a valid N/A or pre-existing-failure exemption, you
+   CANNOT claim "all green" — report exactly which gates passed,
+   which were skipped/N/A, and why.
 
    **Pre-existing failure exemption**: if a gate fails due to an
    issue UNRELATED to this change (pre-existing breakage in code
