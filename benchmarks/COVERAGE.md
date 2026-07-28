@@ -36,13 +36,13 @@ Four artifacts, each representing its framework's recommended production mode:
 
 **Removed (kept in appendix as mode-delta reference)**: `camel-quarkus-dsl` (JVM mode) and
 `camel-quarkus-yaml` (JVM mode). Their numbers prove the native-vs-JVM mode effect; they
-are not part of the head-to-head artifact set going forward. **v3.5 made this harness-official**:
+are not part of the head-to-head artifact set going forward. **v3 made this harness-official**:
 both subprojects dropped from `settings.gradle.kts` `include` lists (directories retained as
 source holders for the `-native` variants via Gradle `sourceSets.srcDir`). v1/v2 published
 reports still contain the JVM numbers as historical mode-delta reference.
 
 **Camel standalone YAML** (`camel-standalone-yaml`) status: **measured in v3+** (Pair B JVM
-baseline). Confirmed in v3.5 — the Pair A/B split survives the v3 metric expansion because
+baseline). Confirmed in v3 — the Pair A/B split survives the v3 metric expansion because
 the YAML-parse overhead (~5ms) is a load-bearing measurement for the dev-inner-loop ICP.
 
 **Bridge scenarios asymmetry** (T4a/T4b only — 4 artifacts per bridge scenario, not 6):
@@ -88,9 +88,9 @@ Each cell shows state + version + report link (if measured).
 
 | | M1 cold-start + RSS | M2 warm p99 | M3 sustained throughput | M4 memory growth |
 |---|---|---|---|---|
-| **T1** timer+log | ✓ v1+v2 — [v1 report](2026-07-18-startup-minimal-benchmark.md), [v2 report](2026-07-18-benchmark-v2.md) | ✓ v3.5 — baseline warm | ✗ won't-measure: timer-driven, fixed throughput (100 msgs/sec at 10ms period) | ✗ won't-measure: same |
-| **T2** 5 EIPs (no-bridge) | ✓ v2 — [v2 report](2026-07-18-benchmark-v2.md) | ✓ v3.5 | ✗ won't-measure: timer-driven, fixed throughput | ✗ won't-measure: same |
-| **T3** HTTP server (no-bridge) | ✓ v3.5 — listener spin-up cost | ✓ v3.5 — request-serving viability | ✓ v4 (platform-http) — 78,628 req/s (rust-camel-lib), 37,713 (Quarkus native), 66,808 (Camel JVM); 1.18× rust-camel vs JVM, 2.08× rust-camel vs Quarkus native, 1.77× JVM vs Quarkus native | ✓ v4 (platform-http) — RSS delta (median, 5 rounds): rust-camel-lib +52 KiB, rust-camel-cli +44 KiB, camel-standalone-dsl +540 KiB, camel-standalone-yaml +448 KiB, camel-quarkus-dsl-native −1,672 KiB (RSS shrinks — GC releasing), camel-quarkus-yaml-native −284 KiB |
+| **T1** timer+log | ✓ v1+v2 — [v1 report](2026-07-18-startup-minimal-benchmark.md), [v2 report](2026-07-18-benchmark-v2.md) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — baseline warm | ✗ won't-measure: timer-driven, fixed throughput (100 msgs/sec at 10ms period) | ✗ won't-measure: same |
+| **T2** 5 EIPs (no-bridge) | ✓ v2 — [v2 report](2026-07-18-benchmark-v2.md) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) | ✗ won't-measure: timer-driven, fixed throughput | ✗ won't-measure: same |
+| **T3** HTTP server (no-bridge) | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — listener spin-up cost | ✓ [v3](../docs/benchmarks/2026-07-21-benchmark-v3.md) — request-serving viability | ✓ v4 (platform-http) — 78,628 req/s (rust-camel-lib), 37,713 (Quarkus native), 66,808 (Camel JVM); 1.18× rust-camel vs JVM, 2.08× rust-camel vs Quarkus native, 1.77× JVM vs Quarkus native | ✓ v4 (platform-http) — RSS delta (median, 5 rounds): rust-camel-lib +52 KiB, rust-camel-cli +44 KiB, camel-standalone-dsl +540 KiB, camel-standalone-yaml +448 KiB, camel-quarkus-dsl-native −1,672 KiB (RSS shrinks — GC releasing), camel-quarkus-yaml-native −284 KiB |
 | **T4a** XSLT bridge (~10ms Java work) | ? v3 — bridge process spawn cost | ✓ v3 — [v3 report](../docs/benchmarks/2026-07-21-benchmark-v3.md) (2 pairs: standalone + Quarkus native, both Saxon-HE) | ✗ won't-measure: throughput dominated by XSLT engine, not bridge overhead | ✗ won't-measure: same as M3 |
 | **T4b** XSD validation bridge (<1ms Java work) | ? v3 — bridge process spawn cost | ✓ v3 — [v3 report](../docs/benchmarks/2026-07-21-benchmark-v3.md) (2 pairs) | ✗ won't-measure: same rationale as T4a | ✗ won't-measure: same |
 | **T4c** JMS bridge | ? v4-if: T4a/T4b tax curve motivates more bridge coverage | ? v4-if: same | ✗ won't-measure: JMS broker dominates | ✗ won't-measure: same |

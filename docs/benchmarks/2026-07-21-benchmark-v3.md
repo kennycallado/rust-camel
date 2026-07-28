@@ -1,20 +1,27 @@
 # Startup benchmark v3 — Protocol B instrumentation fixes (2026-07-21)
 
-> **Provenance**: Measured on commit `<TBD>`, host: 12-core, 27GB RAM,
-> Docker image `benchmark-runner:latest`. Full metadata in
-> `benchmarks/results/20260721T161314Z/run-metadata.json`.
+> **Provenance**: Measured against tag `bench-v3` (`929b81a2`), host:
+> 12-core, 27GB RAM, Docker image `benchmark-runner:latest`. Full
+> metadata in `benchmarks/results/20260721T161314Z/run-metadata.json`.
 
 > bd `rc-2vxg`. Extension of v2 (`rc-p9ki`, closed; report at
 > `docs/benchmarks/2026-07-18-benchmark-v2.md`). Resolves the spec F1
-> instrumentation bug that left v3.5 Protocol B data void: replaces
-> absolute-timestamp emission with per-tick monotonic nanosecond
-> durations on both Java and Rust sides, using identical
-> component-call boundaries, then re-runs the M2 Protocol B matrix
-> and publishes the bridge-tax characterization. M1 cold-start and
-> M2-A warm-latency numbers are inherited unchanged from the v3.5
-> run (`benchmarks/results/20260720T150810Z/`); the v3 contribution
-> is the re-measured M2-B bridge tax and the publication gate
-> verification.
+> instrumentation bug that left the prior run's Protocol B data void.
+
+> **Two runs, one report.** v3 consolidates two measurement runs:
+> - **2026-07-20 run** (`benchmarks/results/20260720T150810Z/`) — M1
+>   cold-start + M2-A warm-latency. Protocol B (M2-B bridge tax) data
+>   was void due to the F1 instrumentation bug. Internally nicknamed
+>   "v3.5" during development; **there is no separate v3.5 report** —
+>   those numbers are first published here.
+> - **2026-07-21 run** (`benchmarks/results/20260721T161314Z/`) — M2-B
+>   bridge tax, re-measured after the F1 fix. This is the v3
+>   contribution.
+>
+> The "v3.5" label was an internal nickname for the 2026-07-20 run
+> during development; v3 is the canonical publication for all of its
+> numbers. `benchmarks/CONTEXT.md` and `benchmarks/COVERAGE.md` now
+> reference v3 directly.
 
 ## Executive summary
 
@@ -45,9 +52,10 @@ re-measured, the bridge tax is now characterizable:
   scenarios, vs rust-camel-lib at 9 ms, but neither is in the
   v3 bridge-tax pair list.
 
-The v3 report inherits the v2 cold-start and v3.5 warm-latency
-numbers; the new data is the bridge-tax table and the publication
-gate verification.
+The v3 report publishes the v2-lineage cold-start and the 2026-07-20
+warm-latency numbers (first publication; raw data in run dir
+`20260720T150810Z`); the new data is the bridge-tax table and the
+publication gate verification.
 
 ## Publication gates
 
@@ -107,9 +115,10 @@ after the 2 native Quarkus builds (each ~3 min Mandrel native:
 `camel-quarkus-dsl-native` for xslt-bridge + xsd-validation-bridge)
 and the 1 Mandrel XML bridge native build.
 
-The M1 cold-start numbers and the M2-A warm-latency numbers are
-inherited from the v3.5 run `20260720T150810Z`; environment
-details for that run are at the top of each respective section.
+The M1 cold-start numbers and the M2-A warm-latency numbers were
+measured in the 2026-07-20 run (`benchmarks/results/20260720T150810Z/`);
+environment details for that run are at the top of each respective
+section.
 
 ### Container (Mandrel-único)
 
@@ -117,8 +126,8 @@ The entire build + measure pipeline runs inside one container
 based on `quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-21`,
 with Rust 1.82.0, Maven 3.9.9, Gradle 8.10.2, and the bench
 utilities layered on. The container's glibc is 2.28 (RHEL 8.10).
-The Mandrel-único runner image was previously described in v3.5
-CONTEXT.md §2 "Container-hosted cold-start" as a v3.5
+The Mandrel-único runner image was previously described in
+CONTEXT.md §2 "Container-hosted cold-start" as a v3
 replacement for the v1/v2 "build in Docker, run bare-metal" split.
 
 ```
@@ -163,7 +172,7 @@ cells). The bridge exposes a gRPC+TLS endpoint that the
 rust-camel `camel-xslt` and `camel-validator` components call
 into from inside the `.to()` route step.
 
-## Cold-start (M1) — inherited from v3.5
+## Cold-start (M1)
 
 Source: `benchmarks/results/20260720T150810Z/<scenario>_<contender>/samples.txt`
 (50 lines, 2 columns: `elapsed_ms rss_kb`). Methodology: n=50
@@ -227,7 +236,7 @@ v3.5 (native build OOM at Mandrel's 4 GB cap with Saxon-HE 12.5
 in the same image); the xslt-bridge `camel-quarkus-yaml-native`
 and both `-yaml` bridge cells were not built for v3.5 (bridge
 matrix intentionally asymmetric — see `benchmarks/CONTEXT.md` §2
-"v3.5: Bridge scenarios stay at 4 artifacts"). The v3 M2-B run
+"v3: Bridge scenarios stay at 4 artifacts"). The v3 M2-B run
 succeeded for the 4 cells in the bridge-tax matrix; see Bridge
 tax section.
 
@@ -240,7 +249,7 @@ cold-start is dominated by the YAML route loader's first-call
 validation; the listener binding itself is sub-millisecond. This
 is a v3.5 finding carried into v3 but not a v3 contribution.
 
-## Warm latency (M2-A) — inherited from v3.5
+## Warm latency (M2-A)
 
 Source: `benchmarks/results/20260720T150810Z/m2-round-{0..4}/<cell>/protocol-a-summary.txt`
 and `protocol-a-samples.txt` (10,000 ns samples per round, 5
@@ -435,7 +444,7 @@ data to do so.
 
 ## Methodology
 
-Inherited regime from v2/v3.5 with the v3 spec F1 changes:
+Inherited regime from v2 with the v3 spec F1 changes:
 
 - **Sample size per cell**: 5 rounds × 10,000 samples = 50,000
   observations per cell for M2-B; n=50 + 3 warmup discarded for
@@ -486,7 +495,7 @@ Inherited regime from v2/v3.5 with the v3 spec F1 changes:
   runtime, no file parsing; Pair B = YAML route, parsed at
   runtime. The bridge matrix is intentionally asymmetric
   (4 artifacts per scenario, not 6) — see `benchmarks/CONTEXT.md`
-  §2 "v3.5: Bridge scenarios stay at 4 artifacts". The
+  §2 "v3: Bridge scenarios stay at 4 artifacts". The
   authoring-format-invariant tax is not re-measured by adding
   yaml variants to the bridge matrix.
 
@@ -563,8 +572,8 @@ Carried from v1/v2 unless noted, plus the v3-specific:
   2-3 (per `/proc/loadavg`); absolute medians may shift a
   few ms or μs on a quieter host. The relative multipliers
   between contenders cancel the noisy-neighbor effect.
-- **JVM Quarkus YAML bridge cells not built for v3.5** (per
-  `benchmarks/CONTEXT.md` §2 "v3.5: Bridge scenarios stay at
+- **JVM Quarkus YAML bridge cells not built for v3** (per
+  `benchmarks/CONTEXT.md` §2 "v3: Bridge scenarios stay at
   4 artifacts"). The bridge tax is authoring-format-invariant
   (the gRPC subprocess + byte-pinned XML payload are
   identical regardless of route authoring format); adding
@@ -598,8 +607,8 @@ a 267 μs to 1 ms per-request tax when it must dispatch to
 a Java bridge, and the resulting p99 is 1.7× to 8.9× the
 Java p99 on the same workload".
 
-The cold-start and warm-latency numbers, inherited from
-v2/v3.5, hold. rust-camel-lib's 9 ms cold-start and 119 μs
+The cold-start and warm-latency numbers (first published here,
+measured in the 2026-07-20 run) hold. rust-camel-lib's 9 ms cold-start and 119 μs
 warm p50 are both ~1.5-1.9× faster than Quarkus native's
 14 ms and 227 μs. The JVM standalone cells are 30-40×
 slower on cold-start and fail M2-A warmup stability at
