@@ -199,3 +199,102 @@ downgraded from `error!` to `warn!`.
 
 Metrics instrumentation is not yet wired for most processors. See TODO(PROC-004) in
 `camel-processor/src/log.rs` for the broader instrumentation gap.
+
+## Aggregator EIP divergences from Apache Camel (ADR-0046 protocol)
+
+This section records divergences surfaced by applying the ADR-0046 protocol to the Aggregator EIP;
+each divergence names the forcing contract shape or ADR and the observable consequence. The
+Splitter-specific divergence D2 lives in the separate "Aggregation contract (divergence from Apache
+Camel)" block above.
+
+### D-A1: binary-fold strategy contract — no null oldExchange on first message
+
+Apache Camel's `AggregationStrategy.aggregate(Exchange oldExchange, Exchange newExchange)` receives
+`null` for `oldExchange` on the FIRST message of a bucket, letting a strategy initialize.
+rust-camel's `AggregationFn = Arc<dyn Fn(Exchange, Exchange) -> Exchange + Send + Sync>` (defined in
+`crates/camel-api/src/aggregator.rs`, the `AggregationFn` alias) ALWAYS receives two exchanges: the first message sits
+untouched in the bucket, and the strategy is first invoked as `f(ex1, ex2)` when the second
+message arrives. Forcing contract shape: the binary `AggregationFn` signature + the bucket model
+that retains the first exchange as the fold seed. Observable consequence: a strategy needing
+initialize-on-first logic must branch on a sentinel in the accumulated body (or check a property)
+rather than on a null oldExchange. Pinned by `aggregator::tests::test_da1_strategy_receives_two_exchanges_first_message_preserved`.
+
+### D-A2: AggregationFn cannot signal failure — no Result return
+
+Apache Camel's `AggregationStrategy.aggregate()` may throw, propagating the exception and failing the
+aggregated exchange. rust-camel's `AggregationFn` returns `Exchange` (not
+`Result<Exchange, CamelError>`), so a custom strategy has no path to signal invalid aggregation
+through the return type except by panicking. Forcing contract shape: the `AggregationFn` alias at
+`crates/camel-api/src/aggregator.rs` — `Arc<dyn Fn(Exchange, Exchange) -> Exchange + Send + Sync>`.
+This is the D2-family divergence for the Aggregate EIP specifically — distinct from the Splitter
+EIP's `Vec<Result<Exchange, CamelError>>` shape documented in the "Aggregation contract" block
+above. Observable consequence: error-aware aggregation logic cannot be expressed in the strategy
+return; it must live outside (e.g. in a downstream doTry/error-handler per ADR-0019) or in a
+wrapping service.
+
+### D-A3: force-completion-on-stop channel-mediated emission + drop under pressure
+
+Apache Camel's `forceCompletionOnStop()` flows pending buckets synchronously through the downstream
+pipeline during `context.stop()`. rust-camel's `force_complete_all()` (in
+`crates/camel-processor/src/aggregator.rs`, the `force_complete_all` method) is nonblocking
+(`-> ()`): it cannot return completed exchanges inline, so it emits them through a bounded `late_tx`
+mpsc channel (capacity 256, see `crates/camel-core/src/lifecycle/adapters/route_controller.rs` where
+the channel is created) that a `select!` arm drains into the post-pipeline. Boolean semantics are
+equal: `force_completion_on_stop == true` emits pending buckets, `== false` drops them. Two
+divergences: (1) channel-mediated async emission vs Camel's synchronous flow; (2) under
+late-channel-full pressure, `try_send` fails and the force-completed exchange is DROPPED with a
+`warn!` log (the "aggregator force-complete emit dropped" warn site in `force_complete_all`) — Camel
+has no equivalent drop path. Forcing contract shape: nonblocking `force_complete_all() -> ()`
+(the nonblocking signature is forced by the Tower `Service` shutdown lifecycle — shutdown cannot
+block on inline return) plus the bounded `late_tx` (capacity 256) that the route controller's
+`select!` arm drains. Pinned by
+`aggregator::tests::test_da3_force_complete_all_drops_on_saturated_channel`.
+
+### D-A4: per-bucket timeout task vs central completion-timeout-checker + knob divergence
+
+Apache Camel runs a single background `completionTimeoutChecker` thread that polls all
+buckets every `completionTimeoutCheckerInterval(ms)` to find expired ones. rust-camel
+uses a per-bucket dedicated tokio task spawned by `spawn_timeout_task` (in
+`crates/camel-processor/src/aggregator.rs`, the `spawn_timeout_task` function), cancelled
+and reset on each new exchange for that key, PLUS a `bucket_ttl` background sweep
+(interval `ttl/2`, floor 50ms) as a fallback eviction path, PLUS a `max_timeout_tasks`
+DoS cap that gracefully degrades to TTL-only eviction when the cap is reached. The
+observable completion semantics are EQUAL (a bucket completes after the configured
+inactivity period) but the MECHANISM differs.
+
+Knob divergence: rust-camel exposes `max_timeout_tasks` and `bucket_ttl` (Camel does not);
+Camel exposes `completionTimeoutCheckerInterval` (rust-camel does not — the per-bucket task
+makes it unnecessary). Forcing contract shape: `CompletionCondition::Timeout` (in
+`crates/camel-api/src/aggregator.rs`), `AggregatorConfig.max_timeout_tasks`, and
+`AggregatorConfig.bucket_ttl` (same file) — all three configuration contracts already defined
+in `AggregatorConfig`. Pinned by
+`aggregator::tests::test_timeout_completes_bucket`,
+`aggregator::tests::test_timeout_resets_on_new_exchange`,
+`aggregator::tests::test_bucket_ttl_eviction`, and
+`aggregator::tests::test_aggregator_timeout_task_cap_no_panic_under_flood`.
+
+### D-A5: mandatory memory bounds — validate() rejects unbounded configs
+
+Apache Camel's default in-memory aggregation repository is UNBOUNDED (no mandatory cap; the operator
+may configure one). rust-camel's `AggregatorConfig::validate()` (the `validate` method in
+`crates/camel-api/src/aggregator.rs`) REJECTS any config with no memory-release bound — it returns
+`CamelError::ConfigValidation(ConfigValidationError::AggregatorMissingMemoryBound)` when none of
+`max_buckets`, a `Timeout` completion condition, or `bucket_ttl` is set, and
+`ConfigValidationError::AggregatorTimeoutRequiresTtl` when a `Timeout` completion is present without
+`bucket_ttl`. The builder defaults are `max_buckets = 10_000` and `bucket_ttl = 300s`. Forcing ADR:
+ADR-0033 (security defaults — typed `ConfigValidationError`, operators may match on the variant).
+Consequence for an operator migrating from Camel: a config that is valid (if risky) in Camel may be
+REJECTED at build/validate time here; the operator must set an explicit bound. Pinned by
+`camel_api::aggregator::tests::test_aggregator_config_rejects_no_memory_bound` (substring check) and
+`camel_api::aggregator::tests::test_da5_validate_returns_typed_missing_memory_bound_variant` (typed-variant pin).
+
+### G-A1 (gap-coverage): completionSize as Expression — static Size only
+
+Apache Camel supports `completionSize(expression)` where the size limit is evaluated per-exchange
+(e.g. derived from a header on each incoming message). rust-camel's
+`CompletionCondition::Size(usize)` (in `crates/camel-api/src/aggregator.rs`) is STATIC — the limit
+is a fixed `usize` set at config time with no per-exchange evaluation path. This is a COVERAGE GAP
+(less surface), NOT a forced divergence: no ADR forbids an expression-based size; it is simply not
+yet implemented. Implementing it is out of scope for this change (which is documentation-only per
+ADR-0046). A future feature task may add a `CompletionCondition::SizeExpr { expr, language }`
+variant mirroring the existing `PredicateExpr` variant (same enum, same file).

@@ -5,6 +5,17 @@ use crate::error::{CamelError, ConfigValidationError};
 use crate::exchange::Exchange;
 
 /// Aggregation function — left-fold binary: (accumulated, next) -> merged.
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use camel_api::aggregator::AggregationFn;
+/// use camel_api::{Exchange, CamelError};
+/// // A strategy that attempts to signal failure via Result does NOT type-check
+/// // as AggregationFn (whose Fn returns Exchange, not Result<Exchange, CamelError>).
+/// let _: AggregationFn = Arc::new(
+///     |_old: Exchange, _new: Exchange| -> Result<Exchange, CamelError> { unreachable!() }
+/// );
+/// ```
 pub type AggregationFn = Arc<dyn Fn(Exchange, Exchange) -> Exchange + Send + Sync>;
 
 /// Strategy for correlating exchanges into aggregation buckets.
@@ -641,6 +652,32 @@ mod tests {
                 || err.to_string().contains("completionTimeout")
                 || err.to_string().contains("bucket_ttl"),
             "error should explain the required bound: {err}"
+        );
+    }
+
+    /// D-A5: typed-variant pin — the exact `AggregatorMissingMemoryBound`
+    /// variant, not a substring match. ADR-0033 contract: operators may match
+    /// on the typed variant for structured error handling.
+    #[test]
+    fn test_da5_validate_returns_typed_missing_memory_bound_variant() {
+        let config = AggregatorConfig {
+            header_name: "k".into(),
+            completion: CompletionMode::Single(CompletionCondition::Size(2)),
+            correlation: CorrelationStrategy::HeaderName("k".into()),
+            strategy: AggregationStrategy::CollectAll,
+            max_buckets: None,
+            bucket_ttl: None,
+            force_completion_on_stop: false,
+            discard_on_timeout: false,
+            max_timeout_tasks: 1024,
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CamelError::ConfigValidation(ConfigValidationError::AggregatorMissingMemoryBound)
+            ),
+            "expected ConfigValidation(AggregatorMissingMemoryBound), got: {err}"
         );
     }
 

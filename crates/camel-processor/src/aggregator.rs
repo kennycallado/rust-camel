@@ -1352,6 +1352,62 @@ mod tests {
         );
     }
 
+    // D-A3 semantic pin: exercises the `force_complete_all()` -> `late_tx.try_send`
+    // path specifically (not the timeout-task path covered by
+    // `test_late_channel_full_drops_with_warning` above). Pre-saturates the
+    // single-slot `late_tx` before constructing the service so every
+    // force-completed exchange must drop on the `try_send` failure branch.
+    #[tokio::test]
+    async fn test_da3_force_complete_all_drops_on_saturated_channel() {
+        let config = AggregatorConfig::correlate_by("k")
+            .complete_when_size(10)
+            .force_completion_on_stop(true)
+            .build()
+            .unwrap();
+        // capacity 1 — deliberately tiny so the pre-fill fully saturates the slot.
+        let (late_tx, mut late_rx) = mpsc::channel::<Exchange>(1);
+        // Pre-saturate the 1-slot mpsc BEFORE the Sender is moved into
+        // AggregatorService::new. The Sender is taken by value into the
+        // service, so this `try_send` is the only chance to occupy the slot.
+        late_tx
+            .try_send(make_exchange("k", "99", "dummy"))
+            .expect("pre-fill succeeds");
+
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let mut svc = AggregatorService::new(config, late_tx, registry, cancel);
+
+        // Three distinct correlation keys -> three buckets, each holding one
+        // exchange. size=10 means no bucket auto-completes.
+        for v in ["1", "2", "3"] {
+            let ex = make_exchange("k", v, "body");
+            let _ = svc.ready().await.unwrap().call(ex).await.unwrap();
+        }
+        assert_eq!(svc.buckets.lock().unwrap().len(), 3);
+
+        // Action: drive the force-complete path.
+        svc.force_complete_all();
+
+        // (a) the manually-sent pre-fill item is still in the channel.
+        let pre_fill = late_rx
+            .try_recv()
+            .expect("pre-fill should still be in channel");
+        assert_eq!(
+            pre_fill.input.headers.get("k"),
+            Some(&serde_json::json!("99"))
+        );
+
+        // (b) channel drained -- no force-completed exchange got through
+        // (all three try_send calls hit the full channel and dropped).
+        assert!(matches!(
+            late_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        // (c) all three buckets were removed during force_complete_all.
+        assert!(svc.buckets.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn test_aggregate_stream_bodies_creates_valid_json() {
         use bytes::Bytes;
@@ -1814,6 +1870,84 @@ mod tests {
         assert_eq!(
             r.property(CAMEL_AGGREGATED_COMPLETION_REASON),
             Some(&serde_json::json!("predicate"))
+        );
+    }
+
+    // ── ADR-0046 D-A1: binary-fold strategy contract (no null oldExchange) ──
+    //
+    // Apache Camel's AggregationStrategy receives a null `oldExchange` on the
+    // FIRST message of a bucket so the strategy can initialize. rust-camel's
+    // AggregationFn has a binary signature `(Exchange, Exchange) -> Exchange`
+    // and the bucket model holds the first message untouched; the strategy is
+    // only first invoked on the SECOND message with both exchanges present.
+    //
+    // This test pins that contract: a strategy needing initialize-on-first
+    // logic cannot rely on a null oldExchange — it must branch on a sentinel
+    // in the accumulated body or on a property.
+    #[tokio::test]
+    async fn test_da1_strategy_receives_two_exchanges_first_message_preserved() {
+        use camel_api::aggregator::{AggregationFn, AggregationStrategy};
+        use std::sync::Arc;
+
+        let recorded: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_for_closure = Arc::clone(&recorded);
+
+        let f: AggregationFn = Arc::new(move |old: Exchange, new: Exchange| {
+            let old_body = old.input.body.as_text().unwrap_or("").to_string();
+            let new_body = new.input.body.as_text().unwrap_or("").to_string();
+            recorded_for_closure
+                .lock()
+                .expect("recorded mutex poisoned")
+                .push((old_body, new_body));
+            new
+        });
+
+        let config = AggregatorConfig::correlate_by("k")
+            .complete_when_size(2)
+            .strategy(AggregationStrategy::Custom(f))
+            .build()
+            .unwrap();
+        let mut svc = new_test_svc(config);
+
+        // First message: bucket goes 0→1, strategy NOT invoked, return pending.
+        let first = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("k", "1", "A"))
+            .await
+            .unwrap();
+        assert!(
+            first.property(CAMEL_AGGREGATOR_PENDING).is_some(),
+            "first message must leave the bucket pending (size < 2)"
+        );
+        assert!(
+            recorded.lock().expect("recorded mutex poisoned").is_empty(),
+            "strategy must NOT be invoked on the first message of a bucket"
+        );
+
+        // Second message: bucket goes 1→2, strategy IS invoked as f(ex1, ex2),
+        // and the result is emitted.
+        let _completed = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("k", "1", "B"))
+            .await
+            .unwrap();
+
+        let recorded = recorded.lock().expect("recorded mutex poisoned");
+        assert_eq!(
+            recorded.len(),
+            1,
+            "strategy must be invoked exactly once across the two-message bucket, got {recorded:?}"
+        );
+        assert_eq!(
+            recorded[0],
+            ("A".to_string(), "B".to_string()),
+            "strategy must observe the first message as `old` and the second as `new`, \
+             with both bodies preserved unchanged"
         );
     }
 }
