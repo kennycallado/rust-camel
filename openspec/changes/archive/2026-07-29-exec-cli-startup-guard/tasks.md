@@ -49,7 +49,7 @@
 - `cargo clippy -p camel-core -- -D warnings` exits 0.
 - `cargo fmt --check --all` clean.
 
-- [ ] 1.1
+- [x] 1.1
 
 ## camel-cli
 
@@ -85,7 +85,7 @@
 - `cargo fmt --check --all` clean.
 - Behavioral correctness is verified by Task 2.2.
 
-- [ ] 2.1
+- [x] 2.1
 
 ### Task 2.2: End-to-end startup integration tests
 
@@ -108,7 +108,7 @@
 - `cargo test -p camel-cli --test run_exec_guard_test` passes.
 - `cargo clippy -p camel-cli --tests -- -D warnings` exits 0.
 
-- [ ] 2.2
+- [x] 2.2
 
 ## examples
 
@@ -136,4 +136,4 @@
 - The example dir contains exactly the three files above.
 - `cargo build -p camel-cli` then `camel run --no-watch` in the example dir starts the route (manual mirror of 2.2's automated check).
 
-- [ ] 3.1
+- [x] 3.1
