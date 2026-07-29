@@ -39,6 +39,7 @@ default-members = [
 ]
 exclude = [
     "examples/camel-cli-run",
+    "examples/camel-cli-no-exec",
     "examples/cxf-example",
     "examples/http-static-basic",
     "examples/http-static-spa",

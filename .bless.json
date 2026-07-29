@@ -1,8 +1,6 @@
 {
-  "kind": "plan",
   "verdict": "BLESS",
-  "hash": "sha256:c2b78f7bd0b747605101acb1bb73395ebde1e5280e8f73ef0dcd0fbe7b337a01",
+  "hash": "sha256:2afd3bcd8d537469df4f352f5d5e0fadab16d4e69101770a12ea12cc856422f8",
   "expert": "experts/e_gpt",
-  "session": "ses_056a13979ffegdbVEKxPxESAQh",
-  "notes": "Plan-bless after 2 rounds of BLESS-WITH-FIXES (test-executability sharpening: exact compile_fail snippet, exact D-A3 assertions incl. private-field access, separate cargo test commands, camel-api scope correction, Task 1 prerequisite declaration, rg -- flag fix). r_glm plan review APPROVE-WITH-FINDINGS (2 Important) also incorporated."
+  "kind": "plan"
 }

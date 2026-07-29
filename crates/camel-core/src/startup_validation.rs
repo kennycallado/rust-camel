@@ -114,10 +114,145 @@ pub fn scan_route_definitions_for_sql_checks(
     for route in routes {
         collect_sql_checks_for_uri(route.from_uri(), &mut out);
         for step in route.steps() {
-            walk_step_uris(step, &mut out);
+            for_each_step_uri(step, &mut |uri| collect_sql_checks_for_uri(uri, &mut out));
         }
     }
     out
+}
+
+/// Walk every statically declared URI reachable through `step` and invoke
+/// `f` for each one. Variant coverage mirrors the prior
+/// `walk_step_uris`: `To`, `WireTap`, `Enrich`, `PollEnrich`, plus all
+/// structural sub-pipelines whose `steps` are known at parse time
+/// (`Filter` / `DeclarativeFilter`, `Split` / `DeclarativeSplit` /
+/// `DeclarativeStreamSplit`, `Multicast`, `Throttle`, `LoadBalance`,
+/// `Loop` / `DeclarativeLoop`, `IdempotentConsumer`), the `Choice` and
+/// `DeclarativeChoice` `whens` (and `otherwise`), and the
+/// `DeclarativeDoTry` `try_steps` / `catch` / `finally` blocks.
+///
+/// Dynamic-URI steps (RoutingSlip, RecipientList, DynamicRouter, and the
+/// declarative equivalents) are intentionally skipped — their URIs are
+/// resolved at runtime and cannot be statically validated.
+fn for_each_step_uri<F: FnMut(&str)>(step: &BuilderStep, f: &mut F) {
+    match step {
+        BuilderStep::To(uri) => f(uri),
+        BuilderStep::WireTap { uri } | BuilderStep::Enrich { uri, .. } => {
+            f(uri);
+        }
+        BuilderStep::PollEnrich { uri, .. } => {
+            f(uri);
+        }
+        BuilderStep::Filter { steps, .. }
+        | BuilderStep::DeclarativeFilter { steps, .. }
+        | BuilderStep::Split { steps, .. }
+        | BuilderStep::DeclarativeSplit { steps, .. }
+        | BuilderStep::DeclarativeStreamSplit { steps, .. }
+        | BuilderStep::Multicast { steps, .. }
+        | BuilderStep::Throttle { steps, .. }
+        | BuilderStep::LoadBalance { steps, .. }
+        | BuilderStep::Loop { steps, .. }
+        | BuilderStep::DeclarativeLoop { steps, .. }
+        | BuilderStep::IdempotentConsumer { steps, .. } => {
+            for s in steps {
+                for_each_step_uri(s, f);
+            }
+        }
+        BuilderStep::Choice { whens, otherwise } => {
+            for when in whens {
+                for s in &when.steps {
+                    for_each_step_uri(s, f);
+                }
+            }
+            if let Some(ow) = otherwise {
+                for s in ow {
+                    for_each_step_uri(s, f);
+                }
+            }
+        }
+        BuilderStep::DeclarativeChoice { whens, otherwise } => {
+            for when in whens {
+                for s in &when.steps {
+                    for_each_step_uri(s, f);
+                }
+            }
+            if let Some(ow) = otherwise {
+                for s in ow {
+                    for_each_step_uri(s, f);
+                }
+            }
+        }
+        BuilderStep::DeclarativeDoTry {
+            try_steps,
+            catch,
+            finally,
+        } => {
+            for s in try_steps {
+                for_each_step_uri(s, f);
+            }
+            for clause in catch {
+                for s in &clause.steps {
+                    for_each_step_uri(s, f);
+                }
+            }
+            if let Some(fin) = finally {
+                for s in &fin.steps {
+                    for_each_step_uri(s, f);
+                }
+            }
+        }
+        // All remaining variants are process-mode (no static URI) or
+        // runtime-resolved dynamic URIs (routing slip, recipient list,
+        // dynamic router) — skip.
+        _ => {}
+    }
+}
+
+/// Return `true` if any route statically declares the given URI scheme.
+///
+/// Scans each route's `from_uri` plus every URI reachable through the
+/// structural `BuilderStep` tree (see `for_each_step_uri`). Dynamic-URI
+/// steps (RoutingSlip, RecipientList, DynamicRouter) do not contribute —
+/// their URIs are runtime-resolved and cannot be statically validated.
+///
+/// Invalid URIs (those that fail `camel_endpoint::parse_uri`) are silently
+/// skipped, matching the best-effort semantics of the SQL scanner. An
+/// invalid `from` URI does NOT cause the route to be reported as
+/// referencing the scheme; an invalid step URI is just ignored.
+///
+/// Used by the `camel run` startup guard to decide whether a route
+/// references `exec` (a feature-gated component) so it can register the
+/// `ExecBundle` only when needed — fixing the fail-closed
+/// `ExecBundle::validate()` that previously aborted startup for any
+/// route, even ones that never used `exec:`.
+pub fn route_definitions_reference_scheme(routes: &[RouteDefinition], scheme: &str) -> bool {
+    use std::cell::Cell;
+    let found = Cell::new(false);
+    let mut check = |uri: &str| {
+        if found.get() {
+            return;
+        }
+        if let Ok(parts) = camel_endpoint::parse_uri(uri)
+            && parts.scheme == scheme
+        {
+            found.set(true);
+        }
+    };
+    for route in routes {
+        if found.get() {
+            break;
+        }
+        check(route.from_uri());
+        if found.get() {
+            break;
+        }
+        for step in route.steps() {
+            for_each_step_uri(step, &mut check);
+            if found.get() {
+                break;
+            }
+        }
+    }
+    found.get()
 }
 
 fn collect_sql_checks_for_uri(uri: &str, out: &mut Vec<Box<dyn ConfigCheck>>) {
@@ -148,80 +283,6 @@ fn collect_sql_checks_for_uri(uri: &str, out: &mut Vec<Box<dyn ConfigCheck>>) {
             use_message_body_for_sql: use_body,
             allow_dynamic_query: allow_dynamic,
         }));
-    }
-}
-
-fn walk_step_uris(step: &BuilderStep, out: &mut Vec<Box<dyn ConfigCheck>>) {
-    match step {
-        BuilderStep::To(uri) => collect_sql_checks_for_uri(uri, out),
-        BuilderStep::WireTap { uri } | BuilderStep::Enrich { uri, .. } => {
-            collect_sql_checks_for_uri(uri, out);
-        }
-        BuilderStep::PollEnrich { uri, .. } => {
-            collect_sql_checks_for_uri(uri, out);
-        }
-        BuilderStep::Filter { steps, .. }
-        | BuilderStep::DeclarativeFilter { steps, .. }
-        | BuilderStep::Split { steps, .. }
-        | BuilderStep::DeclarativeSplit { steps, .. }
-        | BuilderStep::DeclarativeStreamSplit { steps, .. }
-        | BuilderStep::Multicast { steps, .. }
-        | BuilderStep::Throttle { steps, .. }
-        | BuilderStep::LoadBalance { steps, .. }
-        | BuilderStep::Loop { steps, .. }
-        | BuilderStep::DeclarativeLoop { steps, .. }
-        | BuilderStep::IdempotentConsumer { steps, .. } => {
-            for s in steps {
-                walk_step_uris(s, out);
-            }
-        }
-        BuilderStep::Choice { whens, otherwise } => {
-            for when in whens {
-                for s in &when.steps {
-                    walk_step_uris(s, out);
-                }
-            }
-            if let Some(ow) = otherwise {
-                for s in ow {
-                    walk_step_uris(s, out);
-                }
-            }
-        }
-        BuilderStep::DeclarativeChoice { whens, otherwise } => {
-            for when in whens {
-                for s in &when.steps {
-                    walk_step_uris(s, out);
-                }
-            }
-            if let Some(ow) = otherwise {
-                for s in ow {
-                    walk_step_uris(s, out);
-                }
-            }
-        }
-        BuilderStep::DeclarativeDoTry {
-            try_steps,
-            catch,
-            finally,
-        } => {
-            for s in try_steps {
-                walk_step_uris(s, out);
-            }
-            for clause in catch {
-                for s in &clause.steps {
-                    walk_step_uris(s, out);
-                }
-            }
-            if let Some(fin) = finally {
-                for s in &fin.steps {
-                    walk_step_uris(s, out);
-                }
-            }
-        }
-        // All remaining variants are process-mode (no static URI) or
-        // runtime-resolved dynamic URIs (routing slip, recipient list,
-        // dynamic router) — skip.
-        _ => {}
     }
 }
 
@@ -375,5 +436,455 @@ mod tests {
         let route = RouteDefinition::new("sql:select 1?db_url=postgres://x/y", vec![]);
         let checks = scan_route_definitions_for_sql_checks(&[route]);
         assert!(checks.is_empty());
+    }
+
+    // -- exec-scheme scanner tests (Task 1.1) ---------------------------------
+    //
+    // These tests exercise `route_definitions_reference_scheme`, the reusable
+    // scanner that the `camel run` startup guard calls to decide whether a
+    // route statically references the `exec` scheme. The scanner walks every
+    // structural `BuilderStep` variant whose URI is known at parse time, so
+    // each variant needs a coverage test. Dynamic-URI steps
+    // (RoutingSlip/RecipientList/DynamicRouter) must report `false` because
+    // their URIs are resolved at runtime and cannot be statically validated.
+
+    /// From-URI match: a route whose `from` is `exec:...` must be detected.
+    #[test]
+    fn scheme_scanner_detects_exec_from_uri() {
+        let route = RouteDefinition::new("exec:echo", vec![]).with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// Top-level `To` step: a non-exec source with a `To("exec:...")` step.
+    #[test]
+    fn scheme_scanner_detects_exec_in_to_step() {
+        let route = RouteDefinition::new(
+            "timer:tick?period=500",
+            vec![BuilderStep::To("exec:echo".to_string())],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `WireTap` variant — static URI in named field.
+    #[test]
+    fn scheme_scanner_detects_exec_in_wiretap() {
+        let route = RouteDefinition::new(
+            "timer:tick",
+            vec![BuilderStep::WireTap {
+                uri: "exec:audit".to_string(),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Enrich` variant — static URI in named field alongside strategy/timeout.
+    #[test]
+    fn scheme_scanner_detects_exec_in_enrich() {
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Enrich {
+                uri: "exec:enricher".to_string(),
+                strategy: Some("agg".to_string()),
+                timeout_ms: Some(1000),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `PollEnrich` variant — static URI in named field.
+    #[test]
+    fn scheme_scanner_detects_exec_in_pollenrich() {
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::PollEnrich {
+                uri: "exec:poller".to_string(),
+                strategy: None,
+                timeout_ms: Some(500),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Filter` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_filter() {
+        use camel_api::FilterPredicate;
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Filter {
+                predicate: FilterPredicate::new(|_| true),
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Split` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_split() {
+        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Split {
+                config: SplitterConfig::new(split_body_lines())
+                    .aggregation(AggregationStrategy::Original),
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Multicast` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_multicast() {
+        use camel_api::MulticastConfig;
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Multicast {
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+                config: MulticastConfig::new(),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Loop` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_loop() {
+        use camel_api::loop_eip::{LoopConfig, LoopMode};
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Loop {
+                config: LoopConfig::new(LoopMode::Count(3)),
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `IdempotentConsumer` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_idempotent_consumer() {
+        use crate::lifecycle::application::route_definition::LanguageExpressionDef;
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${header.id}".into(),
+        };
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::IdempotentConsumer {
+                repository: "myRepo".to_string(),
+                expression: expr,
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+                eager: false,
+                remove_on_failure: false,
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Throttle` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_throttle() {
+        use camel_api::ThrottlerConfig;
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Throttle {
+                config: ThrottlerConfig::new(10, std::time::Duration::from_millis(10)),
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `LoadBalance` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_loadbalance() {
+        use camel_api::LoadBalancerConfig;
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::LoadBalance {
+                config: LoadBalancerConfig::round_robin(),
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeFilter` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_declarative_filter() {
+        use crate::lifecycle::application::route_definition::LanguageExpressionDef;
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        };
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeFilter {
+                predicate: expr,
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeSplit` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_declarative_split() {
+        use crate::lifecycle::application::route_definition::LanguageExpressionDef;
+        use camel_api::splitter::AggregationStrategy;
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        };
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeSplit {
+                expression: expr,
+                aggregation: AggregationStrategy::Original,
+                parallel: false,
+                parallel_limit: None,
+                stop_on_exception: true,
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeStreamSplit` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_declarative_stream_split() {
+        use camel_api::splitter::{AggregationStrategy, StreamSplitConfig, StreamSplitFormat};
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeStreamSplit {
+                stream_config: StreamSplitConfig {
+                    format: StreamSplitFormat::Ndjson,
+                    max_record_bytes: 1024,
+                    batch_size: 1,
+                    chunk_size: None,
+                    include_origin: true,
+                },
+                aggregation: AggregationStrategy::Original,
+                stop_on_exception: true,
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeLoop` sub-pipeline — recurse into `steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_declarative_loop() {
+        use crate::lifecycle::application::route_definition::LanguageExpressionDef;
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        };
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeLoop {
+                count: Some(5),
+                while_predicate: Some(expr),
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+                max_iterations: Some(100),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Choice` with a `when` branch that contains exec.
+    #[test]
+    fn scheme_scanner_detects_exec_in_choice_branch() {
+        use crate::lifecycle::application::route_definition::WhenStep;
+        use camel_api::FilterPredicate;
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Choice {
+                whens: vec![WhenStep {
+                    predicate: FilterPredicate::new(|_| true),
+                    steps: vec![BuilderStep::To("exec:echo".to_string())],
+                }],
+                otherwise: None,
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Choice` with exec in the `otherwise` branch only.
+    #[test]
+    fn scheme_scanner_detects_exec_in_choice_otherwise() {
+        use crate::lifecycle::application::route_definition::WhenStep;
+        use camel_api::FilterPredicate;
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Choice {
+                whens: vec![WhenStep {
+                    predicate: FilterPredicate::new(|_| false),
+                    steps: vec![BuilderStep::To("log:info".to_string())],
+                }],
+                otherwise: Some(vec![BuilderStep::To("exec:echo".to_string())]),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeChoice` with exec in a `when` branch.
+    #[test]
+    fn scheme_scanner_detects_exec_in_declarative_choice_when() {
+        use crate::lifecycle::application::route_definition::{
+            DeclarativeWhenStep, LanguageExpressionDef,
+        };
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        };
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeChoice {
+                whens: vec![DeclarativeWhenStep {
+                    predicate: expr,
+                    steps: vec![BuilderStep::To("exec:echo".to_string())],
+                }],
+                otherwise: None,
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeChoice` with exec in `otherwise` only.
+    #[test]
+    fn scheme_scanner_detects_exec_in_declarative_choice_otherwise() {
+        use crate::lifecycle::application::route_definition::{
+            DeclarativeWhenStep, LanguageExpressionDef,
+        };
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        };
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeChoice {
+                whens: vec![DeclarativeWhenStep {
+                    predicate: expr,
+                    steps: vec![BuilderStep::To("log:info".to_string())],
+                }],
+                otherwise: Some(vec![BuilderStep::To("exec:echo".to_string())]),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeDoTry` with exec in `try_steps`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_dotry() {
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeDoTry {
+                try_steps: vec![BuilderStep::To("exec:echo".to_string())],
+                catch: vec![],
+                finally: None,
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeDoTry` with exec in a `catch` clause.
+    #[test]
+    fn scheme_scanner_detects_exec_in_dotry_catch() {
+        use crate::lifecycle::application::route_definition::DoTryCatchClauseBuilder;
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeDoTry {
+                try_steps: vec![BuilderStep::To("log:info".to_string())],
+                catch: vec![DoTryCatchClauseBuilder {
+                    exception: None,
+                    when: None,
+                    on_when: None,
+                    disposition: camel_api::error_handler::ExceptionDisposition::Propagate,
+                    steps: vec![BuilderStep::To("exec:echo".to_string())],
+                }],
+                finally: None,
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `DeclarativeDoTry` with exec in `finally`.
+    #[test]
+    fn scheme_scanner_detects_exec_in_dotry_finally() {
+        use crate::lifecycle::application::route_definition::DoTryFinallyBuilder;
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::DeclarativeDoTry {
+                try_steps: vec![BuilderStep::To("log:info".to_string())],
+                catch: vec![],
+                finally: Some(DoTryFinallyBuilder {
+                    on_when: None,
+                    steps: vec![BuilderStep::To("exec:echo".to_string())],
+                }),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// Multi-route scan: only the second route references exec.
+    #[test]
+    fn scheme_scanner_detects_exec_across_multiple_routes() {
+        let r1 = RouteDefinition::new("timer:tick", vec![]).with_route_id("r1".to_string());
+        let r2 = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::To("exec:echo".to_string())],
+        )
+        .with_route_id("r2".to_string());
+        assert!(route_definitions_reference_scheme(&[r1, r2], "exec"));
+    }
+
+    /// Negative: a non-exec route produces `false`.
+    #[test]
+    fn scheme_scanner_false_for_non_exec_route() {
+        let route =
+            RouteDefinition::new("timer:tick", vec![BuilderStep::To("log:info".to_string())])
+                .with_route_id("r".to_string());
+        assert!(!route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// Negative: dynamic-URI step (RoutingSlip) with a closure that returns
+    /// `exec:echo` at runtime — the scanner cannot see through the closure.
+    #[test]
+    fn scheme_scanner_false_for_dynamic_uri_only() {
+        use camel_api::RoutingSlipConfig;
+        use std::sync::Arc;
+        let route = RouteDefinition::new(
+            "timer:tick",
+            vec![BuilderStep::RoutingSlip {
+                config: RoutingSlipConfig::new(Arc::new(|_| Some("exec:echo".to_string()))),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(!route_definitions_reference_scheme(&[route], "exec"));
     }
 }

@@ -412,9 +412,6 @@ pub async fn run(
     #[cfg(feature = "grpc")]
     register_bundle!(ctx, camel_config, camel_component_grpc::GrpcBundle);
 
-    #[cfg(feature = "exec")]
-    register_bundle!(ctx, camel_config, camel_component_exec::ExecBundle);
-
     #[cfg(feature = "llm")]
     register_bundle!(ctx, camel_config, camel_component_llm::LlmBundle);
 
@@ -444,6 +441,19 @@ pub async fn run(
         security_compile_context.clone(),
     ) {
         Ok(defs) => {
+            // Conditionally register ExecBundle: only when a discovered route
+            // references `exec:` or the operator declared `[components.exec]`.
+            #[cfg(feature = "exec")]
+            {
+                let exec_used = camel_core::startup_validation::route_definitions_reference_scheme(
+                    &defs, "exec",
+                );
+                let exec_configured = camel_config.components.raw.contains_key("exec");
+                if exec_used || exec_configured {
+                    register_bundle!(ctx, camel_config, camel_component_exec::ExecBundle);
+                }
+            }
+
             // ADR-0033: register fail-closed ConfigChecks derived from the
             // discovered routes (e.g. SqlDynamicQueryCheck for every `sql:`
             // endpoint). The checks run synchronously at the head of
