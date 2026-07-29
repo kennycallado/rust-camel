@@ -1,6 +1,8 @@
 # Spec Delta: Aggregator EIP ADR-0046 divergence documentation
 
-## ADDED Requirement: Aggregator divergence documentation in tracked CONTEXT.md
+## ADDED Requirements
+
+### Requirement: Aggregator divergence documentation in tracked CONTEXT.md
 
 The system SHALL document every forced divergence between the rust-camel
 Aggregator EIP and Apache Camel as tracked content in
@@ -9,7 +11,7 @@ gitignored spike artifacts). Each documented divergence SHALL name (a) the
 divergence statement, (b) the forcing ADR or contract shape, and (c) the
 observable consequence for an operator migrating from Apache Camel.
 
-### Scenario: D-A1 binary-fold strategy contract documented
+#### Scenario: D-A1 binary-fold strategy contract documented
 
 - **GIVEN** the spike classified D-A1 (Camel `aggregate(oldExchange, newExchange)`
   passes null on the first bucket message; rust-camel `AggregationFn =
@@ -21,7 +23,7 @@ observable consequence for an operator migrating from Apache Camel.
   needing initialize-on-first must handle the first message via the bucket
   state rather than a null-oldExchange branch
 
-### Scenario: D-A2 strategy-cannot-signal-failure documented
+#### Scenario: D-A2 strategy-cannot-signal-failure documented
 
 - **GIVEN** the spike classified D-A2 (Camel strategy can throw; rust-camel
   `AggregationFn -> Exchange` returns no `Result`, so a strategy cannot
@@ -33,7 +35,7 @@ observable consequence for an operator migrating from Apache Camel.
   Splitter `Vec<Result>` D2), and the consequence (error-aware strategies
   cannot be expressed in the return type)
 
-### Scenario: D-A3 force-completion channel path documented
+#### Scenario: D-A3 force-completion channel path documented
 
 - **GIVEN** the spike classified D-A3 (Camel flows force-completed buckets
   synchronously through the downstream pipeline on `context.stop()`;
@@ -45,7 +47,7 @@ observable consequence for an operator migrating from Apache Camel.
   drop-under-pressure edge (with the source line range), and that this is
   forced by Tower shutdown lifecycle + bounded-channel DoS protection
 
-### Scenario: D-A4 timeout mechanism and knob divergence documented
+#### Scenario: D-A4 timeout mechanism and knob divergence documented
 
 - **GIVEN** the spike classified D-A4 (Camel uses a single
   completion-timeout-checker thread polling every
@@ -58,7 +60,7 @@ observable consequence for an operator migrating from Apache Camel.
   `completionTimeoutCheckerInterval`), and the graceful-degradation behavior
   when the task cap is reached
 
-### Scenario: D-A5 mandatory memory bounds documented
+#### Scenario: D-A5 mandatory memory bounds documented
 
 - **GIVEN** the spike classified D-A5 (Camel default in-memory repository is
   unbounded; rust-camel `AggregatorConfig::validate()` rejects unbounded
@@ -70,13 +72,13 @@ observable consequence for an operator migrating from Apache Camel.
   forcing ADRs (0033 security defaults, 0044 admission), and the operator
   consequence (a config valid in Camel may be rejected here)
 
-## ADDED Requirement: Native tests pin rust-camel Aggregator semantics
+### Requirement: Native tests pin rust-camel Aggregator semantics
 
 The system SHALL include native tests that pin rust-camel's Aggregator
 semantics for the divergences where behavior is testable, asserting what
 rust-camel DOES (not what Apache Camel does), per ADR-0046 §Anti-pattern §2.
 
-### Scenario: D-A1 semantic pin — first message preserved unchanged in bucket
+#### Scenario: D-A1 semantic pin — first message preserved unchanged in bucket
 
 - **GIVEN** an `AggregationFn` custom strategy and a bucket receiving its
   first exchange
@@ -85,7 +87,7 @@ rust-camel DOES (not what Apache Camel does), per ADR-0046 §Anti-pattern §2.
   both non-null, and the first exchange's body is the value pushed (not
   transformed by a null-oldExchange branch)
 
-### Scenario: D-A2 semantic pin — strategy return type is Exchange not Result
+#### Scenario: D-A2 semantic pin — strategy return type is Exchange not Result
 
 - **GIVEN** the `AggregationFn` type alias (`Arc<dyn Fn(Exchange, Exchange) -> Exchange + Send + Sync>`)
 - **WHEN** a contributor attempts to write a strategy that signals failure via the return type
@@ -95,7 +97,7 @@ rust-camel DOES (not what Apache Camel does), per ADR-0046 §Anti-pattern §2.
   an explicit type-alias assertion), proving strategy-signaled failure is not
   expressible in the return type
 
-### Scenario: D-A3 semantic pin — force-completion emits via late channel and drops under pressure
+#### Scenario: D-A3 semantic pin — force-completion emits via late channel and drops under pressure
 
 - **GIVEN** an aggregator with `force_completion_on_stop(true)` and a saturated
   late channel (capacity filled before `force_complete_all()` runs)
@@ -108,7 +110,7 @@ rust-camel DOES (not what Apache Camel does), per ADR-0046 §Anti-pattern §2.
   post-pipeline routing is verified by route-controller integration elsewhere
   and is out of scope for this inline unit test
 
-### Scenario: D-A5 semantic pin — validate rejects unbounded config
+#### Scenario: D-A5 semantic pin — validate rejects unbounded config
 
 - **GIVEN** an `AggregatorConfig` with no `max_buckets`, no `Timeout`
   completion, and no `bucket_ttl`
@@ -116,13 +118,13 @@ rust-camel DOES (not what Apache Camel does), per ADR-0046 §Anti-pattern §2.
 - **THEN** it returns `Err(CamelError::ConfigValidation(
   ConfigValidationError::AggregatorMissingMemoryBound))`
 
-## ADDED Requirement: Gap-coverage note for completionSize-as-expression
+### Requirement: Gap-coverage note for completionSize-as-expression
 
 The system SHALL document as a known coverage gap (not a forced divergence)
 that rust-camel's `CompletionCondition::Size(usize)` is static, whereas
 Apache Camel supports `completionSize(expression)` evaluated per exchange.
 
-### Scenario: G-A1 gap note present
+#### Scenario: G-A1 gap note present
 
 - **GIVEN** the spike identified G-A1 as a coverage gap (no ADR forbids it)
 - **WHEN** a contributor reads the CONTEXT.md divergence section
