@@ -9,6 +9,7 @@
 //! NOT in this split commit.
 
 use camel_api::datasource::DatasourceCatalog;
+#[cfg(feature = "wasm")]
 use camel_bean::BeanProcessor;
 use camel_core::datasource::RuntimeDatasourceCatalog;
 use std::sync::Arc;
