@@ -31,8 +31,13 @@ artifacts:
     template: specs/spec.md
     description: Delta specs — requirements and scenarios
     instruction: |
-      Create delta specs with ADDED/MODIFIED/REMOVED requirements.
-      Each requirement needs at least one Given/When/Then scenario.
+      Create delta specs using section headers matching the CLI parser:
+      ## ADDED/MODIFIED/REMOVED/RENAMED Requirements (plural, level-2).
+      ADDED/MODIFIED: ### Requirement: <name> (level-3) with at least
+      one #### Scenario: (level-4) Given/When/Then block.
+      REMOVED: ### Requirement: <name> (level-3), scenarios optional.
+      RENAMED: - FROM: `### Requirement: <old>` / - TO: `### Requirement: <new>`
+      bullet pairs (backticks required by the parser).
       Place files under specs/<domain>/spec.md.
     requires: [design]
 
