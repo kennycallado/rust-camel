@@ -1,6 +1,6 @@
 use super::{
     get_bool_header, get_f64_header, get_i64_header, get_str_header, get_str_vec_header,
-    require_key, require_value,
+    require_key, require_value, value_to_redis_arg,
 };
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -125,14 +125,17 @@ pub(crate) fn build_redis_cmd(
             let score = resolve_zadd_score(exchange);
             let member = require_value(exchange)?;
             let mut c = redis::Cmd::new();
-            c.arg("ZADD").arg(key).arg(score).arg(member.to_string());
+            c.arg("ZADD")
+                .arg(key)
+                .arg(score)
+                .arg(value_to_redis_arg(&member));
             Ok(c)
         }
         RedisCommand::Zrem => {
             let key = require_key(exchange)?;
             let member = require_value(exchange)?;
             let mut c = redis::Cmd::new();
-            c.arg("ZREM").arg(key).arg(member.to_string());
+            c.arg("ZREM").arg(key).arg(value_to_redis_arg(&member));
             Ok(c)
         }
         RedisCommand::Zrange => {
@@ -161,21 +164,21 @@ pub(crate) fn build_redis_cmd(
             let key = require_key(exchange)?;
             let member = require_value(exchange)?;
             let mut c = redis::Cmd::new();
-            c.arg("ZRANK").arg(key).arg(member.to_string());
+            c.arg("ZRANK").arg(key).arg(value_to_redis_arg(&member));
             Ok(c)
         }
         RedisCommand::Zrevrank => {
             let key = require_key(exchange)?;
             let member = require_value(exchange)?;
             let mut c = redis::Cmd::new();
-            c.arg("ZREVRANK").arg(key).arg(member.to_string());
+            c.arg("ZREVRANK").arg(key).arg(value_to_redis_arg(&member));
             Ok(c)
         }
         RedisCommand::Zscore => {
             let key = require_key(exchange)?;
             let member = require_value(exchange)?;
             let mut c = redis::Cmd::new();
-            c.arg("ZSCORE").arg(key).arg(member.to_string());
+            c.arg("ZSCORE").arg(key).arg(value_to_redis_arg(&member));
             Ok(c)
         }
         RedisCommand::Zcard => {
@@ -192,7 +195,7 @@ pub(crate) fn build_redis_cmd(
             c.arg("ZINCRBY")
                 .arg(key)
                 .arg(increment)
-                .arg(member.to_string());
+                .arg(value_to_redis_arg(&member));
             Ok(c)
         }
         RedisCommand::Zcount => {
@@ -277,7 +280,7 @@ pub async fn dispatch(
             let score = resolve_zadd_score(exchange);
             let member = require_value(exchange)?;
             let n: i64 = conn
-                .zadd(&key, member.to_string(), score)
+                .zadd(&key, value_to_redis_arg(&member), score)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis ZADD failed: {e}")))?;
             serde_json::json!(n)
@@ -286,7 +289,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let member = require_value(exchange)?;
             let n: i64 = conn
-                .zrem(&key, member.to_string())
+                .zrem(&key, value_to_redis_arg(&member))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis ZREM failed: {e}")))?;
             serde_json::json!(n)
@@ -332,7 +335,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let member = require_value(exchange)?;
             let rank: Option<i64> = conn
-                .zrank(&key, member.to_string())
+                .zrank(&key, value_to_redis_arg(&member))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis ZRANK failed: {e}")))?;
             json_from_optional_rank(rank)
@@ -341,7 +344,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let member = require_value(exchange)?;
             let rank: Option<i64> = conn
-                .zrevrank(&key, member.to_string())
+                .zrevrank(&key, value_to_redis_arg(&member))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis ZREVRANK failed: {e}")))?;
             json_from_optional_rank(rank)
@@ -350,7 +353,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let member = require_value(exchange)?;
             let score: Option<f64> = conn
-                .zscore(&key, member.to_string())
+                .zscore(&key, value_to_redis_arg(&member))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis ZSCORE failed: {e}")))?;
             json_from_optional_score(score)
@@ -368,7 +371,7 @@ pub async fn dispatch(
             let increment = resolve_zincr_increment(exchange);
             let member = require_value(exchange)?;
             let new_score: f64 = conn
-                .zincr(&key, member.to_string(), increment)
+                .zincr(&key, value_to_redis_arg(&member), increment)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis ZINCRBY failed: {e}")))?;
             serde_json::json!(new_score)
@@ -706,6 +709,8 @@ mod tests {
         assert_cmd_name(&cmd, "ZADD");
         assert!(packed_contains(&cmd, "myzset"));
         assert!(packed_contains(&cmd, "10.5"));
+        assert!(packed_contains(&cmd, "member1"));
+        assert!(!packed_contains(&cmd, "\"member1\""));
     }
 
     #[test]

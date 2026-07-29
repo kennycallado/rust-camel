@@ -60,6 +60,13 @@ pub fn require_value(exchange: &Exchange) -> Result<serde_json::Value, CamelErro
     })
 }
 
+pub(crate) fn value_to_redis_arg(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +134,19 @@ mod tests {
     fn test_require_str_header_missing_returns_err() {
         let ex = Exchange::new(Message::default());
         assert!(require_str_header(&ex, "CamelRedis.Key").is_err());
+    }
+
+    #[test]
+    fn test_value_to_redis_arg_preserves_string_content() {
+        assert_eq!(value_to_redis_arg(&serde_json::json!("hello")), "hello");
+    }
+
+    #[test]
+    fn test_value_to_redis_arg_serializes_non_strings() {
+        assert_eq!(
+            value_to_redis_arg(&serde_json::json!({"a": 1})),
+            r#"{"a":1}"#
+        );
+        assert_eq!(value_to_redis_arg(&serde_json::json!(42)), "42");
     }
 }

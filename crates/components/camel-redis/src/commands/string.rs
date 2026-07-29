@@ -1,4 +1,7 @@
-use super::{get_i64_header, get_str_vec_header, get_u64_header, require_key, require_value};
+use super::{
+    get_i64_header, get_str_vec_header, get_u64_header, require_key, require_value,
+    value_to_redis_arg,
+};
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -47,7 +50,7 @@ pub(crate) fn resolve_mset_values(
 
     Ok(values
         .iter()
-        .map(|(k, v)| (k.clone(), v.to_string()))
+        .map(|(k, v)| (k.clone(), value_to_redis_arg(v)))
         .collect::<Vec<_>>())
 }
 
@@ -75,7 +78,7 @@ pub(crate) fn build_redis_cmd(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("SET");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Get => {
@@ -88,14 +91,14 @@ pub(crate) fn build_redis_cmd(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("GETSET");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Setnx => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("SETNX");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Setex => {
@@ -103,7 +106,7 @@ pub(crate) fn build_redis_cmd(
             let value = require_value(exchange)?;
             let ttl = resolve_timeout_seconds(exchange);
             let mut c = redis::cmd("SETEX");
-            c.arg(key).arg(ttl).arg(value.to_string());
+            c.arg(key).arg(ttl).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Mget => {
@@ -152,7 +155,7 @@ pub(crate) fn build_redis_cmd(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("APPEND");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Strlen => {
@@ -180,7 +183,7 @@ pub async fn dispatch(
         RedisCommand::Set => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
-            conn.set::<_, _, ()>(&key, value.to_string())
+            conn.set::<_, _, ()>(&key, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis SET failed: {e}")))?;
             serde_json::Value::Null
@@ -197,7 +200,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let old: Option<String> = conn
-                .getset(&key, value.to_string())
+                .getset(&key, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis GETSET failed: {e}")))?;
             json_from_optional_string(old)
@@ -206,7 +209,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let ok: bool = conn
-                .set_nx(&key, value.to_string())
+                .set_nx(&key, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis SETNX failed: {e}")))?;
             serde_json::Value::Bool(ok)
@@ -215,7 +218,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let ttl = resolve_timeout_seconds(exchange);
-            conn.set_ex::<_, _, ()>(&key, value.to_string(), ttl)
+            conn.set_ex::<_, _, ()>(&key, value_to_redis_arg(&value), ttl)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis SETEX failed: {e}")))?;
             serde_json::Value::Null
@@ -273,7 +276,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let n: i64 = conn
-                .append(&key, value.to_string())
+                .append(&key, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis APPEND failed: {e}")))?;
             serde_json::json!(n)
@@ -359,8 +362,8 @@ mod tests {
         let ex = ex_with(&[("CamelRedis.Values", serde_json::json!({"a": 1, "b": "x"}))]);
         let values = resolve_mset_values(&ex).expect("values should be present");
         assert_eq!(values.len(), 2);
-        assert!(values.iter().any(|(k, _)| k == "a"));
-        assert!(values.iter().any(|(k, _)| k == "b"));
+        assert!(values.iter().any(|(k, v)| k == "a" && v == "1"));
+        assert!(values.iter().any(|(k, v)| k == "b" && v == "x"));
     }
 
     #[test]
@@ -429,7 +432,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Set, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "SET");
-        assert_eq!(cmd_args(&cmd), vec!["mykey", "\"hello\""]);
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "hello"]);
     }
 
     #[test]
@@ -466,7 +469,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Getset, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "GETSET");
-        assert_eq!(cmd_args(&cmd), vec!["mykey", "\"newval\""]);
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "newval"]);
     }
 
     #[test]
@@ -489,7 +492,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Setnx, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "SETNX");
-        assert_eq!(cmd_args(&cmd), vec!["mykey", "\"hello\""]);
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "hello"]);
     }
 
     #[test]
@@ -513,7 +516,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Setex, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "SETEX");
-        assert_eq!(cmd_args(&cmd), vec!["mykey", "60", "\"hello\""]);
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "60", "hello"]);
     }
 
     #[test]
@@ -558,9 +561,9 @@ mod tests {
         assert_eq!(cmd_name(&cmd), "MSET");
         let args = cmd_args(&cmd);
         assert!(args.contains(&"key1".to_string()));
-        assert!(args.contains(&"\"val1\"".to_string()));
+        assert!(args.contains(&"val1".to_string()));
         assert!(args.contains(&"key2".to_string()));
-        assert!(args.contains(&"\"val2\"".to_string()));
+        assert!(args.contains(&"val2".to_string()));
         assert_eq!(args.len(), 4);
     }
 
@@ -654,7 +657,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Append, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "APPEND");
-        assert_eq!(cmd_args(&cmd), vec!["mykey", "\"suffix\""]);
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "suffix"]);
     }
 
     #[test]

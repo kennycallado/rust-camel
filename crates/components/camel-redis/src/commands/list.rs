@@ -1,4 +1,6 @@
-use super::{get_i64_header, get_str_header, get_u64_header, require_key, require_value};
+use super::{
+    get_i64_header, get_str_header, get_u64_header, require_key, require_value, value_to_redis_arg,
+};
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -96,28 +98,28 @@ pub(crate) fn build_redis_cmd(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("LPUSH");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             Ok(c)
         }
         RedisCommand::Rpush => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("RPUSH");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             Ok(c)
         }
         RedisCommand::Lpushx => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("LPUSHX");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             Ok(c)
         }
         RedisCommand::Rpushx => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("RPUSHX");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             Ok(c)
         }
         RedisCommand::Lpop => {
@@ -171,7 +173,10 @@ pub(crate) fn build_redis_cmd(
             let (mode, pivot) = resolve_linsert_operands(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("LINSERT");
-            c.arg(key).arg(mode).arg(pivot).arg(value.to_string());
+            c.arg(key)
+                .arg(mode)
+                .arg(pivot)
+                .arg(value_to_redis_arg(&value));
             Ok(c)
         }
         RedisCommand::Lset => {
@@ -179,7 +184,7 @@ pub(crate) fn build_redis_cmd(
             let idx = resolve_index(exchange);
             let value = require_value(exchange)?;
             let mut c = redis::cmd("LSET");
-            c.arg(key).arg(idx).arg(value.to_string());
+            c.arg(key).arg(idx).arg(value_to_redis_arg(&value));
             Ok(c)
         }
         RedisCommand::Lrem => {
@@ -187,7 +192,7 @@ pub(crate) fn build_redis_cmd(
             let count = resolve_lrem_count(exchange);
             let value = require_value(exchange)?;
             let mut c = redis::cmd("LREM");
-            c.arg(key).arg(count).arg(value.to_string());
+            c.arg(key).arg(count).arg(value_to_redis_arg(&value));
             Ok(c)
         }
         RedisCommand::Ltrim => {
@@ -222,7 +227,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let n: i64 = conn
-                .lpush(&key, value.to_string())
+                .lpush(&key, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LPUSH failed: {e}")))?;
             serde_json::json!(n)
@@ -231,7 +236,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let n: i64 = conn
-                .rpush(&key, value.to_string())
+                .rpush(&key, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis RPUSH failed: {e}")))?;
             serde_json::json!(n)
@@ -240,7 +245,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let n: i64 = conn
-                .lpush_exists(&key, value.to_string())
+                .lpush_exists(&key, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LPUSHX failed: {e}")))?;
             serde_json::json!(n)
@@ -249,7 +254,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
             let n: i64 = conn
-                .rpush_exists(&key, value.to_string())
+                .rpush_exists(&key, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis RPUSHX failed: {e}")))?;
             serde_json::json!(n)
@@ -323,7 +328,7 @@ pub async fn dispatch(
                 .arg(&key)
                 .arg(mode)
                 .arg(pivot)
-                .arg(value.to_string())
+                .arg(value_to_redis_arg(&value))
                 .query_async(conn)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LINSERT failed: {e}")))?;
@@ -333,7 +338,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let idx = resolve_index(exchange);
             let value = require_value(exchange)?;
-            conn.lset::<_, _, ()>(&key, idx, value.to_string())
+            conn.lset::<_, _, ()>(&key, idx, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LSET failed: {e}")))?;
             serde_json::Value::Null
@@ -343,7 +348,7 @@ pub async fn dispatch(
             let count = resolve_lrem_count(exchange);
             let value = require_value(exchange)?;
             let n: usize = conn
-                .lrem(&key, count, value.to_string())
+                .lrem(&key, count, value_to_redis_arg(&value))
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LREM failed: {e}")))?;
             serde_json::json!(n as i64)
@@ -559,7 +564,7 @@ mod tests {
         let args = cmd_args(&cmd);
         assert_eq!(args[0], "LPUSH");
         assert_eq!(args[1], "mykey");
-        assert_eq!(args[2], serde_json::json!("hello").to_string());
+        assert_eq!(args[2], "hello");
     }
 
     #[test]
@@ -572,7 +577,7 @@ mod tests {
         let args = cmd_args(&cmd);
         assert_eq!(args[0], "RPUSH");
         assert_eq!(args[1], "mykey");
-        assert_eq!(args[2], serde_json::json!("world").to_string());
+        assert_eq!(args[2], "world");
     }
 
     #[test]
@@ -585,7 +590,7 @@ mod tests {
         let args = cmd_args(&cmd);
         assert_eq!(args[0], "LPUSHX");
         assert_eq!(args[1], "mykey");
-        assert_eq!(args[2], serde_json::json!("val").to_string());
+        assert_eq!(args[2], "val");
     }
 
     #[test]
@@ -598,7 +603,7 @@ mod tests {
         let args = cmd_args(&cmd);
         assert_eq!(args[0], "RPUSHX");
         assert_eq!(args[1], "mykey");
-        assert_eq!(args[2], serde_json::json!("val").to_string());
+        assert_eq!(args[2], "val");
     }
 
     #[test]
@@ -717,7 +722,7 @@ mod tests {
         assert_eq!(args[1], "mykey");
         assert_eq!(args[2], "AFTER");
         assert_eq!(args[3], "pivot");
-        assert_eq!(args[4], serde_json::json!("new_val").to_string());
+        assert_eq!(args[4], "new_val");
     }
 
     #[test]
@@ -733,7 +738,7 @@ mod tests {
         assert_eq!(args[1], "mykey");
         assert_eq!(args[2], "BEFORE");
         assert_eq!(args[3], "pivot");
-        assert_eq!(args[4], serde_json::json!("new_val").to_string());
+        assert_eq!(args[4], "new_val");
     }
 
     #[test]
@@ -748,7 +753,7 @@ mod tests {
         assert_eq!(args[0], "LSET");
         assert_eq!(args[1], "mykey");
         assert_eq!(args[2], "2");
-        assert_eq!(args[3], serde_json::json!("replacement").to_string());
+        assert_eq!(args[3], "replacement");
     }
 
     #[test]
@@ -763,7 +768,7 @@ mod tests {
         assert_eq!(args[0], "LREM");
         assert_eq!(args[1], "mykey");
         assert_eq!(args[2], "3");
-        assert_eq!(args[3], serde_json::json!("to_remove").to_string());
+        assert_eq!(args[3], "to_remove");
     }
 
     #[test]
@@ -777,7 +782,7 @@ mod tests {
         assert_eq!(args[0], "LREM");
         assert_eq!(args[1], "mykey");
         assert_eq!(args[2], "0");
-        assert_eq!(args[3], serde_json::json!("to_remove").to_string());
+        assert_eq!(args[3], "to_remove");
     }
 
     #[test]

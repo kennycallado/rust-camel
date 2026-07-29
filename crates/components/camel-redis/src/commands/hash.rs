@@ -1,4 +1,7 @@
-use super::{get_i64_header, get_str_header, get_str_vec_header, require_key, require_value};
+use super::{
+    get_i64_header, get_str_header, get_str_vec_header, require_key, require_value,
+    value_to_redis_arg,
+};
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -44,7 +47,7 @@ pub(crate) fn resolve_hash_values_map(
 
     Ok(values
         .iter()
-        .map(|(f, v)| (f.clone(), v.to_string()))
+        .map(|(f, v)| (f.clone(), value_to_redis_arg(v)))
         .collect::<Vec<_>>())
 }
 
@@ -88,7 +91,7 @@ pub(crate) fn build_redis_cmd(
             let field = resolve_hash_field(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("HSET");
-            c.arg(key).arg(field).arg(value.to_string());
+            c.arg(key).arg(field).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Hget => {
@@ -102,7 +105,7 @@ pub(crate) fn build_redis_cmd(
             let field = resolve_hash_field(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("HSETNX");
-            c.arg(key).arg(field).arg(value.to_string());
+            c.arg(key).arg(field).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Hmset => {
@@ -190,7 +193,7 @@ pub async fn dispatch(
                 let field = resolve_hash_field(exchange)?;
                 let value = require_value(exchange)?;
                 let n: i64 = conn
-                    .hset(&key, field, value.to_string())
+                    .hset(&key, field, value_to_redis_arg(&value))
                     .await
                     .map_err(|e| CamelError::ProcessorError(format!("Redis HSET failed: {e}")))?;
                 serde_json::json!(n)
@@ -208,7 +211,7 @@ pub async fn dispatch(
                 let field = resolve_hash_field(exchange)?;
                 let value = require_value(exchange)?;
                 let ok: bool = conn
-                    .hset_nx(&key, field, value.to_string())
+                    .hset_nx(&key, field, value_to_redis_arg(&value))
                     .await
                     .map_err(|e| CamelError::ProcessorError(format!("Redis HSETNX failed: {e}")))?;
                 serde_json::json!(ok)
@@ -378,8 +381,8 @@ mod tests {
         ]);
         let values = resolve_hash_values_map(&ex).expect("values should be present");
         assert_eq!(values.len(), 2);
-        assert!(values.iter().any(|(k, _)| k == "f1"));
-        assert!(values.iter().any(|(k, _)| k == "f2"));
+        assert!(values.iter().any(|(k, v)| k == "f1" && v == "v1"));
+        assert!(values.iter().any(|(k, v)| k == "f2" && v == "v2"));
     }
 
     #[test]
@@ -471,7 +474,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Hset, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "HSET");
-        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield", "\"myvalue\""]);
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield", "myvalue"]);
     }
 
     #[test]
@@ -533,7 +536,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Hsetnx, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "HSETNX");
-        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield", "\"myvalue\""]);
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield", "myvalue"]);
     }
 
     #[test]
@@ -559,9 +562,9 @@ mod tests {
         let args = cmd_args(&cmd);
         assert_eq!(args[0], "mykey");
         assert!(args.contains(&"f1".to_string()));
-        assert!(args.contains(&"\"v1\"".to_string()));
+        assert!(args.contains(&"v1".to_string()));
         assert!(args.contains(&"f2".to_string()));
-        assert!(args.contains(&"\"v2\"".to_string()));
+        assert!(args.contains(&"v2".to_string()));
         assert_eq!(args.len(), 5);
     }
 
