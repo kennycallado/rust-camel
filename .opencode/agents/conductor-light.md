@@ -122,6 +122,16 @@ openspec instructions specs --change <name> --json
 For each: read template + instruction, read dependencies, write to resolved path.
 STOP after specs.
 
+**SPEC VALIDATION** (catches template/parser mismatches before blessing):
+```bash
+cd "$WT" && openspec validate <name> --type change --json
+```
+Gate the blessing on delta-structure errors only (e.g. "No delta
+sections found"). Completeness warnings (missing tasks, TBD scenarios)
+are non-blocking at this phase — tasks are authored in PHASE 2.
+If delta-structure errors are found, fix the spec format before
+blessing. Do not proceed to blessing with unparseable deltas.
+
 **SPEC BLESSING**: dispatch `@experts/e_gpt` WITHOUT task_id:
 - Compute hash: `cargo run -p xtask -- hash-artifacts --change-dir "$WT/openspec/changes/<name>"`
 - Pass artifact paths (from `$WT`) + hash + "Bless this spec for planning?"
@@ -340,7 +350,7 @@ i. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
       git -C "$WT" diff $(git -C "$WT" merge-base HEAD main)...HEAD
       ```
       NOTE: canonical spec merge (`openspec/specs/`) happens at
-      archive time (step 4d), not here. The reviewer sees delta
+      archive time (PHASE 4 step 7), not here. The reviewer sees delta
       specs from `openspec/changes/<name>/specs/` — that is
       sufficient for cross-task drift detection. If `openspec sync`
       becomes available in a future CLI version, stage it here for
@@ -363,10 +373,15 @@ i. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
    git -C "$WT" commit -m "<conventional commit message>"
    ```
 
-5. Close bd issue (ALWAYS from root):
+5. **SPEC VALIDATION** (safety net — catches delta spec drift from
+   subagent edits during PHASE 3):
    ```bash
-   (cd "$ROOT" && bd close <id> --reason "Completed")
+   openspec validate <name> --type change --json  # cwd: "$WT"
    ```
+   If validation fails on delta-structure errors → loop back to PHASE 3.
+   Do not merge unparseable delta specs. (If the change intentionally
+   modifies no specs, ensure `skip_specs: true` is set in
+   `.openspec.yaml` — validate will pass cleanly.)
 
 6. **MERGE GATE** (requires human approval — never autonomous, even in autopilot):
    - Pause and ask the human: "Approve squash-merge of `<name>` to main?"
@@ -381,13 +396,40 @@ i. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
      git -C "$ROOT" commit -m "<caveman-commit: type(scope): summary + body + Bd:>"
      ```
    - On conflict: do NOT force or auto-resolve — report and hand back to the human.
-   - On success, cleanup the worktree and branch:
-     ```bash
-     git -C "$ROOT" worktree remove --force "$WT"
-     git -C "$ROOT" branch -D feature/<name>
-     ```
-   - Report: "Squash-merged to main locally (commit `<sha>`). Push is the human's exclusive action."
-   - NEVER run `git push`. The human pushes.
+   - Do NOT clean up yet — archive runs next (operates on the merged
+     change dir on main).
+
+7. **POST-MERGE ARCHIVE** (canonicalize delta specs into `openspec/specs/`):
+   The squash-merge brought `openspec/changes/<name>/` onto main. Archive it:
+   ```bash
+   openspec archive <name> --json  # from $ROOT
+   ```
+   This validates the delta, syncs it into `openspec/specs/`, and moves
+   the change to `openspec/changes/archive/YYYY-MM-DD-<name>/`.
+   Commit the archive result:
+   ```bash
+   git -C "$ROOT" add openspec
+   git -C "$ROOT" commit -m "chore(openspec): archive <name>"
+   ```
+   **On archive failure**: do NOT clean up, do NOT close bd. Halt and
+   report "merged to main but archive failed — manual intervention
+   required (bd stays open)." The human can re-run
+   `openspec archive <name>` after fixing the delta. Skipping archive
+   leaves orphan delta specs and a stale spec canon.
+
+8. Close bd issue (ALWAYS from root, only after archive succeeds):
+   ```bash
+   (cd "$ROOT" && bd close <id> --reason "Completed")
+   ```
+
+9. Clean up worktree and branch:
+   ```bash
+   git -C "$ROOT" worktree remove --force "$WT"
+   git -C "$ROOT" branch -D feature/<name>
+   ```
+   Report: "Squash-merged to main locally (commit `<sha>`), specs
+   archived. Push is the human's exclusive action."
+   NEVER run `git push`. The human pushes.
 
 ## TEARDOWN (on REJECT or cancel)
 
