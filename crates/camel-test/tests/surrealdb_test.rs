@@ -34,10 +34,10 @@ use toml::Value as TomlValue;
 // Setup helpers
 // ===========================================================================
 
-fn make_datasource_config(endpoint: &str) -> DatasourceConfig {
+fn make_datasource_config(endpoint: &str, db_name: &str) -> DatasourceConfig {
     let mut extra = HashMap::new();
     extra.insert("namespace".into(), TomlValue::String("test".into()));
-    extra.insert("database".into(), TomlValue::String("test".into()));
+    extra.insert("database".into(), TomlValue::String(db_name.into()));
     extra.insert("username".into(), TomlValue::String("root".into()));
     extra.insert("password".into(), TomlValue::String("root".into()));
     DatasourceConfig {
@@ -55,9 +55,12 @@ fn make_datasource_config(endpoint: &str) -> DatasourceConfig {
     }
 }
 
-fn make_catalog(endpoint: &str) -> RuntimeDatasourceCatalog {
+fn make_catalog(endpoint: &str, db_name: &str) -> RuntimeDatasourceCatalog {
     let mut configs = HashMap::new();
-    configs.insert("test".to_string(), make_datasource_config(endpoint));
+    configs.insert(
+        "test".to_string(),
+        make_datasource_config(endpoint, db_name),
+    );
     let catalog = RuntimeDatasourceCatalog::new(configs);
     catalog
         .register_factory("surrealdb", Arc::new(SurrealDbPoolFactory))
@@ -66,8 +69,11 @@ fn make_catalog(endpoint: &str) -> RuntimeDatasourceCatalog {
 }
 
 /// Create a direct SurrealDB client for DB-state verification.
-async fn direct_client(endpoint: &str) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
-    let config = make_datasource_config(endpoint);
+async fn direct_client(
+    endpoint: &str,
+    db_name: &str,
+) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+    let config = make_datasource_config(endpoint, db_name);
     let pool = SurrealDbPoolFactory
         .create(&config)
         .await
@@ -80,8 +86,8 @@ async fn direct_client(endpoint: &str) -> surrealdb::Surreal<surrealdb::engine::
 }
 
 /// Build a CamelTestContext with SurrealDB component wired through the catalog.
-async fn setup_harness(endpoint: &str) -> CamelTestContext {
-    let catalog = Arc::new(make_catalog(endpoint));
+async fn setup_harness(endpoint: &str, db_name: &str) -> CamelTestContext {
+    let catalog = Arc::new(make_catalog(endpoint, db_name));
     let component = SurrealDbComponent::with_catalog(catalog);
 
     CamelTestContext::builder()
@@ -122,8 +128,9 @@ async fn wait_for_mock_exchanges(
 async fn producer_create() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
-    let h = setup_harness(&endpoint).await;
+    let db_name = "producer_create";
+    let db = direct_client(&endpoint, db_name).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -171,14 +178,15 @@ async fn producer_create() {
 async fn producer_select_one() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_select_one";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Seed a record via direct query (setup only, not part of the tested route).
     db.query("CREATE user:alice SET name = 'Alice', age = 30")
         .await
         .expect("seed failed");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -229,7 +237,8 @@ async fn producer_select_one() {
 async fn producer_select_all() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_select_all";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Seed multiple records.
     db.query("CREATE user:bob SET name = 'Bob'")
@@ -239,7 +248,7 @@ async fn producer_select_all() {
         .await
         .expect("seed charlie");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -290,7 +299,8 @@ async fn producer_select_all() {
 async fn producer_query() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_query";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Seed records directly.
     db.query("CREATE type::record('query_test', 'bob') SET name = 'Bob', age = 25")
@@ -300,7 +310,7 @@ async fn producer_query() {
         .await
         .expect("seed charlie");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -353,14 +363,15 @@ async fn producer_query() {
 async fn producer_update() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_update";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Seed a record.
     db.query("CREATE user:dave SET name = 'Dave', age = 40")
         .await
         .expect("seed dave");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -407,14 +418,15 @@ async fn producer_update() {
 async fn producer_delete() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_delete";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Seed a record.
     db.query("CREATE user:eve SET name = 'Eve', age = 50")
         .await
         .expect("seed eve");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -455,9 +467,10 @@ async fn producer_delete() {
 async fn producer_upsert() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_upsert";
+    let db = direct_client(&endpoint, db_name).await;
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -497,7 +510,7 @@ async fn producer_upsert() {
     assert_eq!(result[0]["age"], 50, "age should be 50");
 
     // Second upsert: replaces the record content (CONTENT vs MERGE).
-    let h2 = setup_harness(&endpoint).await;
+    let h2 = setup_harness(&endpoint, db_name).await;
     let route2 = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(serde_json::json!({"name": "Frank", "age": 51}))
         .to("surrealdb:upsert?datasource=test&table=users&id=frank")
@@ -525,14 +538,15 @@ async fn producer_upsert() {
 async fn producer_patch() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_patch";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Seed a record.
     db.query("CREATE user:grace SET name = 'Grace', age = 25, city = 'NYC'")
         .await
         .expect("seed grace");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -589,14 +603,15 @@ async fn producer_patch() {
 async fn producer_run() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_run";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Define a custom SurrealDB function.
     db.query("DEFINE FUNCTION fn::add($a: int, $b: int) { RETURN $a + $b }")
         .await
         .expect("define function");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -653,7 +668,8 @@ async fn producer_run() {
 async fn producer_relate() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_relate";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Seed source and target records.
     db.query("CREATE user:1 SET name = 'Alice'")
@@ -663,7 +679,7 @@ async fn producer_relate() {
         .await
         .expect("create topic");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -722,7 +738,8 @@ async fn producer_relate() {
 async fn producer_relate_body_and_header_carry_edge_id() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "producer_relate_body_and_header_carry_edge_id";
+    let db = direct_client(&endpoint, db_name).await;
 
     db.query("CREATE user:10 SET name = 'Alice'")
         .await
@@ -731,7 +748,7 @@ async fn producer_relate_body_and_header_carry_edge_id() {
         .await
         .expect("create topic");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -825,7 +842,8 @@ async fn producer_relate_body_and_header_carry_edge_id() {
 async fn vector_search_via_producer() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "vector_search_via_producer";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Define HNSW index for 3D float vectors with cosine distance.
     db.query(
@@ -846,7 +864,7 @@ async fn vector_search_via_producer() {
         .await
         .expect("create doc3");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -901,7 +919,8 @@ async fn vector_search_via_producer() {
 async fn vector_store_via_producer() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "vector_store_via_producer";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Define HNSW index first.
     db.query(
@@ -911,7 +930,7 @@ async fn vector_store_via_producer() {
     .await
     .expect("define index");
 
-    let h = setup_harness(&endpoint).await;
+    let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
         .lock()
         .await
@@ -968,7 +987,8 @@ async fn vector_store_via_producer() {
 async fn polling_consumer_select() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "polling_consumer_select";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Seed a record using type::record (v3 syntax).
     db.query("CREATE type::record('docs', 'poll-test') SET title = 'Polling Test', value = 42")
@@ -976,7 +996,7 @@ async fn polling_consumer_select() {
         .expect("seed doc");
 
     // Build catalog with pool factory and get a pool.
-    let catalog: Arc<dyn DatasourceCatalog> = Arc::new(make_catalog(&endpoint));
+    let catalog: Arc<dyn DatasourceCatalog> = Arc::new(make_catalog(&endpoint, db_name));
     let _handle = catalog.get_pool("test").await.expect("get pool");
 
     // Build polling consumer for select-by-ID
@@ -1011,7 +1031,8 @@ async fn polling_consumer_select() {
 async fn polling_consumer_returns_none_when_empty() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "polling_consumer_returns_none_when_empty";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Ensure table exists (type::record requires existing table in v3).
     db.query("CREATE docs SET _init = true")
@@ -1022,7 +1043,7 @@ async fn polling_consumer_returns_none_when_empty() {
         .expect("delete init record");
 
     // Build catalog with pool factory.
-    let catalog: Arc<dyn DatasourceCatalog> = Arc::new(make_catalog(&endpoint));
+    let catalog: Arc<dyn DatasourceCatalog> = Arc::new(make_catalog(&endpoint, db_name));
     let _handle = catalog.get_pool("test").await.expect("get pool");
 
     // Query non-existent record by ID
@@ -1051,7 +1072,8 @@ async fn polling_consumer_returns_none_when_empty() {
 async fn consumer_live_receives_notifications() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let db = direct_client(&endpoint).await;
+    let db_name = "consumer_live_receives_notifications";
+    let db = direct_client(&endpoint, db_name).await;
 
     // Per SDK docs (https://surrealdb.com/docs/languages/rust/methods/select-live),
     // the table must be DEFINED before starting a live query. Schemaless CREATE
@@ -1067,7 +1089,7 @@ async fn consumer_live_receives_notifications() {
     let h = CamelTestContext::builder()
         .with_mock()
         .with_component(SurrealDbComponent::with_catalog(Arc::new(make_catalog(
-            &endpoint,
+            &endpoint, db_name,
         ))))
         .build()
         .await;
@@ -1209,7 +1231,8 @@ async fn live_rejects_http_scheme() {
 async fn datasource_health_check() {
     install_crypto_provider();
     let endpoint = shared_surrealdb().await.to_string();
-    let config = make_datasource_config(&endpoint);
+    let db_name = "datasource_health_check";
+    let config = make_datasource_config(&endpoint, db_name);
 
     let factory = SurrealDbPoolFactory;
     let pool = factory.create(&config).await.expect("create pool");
