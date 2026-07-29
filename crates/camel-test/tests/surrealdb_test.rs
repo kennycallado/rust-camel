@@ -217,19 +217,15 @@ async fn producer_select_one() {
     let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
-    // Verify the producer returned the record in the output body.
+    // Verify the producer returned the record in the input body.
     let exchanges = endpoint.get_received_exchanges().await;
-    if let Some(output) = &exchanges[0].output {
-        if let Body::Json(v) = &output.body {
-            let arr = v.as_array().expect("select-one result should be array");
-            assert_eq!(arr.len(), 1, "should return exactly one record");
-            assert_eq!(arr[0]["name"], "Alice", "name from select-one");
-            assert_eq!(arr[0]["age"], 30, "age from select-one");
-        } else {
-            panic!("expected Body::Json on output");
-        }
+    if let Body::Json(v) = &exchanges[0].input.body {
+        let arr = v.as_array().expect("select-one result should be array");
+        assert_eq!(arr.len(), 1, "should return exactly one record");
+        assert_eq!(arr[0]["name"], "Alice", "name from select-one");
+        assert_eq!(arr[0]["age"], 30, "age from select-one");
     } else {
-        panic!("expected output message");
+        panic!("expected Body::Json on input.body");
     }
 }
 
@@ -279,19 +275,15 @@ async fn producer_select_all() {
 
     let endpoint = h.mock().get_endpoint("result").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
-    if let Some(output) = &exchanges[0].output {
-        if let Body::Json(v) = &output.body {
-            let arr = v.as_array().expect("select-all result should be array");
-            assert!(
-                arr.len() >= 2,
-                "should return at least 2 records, got {}",
-                arr.len()
-            );
-        } else {
-            panic!("expected Body::Json on output");
-        }
+    if let Body::Json(v) = &exchanges[0].input.body {
+        let arr = v.as_array().expect("select-all result should be array");
+        assert!(
+            arr.len() >= 2,
+            "should return at least 2 records, got {}",
+            arr.len()
+        );
     } else {
-        panic!("expected output message");
+        panic!("expected Body::Json on input.body");
     }
 }
 
@@ -343,19 +335,15 @@ async fn producer_query() {
     let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
-    // Verify output body contains query results
+    // Verify input body contains query results
     let exchanges = endpoint.get_received_exchanges().await;
-    if let Some(output) = &exchanges[0].output {
-        if let Body::Json(v) = &output.body {
-            let arr = v.as_array().expect("query result should be array");
-            assert_eq!(arr.len(), 2, "should have 2 rows");
-            assert_eq!(arr[0]["name"], "Bob");
-            assert_eq!(arr[1]["name"], "Charlie");
-        } else {
-            panic!("expected Body::Json on output");
-        }
+    if let Body::Json(v) = &exchanges[0].input.body {
+        let arr = v.as_array().expect("query result should be array");
+        assert_eq!(arr.len(), 2, "should have 2 rows");
+        assert_eq!(arr[0]["name"], "Bob");
+        assert_eq!(arr[1]["name"], "Charlie");
     } else {
-        panic!("expected output message");
+        panic!("expected Body::Json on input.body");
     }
 }
 
@@ -644,11 +632,7 @@ async fn producer_run() {
     let result_ep = h.mock().get_endpoint("result").expect("result endpoint");
     let exchanges = result_ep.get_received_exchanges().await;
     assert!(!exchanges.is_empty(), "should have received the result");
-    let output = exchanges[0]
-        .output
-        .as_ref()
-        .expect("expected output message");
-    let result_value = match &output.body {
+    let result_value = match &exchanges[0].input.body {
         Body::Json(v) => v.clone(),
         Body::Text(s) => serde_json::from_str(s).expect("parse body as json"),
         other => panic!("unexpected body type: {other:?}"),
@@ -779,13 +763,9 @@ async fn producer_relate_body_and_header_carry_edge_id() {
     let endpoint_ep = h.mock().get_endpoint("result").unwrap();
     endpoint_ep.assert_exchange_count(1).await;
     let exchanges = endpoint_ep.get_received_exchanges().await;
-    let output = exchanges[0]
-        .output
-        .as_ref()
-        .expect("expected output message");
-    let body = match &output.body {
+    let body = match &exchanges[0].input.body {
         Body::Json(v) => v,
-        other => panic!("expected Body::Json on relate output, got {other:?}"),
+        other => panic!("expected Body::Json on relate input.body, got {other:?}"),
     };
 
     // Extract the record id from body.id, accepting either the flat string
@@ -823,7 +803,8 @@ async fn producer_relate_body_and_header_carry_edge_id() {
     );
 
     // Option B: CamelSurrealDbRecordId header MUST be set to the same edge id.
-    let header = output
+    let header = exchanges[0]
+        .input
         .headers
         .get("CamelSurrealDbRecordId")
         .and_then(|v| v.as_str())
@@ -898,20 +879,16 @@ async fn vector_search_via_producer() {
 
     // The search producer returns the top-K nearest neighbours.
     let exchanges = endpoint.get_received_exchanges().await;
-    if let Some(output) = &exchanges[0].output {
-        if let Body::Json(v) = &output.body {
-            let arr = v.as_array().expect("search result should be array");
-            assert_eq!(arr.len(), 2, "KNN top_k=2 should return 2 results");
-            // The nearest neighbour to [0.1, 0.2, 0.3] is doc1 (exact match).
-            assert_eq!(
-                arr[0]["content"], "doc1",
-                "nearest neighbour should be doc1"
-            );
-        } else {
-            panic!("expected Body::Json on output");
-        }
+    if let Body::Json(v) = &exchanges[0].input.body {
+        let arr = v.as_array().expect("search result should be array");
+        assert_eq!(arr.len(), 2, "KNN top_k=2 should return 2 results");
+        // The nearest neighbour to [0.1, 0.2, 0.3] is doc1 (exact match).
+        assert_eq!(
+            arr[0]["content"], "doc1",
+            "nearest neighbour should be doc1"
+        );
     } else {
-        panic!("expected output message");
+        panic!("expected Body::Json on input.body");
     }
 }
 

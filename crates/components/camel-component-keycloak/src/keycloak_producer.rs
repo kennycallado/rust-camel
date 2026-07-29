@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use camel_component_api::{Body, CamelError, Exchange, Message, RuntimeObservability};
+use camel_component_api::{Body, CamelError, Exchange, RuntimeObservability};
 
 use crate::admin_endpoint_config::AdminEndpointConfig;
 
@@ -78,7 +78,7 @@ impl KeycloakAdminProducer {
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("failed to read response: {e}")))?;
             if response_body.is_empty() {
-                exchange.output = Some(Message::new(Body::Empty));
+                exchange.input.body = Body::Empty;
             } else {
                 let body = if response_body.starts_with('{') || response_body.starts_with('[') {
                     let val: serde_json::Value =
@@ -91,7 +91,7 @@ impl KeycloakAdminProducer {
                 } else {
                     Body::Text(response_body)
                 };
-                exchange.output = Some(Message::new(body));
+                exchange.input.body = body;
             }
             Ok(())
         } else {
@@ -144,6 +144,7 @@ impl tower::Service<Exchange> for KeycloakAdminProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::Message;
 
     #[test]
     fn extract_body_from_text() {

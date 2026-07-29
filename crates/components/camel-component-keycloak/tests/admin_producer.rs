@@ -63,9 +63,7 @@ async fn admin_producer_create_user_success() {
     }))));
 
     let result = producer.call(exchange).await.unwrap();
-    assert!(result.output.is_some());
-    let output_body = result.output.unwrap().body;
-    match output_body {
+    match &result.input.body {
         Body::Json(val) => {
             assert_eq!(val["id"], "user-123");
             assert_eq!(val["username"], "testuser");
@@ -96,9 +94,7 @@ async fn admin_producer_delete_user_success() {
     let exchange = Exchange::new(Message::new(Body::Empty));
 
     let result = producer.call(exchange).await.unwrap();
-    assert!(result.output.is_some());
-    let output_body = result.output.unwrap().body;
-    assert!(matches!(output_body, Body::Empty));
+    assert!(matches!(result.input.body, Body::Empty));
 }
 
 #[tokio::test]
@@ -127,9 +123,7 @@ async fn admin_producer_get_user_success() {
     let exchange = Exchange::new(Message::new(Body::Empty));
 
     let result = producer.call(exchange).await.unwrap();
-    assert!(result.output.is_some());
-    let output_body = result.output.unwrap().body;
-    match output_body {
+    match &result.input.body {
         Body::Json(val) => {
             assert_eq!(val["id"], "user-456");
             assert_eq!(val["username"], "getuser");
@@ -158,7 +152,7 @@ async fn admin_producer_create_role_success() {
     }))));
 
     let result = producer.call(exchange).await.unwrap();
-    assert!(result.output.is_some());
+    assert!(matches!(result.input.body, Body::Empty));
 }
 
 #[tokio::test]
@@ -187,7 +181,7 @@ async fn admin_producer_assign_role_success() {
     ]))));
 
     let result = producer.call(exchange).await.unwrap();
-    assert!(result.output.is_some());
+    assert!(matches!(result.input.body, Body::Empty));
 }
 
 #[tokio::test]
@@ -210,7 +204,7 @@ async fn admin_producer_create_client_success() {
     }))));
 
     let result = producer.call(exchange).await.unwrap();
-    assert!(result.output.is_some());
+    assert!(matches!(result.input.body, Body::Empty));
 }
 
 #[tokio::test]
@@ -233,7 +227,7 @@ async fn admin_producer_create_realm_success() {
     }))));
 
     let result = producer.call(exchange).await.unwrap();
-    assert!(result.output.is_some());
+    assert!(matches!(result.input.body, Body::Empty));
 }
 
 #[tokio::test]
@@ -286,9 +280,7 @@ async fn admin_producer_user_id_from_header() {
     exchange.set_property("camel.keycloak.userId", serde_json::json!("from-property"));
 
     let result = producer.call(exchange).await.unwrap();
-    assert!(result.output.is_some());
-    let output_body = result.output.unwrap().body;
-    match output_body {
+    match &result.input.body {
         Body::Json(val) => {
             assert_eq!(val["id"], "from-property");
             assert_eq!(val["username"], "propertyuser");
