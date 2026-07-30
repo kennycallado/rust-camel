@@ -69,9 +69,9 @@ impl std::fmt::Debug for StartupBuildHandle {
             .field("rt_set", &self.rt.is_some())
             .field(
                 "handler_set",
-                &self.handler.lock().expect("poisoned").is_some(),
+                &self.handler.lock().expect("poisoned").is_some(), // allow-unwrap
             )
-            .field("guard_set", &self.guard.lock().expect("poisoned").is_some())
+            .field("guard_set", &self.guard.lock().expect("poisoned").is_some()) // allow-unwrap
             .finish_non_exhaustive()
     }
 }
@@ -136,7 +136,7 @@ impl StepLifecycle for StartupBuildHandle {
             rt: self.rt.clone(),
             route_id: self.route_id.clone(),
         });
-        *self.handler.lock().expect("handler cell poisoned") = Some(Arc::clone(&handler));
+        *self.handler.lock().expect("handler cell poisoned") = Some(Arc::clone(&handler)); // allow-unwrap
 
         // Register the handler into the process-global reload registry
         // (Task 5.3) so `reload_route` can reach it. The registration must
@@ -146,7 +146,7 @@ impl StepLifecycle for StartupBuildHandle {
         // unregisters by unique id — RAII.
         let guard = TemplateReloadRegistry::global()
             .register(Arc::clone(&handler) as Arc<dyn TemplateReloadTarget>);
-        *self.guard.lock().expect("guard cell poisoned") = Some(guard);
+        *self.guard.lock().expect("guard cell poisoned") = Some(guard); // allow-unwrap
 
         Ok(())
     }
@@ -157,7 +157,7 @@ impl StepLifecycle for StartupBuildHandle {
         // unregistered either way. `RegistrationGuard::drop` removes the
         // entry by its unique id — a stopped-generation guard can never
         // evict a restarted-generation registration.
-        *self.guard.lock().expect("guard cell poisoned") = None;
+        *self.guard.lock().expect("guard cell poisoned") = None; // allow-unwrap
         Ok(())
     }
 }

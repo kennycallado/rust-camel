@@ -92,7 +92,7 @@ impl Endpoint for TemplateEndpoint {
     ) -> Result<BoxProcessor, CamelError> {
         // Stash the runtime observability handle so the lifecycle (Task 4.4)
         // can read metrics/health on its own thread.
-        *self.rt.lock().expect("rt cell poisoned") = Some(Arc::clone(&rt));
+        *self.rt.lock().expect("rt cell poisoned") = Some(Arc::clone(&rt)); // allow-unwrap
         Ok(BoxProcessor::new(TemplateProducer::new(
             Arc::clone(&self.shared),
             ResolvedLimits::from_config(&self.render_limits),
@@ -108,7 +108,7 @@ impl Endpoint for TemplateEndpoint {
         let rt = self
             .rt
             .lock()
-            .expect("rt cell poisoned")
+            .expect("rt cell poisoned") // allow-unwrap
             .as_ref()
             .map(Arc::clone);
         Some(Arc::new(StartupBuildHandle {

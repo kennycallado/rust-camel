@@ -380,7 +380,7 @@ mod imp {
                     return Ok((OwnedHandle { inner: opened }, identity));
                 }
                 held = Some(opened);
-                cur_root = held.as_ref().expect("just-set").0;
+                cur_root = held.as_ref().expect("just-set").0; // allow-unwrap
             }
             unreachable!("component list is non-empty (validated)")
         }
