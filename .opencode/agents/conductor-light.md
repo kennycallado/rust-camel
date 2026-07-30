@@ -279,15 +279,17 @@ h. **Inter-phase review (multi-phase only).** After the last task in a
    - "Review this delivery phase against the spec. Cross-task
       interactions, emergent inconsistency, phase-exit-criteria from
      `design.md ## Phases`, and any drift across the phase's tasks."
-   - Verdict: APPROVE | APPROVE-WITH-FINDINGS | REJECT. REJECT or
-     important findings → loop back within the phase, re-dispatch the
-     affected tasks, re-review.
+   - Verdict: APPROVE | APPROVE-WITH-FINDINGS | REJECT. REJECT,
+     important, or legitimate-minor findings → loop back within the
+     phase, re-dispatch the affected tasks, re-review.
    - Single-task phase-groups SKIP this step.
 
 i. Resolve legitimate minor issues before advancing — they are
-   blocking, not deferrable. File bd follow-ups (from root:
-   `(cd "$ROOT" && bd ...)`) ONLY for out-of-scope work the human
-   must approve, or when a fix exceeds the task's scope.
+   blocking, not deferrable. An in-scope finding that identifies a
+   real defect remains blocking even when its fix exceeds the current
+   task's scope: escalate to the human rather than defer-and-advance.
+   File bd follow-ups (from root: `(cd "$ROOT" && bd ...)`) ONLY for
+   genuinely out-of-scope work the human must approve.
 
 - The loop continues autonomously until all tasks (across all phase-groups)
   are done
