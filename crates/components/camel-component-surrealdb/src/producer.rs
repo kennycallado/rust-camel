@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use camel_api::datasource::DatasourceCatalog;
-use camel_component_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::{Body, CamelError, Exchange};
 use serde_json::Value as JsonValue;
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any as SurrealAny;
@@ -633,14 +633,13 @@ impl Service<Exchange> for SurrealDbProducer {
                             "CamelSurrealDbRecordId header not set (no URI config and no extractable body.id)"
                         );
                     }
-                    let mut msg = Message::new(Body::Json(result));
+                    exchange.input.body = Body::Json(result);
                     if let Some(record_id) = record_id {
-                        msg.headers.insert(
+                        exchange.input.headers.insert(
                             headers::RECORD_ID.into(),
                             camel_component_api::Value::String(record_id),
                         );
                     }
-                    exchange.output = Some(msg);
                     Ok(exchange)
                 }
                 Err(err) => {
