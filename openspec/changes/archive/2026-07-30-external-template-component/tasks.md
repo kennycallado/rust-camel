@@ -319,7 +319,7 @@
 - `cargo clippy -p camel-template -- -D warnings` exits 0.
 - `cargo test -p camel-template --lib producer_` passes.
 
-- [ ] 4.2
+- [x] 4.2
 
 ### Task 4.3: TemplateComponent + TemplateEndpoint (producer-only)
 
