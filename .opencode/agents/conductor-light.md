@@ -242,7 +242,10 @@ e. **Dispatch `@reviewers/r_glm` for combined spec+code review** (one run):
       + code quality + test coverage in one pass."
 
 f. Verdict:
-   - Clean (or absurd minor) → mark `- [x]`, advance to next task
+   - Clean → mark `- [x]`, advance to next task
+   - Absurd minor (no real defect) → mark `- [x]`, advance to next task
+   - Legitimate minor (real defect, non-absurd) → re-dispatch worker
+     with findings → resolve BEFORE advancing → re-review
    - Critical/important → re-dispatch worker with findings → re-review
    - Stuck after 2 attempts → escalate `@experts/e_gpt` for consultation
    - **Autopilot budget check**: if cap exceeded → STOP, wait for human
@@ -281,7 +284,10 @@ h. **Inter-phase review (multi-phase only).** After the last task in a
      affected tasks, re-review.
    - Single-task phase-groups SKIP this step.
 
-i. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...)`)
+i. Resolve legitimate minor issues before advancing — they are
+   blocking, not deferrable. File bd follow-ups (from root:
+   `(cd "$ROOT" && bd ...)`) ONLY for out-of-scope work the human
+   must approve, or when a fix exceeds the task's scope.
 
 - The loop continues autonomously until all tasks (across all phase-groups)
   are done
@@ -364,7 +370,8 @@ i. Resolve minor issues or file bd follow-ups (from root: `(cd "$ROOT" && bd ...
          per-crate CONTEXT.md, GLOSSARY.md)."
       - Verdict: APPROVE | APPROVE-WITH-FINDINGS | REJECT
    c. Write `.review.json` (verdict + reviewer + impl_hash)
-   d. REJECT/important findings → loop back to PHASE 3 → re-review
+   d. REJECT / important / legitimate-minor findings → loop back to
+      PHASE 3 → re-review. Only absurd minors are discarded.
    e. [INTERACTIVE] "Holistic review passed. Ready for merge review."
 
 4. Commit everything in the worktree:
