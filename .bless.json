@@ -1,8 +1,0 @@
-{
-  "kind": "plan",
-  "change": "redb-idempotent-repository",
-  "verdict": "APPROVE",
-  "expert": "experts/e_opus",
-  "artifact_hash": "sha256:23a344023bc9b2bc5cfeb6513ee0e8d3bf5c87a607abba083494156e695cd6ca",
-  "notes": "Plan blessing (supersedes spec blessing hash — now includes tasks.md). Reviewer loop: r_glm 2 passes (APPROVE-WITH-FINDINGS -> APPROVE). Plan-bless 2 passes: e_opus APPROVE-WITH-FIXES (CRITICAL: redb::Database is not Clone -> struct holds Arc<Database>, methods Arc::clone; + #[async_trait] pin) -> APPROVE. All fixes verified against redb_journal.rs:85/131/324. Hash is xtask change-dir canonical hash; expert raw-sha256sum of tasks.md differs by algorithm, not content."
-}
