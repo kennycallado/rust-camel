@@ -1,6 +1,8 @@
 use camel_api::{CanonicalRouteSpec, RuntimeCommand};
+use camel_config::JournalDurability;
 use camel_config::config::{
-    CamelConfig, JournalConfig, PlatformCamelConfig, SecurityConfig, StreamCachingConfig,
+    CamelConfig, JournalConfig, PlatformCamelConfig, RedbIdempotentConfig, SecurityConfig,
+    StreamCachingConfig,
 };
 #[cfg(feature = "otel")]
 use camel_config::config::{ObservabilityConfig, OtelCamelConfig};
@@ -84,6 +86,7 @@ async fn test_configure_context_with_supervision() {
         routes: vec![],
         watch: false,
         runtime_journal: None,
+        idempotent_repo: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
@@ -118,6 +121,7 @@ async fn test_configure_context_sets_shutdown_timeout() {
         routes: vec![],
         watch: false,
         runtime_journal: None,
+        idempotent_repo: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
@@ -151,6 +155,7 @@ async fn test_configure_context_with_valid_log_level() {
         routes: vec![],
         watch: false,
         runtime_journal: None,
+        idempotent_repo: None,
         log_level: "debug".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
@@ -180,6 +185,7 @@ async fn test_configure_context_with_invalid_log_level() {
         routes: vec![],
         watch: false,
         runtime_journal: None,
+        idempotent_repo: None,
         log_level: "invalid_level".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
@@ -223,6 +229,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
         routes: vec![],
         watch: false,
         runtime_journal: None,
+        idempotent_repo: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
@@ -266,6 +273,7 @@ async fn test_configure_context_without_otel_no_lifecycle() {
         routes: vec![],
         watch: false,
         runtime_journal: None,
+        idempotent_repo: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
@@ -307,6 +315,7 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
             durability: camel_config::JournalDurability::Immediate,
             compaction_threshold_events: 10_000,
         }),
+        idempotent_repo: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
@@ -416,4 +425,87 @@ any_key = "any_value"
     let config = result.unwrap();
     assert!(config.components.raw.contains_key("redis"));
     assert!(config.components.raw.contains_key("my_custom"));
+}
+
+#[tokio::test]
+async fn context_registers_redb_idempotent_when_configured() {
+    let dir = tempdir().unwrap();
+    let redb_path = dir.path().join("idempotent.redb");
+    let config = CamelConfig {
+        routes: vec![],
+        watch: false,
+        runtime_journal: None,
+        idempotent_repo: Some(RedbIdempotentConfig {
+            path: redb_path.clone(),
+            durability: JournalDurability::Immediate,
+        }),
+        log_level: "INFO".to_string(),
+        timeout_ms: 5000,
+        drain_timeout_ms: 10_000,
+        watch_debounce_ms: 300,
+        components: Default::default(),
+        observability: Default::default(),
+        supervision: None,
+        platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
+        security: SecurityConfig::default(),
+        datasources: HashMap::new(),
+        languages: camel_config::LanguagesConfig::default(),
+        _extra: HashMap::<String, Value>::new(),
+    };
+
+    let ctx = CamelConfig::configure_context(&config)
+        .await
+        .expect("configure_context should succeed with redb idempotent config");
+
+    assert!(
+        ctx.idempotent_repository("redb").is_some(),
+        "idempotent repo named 'redb' must be registered when configured"
+    );
+    assert!(
+        ctx.idempotent_repository("memory").is_some(),
+        "idempotent repo named 'memory' must remain registered as the default"
+    );
+    assert!(
+        redb_path.exists(),
+        "redb file must be created on disk by configure_context"
+    );
+}
+
+#[tokio::test]
+async fn context_redb_absent_when_not_configured_memory_remains_default() {
+    let config = CamelConfig {
+        routes: vec![],
+        watch: false,
+        runtime_journal: None,
+        idempotent_repo: None,
+        log_level: "INFO".to_string(),
+        timeout_ms: 5000,
+        drain_timeout_ms: 10_000,
+        watch_debounce_ms: 300,
+        components: Default::default(),
+        observability: Default::default(),
+        supervision: None,
+        platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
+        security: SecurityConfig::default(),
+        datasources: HashMap::new(),
+        languages: camel_config::LanguagesConfig::default(),
+        _extra: HashMap::<String, Value>::new(),
+    };
+
+    let ctx = CamelConfig::configure_context(&config)
+        .await
+        .expect("configure_context should succeed without redb config");
+
+    assert!(
+        ctx.idempotent_repository("redb").is_none(),
+        "idempotent repo named 'redb' must NOT be registered when not configured"
+    );
+    assert!(
+        ctx.idempotent_repository("memory").is_some(),
+        "idempotent repo named 'memory' must remain the default"
+    );
 }

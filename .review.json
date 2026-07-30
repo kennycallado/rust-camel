@@ -1,0 +1,14 @@
+{
+  "change": "redb-idempotent-repository",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "scope": "holistic (full diff base 1186d842...HEAD)",
+  "impl_hash": "git:6b3183499ac814312fa8ace6f43bc445c2630299",
+  "summary": "No Critical/Important. 11/11 spec scenarios owned by passing tests. End-to-end coherent (config -> context_ext -> 'redb' registry -> resolver), memory default intact, Contract C1 holds, Arc<Database> + () value + set_durability mapping all correct. 12 quality gates green. Optional non-blocking minors: README Core Fields table omits idempotent_repo (parity with existing runtime_journal omission); no CAMEL_IDEMPOTENT_REPO_* env override (parity gap, defensible for table-typed Option). Filed bd follow-up for doc/env parity.",
+  "per_task_reviews": {
+    "1.1": "APPROVE",
+    "1.2": "APPROVE",
+    "2.1": "APPROVE-WITH-FINDINGS (1 minor applied)",
+    "2.2": "APPROVE"
+  }
+}

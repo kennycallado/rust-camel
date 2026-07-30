@@ -112,6 +112,8 @@ pub use crate::hot_reload::adapters::ReloadWatcher;
 pub use crate::hot_reload::application::FunctionReloadContext;
 pub use crate::hot_reload::application::execute_reload_actions;
 pub use crate::hot_reload::domain::ReloadAction;
+#[cfg(feature = "export-internal-adapters")]
+pub use crate::idempotent::RedbIdempotentRepository;
 pub use crate::language_registry::LanguageRegistryError;
 pub use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 pub use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
@@ -123,6 +125,7 @@ pub use crate::lifecycle::adapters::redb_journal::{
     JournalDurability, JournalEntry, JournalInspectFilter, RedbJournalOptions,
     RedbRuntimeEventJournal,
 };
+
 #[cfg(feature = "export-internal-adapters")]
 pub use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 #[cfg(feature = "export-internal-adapters")]

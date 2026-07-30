@@ -48,6 +48,14 @@ format = "json"
 # [default.components.container]
 # docker_host = "unix:///var/run/docker.sock"
 
+# Optional persistent idempotent repository (opt-in). When set under the
+# active profile, registers a "redb" backend for `idempotent_consumer` steps;
+# keys persist across restart. The default "memory" repo stays available.
+# durability: "immediate" (default, fsync per key) | "eventual" (no fsync, faster)
+# [default.idempotent_repo]
+# path = ".camel/idempotent.redb"
+# durability = "immediate"
+
 [development]
 log_level = "DEBUG"
 

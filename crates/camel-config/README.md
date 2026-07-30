@@ -127,7 +127,8 @@ allow_internal = true  # Allow internal services in dev
 |-------|------|---------|-------------|
 | `routes` | `[String]` |  | Glob patterns for route files (default examples use YAML; explicit `.json` globs also supported) |
 | `watch` | `bool` |  | Enable hot reload on file changes |
-| `runtime_journal_path` | `String?` |  | Optional durability flag: when set, enables local runtime journal replay |
+| `runtime_journal` | `[runtime_journal]` table | unset | Optional redb runtime event journal (`path`, `durability`, `compaction_threshold_events`); when set, enables local runtime journal replay |
+| `idempotent_repo` | `[idempotent_repo]` table | unset | Optional persistent redb idempotent repository (`path`, `durability`); when set, registers a `"redb"` backend for `idempotent_consumer` steps. The default `"memory"` repo remains available either way |
 | `log_level` | `String` |  | Logging level (trace/debug/info/warn/error) |
 | `timeout_ms` | `u64` |  | Default operation timeout |
 | `drain_timeout_ms` | `u64` |  | Max time to wait for in-flight exchanges to complete on Restart/Remove (default: 10000) |
@@ -135,6 +136,19 @@ allow_internal = true  # Allow internal services in dev
 | `supervision.*` | - |  | Retry and backoff settings |
 | `observability.health.enabled` | `bool` | `false` | Enable standalone health server |
 | `observability.health.port` | `u16` | `8080` | Health server port |
+
+### `[idempotent_repo]` — Persistent Idempotent Repository (opt-in)
+
+By default, idempotency is volatile: the built-in `"memory"` repository loses its keys on restart, so duplicate messages arriving after a restart are reprocessed. Setting `[default.idempotent_repo]` registers an additional `"redb"` backend — an embedded, ACID, pure-Rust store (redb) — that persists dedup keys to disk so at-most-once delivery survives restarts. It is local/embedded only; multi-replica topologies still need a shared store (Redis/SQL-backed).
+
+```toml
+[default.idempotent_repo]
+path = ".camel/idempotent.redb"   # Created if missing (parent dir is created too)
+durability = "immediate"          # "immediate" (default, fsync per added key) | "eventual" (no fsync)
+```
+
+- Reference it from a route step: `idempotent_consumer { repository: "redb", ... }`. The default `"memory"` repo stays registered, so routes that omit a repository or name `"memory"` are unaffected.
+- **Durability trade-off:** `immediate` (the default) fsyncs on every added key — full at-most-once correctness across OS/power crash, at the cost of one fsync per deduplicated message on the hot path. `eventual` skips fsync for throughput, accepting that a crash may lose recently-added keys (at-least-once degradation). Prefer `eventual` only for high-throughput routes that tolerate occasional reprocessing.
 
 ## Component Defaults
 

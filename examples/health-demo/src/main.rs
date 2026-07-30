@@ -19,6 +19,7 @@ async fn main() -> Result<(), CamelError> {
         routes: vec![],
         watch: false,
         runtime_journal: None,
+        idempotent_repo: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,

@@ -26,6 +26,12 @@ pub struct CamelConfig {
     #[serde(default)]
     pub runtime_journal: Option<JournalConfig>,
 
+    /// Optional persistent redb idempotent repository.
+    ///
+    /// When unset, the in-memory idempotent repository is used (ephemeral,
+    /// bounded by `DEFAULT_MAX_ENTRIES`).
+    pub idempotent_repo: Option<RedbIdempotentConfig>,
+
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
@@ -123,6 +129,7 @@ impl CamelConfigBuilder {
             routes: self.routes.unwrap_or(defaults.routes),
             watch: self.watch.unwrap_or(defaults.watch),
             runtime_journal: defaults.runtime_journal,
+            idempotent_repo: defaults.idempotent_repo,
             log_level: self.log_level.unwrap_or(defaults.log_level),
             timeout_ms: self.timeout_ms.unwrap_or(defaults.timeout_ms),
             drain_timeout_ms: self.drain_timeout_ms.unwrap_or(defaults.drain_timeout_ms),
@@ -147,6 +154,7 @@ impl Default for CamelConfig {
             routes: Vec::new(),
             watch: false,
             runtime_journal: None,
+            idempotent_repo: None,
             log_level: default_log_level(),
             timeout_ms: default_timeout_ms(),
             drain_timeout_ms: default_drain_timeout_ms(),
@@ -472,6 +480,31 @@ pub struct JournalConfig {
     /// Trigger compaction after this many events. Default: 10_000.
     #[serde(default = "default_compaction_threshold_events")]
     pub compaction_threshold_events: u64,
+}
+
+/// Configuration for the persistent redb idempotent repository.
+///
+/// When omitted from `Camel.toml`, the runtime uses the in-memory
+/// `MemoryIdempotentRepository` (ephemeral, bounded by `DEFAULT_MAX_ENTRIES`).
+/// Use this struct to opt into a durable on-disk store.
+///
+/// # Durability trade-off
+///
+/// `JournalDurability::Immediate` fsyncs the redb file on every added key,
+/// matching the runtime event journal's safety guarantee (at-most-once
+/// semantics survive OS/power crash). For high-throughput routes, set
+/// `durability = "eventual"` to skip fsync — accepted degradation is
+/// at-least-once (a key added just before a crash may be silently lost,
+/// allowing a duplicate replay).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RedbIdempotentConfig {
+    /// Path to the `.redb` file. Created if it does not exist.
+    pub path: std::path::PathBuf,
+
+    /// Durability mode. Default: `immediate`.
+    #[serde(default)]
+    pub durability: JournalDurability,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1058,6 +1091,13 @@ impl CamelConfig {
                     "runtime_journal.compaction_threshold_events must be > 0".to_string(),
                 ));
             }
+        }
+        if let Some(ref repo) = self.idempotent_repo
+            && repo.path.as_os_str().is_empty()
+        {
+            return Err(CamelError::Config(
+                "idempotent_repo.path must not be empty".to_string(),
+            ));
         }
         for (name, bean) in &self.beans {
             if bean.plugin.trim().is_empty() {
@@ -1856,6 +1896,31 @@ timeout_ms = 777
     }
 
     #[test]
+    fn redb_idempotent_config_loads_via_profile_section() {
+        // The real Camel.toml uses profiles: the field must live under the
+        // active profile as [default.idempotent_repo] (mirrors [default.supervision]),
+        // NOT top-level. This verifies the profile path that the flat-parsing
+        // redb_idempotent_config_* tests above do not cover.
+        let file = write_temp_config(
+            r#"
+[default]
+[default.idempotent_repo]
+path = "profile.redb"
+durability = "eventual"
+"#,
+        );
+
+        let cfg =
+            CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), Some("default"))
+                .expect("config should load");
+        let repo = cfg
+            .idempotent_repo
+            .expect("idempotent_repo should populate via [default.idempotent_repo]");
+        assert_eq!(repo.path, std::path::PathBuf::from("profile.redb"));
+        assert_eq!(repo.durability, JournalDurability::Eventual);
+    }
+
+    #[test]
     fn test_from_file_with_profile_unknown_profile_returns_error() {
         let file = write_temp_config(
             r#"
@@ -2075,6 +2140,39 @@ mod additional_config_tests {
     }
 
     #[test]
+    fn redb_idempotent_config_defaults_to_immediate_durability() {
+        let toml_str = r#"
+[idempotent_repo]
+path = "x.redb"
+"#;
+        let config: CamelConfig = toml::from_str(toml_str).unwrap();
+        let repo = config.idempotent_repo.expect("idempotent_repo must parse");
+        assert_eq!(repo.durability, JournalDurability::Immediate);
+    }
+
+    #[test]
+    fn redb_idempotent_config_parses_eventual_durability() {
+        let toml_str = r#"
+[idempotent_repo]
+path = "x.redb"
+durability = "eventual"
+"#;
+        let config: CamelConfig = toml::from_str(toml_str).unwrap();
+        let repo = config.idempotent_repo.expect("idempotent_repo must parse");
+        assert_eq!(repo.durability, JournalDurability::Eventual);
+    }
+
+    #[test]
+    fn redb_idempotent_config_durability_roundtrips_to_core() {
+        let cfg = RedbIdempotentConfig {
+            path: std::path::PathBuf::from("x.redb"),
+            durability: JournalDurability::Eventual,
+        };
+        let core: camel_core::JournalDurability = cfg.durability.into();
+        assert_eq!(core, camel_core::JournalDurability::Eventual);
+    }
+
+    #[test]
     fn from_env_or_default_uses_camel_config_file_env() {
         use std::io::Write;
 
@@ -2234,6 +2332,25 @@ mod config_validation_tests {
             ..CamelConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn redb_idempotent_config_empty_path_rejected() {
+        let config = CamelConfig {
+            idempotent_repo: Some(RedbIdempotentConfig {
+                path: std::path::PathBuf::from(""),
+                durability: JournalDurability::default(),
+            }),
+            ..CamelConfig::default()
+        };
+        let err = config
+            .validate()
+            .expect_err("empty idempotent_repo.path must fail validation");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("idempotent_repo") && msg.contains("path"),
+            "error must name `idempotent_repo.path`, got: {msg}"
+        );
     }
 
     #[test]

@@ -214,6 +214,19 @@ impl CamelConfig {
 
         let mut ctx = builder.build().await?;
 
+        // Opt-in persistent redb idempotent repository: when `idempotent_repo`
+        // is set, register a redb-backed repo under the name "redb". The
+        // default "memory" repo registered in CamelContextBuilder::build()
+        // remains in place either way.
+        if let Some(ref icfg) = config.idempotent_repo {
+            let durability = camel_core::JournalDurability::from(icfg.durability.clone());
+            let repo =
+                camel_core::RedbIdempotentRepository::new("redb", icfg.path.clone(), durability)
+                    .await?;
+            ctx.register_idempotent_repository("redb", Arc::new(repo))
+                .map_err(|e| CamelError::Config(format!("register idempotent 'redb': {e:?}")))?;
+        }
+
         ctx.set_shutdown_timeout(std::time::Duration::from_millis(config.timeout_ms));
 
         let tracer_config = config.observability.tracer.clone();

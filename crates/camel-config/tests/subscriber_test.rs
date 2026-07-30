@@ -12,6 +12,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         routes: vec![],
         watch: false,
         runtime_journal: None,
+        idempotent_repo: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
