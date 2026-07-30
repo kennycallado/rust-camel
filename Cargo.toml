@@ -101,6 +101,7 @@ camel-component-controlbus = { path = "crates/components/camel-controlbus", vers
 camel-component-validator = { path = "crates/components/camel-validator", version = "=0.25.1" }
 camel-xslt = { path = "crates/components/camel-xslt", version = "=0.25.1" }
 camel-xj = { path = "crates/components/camel-xj", version = "=0.25.1" }
+camel-template = { path = "crates/components/camel-template", version = "=0.25.1" }
 camel-component-cxf = { path = "crates/components/camel-cxf", version = "=0.25.1" }
 camel-master = { path = "crates/components/camel-master", version = "=0.25.1" }
 camel-component-prometheus = { path = "crates/services/camel-prometheus", version = "=0.25.1" }
@@ -196,6 +197,11 @@ glob = "0.3"
 notify = { version = "8", features = ["macos_fsevent"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "redis"] }
+# ADR-0047 Stage 2: external template component uses rustix (unix) /
+# windows-sys (windows) for `openat`-style relative path resolution to
+# enforce the dependency-closure contract. Feature-gated in the crate.
+rustix = { version = "0.38", features = ["fs"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Wdk_Storage_FileSystem", "Win32_Storage_FileSystem", "Win32_Security"] }
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 csv = "1"
 proc-macro2 = "1.0"

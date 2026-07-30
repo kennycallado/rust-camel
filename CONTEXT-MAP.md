@@ -68,6 +68,7 @@ are a convenience index and may lag the file.
 - [0044](./docs/adr/0044-route-admission-backpressure.md) — Semaphore permit acquired before dequeue in Concurrent model; consumer back-pressure when permits exhausted
 - [0045](./docs/adr/0045-camel-core-architecture-charter.md) — camel-core architecture charter: codifies the Clean + DDD + CQRS + vertical-slices + hexagonal promise crate-wide; declares the module-discipline ceiling (no crate-split through 1.0) and scopes CQRS to the control plane (synchronous-projection)
 - [0046](./docs/adr/0046-apache-camel-inspiration-not-conformance.md) — Apache Camel is design-inspiration corpus, not conformance authority; consultation protocol (trigger by divergence-density, 3 tests, classify-while-reading, native tests, KPI = divergences-documentadas/EIP); rejects `cargo xtask port-camel-test`
+- [0047](./docs/adr/0047-template-rendering-engine.md) — MiniJinja-based external template rendering engine: operator-owned file sources (openat-confined closure walk), compile-once in-memory `TemplateSet`, and atomic hot-reload (all-or-nothing `reload_route`) behind the `template:` producer scheme
 
 ## Key Terms
 

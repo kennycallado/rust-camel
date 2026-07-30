@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::{BodyType, BoxProcessor, CamelError, Exchange};
+use camel_api::{BodyType, BoxProcessor, CamelError, Exchange, StepLifecycle};
 
 use crate::ProducerContext;
 use crate::consumer::Consumer;
@@ -66,6 +66,22 @@ pub trait Endpoint: Send + Sync {
     /// Endpoints that only support push-based consumption should leave
     /// this default (returns `None`).
     fn polling_consumer(&self) -> Option<Box<dyn PollingConsumer>> {
+        None
+    }
+
+    /// Return this endpoint's lifecycle handle, if it is stateful.
+    ///
+    /// Endpoints that own background work beyond a single `process()` call
+    /// (timers, buckets, gap-detectors, queues) should override this to
+    /// expose a `StepLifecycle` for the runtime to start and shut down in
+    /// route order. Default: `None` (stateless; the common case).
+    ///
+    /// Mirrors the contract on the `Endpoint` trait only — see
+    /// `CompiledStep::Process.lifecycle` in camel-core for the consumer
+    /// side. The returned handle is an `Arc<dyn StepLifecycle>` so it can be
+    /// cloned into the compiled pipeline snapshot and shared across the
+    /// route controller without extra ownership plumbing.
+    fn lifecycle(&self) -> Option<Arc<dyn StepLifecycle>> {
         None
     }
 }
@@ -143,6 +159,17 @@ mod tests {
         let rt: Arc<dyn crate::RuntimeObservability> = Arc::new(PanicRuntimeObservability);
         let result = ep.create_producer(rt, &ctx);
         assert!(result.is_err());
+    }
+
+    /// Default `lifecycle()` on the `Endpoint` trait returns `None` —
+    /// stateless endpoints (the common case) need not override the hook.
+    #[test]
+    fn endpoint_lifecycle_default_none() {
+        let ep = MockEndpoint::new("mock://test");
+        assert!(
+            ep.lifecycle().is_none(),
+            "default Endpoint::lifecycle() must return None"
+        );
     }
 
     /// Verify ComponentContext can be constructed (via NoOpComponentContext).

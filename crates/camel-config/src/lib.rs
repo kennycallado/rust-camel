@@ -17,6 +17,7 @@ pub use camel_language_api::{
     JsEngineConfig, JsLimitsConfig, LanguagesConfig, MinijinjaEngineConfig, MinijinjaLimitsConfig,
     RhaiEngineConfig, RhaiLimitsConfig,
 };
+pub use camel_template::ExternalTemplateLimitsConfig;
 pub use config::{
     CamelConfig, ComponentsConfig, HealthCamelConfig, JournalConfig, JournalDurability,
     KeycloakIntrospectionConfig, KeycloakJwksConfig, KeycloakSecurityConfig,
@@ -37,3 +38,18 @@ pub use yaml::{
     RouteDslRoute, RouteDslRoutes, RouteDslStep, load_from_file, parse_yaml,
     parse_yaml_to_canonical, parse_yaml_to_declarative, parse_yaml_with_threshold,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_reexports_external_limits() {
+        // Construct via camel-config re-export
+        let config = ExternalTemplateLimitsConfig::default();
+        // Prove the type identity via round-trip deserialization
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ExternalTemplateLimitsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, deserialized);
+    }
+}

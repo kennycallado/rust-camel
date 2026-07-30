@@ -472,6 +472,7 @@ mod tests {
                     format!("remove:{route_id}")
                 }
                 RuntimeCommand::ReloadTlsCerts { .. } => "reload_tls_certs".to_string(),
+                RuntimeCommand::ReloadTemplates { .. } => "reload_templates".to_string(),
             };
             self.commands.lock().await.push(marker);
             Ok(RuntimeCommandResult::Accepted)

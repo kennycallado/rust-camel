@@ -308,6 +308,8 @@ pub async fn run(
         camel_config,
         camel_component_container::ContainerBundle
     );
+    // External template renderer (ADR-0047 Stage 2): always-on built-in.
+    register_bundle!(ctx, camel_config, camel_template::TemplateBundle);
 
     // Register optional/feature-gated bundles
     let jms_pool = {

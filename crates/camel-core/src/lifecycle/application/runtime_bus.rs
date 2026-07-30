@@ -193,6 +193,26 @@ impl RuntimeCommandBus for RuntimeBus {
         }
         // ── End TLS reload intercept ────────────────────────────────────────
 
+        // ── Template reload intercept ──────────────────────────────────────
+        // Infrastructure command — bypasses journal recovery + dedup (mirrors
+        // ReloadTlsCerts above). Reloads are idempotent and NOT journaled;
+        // RouteStatus is not mutated and ADR-0018 is not invoked. Dispatches to
+        // the registry in camel-component-api (NOT camel-template — that would
+        // invert the dependency).
+        //
+        // NOTE: no `template_reloads_total` metric is recorded here because the
+        // RuntimeBus holds no metrics handle (ReloadTlsCerts records none
+        // either). Threading a metrics port through RuntimeBus::new is out of
+        // scope for this change; tracked jointly (TLS + Templates) in bd rc-d3pj.
+        if let RuntimeCommand::ReloadTemplates { route_id, .. } = &cmd {
+            let route_id = route_id.clone();
+            camel_component_api::template_reload::TemplateReloadRegistry::global()
+                .reload_route(&route_id)
+                .await?;
+            return Ok(RuntimeCommandResult::TemplatesReloaded { route_id });
+        }
+        // ── End template reload intercept ──────────────────────────────────
+
         self.ensure_journal_recovered().await?;
         let command_id = cmd.command_id().to_string();
         if !self.dedup.first_seen(&command_id).await? {

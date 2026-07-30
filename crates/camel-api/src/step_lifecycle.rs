@@ -33,6 +33,21 @@ pub trait StepLifecycle: std::fmt::Debug + Send + Sync + 'static {
     fn name(&self) -> &'static str;
 
     async fn shutdown(&self, reason: StepShutdownReason) -> Result<(), CamelError>;
+
+    /// Called when the route starts.
+    ///
+    /// Default is a no-op so existing implementors remain source-compatible.
+    /// Stateful steps that own background work (timers, buckets, gap-detectors)
+    /// should override this to start that work after construction. Mirrors
+    /// `Lifecycle::start` semantics, but with `&self` (shared-reference,
+    /// interior-mutability) — see ADR-0022.
+    // TODO(reload-start): `start()` is currently invoked only from `start_route`.
+    // The hot-reload path (swap_pipeline / swap_pipeline_raw) stores lifecycle
+    // handles but does not yet call `start()` on rebuilt handles; whether they
+    // need re-start is a future decision (ADR-0022).
+    async fn start(&self) -> Result<(), CamelError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -70,6 +85,18 @@ mod tests {
             *inner.shutdowns.lock().unwrap(),
             vec![StepShutdownReason::RouteStop, StepShutdownReason::HotSwap,]
         );
+    }
+
+    #[tokio::test]
+    async fn start_default_is_noop() {
+        // FakeStep does not override `start`; the default impl on the trait
+        // must return `Ok(())` so existing implementors (ResequencerService,
+        // AggregatorService, test fakes) are unaffected.
+        let step: Arc<dyn StepLifecycle> = Arc::new(FakeStep {
+            shutdowns: Mutex::new(vec![]),
+        });
+        let result = step.start().await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ categories.workspace = true
 async-trait.workspace = true
 camel-api.workspace = true
 camel-language-api.workspace = true
+camel-template.workspace = true
 camel-bean.workspace = true
 camel-core.workspace = true
 camel-dsl.workspace = true

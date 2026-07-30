@@ -13,6 +13,12 @@ use camel_api::{
 };
 use camel_component_api::ConcurrencyModel;
 
+/// Serializes tests that touch the global `START_ROUTE_EVENT_HOOK`. The hook
+/// is a single process-wide slot, so concurrent hook-using tests would
+/// clobber each other's recorders; taking this guard makes them run one at a
+/// time while leaving the rest of the suite parallel.
+static START_ROUTE_HOOK_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct NoopInvoker;
 
 impl FunctionInvokerSync for NoopInvoker {
@@ -462,6 +468,9 @@ async fn start_stop_route_happy_path_with_timer_and_mock() {
 
 #[tokio::test]
 async fn start_route_spawns_pipeline_before_consumer_for_eager_consumers() {
+    let _hook_guard = START_ROUTE_HOOK_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     set_start_route_event_hook(Some({
         let events = Arc::clone(&events);
@@ -2273,5 +2282,350 @@ async fn prepare_twice_same_route_id_does_not_overwrite_staging() {
     assert!(
         controller.prepared_staging_is_empty(),
         "staging must be drained after successful insert"
+    );
+}
+
+// ── StepLifecycle start()/rollback tests (Task 3.3) ──
+
+/// Records every `start()` by pushing its label into a shared ordered log.
+/// Used to assert in-order start before the pipeline task spawns.
+#[derive(Debug)]
+struct RecordingStartLifecycle {
+    label: &'static str,
+    log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait::async_trait]
+impl StepLifecycle for RecordingStartLifecycle {
+    fn name(&self) -> &'static str {
+        self.label
+    }
+    async fn start(&self) -> Result<(), CamelError> {
+        self.log.lock().expect("start log").push(self.label);
+        Ok(())
+    }
+    async fn shutdown(&self, _reason: StepShutdownReason) -> Result<(), CamelError> {
+        Ok(())
+    }
+}
+
+/// Records `shutdown()` reasons. `start()` uses the default Ok path.
+#[derive(Debug)]
+struct ShutdownSpy {
+    shutdowns: Arc<std::sync::Mutex<Vec<StepShutdownReason>>>,
+}
+
+#[async_trait::async_trait]
+impl StepLifecycle for ShutdownSpy {
+    fn name(&self) -> &'static str {
+        "shutdown-spy"
+    }
+    async fn shutdown(&self, reason: StepShutdownReason) -> Result<(), CamelError> {
+        self.shutdowns.lock().expect("shutdowns").push(reason);
+        Ok(())
+    }
+}
+
+/// A step whose `start()` always returns `Err`.
+#[derive(Debug)]
+struct FailingStartStep;
+
+#[async_trait::async_trait]
+impl StepLifecycle for FailingStartStep {
+    fn name(&self) -> &'static str {
+        "failing-start"
+    }
+    async fn start(&self) -> Result<(), CamelError> {
+        Err(CamelError::ProcessorError("start failed".into()))
+    }
+    async fn shutdown(&self, _reason: StepShutdownReason) -> Result<(), CamelError> {
+        Ok(())
+    }
+}
+
+/// `start_route` awaits each step `start()` in route order, completing all of
+/// them before the pipeline task is spawned.
+#[tokio::test]
+async fn start_route_awaits_start_in_order() {
+    let _hook_guard = START_ROUTE_HOOK_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // The event hook shares the same ordered log, so start() labels and spawn
+    // events land on one timeline.
+    set_start_route_event_hook(Some({
+        let log = Arc::clone(&log);
+        Arc::new(move |event| {
+            log.lock().expect("log").push(event);
+        })
+    }));
+
+    let mut controller = build_controller_with_components();
+    controller
+        .add_route(
+            RouteDefinition::new("timer:tick?period=60000", vec![]).with_route_id("start-order"),
+        )
+        .await
+        .unwrap();
+
+    // Inject two lifecycle handles in route order via raw swap.
+    let handles: Vec<Arc<dyn StepLifecycle>> = vec![
+        Arc::new(RecordingStartLifecycle {
+            label: "start-1",
+            log: Arc::clone(&log),
+        }),
+        Arc::new(RecordingStartLifecycle {
+            label: "start-2",
+            log: Arc::clone(&log),
+        }),
+    ];
+    controller
+        .swap_pipeline_raw("start-order", BoxProcessor::new(IdentityProcessor), handles)
+        .expect("swap_pipeline_raw");
+
+    controller.start_route("start-order").await.unwrap();
+    set_start_route_event_hook(None);
+    controller.stop_route("start-order").await.unwrap();
+
+    let log = log.lock().expect("log").clone();
+    let i1 = log
+        .iter()
+        .position(|e| *e == "start-1")
+        .expect("start-1 recorded");
+    let i2 = log
+        .iter()
+        .position(|e| *e == "start-2")
+        .expect("start-2 recorded");
+    let ip = log
+        .iter()
+        .position(|e| *e == "pipeline_spawned")
+        .expect("pipeline_spawned");
+
+    assert!(i1 < i2, "start() must run in route order: {log:?}");
+    assert!(
+        i2 < ip,
+        "start() must complete before pipeline spawn: {log:?}"
+    );
+}
+
+/// On the Nth `start()` failure, already-started handles are shut down
+/// (`RouteStop`, reverse order, best-effort); the pipeline is NOT spawned and
+/// `start_route` returns the original start `Err`.
+#[tokio::test]
+async fn start_route_rolls_back_on_failure() {
+    let _hook_guard = START_ROUTE_HOOK_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let events: Arc<std::sync::Mutex<Vec<&'static str>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    set_start_route_event_hook(Some({
+        let events = Arc::clone(&events);
+        Arc::new(move |event| {
+            events.lock().expect("events").push(event);
+        })
+    }));
+
+    let shutdowns: Arc<std::sync::Mutex<Vec<StepShutdownReason>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let mut controller = build_controller_with_components();
+    controller
+        .add_route(
+            RouteDefinition::new("timer:tick?period=60000", vec![]).with_route_id("rollback"),
+        )
+        .await
+        .unwrap();
+
+    // handle 1 starts OK and records shutdown reasons; handle 2 fails to start.
+    let handles: Vec<Arc<dyn StepLifecycle>> = vec![
+        Arc::new(ShutdownSpy {
+            shutdowns: Arc::clone(&shutdowns),
+        }),
+        Arc::new(FailingStartStep),
+    ];
+    controller
+        .swap_pipeline_raw("rollback", BoxProcessor::new(IdentityProcessor), handles)
+        .expect("swap_pipeline_raw");
+
+    let result = controller.start_route("rollback").await;
+    set_start_route_event_hook(None);
+
+    assert!(result.is_err(), "expected start_route to fail");
+
+    let shutdowns = shutdowns.lock().expect("shutdowns").clone();
+    assert_eq!(
+        shutdowns,
+        vec![StepShutdownReason::RouteStop],
+        "handle 1 must be rolled back with RouteStop: {shutdowns:?}"
+    );
+
+    let events = events.lock().expect("events").clone();
+    assert!(
+        !events.contains(&"pipeline_spawned"),
+        "pipeline must not spawn on start failure: {events:?}"
+    );
+
+    let managed = controller.routes.get("rollback").expect("route exists");
+    assert!(
+        managed.pipeline_handle.is_none(),
+        "no pipeline handle stored on failure"
+    );
+    assert!(
+        managed.consumer_handle.is_none(),
+        "no consumer handle stored on failure"
+    );
+}
+
+/// A route whose handles use the default no-op `start` behaves identically to
+/// before the change: `start_route` succeeds and spawns both tasks.
+#[tokio::test]
+async fn start_route_default_start_noop_unaffected() {
+    let _hook_guard = START_ROUTE_HOOK_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let events: Arc<std::sync::Mutex<Vec<&'static str>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    set_start_route_event_hook(Some({
+        let events = Arc::clone(&events);
+        Arc::new(move |event| {
+            events.lock().expect("events").push(event);
+        })
+    }));
+
+    let mut controller = build_controller_with_components();
+    controller
+        .add_route(
+            RouteDefinition::new("timer:tick?period=60000", vec![]).with_route_id("default-start"),
+        )
+        .await
+        .unwrap();
+
+    // FakeStep does NOT override start() — it uses the trait default (Ok).
+    let handles: Vec<Arc<dyn StepLifecycle>> = vec![Arc::new(FakeStep)];
+    controller
+        .swap_pipeline_raw(
+            "default-start",
+            BoxProcessor::new(IdentityProcessor),
+            handles,
+        )
+        .expect("swap_pipeline_raw");
+
+    controller.start_route("default-start").await.unwrap();
+    set_start_route_event_hook(None);
+    controller.stop_route("default-start").await.unwrap();
+
+    let events = events.lock().expect("events").clone();
+    assert!(
+        events.contains(&"pipeline_spawned"),
+        "pipeline must spawn for default-noop start: {events:?}"
+    );
+    assert!(
+        events.contains(&"consumer_spawned"),
+        "consumer must spawn for default-noop start: {events:?}"
+    );
+}
+
+/// A post-start failure (here: `create_route_consumer` failing on an unknown
+/// consumer scheme) must roll back the already-started handles in reverse
+/// order (`RouteStop`, best-effort), must NOT spawn the pipeline, and
+/// `start_route` must return `Err`. This locks the ADR-0022 SPI ("if
+/// start_route returns Err, no started handle remains running") for the
+/// post-start failure path — distinct from the mid-loop start-failure test
+/// above (`start_route_rolls_back_on_failure`).
+#[tokio::test]
+async fn start_route_rolls_back_on_consumer_creation_failure() {
+    let _hook_guard = START_ROUTE_HOOK_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let events: Arc<std::sync::Mutex<Vec<&'static str>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    set_start_route_event_hook(Some({
+        let events = Arc::clone(&events);
+        Arc::new(move |event| {
+            events.lock().expect("events").push(event);
+        })
+    }));
+
+    // start() record: proves the start loop completed (we are on the
+    // POST-start failure path, not the mid-loop path).
+    let start_log: Arc<std::sync::Mutex<Vec<&'static str>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    // shutdown() record: proves the rollback fired.
+    let shutdowns: Arc<std::sync::Mutex<Vec<StepShutdownReason>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let mut controller = build_controller_with_components();
+    // Unknown consumer scheme: `add_route` succeeds (consumer is created
+    // lazily in `start_route`), but `create_route_consumer` fails there.
+    controller
+        .add_route(
+            RouteDefinition::new("missing:source", vec![]).with_route_id("post-start-rollback"),
+        )
+        .await
+        .unwrap();
+
+    // Two handles whose start() succeeds (default Ok for ShutdownSpy). The
+    // RecordingStartLifecycle confirms start() ran; the ShutdownSpy captures
+    // the rollback shutdown.
+    let handles: Vec<Arc<dyn StepLifecycle>> = vec![
+        Arc::new(RecordingStartLifecycle {
+            label: "started-1",
+            log: Arc::clone(&start_log),
+        }),
+        Arc::new(ShutdownSpy {
+            shutdowns: Arc::clone(&shutdowns),
+        }),
+    ];
+    controller
+        .swap_pipeline_raw(
+            "post-start-rollback",
+            BoxProcessor::new(IdentityProcessor),
+            handles,
+        )
+        .expect("swap_pipeline_raw");
+
+    let result = controller.start_route("post-start-rollback").await;
+    set_start_route_event_hook(None);
+
+    assert!(
+        result.is_err(),
+        "start_route must fail when consumer creation fails"
+    );
+
+    // The start loop ran (post-start path), so start() was awaited.
+    let start_log = start_log.lock().expect("start log").clone();
+    assert!(
+        start_log.contains(&"started-1"),
+        "handle start() must have run (post-start path): {start_log:?}"
+    );
+
+    // Rollback fired on the started handles.
+    let shutdowns = shutdowns.lock().expect("shutdowns").clone();
+    assert_eq!(
+        shutdowns,
+        vec![StepShutdownReason::RouteStop],
+        "started handle must be rolled back with RouteStop: {shutdowns:?}"
+    );
+
+    // Pipeline never spawned.
+    let events = events.lock().expect("events").clone();
+    assert!(
+        !events.contains(&"pipeline_spawned"),
+        "pipeline must not spawn on consumer creation failure: {events:?}"
+    );
+
+    // No execution handles stored.
+    let managed = controller
+        .routes
+        .get("post-start-rollback")
+        .expect("route exists");
+    assert!(
+        managed.pipeline_handle.is_none(),
+        "no pipeline handle stored on failure"
+    );
+    assert!(
+        managed.consumer_handle.is_none(),
+        "no consumer handle stored on failure"
     );
 }

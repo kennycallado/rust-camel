@@ -493,6 +493,17 @@ pub enum RuntimeCommand {
         command_id: String,
         causation_id: Option<String>,
     },
+    /// Reload template sources for a route (infrastructure command).
+    ///
+    /// Intercepted in `RuntimeBus::execute` BEFORE journal recovery + dedup,
+    /// exactly like `ReloadTlsCerts`: it is idempotent, NOT journaled, and does
+    /// not mutate `RouteStatus`. Dispatches to
+    /// `TemplateReloadRegistry::reload_route`.
+    ReloadTemplates {
+        route_id: String,
+        command_id: String,
+        causation_id: Option<String>,
+    },
 }
 
 impl RuntimeCommand {
@@ -506,7 +517,8 @@ impl RuntimeCommand {
             | RuntimeCommand::ReloadRoute { command_id, .. }
             | RuntimeCommand::FailRoute { command_id, .. }
             | RuntimeCommand::RemoveRoute { command_id, .. }
-            | RuntimeCommand::ReloadTlsCerts { command_id, .. } => command_id,
+            | RuntimeCommand::ReloadTlsCerts { command_id, .. }
+            | RuntimeCommand::ReloadTemplates { command_id, .. } => command_id,
         }
     }
 
@@ -520,7 +532,8 @@ impl RuntimeCommand {
             | RuntimeCommand::ReloadRoute { causation_id, .. }
             | RuntimeCommand::FailRoute { causation_id, .. }
             | RuntimeCommand::RemoveRoute { causation_id, .. }
-            | RuntimeCommand::ReloadTlsCerts { causation_id, .. } => causation_id.as_deref(),
+            | RuntimeCommand::ReloadTlsCerts { causation_id, .. }
+            | RuntimeCommand::ReloadTemplates { causation_id, .. } => causation_id.as_deref(),
         }
     }
 }
@@ -542,6 +555,9 @@ pub enum RuntimeCommandResult {
         scheme: String,
         host: String,
         port: u16,
+    },
+    TemplatesReloaded {
+        route_id: String,
     },
 }
 
@@ -626,6 +642,9 @@ mod tests {
                 RuntimeCommand::ReloadTlsCerts {
                     scheme, host, port, ..
                 } => RuntimeCommandResult::TlsCertsReloaded { scheme, host, port },
+                RuntimeCommand::ReloadTemplates { route_id, .. } => {
+                    RuntimeCommandResult::TemplatesReloaded { route_id }
+                }
             })
         }
     }

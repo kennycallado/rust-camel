@@ -122,6 +122,9 @@ pub enum CamelError {
 
     #[error("Validation failed: {0}")]
     ValidationError(String),
+
+    #[error("Template reload failed: {0}")]
+    TemplateReload(String),
 }
 
 impl CamelError {
@@ -144,6 +147,7 @@ impl CamelError {
             Self::Unauthenticated(_) => "unauthenticated",
             Self::Unauthorized(_) => "unauthorized",
             Self::ValidationError(_) => "validation",
+            Self::TemplateReload(_) => "template",
             _ => "unknown",
         }
     }
@@ -178,6 +182,7 @@ impl CamelError {
             Self::Unauthenticated(_) => "Unauthenticated",
             Self::Unauthorized(_) => "Unauthorized",
             Self::ValidationError(_) => "ValidationError",
+            Self::TemplateReload(_) => "TemplateReload",
         }
     }
 }
@@ -235,6 +240,7 @@ mod tests {
             CamelError::Unauthenticated("token expired".to_string()),
             CamelError::Unauthorized("missing admin role".to_string()),
             CamelError::ValidationError("body does not match schema".to_string()),
+            CamelError::TemplateReload("reload failed".to_string()),
         ]
     }
 
@@ -359,6 +365,18 @@ mod tests {
     }
 
     #[test]
+    fn template_reload_classifies_as_template() {
+        let err = CamelError::TemplateReload("boom".into());
+        assert_eq!(err.classify(), "template");
+    }
+
+    #[test]
+    fn template_reload_variant_name() {
+        let err = CamelError::TemplateReload("boom".into());
+        assert_eq!(err.variant_name(), "TemplateReload");
+    }
+
+    #[test]
     fn test_auth_variants_are_clone() {
         let err = CamelError::Unauthenticated("test".to_string());
         let cloned = err.clone();
@@ -431,6 +449,7 @@ mod variant_name_tests {
             (CamelError::Unauthenticated("x".into()), "Unauthenticated"),
             (CamelError::Unauthorized("x".into()), "Unauthorized"),
             (CamelError::ValidationError("bad".into()), "ValidationError"),
+            (CamelError::TemplateReload("x".into()), "TemplateReload"),
         ];
 
         for (err, expected) in cases {

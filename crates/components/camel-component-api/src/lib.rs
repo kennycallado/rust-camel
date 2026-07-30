@@ -19,6 +19,7 @@ pub mod cron_service;
 pub mod network_retry;
 pub mod producer;
 pub mod registrar;
+pub mod template_reload;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod tls_source;

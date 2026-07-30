@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{error, info, warn};
 
-use camel_api::{CamelError, NoOpMetrics};
+use camel_api::{CamelError, NoOpMetrics, StepLifecycle, StepShutdownReason};
 use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 
 use crate::lifecycle::adapters::consumer_management;
@@ -24,6 +24,29 @@ use crate::lifecycle::adapters::route_helpers::{
     DrainGuard, handle_is_running, inferred_lifecycle_label, ready_with_backoff,
 };
 use crate::lifecycle::adapters::route_registry::DEFAULT_SHUTDOWN_TIMEOUT;
+
+/// Best-effort, reverse-order shutdown of already-started `StepLifecycle`
+/// handles when `start_route` must abort. Used both mid-start-loop (the
+/// `[0..idx)` already-started prefix) and for any post-start failure path
+/// (e.g. `create_route_consumer`, the aggregate spawn branch, the consumer
+/// startup handshake) so the ADR-0022 SPI holds: if `start_route` returns
+/// `Err`, no started handle is left running.
+///
+/// Mirrors `StepLifecycle::shutdown`'s best-effort contract — each error is
+/// logged and swallowed so one failing shutdown cannot block rollback of the
+/// remaining handles.
+async fn rollback_started(route_id: &str, handles: &[Arc<dyn StepLifecycle>]) {
+    for handle in handles.iter().rev() {
+        if let Err(e) = handle.shutdown(StepShutdownReason::RouteStop).await {
+            warn!(
+                route_id = %route_id,
+                step = handle.name(),
+                error = %e,
+                "best-effort step shutdown during start rollback failed"
+            );
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl camel_api::RouteController for DefaultRouteController {
@@ -69,6 +92,25 @@ impl camel_api::RouteController for DefaultRouteController {
             )
         };
 
+        // ADR-0022: await each stateful step's `start()` before spawning the
+        // pipeline or consumer. On the Nth failure, roll back the already-
+        // started steps in reverse order (best-effort) and return the original
+        // start error WITHOUT spawning anything. Handles come from the compiled
+        // pipeline assembly, already collected in route order at compile time.
+        let lifecycle_handles: Vec<Arc<dyn StepLifecycle>> = pipeline.load().lifecycle.clone();
+        for (idx, handle) in lifecycle_handles.iter().enumerate() {
+            if let Err(start_err) = handle.start().await {
+                warn!(
+                    route_id = %route_id,
+                    step = handle.name(),
+                    "step start failed; rolling back already-started steps"
+                );
+                // Only [0..idx) have started; the Nth handle itself never did.
+                rollback_started(route_id, &lifecycle_handles[0..idx]).await;
+                return Err(start_err);
+            }
+        }
+
         // Clone crash notifier for consumer task
         let crash_notifier = self.crash_notifier.clone();
         let runtime_for_consumer = self.runtime.clone();
@@ -85,12 +127,21 @@ impl camel_api::RouteController for DefaultRouteController {
         ));
         let consumer_rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::clone(&consumer_component_ctx) as Arc<_>;
-        let (mut consumer, consumer_concurrency) = consumer_management::create_route_consumer(
+        let (mut consumer, consumer_concurrency) = match consumer_management::create_route_consumer(
             consumer_rt,
             &self.registry,
             &from_uri,
             consumer_component_ctx.as_ref(),
-        )?;
+        ) {
+            Ok(v) => v,
+            // ADR-0022 SPI: every started handle must be rolled back
+            // before start_route returns Err, so no stateful step is left
+            // running. This is the first post-start fallible step.
+            Err(e) => {
+                rollback_started(route_id, &lifecycle_handles).await;
+                return Err(e);
+            }
+        };
 
         // Resolve effective concurrency: route override > consumer default
         let effective_concurrency = concurrency.unwrap_or(consumer_concurrency);
@@ -125,7 +176,7 @@ impl camel_api::RouteController for DefaultRouteController {
         // --- Aggregator v2: check for aggregate route with timeout ---
         let split_clone = managed.aggregate_split.clone();
         if let Some(split) = split_clone {
-            return self
+            let result = self
                 .start_aggregate_route(
                     route_id,
                     split,
@@ -139,6 +190,12 @@ impl camel_api::RouteController for DefaultRouteController {
                     drain_in_flight,
                 )
                 .await;
+            // ADR-0022 SPI: roll back already-started handles if the aggregate
+            // spawn/startup path returns Err.
+            if result.is_err() {
+                rollback_started(route_id, &lifecycle_handles).await;
+            }
+            return result;
         }
         // --- End aggregator v2 branch ---
 
@@ -269,7 +326,16 @@ impl camel_api::RouteController for DefaultRouteController {
         // Immediate consumers this is a no-op (pre-resolved receiver); for
         // Explicit consumers (HTTP, WebSocket) it propagates bind failures as
         // proper startup errors instead of silent background logs.
-        consumer_management::await_consumer_startup(startup_rx, "startup").await?;
+        match consumer_management::await_consumer_startup(startup_rx, "startup").await {
+            Ok(()) => {}
+            Err(e) => {
+                // ADR-0022 SPI: the spawned pipeline task self-terminates when
+                // its rx channel drops on this return; the started handles must
+                // still be explicitly rolled back.
+                rollback_started(route_id, &lifecycle_handles).await;
+                return Err(e);
+            }
+        }
 
         // Store handles and update status
         let managed = self

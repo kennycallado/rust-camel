@@ -249,17 +249,33 @@ impl StepCompilerRegistry {
 
 /// Parse a URI and create a producer, reusing `component_ctx`, `rt`, and `producer_ctx`
 /// from the compilation context.
+///
+/// Thin wrapper over [`resolve_producer_with_lifecycle`] that discards the
+/// endpoint's [`StepLifecycle`] handle. Use [`resolve_producer_with_lifecycle`]
+/// directly when the lifecycle is needed (e.g. `WireTap` propagation).
 pub(crate) fn resolve_producer(
     ctx: &CompilationContext,
     uri: &str,
 ) -> Result<BoxProcessor, CamelError> {
+    Ok(resolve_producer_with_lifecycle(ctx, uri)?.0)
+}
+
+/// Parse a URI and create a producer, also returning the endpoint's
+/// [`StepLifecycle`] handle (if any). Canonical resolution path used by all
+/// step compilers; [`resolve_producer`] is a thin wrapper over this.
+pub(crate) fn resolve_producer_with_lifecycle(
+    ctx: &CompilationContext,
+    uri: &str,
+) -> Result<(BoxProcessor, Option<Arc<dyn StepLifecycle>>), CamelError> {
     let parsed = parse_uri(uri)?;
     let component = ctx
         .component_ctx
         .resolve_component(&parsed.scheme)
         .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
     let endpoint = component.create_endpoint(uri, ctx.component_ctx.as_ref())?;
-    endpoint.create_producer(Arc::clone(&ctx.rt), ctx.producer_ctx)
+    let producer = endpoint.create_producer(Arc::clone(&ctx.rt), ctx.producer_ctx)?;
+    let lifecycle = endpoint.lifecycle();
+    Ok((producer, lifecycle))
 }
 
 /// Pack a lifecycle Vec into `None` when empty, `Some` when non-empty.

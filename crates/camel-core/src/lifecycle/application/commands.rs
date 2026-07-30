@@ -62,6 +62,9 @@ pub async fn execute_command(
         RuntimeCommand::ReloadTlsCerts { .. } => Err(CamelError::Config(
             "ReloadTlsCerts not handled: should be intercepted in execute()".into(),
         )),
+        RuntimeCommand::ReloadTemplates { .. } => Err(CamelError::Config(
+            "ReloadTemplates not handled: should be intercepted in execute()".into(),
+        )),
     }
 }
 
