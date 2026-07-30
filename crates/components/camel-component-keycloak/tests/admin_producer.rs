@@ -11,7 +11,7 @@ use camel_auth::types::AuthError;
 use camel_component_api::{Body, Exchange, Message};
 use camel_component_keycloak::{AdminEndpointConfig, AdminOperation, KeycloakAdminProducer};
 use tower::Service;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_json, body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Debug, Clone)]
@@ -47,6 +47,9 @@ async fn admin_producer_create_user_success() {
     Mock::given(method("POST"))
         .and(path("/admin/realms/test/users"))
         .and(header("Authorization", "Bearer test-admin-token"))
+        .and(body_partial_json(
+            serde_json::json!({ "username": "testuser" }),
+        ))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
             "id": "user-123",
             "username": "testuser"
@@ -139,6 +142,9 @@ async fn admin_producer_create_role_success() {
     Mock::given(method("POST"))
         .and(path("/admin/realms/test/roles"))
         .and(header("Authorization", "Bearer test-admin-token"))
+        .and(body_partial_json(
+            serde_json::json!({ "name": "admin-role" }),
+        ))
         .respond_with(ResponseTemplate::new(201))
         .mount(&server)
         .await;
@@ -164,6 +170,9 @@ async fn admin_producer_assign_role_success() {
             "/admin/realms/test/users/user-789/role-mappings/realm",
         ))
         .and(header("Authorization", "Bearer test-admin-token"))
+        .and(body_json(
+            serde_json::json!([{ "id": "role-1", "name": "admin" }]),
+        ))
         .respond_with(ResponseTemplate::new(204))
         .mount(&server)
         .await;
@@ -191,6 +200,9 @@ async fn admin_producer_create_client_success() {
     Mock::given(method("POST"))
         .and(path("/admin/realms/test/clients"))
         .and(header("Authorization", "Bearer test-admin-token"))
+        .and(body_partial_json(
+            serde_json::json!({ "clientId": "my-client" }),
+        ))
         .respond_with(ResponseTemplate::new(201))
         .mount(&server)
         .await;
@@ -214,6 +226,9 @@ async fn admin_producer_create_realm_success() {
     Mock::given(method("POST"))
         .and(path("/admin/realms"))
         .and(header("Authorization", "Bearer test-admin-token"))
+        .and(body_partial_json(
+            serde_json::json!({ "realm": "new-realm" }),
+        ))
         .respond_with(ResponseTemplate::new(201))
         .mount(&server)
         .await;
