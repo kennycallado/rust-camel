@@ -182,8 +182,8 @@ mod tests {
         // Two different real dirs must produce different keys.
         let dir2 = TempDir::new().unwrap();
         let real_path2 = dir2.path().to_path_buf();
-        let key1 = hash_ordered_include_paths(&[real_path.clone()]);
-        let key2 = hash_ordered_include_paths(&[real_path2.clone()]);
+        let key1 = hash_ordered_include_paths(std::slice::from_ref(&real_path));
+        let key2 = hash_ordered_include_paths(std::slice::from_ref(&real_path2));
         assert_ne!(
             key1, key2,
             "two distinct real dirs must produce different cache keys"

@@ -37,6 +37,16 @@ pub use health::JmsHealthCheck;
 /// Version of the Java bridge binary this crate is compatible with.
 pub const BRIDGE_VERSION: &str = "0.5.0";
 
+/// Serializes tests that mutate `CAMEL_JMS_BRIDGE_BINARY_PATH` via
+/// `std::env::set_var`. Process-global env vars race under parallel test
+/// threads: one test's `/bin/false` override leaks into another test's
+/// bridge resolution window. This lock serializes only the affected tests
+/// (rc-alwn). Uses `std::sync::Mutex` (const-constructible for statics);
+/// each consumer test annotates `#[allow(clippy::await_holding_lock)]`
+/// because the guard is safe to hold across `.await` in test scope.
+#[cfg(test)]
+pub(crate) static BRIDGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod proto {
     tonic::include_proto!("jms_bridge");
 }

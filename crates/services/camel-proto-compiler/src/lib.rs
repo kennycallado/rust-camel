@@ -42,6 +42,13 @@ mod tests {
 
     use super::*;
 
+    /// Serializes tests that invoke `compile_proto` (→
+    /// `protoc_bin_vendored::protoc_bin_path()`). The vendored protoc
+    /// extracts to a deterministic temp path; parallel extraction under
+    /// test contention races and intermittently fails. This lock
+    /// serializes only the affected tests (rc-alwn).
+    static PROTOC_COMPILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn test_proto_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -50,6 +57,7 @@ mod tests {
 
     #[test]
     fn compile_proto_success() {
+        let _guard = PROTOC_COMPILE_LOCK.lock().unwrap();
         let proto = test_proto_path();
         let pool =
             compile_proto(&proto, std::iter::empty::<&Path>()).expect("compile should succeed");
@@ -69,6 +77,7 @@ mod tests {
 
     #[test]
     fn compile_proto_invalid_syntax_returns_error() {
+        let _guard = PROTOC_COMPILE_LOCK.lock().unwrap();
         let tmp = TempDir::new().expect("tmp dir");
         let bad_proto = tmp.path().join("bad.proto");
         std::fs::write(
@@ -83,6 +92,7 @@ mod tests {
 
     #[test]
     fn cache_hit_does_not_duplicate_entries() {
+        let _guard = PROTOC_COMPILE_LOCK.lock().unwrap();
         let cache = ProtoCache::new();
         let proto = test_proto_path();
 
@@ -100,6 +110,7 @@ mod tests {
 
     #[test]
     fn cache_does_not_grow_beyond_max() {
+        let _guard = PROTOC_COMPILE_LOCK.lock().unwrap();
         let cache = ProtoCache::with_max_entries(3);
         let tmp = tempfile::tempdir().expect("tmp dir");
 
@@ -125,6 +136,7 @@ mod tests {
 
     #[test]
     fn cache_invalidation_on_content_change() {
+        let _guard = PROTOC_COMPILE_LOCK.lock().unwrap();
         let cache = ProtoCache::new();
         let tmp = TempDir::new().expect("tmp dir");
         let proto = tmp.path().join("demo.proto");

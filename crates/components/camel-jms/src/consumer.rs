@@ -743,7 +743,11 @@ mod tests {
     // ── JMS-017: Missing bridge returns Err immediately ───────────────────────
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn missing_bridge_returns_err_within_1s() {
+        // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
+        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
+
         struct EnvGuard {
             key: &'static str,
             prev: Option<std::ffi::OsString>,

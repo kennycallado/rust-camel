@@ -1119,8 +1119,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn concurrent_get_or_create_slot_no_deadlock() {
         use tokio::time::timeout;
+
+        // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
+        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
 
         struct EnvGuard {
             key: &'static str,
@@ -1183,8 +1187,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn lazy_producer_reports_degraded_when_bridge_start_fails() {
         use tower::Service;
+
+        // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
+        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
 
         struct EnvGuard {
             key: &'static str,
