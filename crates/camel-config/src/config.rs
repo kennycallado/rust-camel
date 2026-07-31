@@ -1349,6 +1349,10 @@ const ALLOWED_ENV_OVERRIDES: &[&str] = &[
     "CAMEL_WATCH_DEBOUNCE_MS",
     "CAMEL_LOG_LEVEL",
     "CAMEL_RUNTIME_JOURNAL_PATH",
+    "CAMEL_RUNTIME_JOURNAL_DURABILITY",
+    "CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS",
+    "CAMEL_IDEMPOTENT_REPO_PATH",
+    "CAMEL_IDEMPOTENT_REPO_DURABILITY",
     "CAMEL_SUPERVISION_INITIAL_DELAY_MS",
     "CAMEL_SUPERVISION_MAX_ATTEMPTS",
 ];
@@ -1433,6 +1437,13 @@ fn build_from_toml_value_inner(
                         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
                     if let serde_json::Value::Object(journal_map) = journal {
                         journal_map.insert(nested_key.to_string(), parsed);
+                    }
+                } else if let Some(nested_key) = key.strip_prefix("idempotent_repo_") {
+                    let repo = env_map
+                        .entry("idempotent_repo".to_string())
+                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                    if let serde_json::Value::Object(repo_map) = repo {
+                        repo_map.insert(nested_key.to_string(), parsed);
                     }
                 } else {
                     env_map.insert(key, parsed);
@@ -2009,6 +2020,90 @@ max_attempts = 3
         unsafe {
             std::env::remove_var("CAMEL_SUPERVISION_INITIAL_DELAY_MS");
             std::env::remove_var("CAMEL_SUPERVISION_MAX_ATTEMPTS");
+        }
+    }
+
+    #[test]
+    fn env_override_allows_runtime_journal_nested_fields() {
+        // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.runtime_journal]
+path = "journal.db"
+durability = "immediate"
+compaction_threshold_events = 10000
+"#,
+        );
+
+        // SAFETY: tests run in controlled process; we set and immediately restore env vars.
+        unsafe {
+            std::env::set_var("CAMEL_RUNTIME_JOURNAL_PATH", "/override/journal.db");
+            std::env::set_var("CAMEL_RUNTIME_JOURNAL_DURABILITY", "eventual");
+            std::env::set_var("CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS", "5000");
+        }
+
+        let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
+            .expect("config should load with env override");
+        let journal = cfg
+            .runtime_journal
+            .expect("runtime_journal should be present");
+        assert_eq!(
+            journal.path,
+            std::path::PathBuf::from("/override/journal.db")
+        );
+        assert_eq!(journal.durability, super::JournalDurability::Eventual);
+        assert_eq!(journal.compaction_threshold_events, 5000);
+
+        // SAFETY: restore process env for test isolation.
+        unsafe {
+            std::env::remove_var("CAMEL_RUNTIME_JOURNAL_PATH");
+            std::env::remove_var("CAMEL_RUNTIME_JOURNAL_DURABILITY");
+            std::env::remove_var("CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS");
+        }
+    }
+
+    #[test]
+    fn env_override_allows_idempotent_repo_nested_fields() {
+        // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+
+[default.idempotent_repo]
+path = "idempotent.db"
+durability = "immediate"
+"#,
+        );
+
+        // SAFETY: tests run in controlled process; we set and immediately restore env vars.
+        unsafe {
+            std::env::set_var("CAMEL_IDEMPOTENT_REPO_PATH", "/override/idempotent.db");
+            std::env::set_var("CAMEL_IDEMPOTENT_REPO_DURABILITY", "eventual");
+        }
+
+        let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
+            .expect("config should load with env override");
+        let repo = cfg
+            .idempotent_repo
+            .expect("idempotent_repo should be present");
+        assert_eq!(
+            repo.path,
+            std::path::PathBuf::from("/override/idempotent.db")
+        );
+        assert_eq!(repo.durability, super::JournalDurability::Eventual);
+
+        // SAFETY: restore process env for test isolation.
+        unsafe {
+            std::env::remove_var("CAMEL_IDEMPOTENT_REPO_PATH");
+            std::env::remove_var("CAMEL_IDEMPOTENT_REPO_DURABILITY");
         }
     }
 
