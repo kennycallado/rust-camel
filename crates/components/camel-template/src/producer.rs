@@ -569,12 +569,12 @@ mod tests {
 
     /// G2 / T2 Case A — empty body, template never references `{{ body }}`.
     ///
-    /// `Body::Empty` serialises to JSON `null` (the `BodyAsJson::Empty` arm
-    /// calls `serialize_none`). A template that does NOT dereference `body`
-    /// must render fine: the static text is the whole output. Pins the safe
-    /// half of the `serialize_none` × `UndefinedBehavior::Strict`
-    /// interaction — `body` is present in the context (as a none value), it
-    /// is simply never read.
+    /// `Body::Empty` serialises to an empty string (the `BodyAsJson::Empty`
+    /// arm calls `serialize_str("")`, see rc-wnqj). A template that does NOT
+    /// dereference `body` must render fine: the static text is the whole
+    /// output. Pins the safe half of the empty-string ×
+    /// `UndefinedBehavior::Strict` interaction — `body` is present in the
+    /// context (as an empty string), it is simply never read.
     #[tokio::test]
     async fn producer_renders_static_template_with_empty_body() {
         let templates = make_templates(
@@ -599,23 +599,21 @@ mod tests {
 
     /// G2 / T2 Case B — empty body, template DOES reference `{{ body }}`.
     ///
-    /// This is the single highest-risk blind spot in the audit (§4):
+    /// Historically the highest-risk blind spot in the audit (§4):
     /// `Body::Empty` → `serialize_none` → JSON `null`, rendered under
-    /// `UndefinedBehavior::Strict`. The observed behaviour (probed live) is
-    /// that the render SUCCEEDS and emits the literal string `"none"` —
-    /// strict-undefined does NOT trip, because the variable `body` IS
-    /// defined in the context (it holds a none value); strict-undefined
-    /// only errors on absent variables, not on none-valued present ones.
+    /// `UndefinedBehavior::Strict`, emitted the literal string `"none"`
+    /// into HTML/SSR output. Strict-undefined did NOT trip because the
+    /// variable `body` IS defined in the context (it held a none value);
+    /// strict-undefined only errors on absent variables.
     ///
-    /// This test pins that behaviour as the spec decision record. Note the
-    /// footgun it documents: an empty body renders the string `none` into
-    /// the output, NOT an empty string. A template like `<p>{{ body }}</p>`
-    /// with an empty inbound body yields `<p>none</p>` — operators must
-    /// guard empty bodies with `{% if body is defined and body %}…` (or
-    /// coalesce upstream). Changing this to render empty / to error is a
-    /// deliberate decision and must update this test.
+    /// Reversed by rc-wnqj: `Body::Empty` now serialises to an empty
+    /// string (`serialize_str("")`), so `{{ body }}` renders `""` — not
+    /// `"none"`, not an error. A template like `<p>{{ body }}</p>` with
+    /// an empty inbound body now yields `<p></p>`. Operators no longer
+    /// need to guard empty bodies with `{% if body is defined and body %}…`
+    /// for the common case.
     #[tokio::test]
-    async fn producer_renders_none_literal_for_referenced_empty_body() {
+    async fn producer_renders_empty_string_for_referenced_empty_body() {
         let templates = make_templates(
             "echo.html",
             r#"{% autoescape "none" %}{{ body }}{% endautoescape %}"#,
@@ -626,14 +624,14 @@ mod tests {
         let mut exchange = Exchange::new(Message::new(Body::Empty));
 
         producer.render_into(&mut exchange).await.expect(
-            "referencing a none-valued body does NOT trip strict-undefined; \
+            "referencing an empty-string body does NOT trip strict-undefined; \
                      the variable is defined",
         );
         assert_eq!(
             body_string(&exchange).as_deref(),
-            Some("none"),
-            "Body::Empty renders the literal 'none' (the minijinja none-value string), \
-             NOT empty string and NOT a ProcessorError"
+            Some(""),
+            "Body::Empty renders an empty string (rc-wnqj reversal), \
+             NOT the literal 'none' and NOT a ProcessorError"
         );
     }
 

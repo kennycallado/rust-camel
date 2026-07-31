@@ -368,7 +368,15 @@ impl<'a> BodyAsJson<'a> {
 impl<'a> serde::Serialize for BodyAsJson<'a> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self.inner {
-            Body::Empty => s.serialize_none(),
+            // Body::Empty renders as an empty string, NOT JSON null.
+            // Prior behaviour (serialize_none → JSON null → minijinja
+            // stringifies {{ body }} as the literal word "none") leaked
+            // the string "none" into HTML/SSR output when a request had
+            // an empty body and the template referenced {{ body }}.
+            // Reversed by rc-wnqj (coverage audit highest-risk blind spot).
+            // Empty string over omit-key: omitting the key would trip
+            // UndefinedBehavior::Strict and break common empty-GET requests.
+            Body::Empty => s.serialize_str(""),
             Body::Text(t) => s.serialize_str(t),
             Body::Json(v) => v.serialize(s),
             Body::Xml(x) => s.serialize_str(x),
