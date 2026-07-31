@@ -156,6 +156,7 @@ impl CamelContextBuilder {
         store: crate::lifecycle::adapters::InMemoryRuntimeStore,
         execution_factory: Option<ExecutionFactory>,
         health_registry: Arc<HealthCheckRegistry>,
+        metrics: Arc<dyn MetricsCollector>,
     ) -> Arc<RuntimeBus> {
         let execution: Arc<dyn RuntimeExecutionPort> = if let Some(factory) = execution_factory {
             factory(controller.clone())
@@ -171,7 +172,8 @@ impl CamelContextBuilder {
             )
             .with_uow(Arc::new(store))
             .with_execution(execution)
-            .with_health_registry(health_registry),
+            .with_health_registry(health_registry)
+            .with_metrics(metrics),
         )
     }
 
@@ -289,6 +291,7 @@ impl CamelContextBuilder {
             store,
             self.execution_factory,
             Arc::clone(&health_registry),
+            Arc::clone(&metrics),
         );
         let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
         controller

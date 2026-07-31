@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
 use camel_api::{
-    CamelError, RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery,
-    RuntimeQueryBus, RuntimeQueryResult,
+    CamelError, MetricsCollector, RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult,
+    RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult,
 };
 
 use crate::lifecycle::application::commands::{
@@ -42,6 +42,7 @@ pub struct RuntimeBus {
     uow: Option<Arc<dyn RuntimeUnitOfWorkPort>>,
     execution: Option<Arc<dyn RuntimeExecutionPort>>,
     health_registry: Option<Arc<dyn HealthCheckRegistryTrait>>,
+    metrics: Option<Arc<dyn MetricsCollector>>,
     journal_recovered_once: OnceCell<()>,
 }
 
@@ -60,6 +61,7 @@ impl RuntimeBus {
             uow: None,
             execution: None,
             health_registry: None,
+            metrics: None,
             journal_recovered_once: OnceCell::new(),
         }
     }
@@ -79,6 +81,14 @@ impl RuntimeBus {
         health_registry: Arc<crate::health_registry::HealthCheckRegistry>,
     ) -> Self {
         self.health_registry = Some(health_registry);
+        self
+    }
+
+    /// Thread a metrics handle so infrastructure commands (ReloadTlsCerts,
+    /// ReloadTemplates) can record counters (rc-d3pj). When None (default),
+    /// no counters are recorded.
+    pub fn with_metrics(mut self, metrics: Arc<dyn MetricsCollector>) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -178,6 +188,14 @@ impl RuntimeCommandBus for RuntimeBus {
             match registry.find(scheme, host, *port) {
                 Some(handler) => {
                     handler.reload().await?;
+                    // rc-d3pj: record reload counter once per successful reload.
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_counter(
+                            "tls_reloads_total",
+                            1.0,
+                            &[("scheme", scheme), ("host", host)],
+                        );
+                    }
                     return Ok(RuntimeCommandResult::TlsCertsReloaded {
                         scheme: scheme.clone(),
                         host: host.clone(),
@@ -199,16 +217,19 @@ impl RuntimeCommandBus for RuntimeBus {
         // RouteStatus is not mutated and ADR-0018 is not invoked. Dispatches to
         // the registry in camel-component-api (NOT camel-template — that would
         // invert the dependency).
-        //
-        // NOTE: no `template_reloads_total` metric is recorded here because the
-        // RuntimeBus holds no metrics handle (ReloadTlsCerts records none
-        // either). Threading a metrics port through RuntimeBus::new is out of
-        // scope for this change; tracked jointly (TLS + Templates) in bd rc-d3pj.
         if let RuntimeCommand::ReloadTemplates { route_id, .. } = &cmd {
             let route_id = route_id.clone();
             camel_component_api::template_reload::TemplateReloadRegistry::global()
                 .reload_route(&route_id)
                 .await?;
+            // rc-d3pj: record reload counter once per successful reload.
+            if let Some(metrics) = &self.metrics {
+                metrics.record_counter(
+                    "template_reloads_total",
+                    1.0,
+                    &[("route_id", route_id.as_str())],
+                );
+            }
             return Ok(RuntimeCommandResult::TemplatesReloaded { route_id });
         }
         // ── End template reload intercept ──────────────────────────────────

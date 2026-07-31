@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_api::{
-    RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery, RuntimeQueryBus,
-    RuntimeQueryResult,
+    MetricsCollector, RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery,
+    RuntimeQueryBus, RuntimeQueryResult,
 };
 use camel_component_api::template_reload::{
     TemplateReloadRegistry, TemplateReloadStaged, TemplateReloadTarget,
@@ -269,4 +269,87 @@ async fn reload_templates_route_status_unchanged() {
         "ReloadTemplates must not append journal events (before={events_before}, after={events_after})"
     );
     // _guard dropped on scope end → target unregistered.
+}
+
+// ── rc-d3pj: metrics counter verification ────────────────────────────────────
+
+/// Mock MetricsCollector that records `record_counter` calls.
+struct RecordingMetrics {
+    counters: std::sync::Mutex<Vec<CounterRecord>>,
+}
+
+#[derive(Clone, Debug)]
+struct CounterRecord {
+    name: String,
+    value: f64,
+    labels: Vec<(String, String)>,
+}
+
+impl MetricsCollector for RecordingMetrics {
+    fn record_exchange_duration(&self, _: &str, _: Duration) {}
+    fn increment_errors(&self, _: &str, _: &str) {}
+    fn increment_exchanges(&self, _: &str) {}
+    fn set_queue_depth(&self, _: &str, _: usize) {}
+    fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    fn record_counter(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+        self.counters.lock().unwrap().push(CounterRecord {
+            name: name.to_string(),
+            value,
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        });
+    }
+}
+
+/// rc-d3pj: ReloadTemplates must record `template_reloads_total` once per
+/// successful reload when a metrics handle is threaded into RuntimeBus.
+#[tokio::test]
+async fn reload_templates_records_counter() {
+    let route = "tpl-metrics-counter";
+    let target = FakeTarget::new(route);
+    let _guard = TemplateReloadRegistry::global().register(target.as_dyn());
+
+    let metrics = Arc::new(RecordingMetrics {
+        counters: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let bus = RuntimeBus::new(
+        Arc::new(InMemoryRouteRepository::default()),
+        Arc::new(InMemoryProjectionStore::default()),
+        Arc::new(InMemoryEventPublisher::default()),
+        Arc::new(InMemoryCommandDedup::default()),
+    )
+    .with_metrics(Arc::clone(&metrics) as Arc<dyn MetricsCollector>);
+
+    let result = bus
+        .execute(RuntimeCommand::ReloadTemplates {
+            route_id: route.to_string(),
+            command_id: "tpl-metrics-1".to_string(),
+            causation_id: None,
+        })
+        .await;
+    assert!(result.is_ok(), "reload should succeed: {result:?}");
+
+    let recorded = metrics
+        .counters
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "exactly one counter must be recorded: {recorded:?}"
+    );
+    assert_eq!(recorded[0].name, "template_reloads_total");
+    assert_eq!(recorded[0].value, 1.0);
+    assert_eq!(
+        recorded[0].labels,
+        vec![("route_id".to_string(), route.to_string())],
+        "label must include route_id: {:?}",
+        recorded[0].labels
+    );
 }
