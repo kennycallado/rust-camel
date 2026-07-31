@@ -886,7 +886,17 @@ impl DefaultRouteController {
 
         // rc-w1u9: await consumer startup handshake for aggregate routes too
         // so bind failures surface as route-start errors.
-        super::consumer_management::await_consumer_startup(startup_rx, "startup").await?;
+        // rc-kh7c: on failure, abort the orphaned consumer task and cancel the
+        // pipeline so neither runs detached. The aggregate pipeline loop would
+        // eventually self-clean via rx-drop + late_tx-drop, but cancelling
+        // pipeline_cancel also triggers force_complete_all (aggregate cleanup).
+        if let Err(e) =
+            super::consumer_management::await_consumer_startup(startup_rx, "startup").await
+        {
+            consumer_handle.abort();
+            pipeline_cancel_for_monitor.cancel();
+            return Err(e);
+        }
 
         // Extend the stored consumer handle through aggregate force-completion.
         // While this monitor drains pending buckets, handle_is_running still reports

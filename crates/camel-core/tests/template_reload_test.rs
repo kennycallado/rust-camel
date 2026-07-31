@@ -175,7 +175,7 @@ async fn reload_templates_does_not_require_journal() {
     );
     let result = result.unwrap();
     assert!(
-        matches!(result, RuntimeCommandResult::TemplatesReloaded { ref route_id } if route_id == &route),
+        matches!(result, RuntimeCommandResult::TemplatesReloaded { ref route_id } if route_id == route),
         "expected TemplatesReloaded, got {result:?}"
     );
 }

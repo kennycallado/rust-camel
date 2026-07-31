@@ -11,7 +11,11 @@ use camel_api::{
     OpaqueProcessor, RuntimeCommand, StepLifecycle, StepShutdownReason, SyncBoxProcessor, Value,
     ValueSourceDef,
 };
-use camel_component_api::ConcurrencyModel;
+use camel_component_api::{
+    Component, ComponentContext, ConcurrencyModel, ConsumerStartupMode, Endpoint, ProducerContext,
+    RuntimeObservability,
+};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Serializes tests that touch the global `START_ROUTE_EVENT_HOOK`. The hook
 /// is a single process-wide slot, so concurrent hook-using tests would
@@ -467,6 +471,7 @@ async fn start_stop_route_happy_path_with_timer_and_mock() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn start_route_spawns_pipeline_before_consumer_for_eager_consumers() {
     let _hook_guard = START_ROUTE_HOOK_GUARD
         .lock()
@@ -2346,6 +2351,7 @@ impl StepLifecycle for FailingStartStep {
 /// `start_route` awaits each step `start()` in route order, completing all of
 /// them before the pipeline task is spawned.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn start_route_awaits_start_in_order() {
     let _hook_guard = START_ROUTE_HOOK_GUARD
         .lock()
@@ -2413,6 +2419,7 @@ async fn start_route_awaits_start_in_order() {
 /// (`RouteStop`, reverse order, best-effort); the pipeline is NOT spawned and
 /// `start_route` returns the original start `Err`.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn start_route_rolls_back_on_failure() {
     let _hook_guard = START_ROUTE_HOOK_GUARD
         .lock()
@@ -2480,6 +2487,7 @@ async fn start_route_rolls_back_on_failure() {
 /// A route whose handles use the default no-op `start` behaves identically to
 /// before the change: `start_route` succeeds and spawns both tasks.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn start_route_default_start_noop_unaffected() {
     let _hook_guard = START_ROUTE_HOOK_GUARD
         .lock()
@@ -2534,6 +2542,7 @@ async fn start_route_default_start_noop_unaffected() {
 /// post-start failure path — distinct from the mid-loop start-failure test
 /// above (`start_route_rolls_back_on_failure`).
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn start_route_rolls_back_on_consumer_creation_failure() {
     let _hook_guard = START_ROUTE_HOOK_GUARD
         .lock()
@@ -2627,5 +2636,145 @@ async fn start_route_rolls_back_on_consumer_creation_failure() {
     assert!(
         managed.consumer_handle.is_none(),
         "no consumer handle stored on failure"
+    );
+}
+
+// rc-kh7c: Verify the consumer task is properly cleaned up when startup fails.
+// When `await_consumer_startup` returns Err (e.g. the consumer's `start()`
+// returns Err simulating a bind failure), the spawned consumer task and its
+// child tasks MUST be stopped — not left detached. Dropping a JoinHandle
+// detaches the task (Tokio contract); it keeps running in the background.
+//
+// The fix aborts the consumer JoinHandle AND cancels the consumer's
+// CancellationToken so child tasks that observe ctx.cancelled() also stop.
+//
+// Test design: register a mock component whose consumer's `start()` spawns
+// a background counter task that respects ctx.cancelled() (as a well-behaved
+// consumer would), then returns Err. If the fix works, the cancel token is
+// cancelled and the counter stops. If the fix regresses, the counter keeps
+// incrementing (orphan task leak).
+
+/// Mock consumer whose `start()` spawns a background counter task that
+/// respects `ctx.cancel_token()`, then returns Err (simulated bind failure).
+/// If the fix cancels the token, the counter stops; otherwise it leaks.
+struct RcKh7cFailBindConsumer {
+    counter: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl Consumer for RcKh7cFailBindConsumer {
+    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        let counter = Arc::clone(&self.counter);
+        let cancel = ctx.cancel_token();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+        Err(CamelError::RouteError("simulated bind failure".to_string()))
+    }
+    async fn stop(&mut self) -> Result<(), CamelError> {
+        Ok(())
+    }
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
+    }
+}
+
+/// Mock endpoint that vends `RcKh7cFailBindConsumer`.
+struct RcKh7cFailBindEndpoint {
+    uri: String,
+    counter: Arc<AtomicU64>,
+}
+
+impl Endpoint for RcKh7cFailBindEndpoint {
+    fn uri(&self) -> &str {
+        &self.uri
+    }
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(RcKh7cFailBindConsumer {
+            counter: Arc::clone(&self.counter),
+        }))
+    }
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        Err(CamelError::ProcessorError(
+            "failbind does not support producers".into(),
+        ))
+    }
+}
+
+/// Mock component that vends `RcKh7cFailBindEndpoint` under the
+/// `"failbind"` scheme.
+struct RcKh7cFailBindComponent {
+    counter: Arc<AtomicU64>,
+}
+
+impl Component for RcKh7cFailBindComponent {
+    fn scheme(&self) -> &str {
+        "failbind"
+    }
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        Ok(Box::new(RcKh7cFailBindEndpoint {
+            uri: uri.to_string(),
+            counter: Arc::clone(&self.counter),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn start_route_aborts_consumer_task_on_startup_failure() {
+    let counter = Arc::new(AtomicU64::new(0));
+
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::new(RcKh7cFailBindComponent {
+            counter: Arc::clone(&counter),
+        }));
+    }
+    let mut controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    controller
+        .add_route(RouteDefinition::new("failbind:test", vec![]).with_route_id("rc-kh7c-abort"))
+        .await
+        .expect("add_route");
+
+    let result = controller.start_route("rc-kh7c-abort").await;
+    assert!(
+        result.is_err(),
+        "start_route must fail when consumer's start() returns Err"
+    );
+
+    // Verify the consumer task was aborted. If the task (or any task
+    // spawned by it) is still running, the counter will keep incrementing
+    // during the sleep. With the fix, the consumer task's JoinHandle is
+    // `.abort()`ed, so the counter stops.
+    let v1 = counter.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let v2 = counter.load(Ordering::SeqCst);
+    assert_eq!(
+        v1, v2,
+        "consumer task was not aborted: counter advanced from {v1} to {v2} \
+         after start_route returned Err (orphan task leak)"
     );
 }

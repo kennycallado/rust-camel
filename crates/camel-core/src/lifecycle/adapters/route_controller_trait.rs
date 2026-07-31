@@ -193,11 +193,21 @@ impl camel_api::RouteController for DefaultRouteController {
             // ADR-0022 SPI: roll back already-started handles if the aggregate
             // spawn/startup path returns Err.
             if result.is_err() {
+                // rc-kh7c: cancel consumer's cancel token to stop child tasks
+                // spawned by consumer.start() that observe ctx.cancelled().
+                if let Some(managed) = self.routes.get_mut(route_id) {
+                    managed.consumer_cancel_token.cancel();
+                }
                 rollback_started(route_id, &lifecycle_handles).await;
             }
             return result;
         }
         // --- End aggregator v2 branch ---
+
+        // Clone for the startup-failure cleanup path (rc-kh7c): pipeline_cancel
+        // is moved into the spawn closure below; this clone stays in scope so
+        // the error handler can cancel it to force immediate pipeline exit.
+        let pipeline_cancel_for_cleanup = pipeline_cancel.clone();
 
         // Spawn pipeline task with its own cancellation token
         let pipeline_handle = match effective_concurrency {
@@ -329,9 +339,17 @@ impl camel_api::RouteController for DefaultRouteController {
         match consumer_management::await_consumer_startup(startup_rx, "startup").await {
             Ok(()) => {}
             Err(e) => {
-                // ADR-0022 SPI: the spawned pipeline task self-terminates when
-                // its rx channel drops on this return; the started handles must
-                // still be explicitly rolled back.
+                // rc-kh7c: abort the orphaned consumer task and cancel the
+                // pipeline so neither runs detached after start_route returns
+                // Err. Dropping a JoinHandle detaches the task (Tokio
+                // contract); abort() forces termination. The pipeline task
+                // would eventually self-clean via rx-drop, but explicit
+                // cancellation makes it immediate.
+                consumer_handle.abort();
+                pipeline_cancel_for_cleanup.cancel();
+                // Cancel the consumer's cancel token so child tasks spawned
+                // by consumer.start() that observe ctx.cancelled() also stop.
+                consumer_cancel.cancel();
                 rollback_started(route_id, &lifecycle_handles).await;
                 return Err(e);
             }
