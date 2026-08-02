@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
@@ -272,7 +271,6 @@ struct DirectConsumer {
     name: String,
     registry: DirectRegistry,
     cancel: Option<CancellationToken>,
-    handle: Option<JoinHandle<Result<(), CamelError>>>,
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -286,7 +284,6 @@ impl DirectConsumer {
             name,
             registry,
             cancel: None,
-            handle: None,
             runtime,
         }
     }
@@ -378,35 +375,11 @@ impl Consumer for DirectConsumer {
             cancel.cancel();
         }
 
-        // Wait for the spawned task to finish (with a 5s timeout).
-        if let Some(mut h) = self.handle.take() {
-            if tokio::time::timeout(Duration::from_secs(5), &mut h)
-                .await
-                .is_err()
-            {
-                h.abort();
-                let _ = h.await;
-                warn!(endpoint_name = %self.name, "consumer task did not stop in 5s; aborted");
-                // Aborted task cannot clean up its own registry entry — do it here.
-                let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-                reg.remove(&self.name);
-            }
-        } else {
-            // No join handle — just remove from registry.
-            let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            reg.remove(&self.name);
-        }
+        let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        reg.remove(&self.name);
 
         debug!(endpoint_name = %self.name, "direct consumer stopped");
         Ok(())
-    }
-
-    fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
-        // Take the handle so spawn_consumer_task can monitor it for unexpected
-        // panics. The consumer loop exits cleanly via the CancellationToken, so
-        // stop() drives shutdown through cancel.take(); the task removes itself
-        // from the registry on exit.
-        self.handle.take()
     }
 }
 
@@ -885,7 +858,6 @@ mod tests {
             name: "cleanup".to_string(),
             registry: Arc::clone(&component.registry),
             cancel: None,
-            handle: None,
             runtime: rt(),
         };
         stop_consumer.stop().await.unwrap();
@@ -912,7 +884,6 @@ mod tests {
             name: "cancel-test".to_string(),
             registry: registry.clone(),
             cancel: None,
-            handle: None,
             runtime: rt(),
         };
 
@@ -952,7 +923,6 @@ mod tests {
             name: "never-registered".to_string(),
             registry,
             cancel: None,
-            handle: None,
             runtime: rt(),
         };
         let result = consumer.stop().await;
@@ -1107,7 +1077,6 @@ mod tests {
             name: "stop-test".to_string(),
             registry: Arc::clone(&component.registry),
             cancel: Some(token.clone()),
-            handle: None,
             runtime: rt(),
         };
         stop_consumer.stop().await.unwrap();
