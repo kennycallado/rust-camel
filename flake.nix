@@ -96,7 +96,10 @@
           );
         };
 
-        packages.default = rust-camel;
+        packages = {
+          default = rust-camel;
+          opencode = pkgsUnstable.opencode;
+        };
 
         apps.default = flake-utils.lib.mkApp {
           drv = rust-camel;
@@ -119,6 +122,7 @@
             libxml2
             libclang
             pkgsUnstable.beads # agents memory
+            pkgsUnstable.opencode
             pkgsUnstable.rdkafka
             (writeShellScriptBin "openspec" ''
               exec npx @fission-ai/openspec@1.7.0 "$@"
