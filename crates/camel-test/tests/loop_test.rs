@@ -34,6 +34,43 @@ async fn send_to_direct(h: &CamelTestContext, endpoint_uri: &str, exchange: Exch
         .expect("failed to send exchange to direct endpoint");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn top_level_direct_step_completes() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let yaml = r#"
+routes:
+  - id: "direct-test-producer"
+    from: "timer:directtest?period=10&repeatCount=1"
+    startup_order: 200
+    steps:
+      - to: "direct:echo"
+  - id: "direct-echo"
+    from: "direct:echo"
+    startup_order: 50
+    steps:
+      - to: "mock:direct-result"
+"#;
+
+    for route in camel_dsl::parse_yaml(yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    h.mock()
+        .get_endpoint("direct-result")
+        .expect("mock endpoint created during route compilation")
+        .await_exchanges(1, Duration::from_secs(2))
+        .await;
+
+    h.stop().await;
+}
+
 /// Count-mode loop via programmatic DSL.
 #[tokio::test(flavor = "multi_thread")]
 async fn loop_count_integration() {

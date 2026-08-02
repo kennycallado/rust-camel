@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
@@ -272,7 +271,6 @@ struct DirectConsumer {
     name: String,
     registry: DirectRegistry,
     cancel: Option<CancellationToken>,
-    handle: Option<JoinHandle<Result<(), CamelError>>>,
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -286,7 +284,6 @@ impl DirectConsumer {
             name,
             registry,
             cancel: None,
-            handle: None,
             runtime,
         }
     }
@@ -322,58 +319,53 @@ impl Consumer for DirectConsumer {
 
         info!(endpoint_name = %self.name, "direct consumer started");
 
-        // Spawn the consumer loop so start() returns immediately.
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_clone.cancelled() => {
-                        debug!(endpoint_name = %name, "direct consumer received cancellation");
-                        break;
-                    }
-                    msg = rx.recv() => {
-                        match msg {
-                            Some((exchange, reply_tx)) => {
-                                debug!(
+        self.cancel = Some(cancel);
+
+        loop {
+            tokio::select! {
+                _ = cancel_clone.cancelled() => {
+                    debug!(endpoint_name = %name, "direct consumer received cancellation");
+                    break;
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        Some((exchange, reply_tx)) => {
+                            debug!(
+                                endpoint_name = %name,
+                                exchange_id = %exchange.correlation_id,
+                                "direct consumer received exchange"
+                            );
+                            let result = context.send_and_wait(exchange).await;
+                            if let Err(ref err) = result {
+                                // (category b′: send_and_wait returned Err on a normal-data send,
+                                // meaning the route handler did NOT absorb the failure —
+                                // see ADR-0012 "b-bridged discriminator". This emitter is the
+                                // only ERROR signal for the unhandled failure; must stay loud.)
+                                runtime
+                                    .metrics()
+                                    .increment_errors(&route_id, "b-prime:direct:send-and-wait");
+                                // log-policy: outside-contract
+                                error!(
                                     endpoint_name = %name,
-                                    exchange_id = %exchange.correlation_id,
-                                    "direct consumer received exchange"
+                                    error = %err,
+                                    "direct consumer pipeline error"
                                 );
-                                let result = context.send_and_wait(exchange).await;
-                                if let Err(ref err) = result {
-                                    // (category b′: send_and_wait returned Err on a normal-data send,
-                                    // meaning the route handler did NOT absorb the failure —
-                                    // see ADR-0012 "b-bridged discriminator". This emitter is the
-                                    // only ERROR signal for the unhandled failure; must stay loud.)
-                                    runtime
-                                        .metrics()
-                                        .increment_errors(&route_id, "b-prime:direct:send-and-wait");
-                                    // log-policy: outside-contract
-                                    error!(
-                                        endpoint_name = %name,
-                                        error = %err,
-                                        "direct consumer pipeline error"
-                                    );
-                                }
-                                let _ = reply_tx.send(result);
                             }
-                            None => break,
+                            let _ = reply_tx.send(result);
                         }
+                        None => break,
                     }
                 }
             }
+        }
 
-            // Cleanup: remove from registry on exit
-            {
-                let mut reg = registry.lock().unwrap_or_else(|e| e.into_inner());
-                reg.remove(&name);
-            }
+        // Cleanup: remove from registry on exit
+        {
+            let mut reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+            reg.remove(&name);
+        }
 
-            debug!(endpoint_name = %name, "direct consumer stopped");
-            Ok(())
-        });
-
-        self.cancel = Some(cancel);
-        self.handle = Some(handle);
+        debug!(endpoint_name = %name, "direct consumer stopped");
         Ok(())
     }
 
@@ -383,35 +375,11 @@ impl Consumer for DirectConsumer {
             cancel.cancel();
         }
 
-        // Wait for the spawned task to finish (with a 5s timeout).
-        if let Some(mut h) = self.handle.take() {
-            if tokio::time::timeout(Duration::from_secs(5), &mut h)
-                .await
-                .is_err()
-            {
-                h.abort();
-                let _ = h.await;
-                warn!(endpoint_name = %self.name, "consumer task did not stop in 5s; aborted");
-                // Aborted task cannot clean up its own registry entry — do it here.
-                let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-                reg.remove(&self.name);
-            }
-        } else {
-            // No join handle — just remove from registry.
-            let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            reg.remove(&self.name);
-        }
+        let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        reg.remove(&self.name);
 
         debug!(endpoint_name = %self.name, "direct consumer stopped");
         Ok(())
-    }
-
-    fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
-        // Take the handle so spawn_consumer_task can monitor it for unexpected
-        // panics. The consumer loop exits cleanly via the CancellationToken, so
-        // stop() drives shutdown through cancel.take(); the task removes itself
-        // from the registry on exit.
-        self.handle.take()
     }
 }
 
@@ -732,12 +700,16 @@ mod tests {
         let mut consumer_b = endpoint.create_consumer(rt()).unwrap();
 
         let (route_tx_a, _route_rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
+        let token_a = tokio_util::sync::CancellationToken::new();
         let ctx_a = ConsumerContext::new(
             route_tx_a,
-            tokio_util::sync::CancellationToken::new(),
+            token_a.clone(),
             "direct-test-route-a".to_string(),
         );
-        consumer_a.start(ctx_a).await.unwrap();
+        let handle_a = tokio::spawn(async move {
+            consumer_a.start(ctx_a).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let (route_tx_b, _route_rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx_b = ConsumerContext::new(
@@ -753,7 +725,8 @@ mod tests {
                 if msg.contains("already has a registered consumer")
         ));
 
-        consumer_a.stop().await.unwrap();
+        token_a.cancel();
+        handle_a.await.unwrap();
     }
 
     #[tokio::test]
@@ -885,7 +858,6 @@ mod tests {
             name: "cleanup".to_string(),
             registry: Arc::clone(&component.registry),
             cancel: None,
-            handle: None,
             runtime: rt(),
         };
         stop_consumer.stop().await.unwrap();
@@ -912,7 +884,6 @@ mod tests {
             name: "cancel-test".to_string(),
             registry: registry.clone(),
             cancel: None,
-            handle: None,
             runtime: rt(),
         };
 
@@ -952,7 +923,6 @@ mod tests {
             name: "never-registered".to_string(),
             registry,
             cancel: None,
-            handle: None,
             runtime: rt(),
         };
         let result = consumer.stop().await;
@@ -1087,8 +1057,7 @@ mod tests {
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx, token.clone(), "direct-test-route".to_string());
 
-        // start() blocks — it should run the consumer loop on a JoinHandle
-        // and return immediately. But currently start() IS the loop.
+        // start() runs the consumer loop inline on the managed consumer task.
         // We test stop() cancels the loop.
         let handle = tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -1108,7 +1077,6 @@ mod tests {
             name: "stop-test".to_string(),
             registry: Arc::clone(&component.registry),
             cancel: Some(token.clone()),
-            handle: None,
             runtime: rt(),
         };
         stop_consumer.stop().await.unwrap();
