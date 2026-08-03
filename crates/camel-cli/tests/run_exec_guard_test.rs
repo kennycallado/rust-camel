@@ -23,6 +23,14 @@
 //! - Success cases send exactly ONE SIGTERM. The CLI's `tokio::select!` arm
 //!   handles SIGTERM → graceful shutdown → `Ok(())` → exit 0. A second signal
 //!   would force `exit(1)`, so we must not double-tap.
+//! - Observation/exit deadlines are 30 s, not a tight value. These tests spawn
+//!   the full ~466 MB `camel` binary, which initializes ~15 always-on
+//!   component bundles. Under a whole-workspace `cargo test` run the OS is
+//!   saturated by hundreds of peer processes and subprocess startup slows
+//!   ~100×. The happy path still returns in well under 1 s (the helpers
+//!   short-circuit the moment the observation is seen / the child exits), so
+//!   the generous ceiling only buys headroom under load — it never slows the
+//!   fast path.
 
 use std::io::Read;
 use std::path::Path;
@@ -260,7 +268,7 @@ watch = false
     );
 
     let (exit_code, output) =
-        run_observe_then_signal(dir.path(), "non-exec-tick-ok", Duration::from_secs(4));
+        run_observe_then_signal(dir.path(), "non-exec-tick-ok", Duration::from_secs(30));
 
     assert_eq!(
         exit_code, 0,
@@ -302,7 +310,7 @@ watch = false
 "#,
     );
 
-    let (exit_code, output) = run_expect_exit(dir.path(), Duration::from_secs(4));
+    let (exit_code, output) = run_expect_exit(dir.path(), Duration::from_secs(30));
 
     assert_ne!(
         exit_code, 0,
@@ -346,7 +354,7 @@ workspace_root = "."
 "#,
     );
 
-    let (exit_code, output) = run_expect_exit(dir.path(), Duration::from_secs(4));
+    let (exit_code, output) = run_expect_exit(dir.path(), Duration::from_secs(30));
 
     assert_ne!(
         exit_code, 0,
@@ -398,7 +406,7 @@ accepted_exit_codes = [0]
     );
 
     let (exit_code, output) =
-        run_observe_then_signal(dir.path(), "context started", Duration::from_secs(4));
+        run_observe_then_signal(dir.path(), "context started", Duration::from_secs(30));
 
     assert_eq!(
         exit_code, 0,
