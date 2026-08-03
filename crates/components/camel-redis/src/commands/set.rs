@@ -1,4 +1,7 @@
-use super::{get_i64_header, get_str_header, get_str_vec_header, require_key, require_value};
+use super::{
+    get_i64_header, get_str_header, get_str_vec_header, require_key, require_value,
+    value_to_redis_arg,
+};
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -84,13 +87,13 @@ pub(crate) fn build_redis_cmd(
         RedisCommand::Sadd => {
             let (key, value) = resolve_key_value_operands(exchange)?;
             let mut c = redis::cmd("SADD");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Srem => {
             let (key, value) = resolve_key_value_operands(exchange)?;
             let mut c = redis::cmd("SREM");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Smembers => {
@@ -108,7 +111,7 @@ pub(crate) fn build_redis_cmd(
         RedisCommand::Sismember => {
             let (key, value) = resolve_key_value_operands(exchange)?;
             let mut c = redis::cmd("SISMEMBER");
-            c.arg(key).arg(value.to_string());
+            c.arg(key).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Spop => {
@@ -120,7 +123,7 @@ pub(crate) fn build_redis_cmd(
         RedisCommand::Smove => {
             let (key, dest, value) = resolve_key_destination_value_operands(exchange)?;
             let mut c = redis::cmd("SMOVE");
-            c.arg(key).arg(dest).arg(value.to_string());
+            c.arg(key).arg(dest).arg(value_to_redis_arg(&value));
             c
         }
         RedisCommand::Sinter => {
@@ -199,130 +202,132 @@ pub async fn dispatch(
         return Err(CamelError::ProcessorError("Not a set command".into()));
     }
 
-    let result: serde_json::Value =
-        match cmd {
-            RedisCommand::Sadd => {
-                let (key, value) = resolve_key_value_operands(exchange)?;
-                let n: i64 = conn
-                    .sadd(&key, value.to_string())
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SADD failed: {e}")))?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Srem => {
-                let (key, value) = resolve_key_value_operands(exchange)?;
-                let n: i64 = conn
-                    .srem(&key, value.to_string())
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SREM failed: {e}")))?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Smembers => {
-                let key = require_key(exchange)?;
-                let members: Vec<String> = conn.smembers(&key).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis SMEMBERS failed: {e}"))
-                })?;
-                json_from_members(members)
-            }
-            RedisCommand::Scard => {
-                let key = require_key(exchange)?;
-                let n: i64 = conn
-                    .scard(&key)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SCARD failed: {e}")))?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Sismember => {
-                let (key, value) = resolve_key_value_operands(exchange)?;
-                let ok: bool = conn.sismember(&key, value.to_string()).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis SISMEMBER failed: {e}"))
-                })?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Spop => {
-                let key = require_key(exchange)?;
-                let val: Option<String> = conn
-                    .spop(&key)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SPOP failed: {e}")))?;
-                json_from_optional_member(val)
-            }
-            RedisCommand::Smove => {
-                let (key, dest, value) = resolve_key_destination_value_operands(exchange)?;
-                let ok: bool = conn
-                    .smove(&key, dest, value.to_string())
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SMOVE failed: {e}")))?;
-                serde_json::json!(ok)
-            }
-            RedisCommand::Sinter => {
-                let keys = resolve_set_keys(exchange)?;
-                let members: Vec<String> = conn
-                    .sinter(&keys)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SINTER failed: {e}")))?;
-                json_from_members(members)
-            }
-            RedisCommand::Sunion => {
-                let keys = resolve_set_keys(exchange)?;
-                let members: Vec<String> = conn
-                    .sunion(&keys)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SUNION failed: {e}")))?;
-                json_from_members(members)
-            }
-            RedisCommand::Sdiff => {
-                let keys = resolve_set_keys(exchange)?;
-                let members: Vec<String> = conn
-                    .sdiff(&keys)
-                    .await
-                    .map_err(|e| CamelError::ProcessorError(format!("Redis SDIFF failed: {e}")))?;
-                json_from_members(members)
-            }
-            RedisCommand::Sinterstore => {
-                let (dest, keys) = resolve_store_operands(exchange)?;
-                let n: i64 = conn.sinterstore(dest, &keys).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis SINTERSTORE failed: {e}"))
-                })?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Sunionstore => {
-                let (dest, keys) = resolve_store_operands(exchange)?;
-                let n: i64 = conn.sunionstore(dest, &keys).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis SUNIONSTORE failed: {e}"))
-                })?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Sdiffstore => {
-                let (dest, keys) = resolve_store_operands(exchange)?;
-                let n: i64 = conn.sdiffstore(dest, &keys).await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Redis SDIFFSTORE failed: {e}"))
-                })?;
-                serde_json::json!(n)
-            }
-            RedisCommand::Srandmember => {
-                let key = require_key(exchange)?;
-                let count = resolve_random_member_count(exchange);
-                match count {
-                    Some(c) => {
-                        let members: Vec<String> = conn
-                            .srandmember_multiple(&key, c as isize)
-                            .await
-                            .map_err(|e| {
-                                CamelError::ProcessorError(format!("Redis SRANDMEMBER failed: {e}"))
-                            })?;
-                        serde_json::json!(members)
-                    }
-                    None => {
-                        let member: Option<String> = conn.srandmember(&key).await.map_err(|e| {
+    let result: serde_json::Value = match cmd {
+        RedisCommand::Sadd => {
+            let (key, value) = resolve_key_value_operands(exchange)?;
+            let n: i64 = conn
+                .sadd(&key, value_to_redis_arg(&value))
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SADD failed: {e}")))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Srem => {
+            let (key, value) = resolve_key_value_operands(exchange)?;
+            let n: i64 = conn
+                .srem(&key, value_to_redis_arg(&value))
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SREM failed: {e}")))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Smembers => {
+            let key = require_key(exchange)?;
+            let members: Vec<String> = conn
+                .smembers(&key)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SMEMBERS failed: {e}")))?;
+            json_from_members(members)
+        }
+        RedisCommand::Scard => {
+            let key = require_key(exchange)?;
+            let n: i64 = conn
+                .scard(&key)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SCARD failed: {e}")))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Sismember => {
+            let (key, value) = resolve_key_value_operands(exchange)?;
+            let ok: bool = conn
+                .sismember(&key, value_to_redis_arg(&value))
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SISMEMBER failed: {e}")))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Spop => {
+            let key = require_key(exchange)?;
+            let val: Option<String> = conn
+                .spop(&key)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SPOP failed: {e}")))?;
+            json_from_optional_member(val)
+        }
+        RedisCommand::Smove => {
+            let (key, dest, value) = resolve_key_destination_value_operands(exchange)?;
+            let ok: bool = conn
+                .smove(&key, dest, value_to_redis_arg(&value))
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SMOVE failed: {e}")))?;
+            serde_json::json!(ok)
+        }
+        RedisCommand::Sinter => {
+            let keys = resolve_set_keys(exchange)?;
+            let members: Vec<String> = conn
+                .sinter(&keys)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SINTER failed: {e}")))?;
+            json_from_members(members)
+        }
+        RedisCommand::Sunion => {
+            let keys = resolve_set_keys(exchange)?;
+            let members: Vec<String> = conn
+                .sunion(&keys)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SUNION failed: {e}")))?;
+            json_from_members(members)
+        }
+        RedisCommand::Sdiff => {
+            let keys = resolve_set_keys(exchange)?;
+            let members: Vec<String> = conn
+                .sdiff(&keys)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SDIFF failed: {e}")))?;
+            json_from_members(members)
+        }
+        RedisCommand::Sinterstore => {
+            let (dest, keys) = resolve_store_operands(exchange)?;
+            let n: i64 = conn.sinterstore(dest, &keys).await.map_err(|e| {
+                CamelError::ProcessorError(format!("Redis SINTERSTORE failed: {e}"))
+            })?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Sunionstore => {
+            let (dest, keys) = resolve_store_operands(exchange)?;
+            let n: i64 = conn.sunionstore(dest, &keys).await.map_err(|e| {
+                CamelError::ProcessorError(format!("Redis SUNIONSTORE failed: {e}"))
+            })?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Sdiffstore => {
+            let (dest, keys) = resolve_store_operands(exchange)?;
+            let n: i64 = conn
+                .sdiffstore(dest, &keys)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis SDIFFSTORE failed: {e}")))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Srandmember => {
+            let key = require_key(exchange)?;
+            let count = resolve_random_member_count(exchange);
+            match count {
+                Some(c) => {
+                    let members: Vec<String> = conn
+                        .srandmember_multiple(&key, c as isize)
+                        .await
+                        .map_err(|e| {
                             CamelError::ProcessorError(format!("Redis SRANDMEMBER failed: {e}"))
                         })?;
-                        json_from_optional_member(member)
-                    }
+                    serde_json::json!(members)
+                }
+                None => {
+                    let member: Option<String> = conn.srandmember(&key).await.map_err(|e| {
+                        CamelError::ProcessorError(format!("Redis SRANDMEMBER failed: {e}"))
+                    })?;
+                    json_from_optional_member(member)
                 }
             }
-            _ => unreachable!("non-set commands rejected above"),
-        };
+        }
+        _ => unreachable!("non-set commands rejected above"),
+    };
     exchange.input.body = Body::Json(result);
     Ok(())
 }
@@ -500,7 +505,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Sadd, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "SADD");
-        assert_eq!(cmd_args(&cmd), vec!["myset", "\"member1\""]);
+        assert_eq!(cmd_args(&cmd), vec!["myset", "member1"]);
     }
 
     #[test]
@@ -523,7 +528,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Srem, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "SREM");
-        assert_eq!(cmd_args(&cmd), vec!["myset", "\"member1\""]);
+        assert_eq!(cmd_args(&cmd), vec!["myset", "member1"]);
     }
 
     #[test]
@@ -568,7 +573,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Sismember, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "SISMEMBER");
-        assert_eq!(cmd_args(&cmd), vec!["myset", "\"member1\""]);
+        assert_eq!(cmd_args(&cmd), vec!["myset", "member1"]);
     }
 
     #[test]
@@ -600,7 +605,7 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Smove, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "SMOVE");
-        assert_eq!(cmd_args(&cmd), vec!["set1", "set2", "\"member1\""]);
+        assert_eq!(cmd_args(&cmd), vec!["set1", "set2", "member1"]);
     }
 
     #[test]
