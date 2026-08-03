@@ -30,13 +30,13 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Setup GraalVM (native builds)
         if: matrix.build_method == 'native'
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f # v1.5.3
+        uses: graalvm/setup-graalvm@0def53c0fd8534bc13416c9469f5be45265824fd # v1.6.3
         with:
           java-version: '21'
           distribution: 'graalvm'
@@ -48,7 +48,7 @@ jobs:
 
       - name: Cache Gradle dependencies (Docker)
         if: matrix.build_method == 'docker'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: bridges/xml/.gradle-docker-cache
           key: gradle-${{ hashFiles('bridges/xml/build.gradle.kts', 'bridges/xml/gradle/wrapper/gradle-wrapper.properties') }}
@@ -57,7 +57,7 @@ jobs:
 
       - name: Cache Gradle dependencies (native)
         if: matrix.build_method == 'native'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: bridges/xml/.gradle-local-cache
           key: gradle-native-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('bridges/xml/build.gradle.kts', 'bridges/xml/gradle/wrapper/gradle-wrapper.properties') }}
@@ -87,7 +87,7 @@ jobs:
           fi
           echo "Verified: statically linked"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bridge-${{ matrix.target }}
           path: |
@@ -100,7 +100,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: bridge-*
           merge-multiple: true
@@ -117,7 +117,7 @@ jobs:
           sha256sum *.tar.gz *.zip > "xml-bridge-${VERSION}-SHA256SUMS"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v2
         with:
           files: |
             artifacts/*.tar.gz
