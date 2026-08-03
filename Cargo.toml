@@ -201,7 +201,15 @@ testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "r
 # windows-sys (windows) for `openat`-style relative path resolution to
 # enforce the dependency-closure contract. Feature-gated in the crate.
 rustix = { version = "0.38", features = ["fs"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Wdk_Storage_FileSystem", "Win32_Storage_FileSystem", "Win32_Security"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
+] }
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 csv = "1"
 proc-macro2 = "1.0"

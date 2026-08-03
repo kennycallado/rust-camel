@@ -319,36 +319,38 @@ mod imp {
 // NOTE (spec Task 2.1): the Windows path uses per-component `NtCreateFile`
 // with a chained `OBJECT_ATTRIBUTES.RootDirectory` and reparse-point rejection
 // at every component — NOT `CreateFileW` (which only checks the trailing
-// component). This path CANNOT be validated on the Linux CI host; Unix is the
-// CI gate.
-//
-// `NtCreateFile`, `OBJECT_ATTRIBUTES`/`UNICODE_STRING`, `IO_STATUS_BLOCK`, and
-// `OBJ_CASE_INSENSITIVE` live behind `windows-sys` features NOT yet enabled in
-// the Phase-1 workspace dependency set. A Windows build (cross-compile or a
-// Windows CI job) MUST add these features before this path compiles:
-//   - `Wdk_Foundation`           (OBJECT_ATTRIBUTES, UNICODE_STRING, NtCreateFile)
-//   - `Win32_System_IO`          (IO_STATUS_BLOCK, NtCreateFile)
+// component). This path CANNOT be fully validated on a Linux CI host; the
+// Unix path is the primary CI gate. The windows-sys 0.59 features required
+// here are now all enabled in the workspace Cargo.toml:
+//   - `Wdk_Foundation`           (OBJECT_ATTRIBUTES)
+//   - `Win32_System_IO`          (IO_STATUS_BLOCK)
 //   - `Win32_System_Kernel`      (OBJ_CASE_INSENSITIVE)
-// already present: `Win32_Foundation`, `Wdk_Storage_FileSystem`,
-//                  `Win32_Storage_FileSystem`, `Win32_Security`.
-// Until that job lands, treat the Windows path as unvalidated scaffolding.
+//   - `Wdk_Storage_FileSystem`   (NtCreateFile, FILE_OPEN, create-options)
+//   - `Win32_Storage_FileSystem` (BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle)
+//   - `Win32_Foundation`         (HANDLE, UNICODE_STRING, CloseHandle, NTSTATUS, FILETIME)
+// File identity is collected via a single `GetFileInformationByHandle` call
+// (volume serial, file id, size, last-write) rather than the multi-call
+// `GetFileInformationByHandleEx` route, because windows-sys 0.59 does not
+// expose `FileFsVolumeInformation` / `FileInternalInfo` enum variants under
+// `FILE_INFO_BY_HANDLE_CLASS`.
 #[cfg(windows)]
 mod imp {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{
+        AsRawHandle, FromRawHandle, OwnedHandle as StdOwnedHandle, RawHandle,
+    };
     use std::path::Path;
 
-    use windows_sys::Wdk::Foundation::{OBJECT_ATTRIBUTES, UNICODE_STRING};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
-        FILE_BASIC_INFORMATION, FILE_FS_VOLUME_INFORMATION, FILE_INTERNAL_INFORMATION, FILE_OPEN,
-        FILE_OPEN_REPARSE_POINT, FILE_STANDARD_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
-        NtCreateFile,
+        FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
     };
     use windows_sys::Win32::Foundation::{
-        CloseHandle, HANDLE, INVALID_HANDLE_VALUE, STATUS_SUCCESS,
+        CloseHandle, HANDLE, INVALID_HANDLE_VALUE, STATUS_SUCCESS, UNICODE_STRING,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        FileFsVolumeInformation, FileInternalInfo, FileStandardInfo, GetFileInformationByHandleEx,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
         SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -369,7 +371,8 @@ mod imp {
             let components = validate_components(name)?;
             let last_idx = components.len() - 1;
 
-            let mut cur_root: HANDLE = root.inner.as_raw() as HANDLE;
+            // The std `OwnedHandle` field is opaque; reach for `AsRawHandle`.
+            let mut cur_root: HANDLE = root.inner.as_raw_handle() as HANDLE;
             let mut held: Option<OwnedHandleInner> = None;
 
             for (i, comp) in components.iter().enumerate() {
@@ -377,7 +380,7 @@ mod imp {
                 let opened = nt_open_component(cur_root, comp, is_last)?;
                 if is_last {
                     let identity = identity_of(opened.0)?;
-                    return Ok((OwnedHandle { inner: opened }, identity));
+                    return Ok((wrap_std(opened)?, identity));
                 }
                 held = Some(opened);
                 cur_root = held.as_ref().expect("just-set").0; // allow-unwrap
@@ -396,11 +399,21 @@ mod imp {
         }
     }
 
-    impl OwnedHandle {
-        fn as_raw(&self) -> usize {
-            self.inner.0 as usize
-        }
+    /// Transfer ownership of the NT HANDLE inside `OwnedHandleInner` into the
+    /// std `OwnedHandle` stored as `OwnedHandle::inner`. `OwnedHandleInner`'s
+    /// `Drop` is suppressed via `ManuallyDrop` so the handle is closed exactly
+    /// once (by std's `Drop` later). NT handles from `NtCreateFile` live in
+    /// the same kernel namespace as kernel32 handles, so std's
+    /// `CloseHandle`-based `Drop` is correct.
+    fn wrap_std(inner: OwnedHandleInner) -> Result<OwnedHandle, TemplateReloadError> {
+        let raw: RawHandle = std::mem::ManuallyDrop::new(inner).0 as RawHandle;
+        // Safety: `raw` is a valid open HANDLE we now exclusively own; std
+        // takes responsibility for closing it.
+        let std_handle = unsafe { StdOwnedHandle::from_raw_handle(raw) };
+        Ok(OwnedHandle { inner: std_handle })
+    }
 
+    impl OwnedHandle {
         /// Read up to `max_bytes` from this handle. The Windows path is
         /// unvalidated scaffolding (see the module-level note); this stub
         /// returns [`TemplateReloadError::Acquire`] until a Windows CI job
@@ -423,7 +436,7 @@ mod imp {
     fn nt_open_component(
         root: HANDLE,
         comp: &str,
-        is_last: bool,
+        _is_last: bool,
     ) -> Result<OwnedHandleInner, TemplateReloadError> {
         let mut name_utf16: Vec<u16> = OsStr::new(comp).encode_wide().collect();
         name_utf16.push(0);
@@ -487,11 +500,7 @@ mod imp {
     }
 
     fn is_reparse(handle: HANDLE) -> Result<bool, TemplateReloadError> {
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
-        };
-        let mut info: windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
-            unsafe { std::mem::zeroed() };
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
         if ok == 0 {
             return Err(TemplateReloadError::Acquire(
@@ -502,74 +511,30 @@ mod imp {
     }
 
     fn identity_of(handle: HANDLE) -> Result<FileIdentity, TemplateReloadError> {
-        let mut internal: FILE_INTERNAL_INFORMATION = unsafe { std::mem::zeroed() };
-        query_info(handle, FileInternalInfo, &mut internal)?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+        if ok == 0 {
+            return Err(TemplateReloadError::Acquire(
+                "GetFileInformationByHandle failed".to_string(),
+            ));
+        }
 
-        let mut standard: FILE_STANDARD_INFORMATION = unsafe { std::mem::zeroed() };
-        query_info(handle, FileStandardInfo, &mut standard)?;
-
-        let mut volume: FILE_FS_VOLUME_INFORMATION = unsafe { std::mem::zeroed() };
-        query_fs_volume(handle, &mut volume)?;
-
-        // `FILE_BASIC_INFORMATION.LastWriteTime` is the Windows FILETIME for
-        // last write, expressed as the number of 100-nanosecond intervals
-        // since 1601-01-01 UTC. It is the exact analogue of Unix's
-        // `st_mtime` nanosecond timestamp for change-detection purposes.
-        // `Wdk_Storage_FileSystem` (FILE_BASIC_INFORMATION) and
-        // `Win32_Storage_FileSystem` (FileBasicInfo) are both already
-        // enabled in the workspace, so no new windows-sys features are
-        // required to populate this field.
-        let mut basic: FILE_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
-        query_info(handle, FileBasicInfo, &mut basic)?;
+        // `nFileSize{High,Low}` compose the 64-bit logical length; FILETIME
+        // is a 64-bit count of 100-ns intervals since the Windows epoch
+        // (1601-01-01), which is the analogue of Unix `st_mtime` for change
+        // detection.
+        let length = ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64);
+        let last_write_100ns: i64 = (((info.ftLastWriteTime.dwHighDateTime as u64) << 32)
+            | (info.ftLastWriteTime.dwLowDateTime as u64))
+            as i64;
 
         Ok(FileIdentity {
-            volume_serial: volume.VolumeSerialNumber,
-            file_index_high: (internal.IndexNumber >> 32) as u32,
-            file_index_low: internal.IndexNumber as u32,
-            length: standard.EndOfFile,
-            last_write_100ns: basic.LastWriteTime,
+            volume_serial: info.dwVolumeSerialNumber,
+            file_index_high: info.nFileIndexHigh,
+            file_index_low: info.nFileIndexLow,
+            length,
+            last_write_100ns,
         })
-    }
-
-    fn query_info<T>(
-        handle: HANDLE,
-        class: windows_sys::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,
-        buf: *mut T,
-    ) -> Result<(), TemplateReloadError> {
-        let ok = unsafe {
-            GetFileInformationByHandleEx(
-                handle,
-                class,
-                buf as *mut std::ffi::c_void,
-                std::mem::size_of::<T>() as u32,
-            )
-        };
-        if ok == 0 {
-            return Err(TemplateReloadError::Acquire(
-                "GetFileInformationByHandleEx failed".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn query_fs_volume(
-        handle: HANDLE,
-        buf: *mut FILE_FS_VOLUME_INFORMATION,
-    ) -> Result<(), TemplateReloadError> {
-        let ok = unsafe {
-            GetFileInformationByHandleEx(
-                handle,
-                FileFsVolumeInformation,
-                buf as *mut std::ffi::c_void,
-                std::mem::size_of::<FILE_FS_VOLUME_INFORMATION>() as u32,
-            )
-        };
-        if ok == 0 {
-            return Err(TemplateReloadError::Acquire(
-                "GetFileInformationByHandleEx(FileFsVolumeInformation) failed".to_string(),
-            ));
-        }
-        Ok(())
     }
 
     pub(crate) fn open_root_windows(
@@ -639,7 +604,7 @@ mod imp {
 
         let inner = OwnedHandleInner(handle);
         let identity = identity_of(handle)?;
-        Ok((OwnedHandle { inner }, identity))
+        wrap_std(inner).map(|h| (h, identity))
     }
 
     fn validate_components(name: &str) -> Result<Vec<&str>, TemplateReloadError> {
