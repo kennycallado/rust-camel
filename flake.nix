@@ -96,7 +96,10 @@
           );
         };
 
-        packages.default = rust-camel;
+        packages = {
+          default = rust-camel;
+          opencode = pkgsUnstable.opencode;
+        };
 
         apps.default = flake-utils.lib.mkApp {
           drv = rust-camel;
@@ -119,6 +122,7 @@
             libxml2
             libclang
             pkgsUnstable.beads # agents memory
+            pkgsUnstable.opencode
             pkgsUnstable.rdkafka
             (writeShellScriptBin "openspec" ''
               exec npx @fission-ai/openspec@1.7.0 "$@"
@@ -133,8 +137,11 @@
             export RUSTC_WRAPPER=sccache
             sccache --stop-server 2>/dev/null || true
             sccache --start-server
-            # export CARGO_TARGET_DIR="$HOME/.cache/rust-camel-target"
-            export CARGO_TARGET_DIR="/home/shared/rust-camel-target"
+            if [ -d "/home/shared" ] && [ -w "/home/shared" ]; then
+              export CARGO_TARGET_DIR="/home/shared/rust-camel-target"
+            else
+              export CARGO_TARGET_DIR="$HOME/.cache/rust-camel-target"
+            fi
 
             # JMS bridge: auto-detect native binary
             BRIDGE_BIN="$PWD/bridges/jms/build/native/jms-bridge"
