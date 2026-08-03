@@ -1,3 +1,5 @@
+mod changelog;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -101,6 +103,19 @@ enum Commands {
         /// Directory of the OpenSpec change.
         #[arg(long)]
         change_dir: String,
+    },
+    /// Generate categorized release notes from Conventional Commits.
+    ///
+    /// Writes Markdown to stdout (for the GitHub Release body) and
+    /// diagnostics (warnings + SemVer recommendation) to stderr.
+    /// Defaults to `<latest vX.Y.Z tag>..HEAD`.
+    Changelog {
+        /// Starting tag or SHA (exclusive). Defaults to the latest core tag.
+        #[arg(long)]
+        from: Option<String>,
+        /// Ending ref. Defaults to HEAD.
+        #[arg(long)]
+        to: Option<String>,
     },
 }
 
@@ -227,6 +242,12 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Commands::Changelog { from, to } => {
+            if let Err(e) = changelog::run(from, to) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 

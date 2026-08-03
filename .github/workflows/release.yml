@@ -108,6 +108,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # xtask changelog needs full history + tags
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          # Resolve previous core tag (vX.Y.Z), excluding bridge tags.
+          PREV=$(git tag --sort=-v:refname \
+                 | grep -E '^v[0-9]' \
+                 | grep -v "^${GITHUB_REF_NAME}$" \
+                 | head -1)
+          if [ -z "$PREV" ]; then
+            echo "No previous core tag found; emitting minimal body."
+            echo "body=Initial release." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "body<<__EOF__"
+            cargo xtask changelog --from "$PREV" --to "${GITHUB_REF_NAME}"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -119,7 +146,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/camel-*
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.body }}
 
   publish:
     name: Publish crates to crates.io
