@@ -208,7 +208,7 @@ proc-macro2 = "1.0"
 prometheus = "0.14"
 quick-xml = "0.41"
 quote = "1.0"
-base64 = "0.22"
+base64 = "0.23"
 pkcs1 = { version = "0.7", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 serde_urlencoded = "0.7"
