@@ -56,13 +56,21 @@ impl Commit {
 ///
 /// Writes categorized Markdown to stdout (intended for the GitHub Release
 /// body) and diagnostics (warnings + SemVer recommendation) to stderr.
-pub fn run(from: Option<String>, to: Option<String>) -> Result<(), String> {
+///
+/// When `check` is true, runs as a CI gate: emits a single OK line on
+/// stdout if no unmarked breaking changes are found, or returns an Err
+/// (which the dispatcher turns into a non-zero exit) listing offenders.
+pub fn run(from: Option<String>, to: Option<String>, check: bool) -> Result<(), String> {
     let start = resolve_from(from)?;
     let end = to.unwrap_or_else(|| "HEAD".to_string());
     let range = format!("{start}..{end}");
 
     let log = git_log(&range)?;
     let commits = parse_commits(&log);
+
+    if check {
+        return run_check(&commits, &range);
+    }
 
     let body = render_body(&commits, &start);
     print!("{body}");
@@ -71,6 +79,33 @@ pub fn run(from: Option<String>, to: Option<String>) -> Result<(), String> {
     emit_bump_recommendation(&commits);
 
     Ok(())
+}
+
+/// CI gate mode: fail if any commit mentions breaking in prose without
+/// the conventional `!:` subject marker (or a `BREAKING CHANGE:` body line).
+fn run_check(commits: &[Commit], range: &str) -> Result<(), String> {
+    let unmarked = find_unmarked_breaking(commits);
+    if unmarked.is_empty() {
+        println!(
+            "lint-commits: OK ({} commits in {}, no unmarked breaking)",
+            commits.len(),
+            range
+        );
+        return Ok(());
+    }
+    let mut msg = format!(
+        "lint-commits: FAILED — {} commit(s) mention breaking without the `!:` marker:\n",
+        unmarked.len()
+    );
+    for c in unmarked {
+        msg.push_str(&format!("  {} {}\n", short_hash(&c.hash), c.subject));
+    }
+    msg.push_str(
+        "\nFix: add `!:` to the subject (e.g. `feat(scope)!: ...`) or add a \
+         `BREAKING CHANGE:` footer to the body, or reword the body if the \
+         word `breaking` describes a bug rather than a breaking change.",
+    );
+    Err(msg)
 }
 
 fn resolve_from(from: Option<String>) -> Result<String, String> {
@@ -231,22 +266,47 @@ fn short_hash(hash: &str) -> &str {
     if hash.len() >= 8 { &hash[..8] } else { hash }
 }
 
+/// Returns true if the body mentions breaking in prose, excluding the
+/// standard `BREAKING CHANGE:` footer (handled separately via `marked`).
+///
+/// Heuristic (deliberately narrow to avoid false positives on bug
+/// descriptions like "breaking body propagation"):
+///   - phrase `breaking change` (case-insensitive)
+///   - hyphenated form `[a-z]+-breaking` (e.g. `source-breaking`,
+///     `api-breaking`, `semver-breaking`)
+fn is_prose_breaking(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    if lower.contains("breaking change") {
+        return true;
+    }
+    let re = Regex::new(r"[a-z]+-breaking\b").expect("static regex"); // allow-unwrap
+    re.is_match(&lower)
+}
+
+/// Commits whose bodies mention breaking in prose but lack both the `!:`
+/// subject marker and the `BREAKING CHANGE:` body footer.
+fn find_unmarked_breaking(commits: &[Commit]) -> Vec<&Commit> {
+    commits
+        .iter()
+        .filter(|c| {
+            let marked = c.breaking_subject || c.body.contains("BREAKING CHANGE:");
+            !marked && is_prose_breaking(&c.body)
+        })
+        .collect()
+}
+
 fn emit_warnings(commits: &[Commit]) {
-    let mut warned = false;
-    for c in commits {
-        let prose_breaking = c.body.to_lowercase().contains("breaking");
-        let marked = c.breaking_subject || c.body.contains("BREAKING CHANGE:");
-        if prose_breaking && !marked {
-            if !warned {
-                eprintln!();
-                warned = true;
-            }
-            eprintln!(
-                "warning: {} body mentions 'breaking' but subject lacks `!:` marker",
-                short_hash(&c.hash)
-            );
-            eprintln!("         {}", c.subject);
-        }
+    let unmarked = find_unmarked_breaking(commits);
+    if unmarked.is_empty() {
+        return;
+    }
+    eprintln!();
+    for c in unmarked {
+        eprintln!(
+            "warning: {} body mentions 'breaking' but subject lacks `!:` marker",
+            short_hash(&c.hash)
+        );
+        eprintln!("         {}", c.subject);
     }
 }
 

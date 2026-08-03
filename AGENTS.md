@@ -32,6 +32,10 @@
   run: cargo xtask lint-unwrap
 - name: lint-secrets
   run: cargo xtask lint-secrets
+- name: lint-commits
+  run: |
+    git fetch origin main --depth=1
+    cargo xtask changelog --check --from FETCH_HEAD --to HEAD
 - name: lint-log-levels
   run: cargo xtask lint-log-levels
 - name: schema-check

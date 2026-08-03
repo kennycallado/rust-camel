@@ -116,6 +116,10 @@ enum Commands {
         /// Ending ref. Defaults to HEAD.
         #[arg(long)]
         to: Option<String>,
+        /// CI gate mode: exit non-zero if any commit mentions breaking
+        /// without the `!:` subject marker. Used by `lint-commits` gate.
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -242,8 +246,8 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        Commands::Changelog { from, to } => {
-            if let Err(e) = changelog::run(from, to) {
+        Commands::Changelog { from, to, check } => {
+            if let Err(e) = changelog::run(from, to, check) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }

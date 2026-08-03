@@ -178,6 +178,13 @@ jobs:
         run: cargo xtask lint-unwrap
       - name: lint-secrets
         run: cargo xtask lint-secrets
+      - name: lint-commits
+        # Fail if any commit in the PR range mentions breaking in prose
+        # without the conventional `!:` subject marker. Default checkout
+        # lacks origin/main, so fetch it explicitly.
+        run: |
+          git fetch origin main --depth=1
+          cargo xtask changelog --check --from FETCH_HEAD --to HEAD
       - name: cargo-audit (vulnerability scan)
         uses: taiki-e/install-action@cargo-audit
       - name: audit
