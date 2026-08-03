@@ -1,0 +1,38 @@
+version: 2
+
+# Monthly cadence with grouped PRs. This workspace has ~40 member crates, so
+# ungrouped bumps would produce an unmanageable stream of pull requests.
+# Security updates need their own group: a normal group only covers version
+# updates, so without `applies-to: security-updates` they arrive one per PR.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-version-updates:
+        applies-to: version-updates
+        patterns: ["*"]
+        # Majors stay ungrouped so a breaking bump is reviewed on its own.
+        update-types: ["minor", "patch"]
+      cargo-security-updates:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions-version-updates:
+        applies-to: version-updates
+        patterns: ["*"]
+      actions-security-updates:
+        applies-to: security-updates
+        patterns: ["*"]
