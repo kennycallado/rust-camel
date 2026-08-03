@@ -37,6 +37,9 @@ impl crate::lifecycle::adapters::route_controller::DefaultRouteController {
                 ))
             })?;
 
+        let from_uri = managed.from_uri.clone();
+        let route_id = prepared.route_id.clone();
+
         if self.routes.contains_key(&prepared.route_id) {
             // Re-insert into staging so the caller's error path can discard
             // explicitly OR retry. The orphan ManagedRoute is dropped on `remove`
@@ -50,6 +53,7 @@ impl crate::lifecycle::adapters::route_controller::DefaultRouteController {
         }
 
         self.routes.insert(prepared.route_id, managed);
+        self.endpoint_index.insert(&from_uri, &route_id);
         Ok(())
     }
 

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use camel_api::{MetricsCollector, RouteController, SupervisionConfig};
+use camel_api::{CamelError, MetricsCollector, RouteController, SupervisionConfig};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -278,6 +278,36 @@ pub fn spawn_controller_actor(
                 }
                 RouteControllerCommand::RouteIds { reply } => {
                     let _ = reply.send(controller.route_ids());
+                }
+                RouteControllerCommand::ListEndpoints { reply } => {
+                    let _ = reply.send(controller.list_endpoint_uris());
+                }
+                RouteControllerCommand::RoutesForEndpoint { uri, reply } => {
+                    let _ = reply.send(controller.routes_for_endpoint(&uri));
+                }
+                RouteControllerCommand::HealthCheckEndpoint { uri, reply } => {
+                    let route_ids = controller.routes_for_endpoint(&uri);
+                    if route_ids.is_empty() {
+                        let _ =
+                            reply.send(Err(CamelError::RouteError("endpoint not found".into())));
+                    } else {
+                        let health_registry = controller.health_registry();
+                        // Detached per-call task: health probes may be slow
+                        // and must not block the sequential actor loop.
+                        // Unbounded; route via controller JoinSet if QPS grows.
+                        tokio::spawn(async move {
+                            let futures: Vec<_> = route_ids
+                                .iter()
+                                .map(|rid| health_registry.check_route(rid))
+                                .collect();
+                            let results = futures::future::join_all(futures).await;
+                            let worst = results.into_iter().fold(
+                                camel_api::HealthStatus::Healthy,
+                                crate::health_registry::combine_worst,
+                            );
+                            let _ = reply.send(Ok(worst));
+                        });
+                    }
                 }
                 RouteControllerCommand::AutoStartupRouteIds { reply } => {
                     let _ = reply.send(controller.auto_startup_route_ids());

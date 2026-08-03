@@ -184,17 +184,7 @@ impl HealthCheckRegistry {
         {
             let mut entries = self.entries().write();
             for rh in entries.values_mut() {
-                if let Some(ref mut forced) = rh.forced {
-                    let recovered = forced.started_after_force
-                        && rh.probe_generation > forced.probe_generation_at_force;
-                    if recovered {
-                        rh.forced = None;
-                    } else if let (Some(ttl), Some(at)) = (forced.ttl, forced.forced_at)
-                        && at.elapsed() >= ttl
-                    {
-                        forced.reason = "forced health expired; awaiting recovery".into();
-                    }
-                }
+                recover_forced(rh);
             }
         }
 
@@ -267,11 +257,7 @@ impl HealthCheckRegistry {
         let mut services = Vec::with_capacity(results.len());
 
         for result in results {
-            if result.status == HealthStatus::Unhealthy {
-                worst = HealthStatus::Unhealthy;
-            } else if result.status == HealthStatus::Degraded && worst != HealthStatus::Unhealthy {
-                worst = HealthStatus::Degraded;
-            }
+            worst = combine_worst(worst, result.status);
             let status = match result.status {
                 HealthStatus::Healthy => camel_api::ServiceStatus::Started,
                 HealthStatus::Degraded => camel_api::ServiceStatus::Started,
@@ -294,6 +280,115 @@ impl HealthCheckRegistry {
             status: worst,
             services,
             timestamp: Utc::now(),
+        }
+    }
+
+    /// Return the health status for a single route, preserving the same
+    /// semantics as `check_all` (recovery pre-pass, forced-unhealthy
+    /// precedence, probe timeout/panic handling, worst-status aggregation)
+    /// but scoped to one route_id.
+    pub async fn check_route(&self, route_id: &str) -> HealthStatus {
+        if self.cancel_token().is_cancelled() {
+            return HealthStatus::Unhealthy;
+        }
+
+        // Scoped R4-L12 recovery pre-pass
+        {
+            let mut entries = self.entries().write();
+            if let Some(rh) = entries.get_mut(route_id) {
+                recover_forced(rh);
+            }
+        }
+
+        let tasks: Vec<CheckTask> = {
+            let guard = self.entries().read();
+            match guard.get(route_id) {
+                None => return HealthStatus::Healthy,
+                Some(rh) if !rh.active => return HealthStatus::Healthy,
+                Some(rh) => {
+                    if let Some(ref forced) = rh.forced {
+                        vec![CheckTask::Forced {
+                            name: forced.name.clone(),
+                            reason: forced.reason.clone(),
+                        }]
+                    } else if rh.live.is_empty() {
+                        return HealthStatus::Healthy;
+                    } else {
+                        rh.live
+                            .iter()
+                            .map(|c| CheckTask::Live {
+                                check: Arc::clone(c),
+                            })
+                            .collect()
+                    }
+                }
+            }
+        };
+
+        let dur = self.default_timeout();
+        let futures: Vec<_> = tasks
+            .into_iter()
+            .map(|task| async move {
+                match task {
+                    CheckTask::Live { check } => {
+                        let check_name = check.name().to_string();
+                        std::panic::AssertUnwindSafe(async {
+                            match timeout(dur, check.check()).await {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "health check '{}' timed out after {:?}",
+                                        check_name,
+                                        dur
+                                    );
+                                    CheckResult::unhealthy(&check_name, "timed out")
+                                }
+                            }
+                        })
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| {
+                            tracing::warn!("health check '{}' panicked", check_name);
+                            CheckResult::unhealthy(&check_name, "checker panicked")
+                        })
+                    }
+                    CheckTask::Forced { name, reason } => CheckResult::unhealthy(&name, &reason),
+                }
+            })
+            .collect();
+
+        let results = join_all(futures).await;
+        let mut worst = HealthStatus::Healthy;
+        for result in results {
+            worst = combine_worst(worst, result.status);
+        }
+        worst
+    }
+}
+
+/// Aggregate two HealthStatus values, returning the worse one.
+/// Unhealthy > Degraded > Healthy.
+pub(crate) fn combine_worst(a: HealthStatus, b: HealthStatus) -> HealthStatus {
+    match (a, b) {
+        (HealthStatus::Unhealthy, _) | (_, HealthStatus::Unhealthy) => HealthStatus::Unhealthy,
+        (HealthStatus::Degraded, _) | (_, HealthStatus::Degraded) => HealthStatus::Degraded,
+        _ => HealthStatus::Healthy,
+    }
+}
+
+/// R4-L12 recovery: clear a forced-unhealthy entry if the route has recovered
+/// (started after force AND new probe generation), or update its reason if
+/// TTL-expired. Called by both `check_all` (all routes) and `check_route` (one).
+fn recover_forced(rh: &mut RouteHealth) {
+    if let Some(ref mut forced) = rh.forced {
+        let recovered =
+            forced.started_after_force && rh.probe_generation > forced.probe_generation_at_force;
+        if recovered {
+            rh.forced = None;
+        } else if let (Some(ttl), Some(at)) = (forced.ttl, forced.forced_at)
+            && at.elapsed() >= ttl
+        {
+            forced.reason = "forced health expired; awaiting recovery".into();
         }
     }
 }
@@ -840,5 +935,53 @@ mod tests {
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Unhealthy);
         assert_eq!(report.services[0].name, "forced");
+    }
+
+    #[tokio::test]
+    async fn check_route_healthy_with_probes() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("r1", healthy_check("redis"));
+        registry.mark_route_started("r1");
+        assert_eq!(registry.check_route("r1").await, HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn check_route_unhealthy_probe() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("r1", unhealthy_check("kafka"));
+        registry.mark_route_started("r1");
+        assert_eq!(registry.check_route("r1").await, HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn check_route_no_probes_healthy() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.mark_route_started("r1");
+        assert_eq!(registry.check_route("r1").await, HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn check_route_forced_unhealthy_no_probes() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.force_unhealthy_for_route("r1", "test", "reason");
+        assert_eq!(registry.check_route("r1").await, HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn check_route_unknown_route_healthy() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        assert_eq!(
+            registry.check_route("nonexistent").await,
+            HealthStatus::Healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn check_route_stopped_route_healthy() {
+        let registry = HealthCheckRegistry::new(Duration::from_secs(5));
+        registry.register_for_route("r1", unhealthy_check("redis"));
+        registry.mark_route_started("r1");
+        registry.mark_route_stopped("r1");
+        assert_eq!(registry.check_route("r1").await, HealthStatus::Healthy);
     }
 }

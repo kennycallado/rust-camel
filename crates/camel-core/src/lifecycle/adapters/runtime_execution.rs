@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 
-use camel_api::CamelError;
+use camel_api::{CamelError, HealthStatus};
 
 use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 use crate::lifecycle::application::RouteDefinition;
 use crate::lifecycle::application::ports::{InFlightCountResult, RuntimeExecutionPort};
 use crate::lifecycle::domain::DomainError;
-
 /// Runtime side-effect adapter backed by the technical route controller.
 #[derive(Clone)]
 pub struct RuntimeExecutionAdapter {
@@ -91,5 +90,23 @@ impl RuntimeExecutionPort for RuntimeExecutionAdapter {
                 },
             },
         )
+    }
+
+    async fn list_endpoints(&self) -> Result<Vec<String>, DomainError> {
+        self.controller.list_endpoints().await.map_err(to_domain)
+    }
+
+    async fn routes_for_endpoint(&self, uri: &str) -> Result<Vec<String>, DomainError> {
+        self.controller
+            .routes_for_endpoint(uri)
+            .await
+            .map_err(to_domain)
+    }
+
+    async fn health_check_endpoint(&self, uri: &str) -> Result<HealthStatus, DomainError> {
+        self.controller
+            .health_check_endpoint(uri)
+            .await
+            .map_err(to_domain)
     }
 }

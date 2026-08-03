@@ -125,6 +125,17 @@ pub(crate) enum RouteControllerCommand {
     RouteIds {
         reply: oneshot::Sender<Vec<String>>,
     },
+    ListEndpoints {
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    RoutesForEndpoint {
+        uri: String,
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    HealthCheckEndpoint {
+        uri: String,
+        reply: oneshot::Sender<Result<camel_api::HealthStatus, CamelError>>,
+    },
     AutoStartupRouteIds {
         reply: oneshot::Sender<Vec<String>>,
     },
@@ -538,6 +549,51 @@ impl RouteControllerHandle {
         reply_rx
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))
+    }
+
+    pub async fn list_endpoints(&self) -> Result<Vec<String>, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::ListEndpoints { reply: reply_tx })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))
+    }
+
+    pub async fn routes_for_endpoint(
+        &self,
+        uri: impl Into<String>,
+    ) -> Result<Vec<String>, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::RoutesForEndpoint {
+                uri: uri.into(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))
+    }
+
+    pub async fn health_check_endpoint(
+        &self,
+        uri: impl Into<String>,
+    ) -> Result<camel_api::HealthStatus, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::HealthCheckEndpoint {
+                uri: uri.into(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
     }
 
     pub async fn auto_startup_route_ids(&self) -> Result<Vec<String>, CamelError> {

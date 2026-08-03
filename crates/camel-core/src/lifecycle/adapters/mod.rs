@@ -3,6 +3,7 @@ pub(crate) mod consumer_management;
 pub(crate) mod controller_actor;
 mod controller_actor_commands;
 pub(crate) mod controller_component_context;
+pub(crate) mod endpoint_index;
 pub(crate) mod endpoint_resolver_factory;
 pub mod exchange_uow;
 pub mod in_memory;

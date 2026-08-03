@@ -85,6 +85,8 @@ pub struct DefaultRouteController {
     /// On insert-failure error paths, the caller (`reload_actions.rs`) must
     /// explicitly drain to avoid orphan CancellationToken/SharedPipeline leaks.
     pub(super) prepared_staging: HashMap<String, ManagedRoute>,
+    /// Source endpoint URI to route_id index (one-to-many).
+    pub(super) endpoint_index: super::endpoint_index::EndpointIndex,
 }
 
 impl DefaultRouteController {
@@ -141,6 +143,7 @@ impl DefaultRouteController {
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
             prepared_staging: HashMap::new(),
+            endpoint_index: super::endpoint_index::EndpointIndex::new(),
         }
     }
 
@@ -167,6 +170,7 @@ impl DefaultRouteController {
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
             prepared_staging: HashMap::new(),
+            endpoint_index: super::endpoint_index::EndpointIndex::new(),
         }
     }
 
@@ -193,6 +197,7 @@ impl DefaultRouteController {
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
             prepared_staging: HashMap::new(),
+            endpoint_index: super::endpoint_index::EndpointIndex::new(),
         }
     }
 
@@ -326,6 +331,7 @@ impl DefaultRouteController {
     /// - Step resolution fails
     pub async fn add_route(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
         let route_id = definition.route_id().to_string();
+        let from_uri = definition.from_uri().to_string();
 
         if self.routes.contains_key(&route_id) {
             return Err(CamelError::RouteError(format!(
@@ -357,6 +363,7 @@ impl DefaultRouteController {
         self.routes
             .insert(managed.definition.route_id().to_string(), managed);
 
+        self.endpoint_index.insert(&from_uri, &route_id);
         Ok(())
     }
 
@@ -463,6 +470,7 @@ impl DefaultRouteController {
         generation: u64,
     ) -> Result<(), CamelError> {
         let route_id = definition.route_id().to_string();
+        let from_uri = definition.from_uri().to_string();
 
         if self.routes.contains_key(&route_id) {
             return Err(CamelError::RouteError(format!(
@@ -478,8 +486,9 @@ impl DefaultRouteController {
             &super::step_resolution::FunctionStagingMode::HotReload { generation },
         )?;
 
-        self.routes.insert(route_id, managed);
+        self.routes.insert(route_id.clone(), managed);
 
+        self.endpoint_index.insert(&from_uri, &route_id);
         Ok(())
     }
 
@@ -503,6 +512,7 @@ impl DefaultRouteController {
         if let Some(reg) = &self.health_registry {
             reg.unregister_for_route(route_id);
         }
+        self.endpoint_index.remove(route_id);
         debug!(route_id = %route_id, "Route removed from controller (functions preserved for reload finalize)");
         Ok(())
     }
@@ -580,6 +590,7 @@ impl DefaultRouteController {
         if let Some(reg) = &self.health_registry {
             reg.unregister_for_route(route_id);
         }
+        self.endpoint_index.remove(route_id);
         info!(route_id = %route_id, "Route removed from controller");
         Ok(())
     }
@@ -716,6 +727,16 @@ impl DefaultRouteController {
     /// Returns the from_uri of a route, if it exists.
     pub fn route_from_uri(&self, route_id: &str) -> Option<String> {
         self.routes.route_from_uri(route_id)
+    }
+
+    /// Return all route_ids that consume from the given source endpoint URI.
+    pub fn routes_for_endpoint(&self, uri: &str) -> Vec<String> {
+        self.endpoint_index.routes_for(uri)
+    }
+
+    /// Return all registered source endpoint URIs.
+    pub fn list_endpoint_uris(&self) -> Vec<String> {
+        self.endpoint_index.list_uris()
     }
 
     /// Get a clone of the current pipeline for a route.

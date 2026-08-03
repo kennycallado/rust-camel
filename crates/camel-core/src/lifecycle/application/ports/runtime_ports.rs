@@ -123,18 +123,30 @@ pub trait RuntimeExecutionPort: Send + Sync {
     async fn remove_route(&self, route_id: &str) -> Result<(), DomainError>;
     async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError>;
 
-    // TODO(CORE-003, bd rc-56vk): Missing RuntimeEndpointRegistry parity. The following methods are needed:
-    // - health_check_endpoint(uri: &str) -> Result<HealthStatus, DomainError> — per-endpoint health
-    // - route_for_endpoint(uri: &str) -> Option<String> — map endpoint URI to owning route ID
-    // These are currently absent and block runtime introspection / management API completeness.
-    // Tracked as post-1.0 work in bd issue rc-56vk (not blocking ADR-0045 charter compliance).
-
     /// List all registered endpoint URIs across all routes.
     ///
     /// Default implementation returns an empty list. Adapters should override
     /// to return actual endpoint URIs once endpoint tracking is implemented.
     async fn list_endpoints(&self) -> Result<Vec<String>, DomainError> {
         Ok(Vec::new())
+    }
+
+    /// Return all route_ids that consume from the given source endpoint URI.
+    ///
+    /// Default implementation returns an empty vector (source-compatible for
+    /// external implementations that do not track endpoints).
+    async fn routes_for_endpoint(&self, _uri: &str) -> Result<Vec<String>, DomainError> {
+        Ok(Vec::new())
+    }
+
+    /// Return the worst HealthStatus across all routes owning the endpoint.
+    ///
+    /// Default implementation returns an endpoint-not-found error (source-compatible).
+    async fn health_check_endpoint(
+        &self,
+        _uri: &str,
+    ) -> Result<camel_api::HealthStatus, DomainError> {
+        Err(DomainError::InvalidState("endpoint not found".into()))
     }
 }
 
@@ -190,5 +202,50 @@ mod tests {
     async fn default_uow_recover_is_noop_ok() {
         let uow = DummyUow;
         uow.recover_from_journal().await.unwrap();
+    }
+
+    struct DummyRuntimeExecution;
+
+    #[async_trait]
+    impl RuntimeExecutionPort for DummyRuntimeExecution {
+        async fn register_route(&self, _: RouteDefinition) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn start_route(&self, _: &str) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn stop_route(&self, _: &str) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn suspend_route(&self, _: &str) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn resume_route(&self, _: &str) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn reload_route(&self, _: &str) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn remove_route(&self, _: &str) -> Result<(), DomainError> {
+            unimplemented!()
+        }
+        async fn in_flight_count(&self, _: &str) -> Result<InFlightCountResult, DomainError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_port_default_routes_for_endpoint_returns_empty() {
+        let port = DummyRuntimeExecution;
+        assert_eq!(
+            port.routes_for_endpoint("any").await.unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_port_default_health_check_endpoint_returns_error() {
+        let port = DummyRuntimeExecution;
+        assert!(port.health_check_endpoint("any").await.is_err());
     }
 }

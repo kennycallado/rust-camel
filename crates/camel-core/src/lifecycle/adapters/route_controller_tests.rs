@@ -2778,3 +2778,183 @@ async fn start_route_aborts_consumer_task_on_startup_failure() {
          after start_route returned Err (orphan task leak)"
     );
 }
+
+// === Task 4: EndpointIndex integration tests ===
+
+fn make_test_controller() -> DefaultRouteController {
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    )
+}
+
+#[tokio::test]
+async fn controller_add_route_indexes_endpoint() {
+    let mut c = make_test_controller();
+    let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("r1");
+    c.add_route(def).await.unwrap();
+    assert_eq!(c.routes_for_endpoint("timer:tick"), vec!["r1"]);
+}
+
+#[tokio::test]
+async fn controller_add_route_with_generation_indexes_endpoint() {
+    let mut c = make_test_controller();
+    let def = RouteDefinition::new("direct:gen", vec![]).with_route_id("r2");
+    c.add_route_with_generation(def, 1).await.unwrap();
+    assert_eq!(c.routes_for_endpoint("direct:gen"), vec!["r2"]);
+}
+
+#[tokio::test]
+async fn controller_remove_route_clears_endpoint() {
+    let mut c = make_test_controller();
+    let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("r1");
+    c.add_route(def).await.unwrap();
+    c.remove_route("r1").await.unwrap();
+    assert!(c.routes_for_endpoint("timer:tick").is_empty());
+}
+
+#[tokio::test]
+async fn controller_remove_preserving_clears_endpoint() {
+    let mut c = make_test_controller();
+    let def = RouteDefinition::new("direct:cleanup", vec![]).with_route_id("r3");
+    c.add_route(def).await.unwrap();
+    c.remove_route_preserving_functions("r3").await.unwrap();
+    assert!(c.routes_for_endpoint("direct:cleanup").is_empty());
+}
+
+#[tokio::test]
+async fn controller_multiple_routes_same_uri() {
+    let mut c = make_test_controller();
+    c.add_route(RouteDefinition::new("direct:shared", vec![]).with_route_id("a"))
+        .await
+        .unwrap();
+    c.add_route(RouteDefinition::new("direct:shared", vec![]).with_route_id("b"))
+        .await
+        .unwrap();
+    let routes = c.routes_for_endpoint("direct:shared");
+    assert!(routes.contains(&"a".to_string()));
+    assert!(routes.contains(&"b".to_string()));
+}
+
+#[tokio::test]
+async fn controller_list_endpoint_uris() {
+    let mut c = make_test_controller();
+    c.add_route(RouteDefinition::new("timer:a", vec![]).with_route_id("r1"))
+        .await
+        .unwrap();
+    c.add_route(RouteDefinition::new("direct:b", vec![]).with_route_id("r2"))
+        .await
+        .unwrap();
+    c.add_route(RouteDefinition::new("seda:c", vec![]).with_route_id("r3"))
+        .await
+        .unwrap();
+    let uris = c.list_endpoint_uris();
+    assert!(uris.contains(&"timer:a".to_string()));
+    assert!(uris.contains(&"direct:b".to_string()));
+    assert!(uris.contains(&"seda:c".to_string()));
+}
+
+#[tokio::test]
+async fn controller_list_endpoint_uris_empty() {
+    let c = make_test_controller();
+    assert!(c.list_endpoint_uris().is_empty());
+}
+
+#[tokio::test]
+async fn controller_insert_prepared_route_indexes_endpoint() {
+    let mut c = make_test_controller();
+    let def = RouteDefinition::new("seda:staged", vec![]).with_route_id("r4");
+    let prepared = c.prepare_route_definition_with_generation(def, 1).unwrap();
+    c.insert_prepared_route(prepared).unwrap();
+    assert_eq!(c.routes_for_endpoint("seda:staged"), vec!["r4"]);
+}
+
+// === Task 5: Adapter integration tests ===
+
+use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
+use crate::lifecycle::adapters::runtime_execution::RuntimeExecutionAdapter;
+use crate::lifecycle::application::ports::RuntimeExecutionPort;
+
+fn build_adapter() -> (RuntimeExecutionAdapter, tokio::task::JoinHandle<()>) {
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("lock");
+        guard.register(Arc::new(camel_component_timer::TimerComponent::new()));
+        guard.register(Arc::new(camel_component_mock::MockComponent::new()));
+    }
+    let controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+    let (handle, join) = spawn_controller_actor(controller);
+    (RuntimeExecutionAdapter::new(handle), join)
+}
+
+#[tokio::test]
+async fn adapter_list_endpoints_returns_registered_uris() {
+    let (adapter, _join) = build_adapter();
+    adapter
+        .register_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+        .await
+        .unwrap();
+    let endpoints = adapter.list_endpoints().await.unwrap();
+    assert!(endpoints.contains(&"timer:tick".to_string()));
+}
+
+#[tokio::test]
+async fn adapter_routes_for_endpoint_returns_route_id() {
+    let (adapter, _join) = build_adapter();
+    adapter
+        .register_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+        .await
+        .unwrap();
+    let routes = adapter.routes_for_endpoint("timer:tick").await.unwrap();
+    assert!(routes.contains(&"r1".to_string()));
+}
+
+#[tokio::test]
+async fn adapter_routes_for_endpoint_unknown_returns_empty() {
+    let (adapter, _join) = build_adapter();
+    let routes = adapter.routes_for_endpoint("direct:unknown").await.unwrap();
+    assert!(routes.is_empty());
+}
+
+#[tokio::test]
+async fn adapter_health_check_endpoint_returns_healthy() {
+    let (adapter, _join) = build_adapter();
+    adapter
+        .register_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+        .await
+        .unwrap();
+    let status = adapter.health_check_endpoint("timer:tick").await.unwrap();
+    assert_eq!(status, camel_api::HealthStatus::Healthy);
+}
+
+#[tokio::test]
+async fn adapter_health_check_endpoint_unknown_returns_error() {
+    let (adapter, _join) = build_adapter();
+    assert!(
+        adapter
+            .health_check_endpoint("direct:unknown")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn adapter_remove_route_clears_endpoint() {
+    let (adapter, _join) = build_adapter();
+    adapter
+        .register_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+        .await
+        .unwrap();
+    adapter.remove_route("r1").await.unwrap();
+    assert!(
+        adapter
+            .routes_for_endpoint("timer:tick")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
