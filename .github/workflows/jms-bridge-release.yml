@@ -5,6 +5,10 @@ on:
     tags:
       - 'jms-bridge-v*'
 
+
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:

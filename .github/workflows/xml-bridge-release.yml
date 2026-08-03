@@ -5,6 +5,10 @@ on:
     tags:
       - 'xml-bridge-v*'
 
+
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
