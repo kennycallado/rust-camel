@@ -40,9 +40,10 @@ test-support = ["dep:rcgen"]
 [dev-dependencies]
 serde_json.workspace = true
 tracing-subscriber = { workspace = true }
-# Enable the `test-support` feature for the crate's own tests so the
-# `test_support::tls` module (which uses `rcgen`) compiles in test mode.
-camel-component-api = { workspace = true, features = ["test-support"] }
+# Path-only self dev-dep (cargo strips it on publish). `workspace = true`
+# here would inherit `version = "=0.26.0"` and break publish — match the
+# camel-component-cxf pattern. See xtask publish-order self-ref filter.
+camel-component-api = { path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true
