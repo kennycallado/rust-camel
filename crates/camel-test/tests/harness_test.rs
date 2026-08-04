@@ -28,13 +28,9 @@ async fn test_harness_basic_timer_to_mock() {
     h.add_route(route).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    h.mock()
-        .get_endpoint("result")
-        .unwrap()
-        .assert_exchange_count(3)
-        .await;
+    let ep = h.mock().get_endpoint("result").unwrap();
+    ep.await_exchanges(3, Duration::from_secs(2)).await;
+    ep.assert_exchange_count(3).await;
     // stop() called automatically by TestGuard on drop
 }
 
@@ -69,13 +65,9 @@ async fn test_harness_with_direct_component() {
     h.add_route(main).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    h.mock()
-        .get_endpoint("sub-result")
-        .unwrap()
-        .assert_exchange_count(2)
-        .await;
+    let ep = h.mock().get_endpoint("sub-result").unwrap();
+    ep.await_exchanges(2, Duration::from_secs(2)).await;
+    ep.assert_exchange_count(2).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,18 +100,13 @@ async fn test_harness_multiple_routes() {
     h.add_route(route_b).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    let ep_a = h.mock().get_endpoint("result-a").unwrap();
+    ep_a.await_exchanges(2, Duration::from_secs(2)).await;
+    ep_a.assert_exchange_count(2).await;
 
-    h.mock()
-        .get_endpoint("result-a")
-        .unwrap()
-        .assert_exchange_count(2)
-        .await;
-    h.mock()
-        .get_endpoint("result-b")
-        .unwrap()
-        .assert_exchange_count(3)
-        .await;
+    let ep_b = h.mock().get_endpoint("result-b").unwrap();
+    ep_b.await_exchanges(3, Duration::from_secs(2)).await;
+    ep_b.assert_exchange_count(3).await;
 }
 
 // ---------------------------------------------------------------------------
