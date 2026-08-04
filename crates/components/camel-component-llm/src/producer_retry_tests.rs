@@ -169,34 +169,44 @@ async fn total_timeout_fires_during_retry_backoff() {
 /// Verifies the semaphore slot frees up during backoff so a second concurrent
 /// call can proceed while the first sleeps.
 ///
-/// We use a timing-based assertion rather than `max_concurrent()` because
-/// `max_concurrent()` tracks concurrent `chat_stream()` calls, which run
-/// *inside* the per-attempt semaphore window — the first call's stream is
-/// always exhausted before the permit is dropped. Timing proves the permit
-/// was released without changing production code:
+/// We assert on the **relative ordering of `chat_stream` invocations**
+/// (recorded by `with_start_times_tracker`) rather than absolute wall-clock
+/// time. CI runners (especially macOS) have high scheduling variance, which
+/// makes absolute thresholds like `elapsed < 180ms` flaky — the gap between
+/// the with-release (~160ms) and without-release (~200ms) scenarios is too
+/// small for a robust absolute threshold.
 ///
-/// With per-attempt permit release:
-///   - Call 1: acquire → chat_stream(30ms + error) → drop permit → sleep 50ms → reacquire → chat_stream(30ms + success). Total: ~110ms
-///   - Call 2: waits ~30ms for permit → chat_stream(30ms + success). Total: ~60ms
-///   - Wall clock: ~110ms
+/// Timeline with per-attempt permit release (max_concurrency=1):
+///   - t=0:     call 1 attempt 1 acquires permit → chat_stream (delay)
+///   - t=delay: call 1 errors, drops permit, enters backoff
+///   - t=delay: call 2 acquires permit → chat_stream (delay)
+///   - t=2*delay+backoff: call 1 retry → chat_stream (success)
+///   → 2nd invocation happens at ~delay after the 1st.
 ///
-/// Without permit release (permit held across retries):
-///   - Call 2 waits 110ms for call 1 to finish → 30ms → ~140ms total
+/// Without release (permit held across retries):
+///   - call 1 retries before call 2 starts.
+///   → 2nd invocation happens at ~delay+backoff after the 1st.
+///
+/// Asserting `gap < delay + backoff/2` discriminates deterministically:
+/// CI slowdown scales both sides equally, but the threshold is a fixed
+/// midpoint between `delay` and `delay + backoff`.
 #[tokio::test]
 async fn permit_released_during_retry_backoff() {
     // max_concurrency=1, fail_after=1 (first call fails, retry succeeds).
     // First call acquires permit, fails, releases permit during backoff.
     // Second concurrent call can then acquire the permit while first is sleeping.
+    let delay_ms = 40;
+    let backoff_ms = 80;
     let mock = Arc::new(
         MockProvider::new("t", MockMode::Fixed("ok".into()))
-            .with_delay(Duration::from_millis(40))
+            .with_delay(Duration::from_millis(delay_ms))
             .with_fail_after(1, LlmError::Network("boom".into()))
-            .with_concurrent_tracker(),
+            .with_start_times_tracker(),
     );
     let provider = mock.clone() as Arc<dyn LlmProvider>;
     let policy = NetworkRetryPolicy {
         max_attempts: 3,
-        initial_delay: Duration::from_millis(80), // long backoff = window for 2nd call
+        initial_delay: Duration::from_millis(backoff_ms), // long backoff = window for 2nd call
         multiplier: 1.0,
         max_delay: Duration::from_millis(200),
         jitter_factor: 0.0,
@@ -206,7 +216,6 @@ async fn permit_released_during_retry_backoff() {
     let producer = make_producer_with_concurrency_and_retry(provider, 1, Some(policy));
     let p = Arc::new(producer);
 
-    let start = std::time::Instant::now();
     let mut handles = vec![];
     for _ in 0..2 {
         let p = p.clone();
@@ -218,16 +227,26 @@ async fn permit_released_during_retry_backoff() {
     for h in handles {
         let _ = h.await;
     }
-    let elapsed = start.elapsed();
 
-    // If permit were NOT released during backoff, total wall-clock time
-    // would be ~200ms (call2 waits ~160ms for call1 then runs ~40ms).
-    // With release, wall clock is ~160ms (call1's 2-attempt sequence
-    // dominates; call2 overlaps during backoff). A 180ms threshold
-    // provides ~20ms margin on each side for CI variance.
+    let starts = mock.start_times();
+    // 3 invocations: call1 attempt1, call2, call1 attempt2 (release case), or
+    // call1 attempt1, call1 attempt2, call2 (no-release case).
+    assert_eq!(
+        starts.len(),
+        3,
+        "expected 3 chat_stream invocations (2 from retrying call 1 + 1 from call 2), got {}",
+        starts.len()
+    );
+    let gap = starts[1].duration_since(starts[0]);
+    // With release: gap ≈ delay (call 2 starts right after call 1 drops permit).
+    // Without release: gap ≈ delay + backoff (call 1 retries before call 2).
+    // Threshold at delay + backoff/2 sits squarely between the two scenarios.
+    let threshold = Duration::from_millis(delay_ms + backoff_ms / 2);
     assert!(
-        elapsed < Duration::from_millis(180),
-        "permit must be released during backoff — total elapsed {elapsed:?} suggests sequential execution",
+        gap < threshold,
+        "permit must be released during backoff — 2nd chat_stream started {gap:?} after the 1st \
+         (threshold {threshold:?}); this means call 1 retried before call 2 could start, i.e. the \
+         permit was held across the backoff",
     );
 }
 

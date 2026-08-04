@@ -37,6 +37,7 @@ pub enum MockMode {
 /// - `call_count`: query how many times `chat_stream` has been called (always tracked).
 /// - `with_concurrent_tracker`: track max in-flight `chat_stream`.
 /// - `with_cancellation_tracking`: record whether a stream was dropped early.
+/// - `with_start_times_tracker`: record `Instant` of each `chat_stream` invocation.
 pub struct MockProvider {
     id: String,
     mode: MockMode,
@@ -56,6 +57,8 @@ pub struct MockProvider {
     /// Whether any stream was cancelled (dropped before completion).
     cancelled: Arc<AtomicBool>,
     track_cancel: bool,
+    /// Optional recorder for `Instant` of each `chat_stream` invocation.
+    start_times: Option<Arc<Mutex<Vec<std::time::Instant>>>>,
     /// Optional tool call to emit (id, name, arguments).
     tool_call: Option<(String, String, String)>,
     /// Records received ChatRequest messages for assertion in multi-turn tests.
@@ -125,6 +128,7 @@ impl MockProvider {
             track_concurrent: false,
             cancelled: Arc::new(AtomicBool::new(false)),
             track_cancel: false,
+            start_times: None,
             tool_call: None,
             messages_recorder: None,
         }
@@ -197,6 +201,15 @@ impl MockProvider {
         self
     }
 
+    /// Record the `Instant` of each `chat_stream` invocation, in order.
+    /// Used by tests that need to reason about the relative timing of
+    /// calls (e.g. permit-release-during-backoff) without relying on
+    /// absolute wall-clock thresholds that are fragile under CI variance.
+    pub fn with_start_times_tracker(mut self) -> Self {
+        self.start_times = Some(Arc::new(Mutex::new(Vec::new())));
+        self
+    }
+
     /// Number of times `chat_stream` has been called.
     pub fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
@@ -210,6 +223,15 @@ impl MockProvider {
     /// Whether any stream was cancelled (dropped before completion).
     pub fn was_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// `Instant` of each `chat_stream` invocation, in call order.
+    /// Returns an empty vec if `with_start_times_tracker` was not set.
+    pub fn start_times(&self) -> Vec<std::time::Instant> {
+        self.start_times
+            .as_ref()
+            .map(|s| s.lock().expect("start_times poisoned").clone()) // allow-unwrap
+            .unwrap_or_default()
     }
 }
 
@@ -225,6 +247,12 @@ impl LlmProvider for MockProvider {
 
     fn chat_stream(&self, req: ChatRequest) -> BoxStream<'static, Result<ChatEvent, LlmError>> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        // Record start time before any delay — captures when the producer
+        // dispatched the call, not when the stream was first polled.
+        if let Some(ref st) = self.start_times {
+            let mut times = st.lock().expect("start_times poisoned"); // allow-unwrap
+            times.push(std::time::Instant::now());
+        }
         let delay = self.delay;
         let fail = self
             .fail_after
