@@ -1,0 +1,55 @@
+name: Documentation
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "docs/**"
+      - "examples/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/docs.yml"
+
+permissions:
+  contents: read
+
+env:
+  RUSTDOCFLAGS: "-D warnings"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install documentation tools
+        uses: taiki-e/install-action@eba66cc6f87204a1e73f96e528e759b6c1fcf573 # cargo-binstall
+        with:
+          tool: mdbook@0.4.52,lychee@0.20.1
+      - name: Build Rustdoc
+        run: cargo doc --workspace --no-deps
+      - name: Test Rustdoc examples
+        run: cargo test --workspace --doc
+      - name: Compile guide Rust examples
+        run: cargo check -p hello-world -p config-basic
+      - name: Validate guide YAML examples
+        run: cargo test -p camel-dsl --test documentation_examples
+      - name: Build and test guide
+        run: |
+          mdbook build docs
+          mdbook test docs
+      - name: Check rendered guide links
+        run: lychee --offline --no-progress docs/book
