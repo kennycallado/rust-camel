@@ -10,39 +10,46 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `aggregator` | Aggregate | stateful routing / aggregation | `src/lib.rs:1` (defaults: max_buckets=10_000, bucket_ttl=300s; background sweep auto-spawned at construction bound to route token — Batch 1 R3-C1) |
 | `choice` | Choice | conditional routing | `src/lib.rs:2` |
 | `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:3` |
-| `content_enricher` | Enrich / PollEnrich | enrichment | `src/lib.rs:4` |
-| `convert_body` | ConvertBodyTo | transformation | `src/lib.rs:5` |
-| `data_format` | built-in data formats | marshal / unmarshal support | `src/lib.rs:6` |
-| `delayer` | Delay | timing | `src/lib.rs:7` (header-derived delay clamped to max_delay_ms, default 3_600_000 — Batch 1 H12) |
-| `do_try` | doTry / catch | error-handling block | `src/lib.rs:8` |
-| `dynamic_router` | DynamicRouter | dynamic routing | `src/lib.rs:9` |
-| `dynamic_set_header` | DynamicSetHeader | transformation | `src/lib.rs:10` |
-| `dynamic_set_property` | DynamicSetProperty | transformation | `src/lib.rs:11` |
-| `endpoint_pipeline` | EndpointPipelineService | endpoint resolution / cache | `src/lib.rs:12` |
-| `enrichment_strategy` | EnrichmentStrategy helpers | enrichment | `src/lib.rs:13` |
-| `error_handler` | RouteErrorHandler + legacy ErrorHandlerLayer | error handling | `src/lib.rs:14` |
-| `filter` | Filter | conditional routing | `src/lib.rs:15` |
-| `load_balancer` | LoadBalancer | load balancing / failover | `src/lib.rs:16` |
-| `log` | Log / DynamicLog | observability | `src/lib.rs:17` |
-| `loop_eip` | Loop | repeated routing | `src/lib.rs:18` (Count(n) clamped to config.max_iterations, default MAX_LOOP_ITERATIONS=10_000 — configurable per-step per ADR-0039) |
-| `map_body` | MapBody | transformation | `src/lib.rs:19` |
-| `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:20` |
-| `multicast` | Multicast | fan-out routing | `src/lib.rs:21` |
-| `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:22` (expression capped to max_recipients, default 1_000 — Batch 1 H13) |
-| `routing_slip` | RoutingSlip | dynamic routing | `src/lib.rs:23` |
-| `script_mutator` | ScriptMutator | script-backed mutation | `src/lib.rs:24` |
-| `security_policy_layer` | SecurityPolicyLayer | pre-pipeline authorization | `src/lib.rs:25`; ADR-0010 |
-| `set_body` | SetBody | transformation | `src/lib.rs:26` |
-| `set_header` | SetHeader | transformation | `src/lib.rs:27` |
-| `set_property` | SetProperty | transformation | `src/lib.rs:28` |
-| `splitter` | Split | splitting / aggregation | `src/lib.rs:29` |
-| `stop` | CompiledStep::Stop | control-flow Stop (ADR-0024) | `src/lib.rs:30`; ADR-0025 |
-| `stream_cache` | StreamCache | body materialization | `src/lib.rs:31` |
-| `stream_codec` | StreamSplitCodec implementations | streaming split support | `src/lib.rs:32` |
-| `streaming_splitter` | StreamingSplit | streaming splitter | `src/lib.rs:33` |
-| `throttler` | Throttle | rate limiting | `src/lib.rs:34` (try_new returns Err on max_requests=0 or period=0 — Batch 1 D-M8) |
-| `wire_tap` | WireTap | fire-and-forget side route | `src/lib.rs:35` |
-| `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:36` |
+| `claim_check` | Claim Check | stateful repository stash/retrieve (ADR-0046 retro-exempt) | `src/lib.rs:4` |
+| `content_enricher` | Enrich / PollEnrich | enrichment | `src/lib.rs:5` |
+| `convert_body` | ConvertBodyTo | transformation | `src/lib.rs:6` |
+| `data_format` | built-in data formats | marshal / unmarshal support | `src/lib.rs:7` |
+| `delayer` | Delay | timing | `src/lib.rs:8` (header-derived delay clamped to max_delay_ms, default 3_600_000 — Batch 1 H12) |
+| `do_try` | doTry / catch | error-handling block | `src/lib.rs:9` |
+| `dynamic_router` | DynamicRouter | dynamic routing | `src/lib.rs:11` |
+| `dynamic_set_header` | DynamicSetHeader | transformation | `src/lib.rs:12` |
+| `dynamic_set_property` | DynamicSetProperty | transformation | `src/lib.rs:13` |
+| `endpoint_pipeline` | EndpointPipelineService | endpoint resolution / cache | `src/lib.rs:14` |
+| `enrichment_strategy` | EnrichmentStrategy helpers | enrichment | `src/lib.rs:15` |
+| `error_handler` | RouteErrorHandler + legacy ErrorHandlerLayer | error handling | `src/lib.rs:16` |
+| `filter` | Filter | conditional routing | `src/lib.rs:17` |
+| `idempotent_consumer` | Idempotent Consumer | stateful dedup via repository (ADR-0046 retro-exempt) | `src/lib.rs:18` |
+| `json_schema_validate` | Validate (JSON Schema) | schema validation | `src/lib.rs:19` |
+| `load_balancer` | LoadBalancer | load balancing / failover | `src/lib.rs:20` |
+| `log` | Log / DynamicLog | observability | `src/lib.rs:21` |
+| `loop_eip` | Loop | repeated routing | `src/lib.rs:22` (Count(n) clamped to config.max_iterations, default MAX_LOOP_ITERATIONS=10_000 — configurable per-step per ADR-0039) |
+| `map_body` | MapBody | transformation | `src/lib.rs:23` |
+| `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:24` |
+| `multicast` | Multicast | fan-out routing | `src/lib.rs:25` |
+| `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:27` (expression capped to max_recipients, default 1_000 — Batch 1 H13) |
+| `resequencer` | Resequencer (batch/stream) | stateful reorder; continuation boundary (ADR-0029) | `src/lib.rs:28` |
+| `routing_slip` | RoutingSlip | dynamic routing | `src/lib.rs:29` |
+| `sampling` | Sampling | deterministic 1-of-N (period>0 enforced at build) | `src/lib.rs:30` |
+| `script_mutator` | ScriptMutator | script-backed mutation | `src/lib.rs:31` |
+| `security_policy_layer` | SecurityPolicyLayer | pre-pipeline authorization | `src/lib.rs:32`; ADR-0010 |
+| `set_body` | SetBody | transformation | `src/lib.rs:33` |
+| `set_header` | SetHeader | transformation | `src/lib.rs:34` |
+| `set_property` | SetProperty | transformation | `src/lib.rs:35` |
+| `sort` | Sort | body array sort (no per-call size cap — audit M8) | `src/lib.rs:36` |
+| `splitter` | Split | splitting / aggregation | `src/lib.rs:38` |
+| `stop` | CompiledStep::Stop | control-flow Stop (ADR-0024) | `CompiledStep` variant (not a `pub mod`); ADR-0025 |
+| `stream_cache` | StreamCache | body materialization | `src/lib.rs:39` |
+| `stream_codec` | StreamSplitCodec implementations | streaming split support | `src/lib.rs:40` |
+| `streaming_splitter` | Streaming Split | streaming splitter | `src/lib.rs:42` |
+| `throttler` | Throttle | rate limiting | `src/lib.rs:43` (try_new returns Err on max_requests=0 or period=0 — Batch 1 D-M8) |
+| `validate` | Validate (predicate) | predicate validation wrapper | `src/lib.rs:44` |
+| `wire_tap` | WireTap | fire-and-forget side route | `src/lib.rs:45` |
+| `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:46` |
 
 ## Structural EIP Segments
 
@@ -59,6 +66,7 @@ Phase 4 (ADR-0025) migrated structural EIPs from Tower services returning `Err(C
 | `StreamingSplitSegment` | `streaming_split_segment` | Streaming split — same semantics as `SplitSegment` but processes a lazy byte stream. Stop drops the underlying stream and returns `Stopped(fragment_ex)`. |
 | `MulticastSegment` | `multicast` | Fan-out routing — sends Exchange to multiple endpoints in parallel or sequentially. Stop from any branch propagates to outer pipeline. |
 | `LoadBalanceSegment` | `load_balancer` | Load balancing / failover — selects one endpoint per strategy (round-robin, random, failover). Stop from selected branch propagates. |
+| `IdempotentConsumerSegment` | `idempotent_consumer` | Dedup — backed by `Arc<dyn IdempotentRepository>` (`camel-api/src/idempotent.rs:21`); computes message id via `MessageIdExpression`, checks `contains(key)`, runs body + records key on first sighting, skips body on duplicate. Stop from body propagates. |
 
 ## Public API surface (v1.0 freeze)
 
@@ -116,6 +124,7 @@ ADR-0019 requires processors whose errors are routable/recoverable events to avo
 | `LoadBalancerService` | polls all endpoints and returns first `Err` | pending-fix | Failover/selection must happen in `call()`; `src/load_balancer.rs:40-49`. |
 | `SplitterService` | delegates to sub-pipeline | pending-fix | Fragment processing already checks readiness per fragment in `call()`; `src/splitter.rs:75-77`, `src/splitter.rs:145-153`. |
 | `StreamingSplitterService` | delegates to sub-pipeline | pending-fix | Streaming fragment processing checks readiness per fragment in `call()`; `src/streaming_splitter.rs:54-56`, `src/streaming_splitter.rs:97-102`. |
+| `FilterService` | delegates to sub-pipeline | pending-fix | Conditional dispatch; predicate + sub-pipeline readiness belong in `call()`; `src/filter.rs:45-47`. |
 | `SecurityPolicyService` | delegates to inner service | excluded | Pre-pipeline authorization gate; authz faults are outside normal EIP recovery per ADR-0010; `src/security_policy_layer.rs:58-60`. |
 
 ## Language
@@ -180,6 +189,15 @@ shape; they cannot rely on the Camel-style exception-attached Exchange.
 Per ADR-0046 §Anti-patrones, this divergence is documented here as tracked
 content (not in a gitignored spike doc). Source: spike Splitter (commit
 `8d31e74a`), divergence label D2.
+
+## Stateful repository EIPs (ADR-0046 retro-exempt)
+
+`IdempotentConsumerSegment` (`src/idempotent_consumer.rs:61`, `impl OutcomePipeline` at `:101`) and `ClaimCheckService` (`src/claim_check.rs:50`) are stateful EIPs backed by a repository trait, implemented 2026-06-27/28 (before ADR-0046 was accepted 2026-07-17). They are **retroactive-exempt** from the ADR-0046 consultation protocol per §Scope: no Camel test-mining is required. This section documents their contract **from existing behaviour** (not from a Camel comparison) so a future contributor understands the shape without re-deriving it.
+
+- **Idempotent Consumer** — backed by `Arc<dyn IdempotentRepository>` (`camel-api/src/idempotent.rs:21`). The segment computes a message id via `MessageIdExpression` (`Arc<dyn Fn(&Exchange) -> Option<String>>`, `src/idempotent_consumer.rs:34`), checks `contains(key)`, and either runs the body + records the key (first sighting) or skips the body (duplicate). Maps to Camel's `IdempotentConsumer` / `MessageIdRepository`; the repository abstraction is the rust-camel analogue.
+- **Claim Check** — backed by `Arc<dyn ClaimCheckRepository>` (`camel-api/src/claim_check.rs:27`), driven by `ClaimCheckOp` (Set / Get / GetAndRemove / Push / Pop) and a `KeyExpression` (`src/claim_check.rs:26`). Stash/retrieve of the message body against a key. Maps to Camel's Claim Check EIP operation set.
+
+If a concrete design question about divergence from Camel emerges for either EIP, it is escalated case-by-case at that point (ADR-0046 §Scope); until then the documented contract above is sufficient. No `gap-coverage` bd or mandatory protocol is opened — these are voluntary-resolution entries (blind spot #16), not `FC-BEHAVIORAL-PARITY-GAP`.
 
 ## ADR-0012 log-policy sites
 

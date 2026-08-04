@@ -55,6 +55,7 @@ semantics.
 | `LoadBalancerService` | Failover/selection strategies must skip broken endpoints in `call()`, not fail before selection runs. | pending-fix |
 | `SplitterService` | Fragment sub-pipeline readiness is checked per fragment in `call()`; outer readiness MUST NOT bypass split error policy. | pending-fix |
 | `StreamingSplitterService` | Streaming fragment readiness is checked per fragment in `call()`; outer readiness MUST NOT abort before stream policy runs. | pending-fix |
+| `FilterService` | Conditional sub-pipeline; predicate is evaluated in `call()`, and sub-pipeline readiness MUST be checked there so the route error handler can apply continued/handled semantics — outer readiness MUST NOT bypass the filter's conditional dispatch. | pending-fix |
 
 `SecurityPolicyService` is intentionally excluded. Route-level authorization is a
 pre-pipeline boundary per [ADR-0010](./0010-security-policy-pre-pipeline-authorization.md):
