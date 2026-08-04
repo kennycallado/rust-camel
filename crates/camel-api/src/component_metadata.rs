@@ -165,8 +165,8 @@ impl ComponentMetadata {
 
     /// Build a minimal metadata entry for `scheme`.
     ///
-    /// Sets `schema_version` to [`SCHEMA_VERSION`].  The `version` field is
-    /// left empty — components that override [`Component::metadata`] should
+    /// Sets `schema_version` to [`Self::SCHEMA_VERSION`].  The `version` field is
+    /// left empty — components that override `Component::metadata` should
     /// supply their own `env!("CARGO_PKG_VERSION")`.
     pub fn minimal(scheme: &str) -> Self {
         Self {

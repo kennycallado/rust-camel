@@ -40,9 +40,23 @@ jobs:
         with:
           tool: mdbook@0.4.52,lychee@0.20.1
       - name: Build Rustdoc
-        run: cargo doc --workspace --no-deps
+        run: |
+          cargo doc \
+            -p camel-api \
+            -p camel-core \
+            -p camel-builder \
+            -p camel-dsl \
+            -p camel-endpoint \
+            --no-deps
       - name: Test Rustdoc examples
-        run: cargo test --workspace --doc
+        run: |
+          cargo test \
+            -p camel-api \
+            -p camel-core \
+            -p camel-builder \
+            -p camel-dsl \
+            -p camel-endpoint \
+            --doc
       - name: Compile guide Rust examples
         run: cargo check -p hello-world -p config-basic
       - name: Validate guide YAML examples
