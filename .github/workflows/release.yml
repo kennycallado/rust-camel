@@ -268,6 +268,11 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Attest amd64 image
+        # Non-blocking: attestations fail with "Resource not accessible by
+        # integration" on this repo (no toggle in security_and_analysis for
+        # public user-owned repos — see v0.26.0 run 30847300641). Images push
+        # fine; the block below must not be gated on attestation.
+        continue-on-error: true
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
@@ -290,6 +295,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Attest arm64 image
+        continue-on-error: true
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
