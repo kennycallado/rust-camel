@@ -227,7 +227,7 @@ sqlx = "0.8"
 sxd-document = "0.3"
 syn = "2.0"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
-noyalib = { version = "0.0.8", features = ["compat-serde-yaml"] }
+noyalib = { version = "0.0.18", features = ["compat-serde-yaml"] }
 toml = "1"
 percent-encoding = "2.3"
 schemars = "1"
