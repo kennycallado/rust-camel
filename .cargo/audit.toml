@@ -6,5 +6,17 @@
 # holds no RSA private key, so the vector does not apply. The auth-issuance path
 # (camel-auth) was migrated off `rsa` to pkcs1/pkcs8 (bd rc-ayu). To fully drop rsa,
 # remove MySQL support from camel-component-sql.
-ignore = ["RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0235 (rkyv, OOB read on archives containing Rc/Arc) — transitive,
+# non-applicable in rust-camel. `rkyv 0.7.46` is pulled by `rust_decimal` (optional
+# dep behind its `rkyv` feature), which is in turn pulled by `surrealdb` (and its
+# revision/collections/strand crates), used only by `camel-component-surrealdb`.
+# The vector fires when deserializing an untrusted rkyv archive containing Rc/Arc.
+# In rust-camel the rkyv bytes come from the operator-configured SurrealDB instance
+# (trusted server), not from external route input. A malicious archive would require a
+# compromised SurrealDB server, at which point the SurrealDB component is already
+# untrusted at the transport layer. `cargo update -p rkyv` cannot cross the 0.7→0.8
+# SemVer-incompatible boundary; the fix is upstream (surrealdb/rust_decimal must bump
+# to rkyv 0.8). Remove this entry once a surrealdb release carries rkyv >=0.8.17.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0235"]
 informational_warnings = ["unmaintained"]
