@@ -18,6 +18,33 @@ a `// log-policy: system-broken` annotation.
 > Line numbers are illustrative; the `// log-policy: system-broken` annotation is the durable
 > marker. Re-verify with `rg -n '// log-policy' src/yaml.rs`.
 
+## `#[non_exhaustive]` posture (crate-local)
+
+ADR-0049 scopes the workspace `#[non_exhaustive]` policy to the three contract crates only
+(`camel-api`, `camel-component-api`, `camel-language-api`); `camel-dsl` is out of that ADR's
+scope by design. This table records the crate-local posture for the DSL authoring types, using
+ADR-0049 §Rule 3 as the decision framework — **not** an extension of ADR-0049's mandatory scope.
+
+**Posture:** an authoring type is `#[non_exhaustive]` when it is (a) an enum-taxonomy that grows
+parity-driven with upstream Camel EIP coverage **and** (b) has external match or struct-literal
+construction sites today (the same additive-becomes-breaking surface ADR-0049 targets for contract
+enums). All six DSL authoring types below meet both tests (6 struct-literal sites in `camel-test`),
+so all six are `#[non_exhaustive]: yes`.
+
+| Type | Kind | non_exhaustive | Rationale (ADR-0049 §Rule 3 framework) |
+|------|------|----------------|----------------------------------------|
+| `DeclarativeRoute` | struct | yes | Root authoring struct; external struct-literal construction — new field is additive only under `#[non_exhaustive]` |
+| `DeclarativeStepKind` | enum | yes | Step taxonomy; grows parity-driven with EIP coverage; externally matched |
+| `DeclarativeStep` | enum | yes | Step wrapper taxonomy; externally matched alongside `DeclarativeStepKind` |
+| `DeclarativeSecurityPolicy` | enum | yes | Policy-form taxonomy (`roles`/`scopes`/`ref`/`wasm`/`permission`); grows parity-driven; externally matched |
+| `DeclarativeConcurrency` | enum | yes | Concurrency-form taxonomy; externally matched; compiles to `ConcurrencyModel` |
+| `RouteDslStep` | enum | yes | DSL-builder step taxonomy; grows parity-driven; externally matched |
+
+> **Scope note:** This posture is crate-local. It does **not** amend ADR-0049 or add camel-dsl to
+> its binding scope; it applies the same §Rule 3 reasoning by choice. The mechanical attribute
+> application (adding `#[non_exhaustive]` to the six types) is tracked in the code stream
+> (rc-3pw3), not by this documentation record.
+
 ## Language
 
 **RouteDefinition**:
