@@ -7,7 +7,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 
 | Module | Processor / concern | Type | Source |
 |---|---|---|---|
-| `aggregator` | Aggregate | stateful routing / aggregation | `src/lib.rs:1` (defaults: max_buckets=10_000, bucket_ttl=300s; background sweep auto-spawned at construction bound to route token — Batch 1 R3-C1) |
+| `aggregator` | Aggregate | stateful routing / aggregation | `src/aggregator.rs` (`impl AggregatorService`, `fn poll_ready`, `fn call`): defaults are max_buckets=10_000 and bucket_ttl=300s. The background TTL sweep starts lazily on the first `poll_ready` and is bound to the route cancellation token. Inline eviction in `call` remains active before the sweep starts (Batch 1 R3-C1). |
 | `choice` | Choice | conditional routing | `src/lib.rs:2` |
 | `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:3` |
 | `claim_check` | Claim Check | stateful repository stash/retrieve (ADR-0046 retro-exempt) | `src/lib.rs:4` |
@@ -74,41 +74,49 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 
 | Export | Status | Source | Notes |
 |---|---|---|---|
-| `AggregatorService` | stable | `src/lib.rs:38` | Aggregate EIP service. |
-| `ChoiceService`, `WhenClause` | stable | `src/lib.rs:39` | Choice EIP. |
-| `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `src/lib.rs:40-42` | README claims deprecation for layer/service; code has no `#[deprecated]` yet. |
-| `EnrichService`, `PollEnrichService` | stable | `src/lib.rs:43` | Enrich / pollEnrich. |
-| `ConvertBodyTo` | stable | `src/lib.rs:44` | Body conversion. |
-| `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonConfig`, `JsonDataFormat`, `XmlConfig`, `XmlDataFormat`, `ZipConfig`, `ZipDataFormat`, `builtin_data_format`, `builtin_data_format_with_config` | stable | `src/lib.rs:55` | Built-in data formats. CSV added per ADR-0030. Configurable DoS caps per ADR-0038. |
-| `DelayerService` | stable | `src/lib.rs:46` | Delay EIP. |
-| `CatchClause`, `CatchMatcher`, `DoTryService` | stable | `src/lib.rs:47` | doTry block. |
-| `DynamicRouterService` | stable | `src/lib.rs:48` | Dynamic router. |
-| `DynamicSetHeader`, `DynamicSetHeaderLayer` | stable | `src/lib.rs:49` | Header mutation. |
-| `DynamicSetProperty`, `DynamicSetPropertyLayer` | stable | `src/lib.rs:50` | Property mutation. |
-| `EndpointPipelineService` | stable | `src/lib.rs:51` | Endpoint resolver/cache wrapper. |
-| `EnrichmentStrategy`, `UseEnrichedBody` | stable | `src/lib.rs:52` | Enrichment merge strategy. |
-| `DefaultRouteErrorHandler`, `RouteErrorHandler`, `invoke_processor` | stable | `src/lib.rs:55-58` | ADR-0019 in-pipeline handler API. |
-| `ErrorHandlerLayer`, `ErrorHandlerService` | stable | `src/lib.rs:55-58`; `src/error_handler.rs:367-420` | Legacy Tower layer/service for in-pipeline error handling; prefer `RouteChannelService` + `DefaultRouteErrorHandler` per ADR-0019 for new code. |
-| `FilterService` | stable | `src/lib.rs:59` | Filter EIP. |
-| `LoadBalancerService` | stable | `src/lib.rs:60` | Load balancer EIP; poll_ready migration pending. |
-| `LogLevel`, `LogProcessor` | stable | `src/lib.rs:61` | Log EIP. |
-| `CAMEL_LOOP_INDEX`, `CAMEL_LOOP_SIZE`, `LoopService` | stable | `src/lib.rs:62` | Loop EIP metadata + service. |
-| `MapBody`, `MapBodyLayer` | stable | `src/lib.rs:63` | Body mapping. |
-| `MarshalService`, `UnmarshalService` | stable | `src/lib.rs:64` | Data format transform. |
-| `CAMEL_MULTICAST_COMPLETE`, `CAMEL_MULTICAST_INDEX`, `MulticastService` | stable | `src/lib.rs:65` | Multicast metadata + service. |
-| `RecipientListService` | stable | `src/lib.rs:66` | Recipient list EIP. |
-| `RoutingSlipService` | stable | `src/lib.rs:67` | Routing slip EIP. |
-| `ScriptMutator` | stable | `src/lib.rs:68` | Script mutation. |
-| `SecurityPolicyLayer`, `SecurityPolicyService` | stable | `src/lib.rs:69` | Pre-pipeline authorization per ADR-0010. |
-| `SetBody`, `SetBodyLayer` | stable | `src/lib.rs:70` | Body mutation. |
-| `SetHeader`, `SetHeaderLayer` | stable | `src/lib.rs:71` | Header mutation. |
-| `SetProperty`, `SetPropertyLayer` | stable | `src/lib.rs:72` | Property mutation. |
-| `SplitterService` | stable | `src/lib.rs:73` | Split EIP; poll_ready migration pending. |
-| `CompiledStep::Stop` | stable | `src/lib.rs:74` | Control-flow Stop EIP compiled step (ADR-0024, ADR-0025). |
-| `StreamCacheService` | stable | `src/lib.rs:75` | Stream body materialization. |
-| `StreamingSplitterService` | stable | `src/lib.rs:76` | Streaming Split EIP; poll_ready migration pending. |
-| `ThrottlerService` | stable | `src/lib.rs:77` | Throttle EIP. |
-| `WireTapConfig`, `WireTapLayer`, `WireTapService` | stable | `src/lib.rs:78` | WireTap EIP; poll_ready migration pending. |
+| `AggregatorService` | stable | `pub use aggregator::AggregatorService` | Aggregate EIP service. |
+| `ChoiceSegment`, `ChoiceService`, `WhenClause`, `WhenClauseSegment` | stable | `pub use choice::{...}` | Choice EIP. |
+| `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `pub use circuit_breaker::{...}` | README claims deprecation for layer/service; code has no `#[deprecated]` yet. |
+| `ClaimCheckOp`, `ClaimCheckService`, `KeyExpression` | stable | `pub use claim_check::{...}` | Claim Check EIP. |
+| `EnrichService`, `PollEnrichService` | stable | `pub use content_enricher::{...}` | Enrich / pollEnrich. |
+| `ConvertBodyTo` | stable | `pub use convert_body::ConvertBodyTo` | Body conversion. |
+| `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonConfig`, `JsonDataFormat`, `XmlConfig`, `XmlDataFormat`, `ZipConfig`, `ZipDataFormat`, `builtin_data_format`, `builtin_data_format_with_config` | stable | `pub use data_format::{...}` | Built-in data formats. CSV added per ADR-0030. Configurable DoS caps per ADR-0038. |
+| `DelayerService` | stable | `pub use delayer::DelayerService` | Delay EIP. |
+| `CatchClause`, `CatchMatcher`, `DoTryService` | stable | `pub use do_try::{...}` | doTry Tower service. |
+| `CatchClauseSegment`, `DoTrySegment`, `FinallyClauseSegment` | stable | `pub use do_try_segment::{...}` | Outcome-aware doTry segment. |
+| `DynamicRouterService` | stable | `pub use dynamic_router::DynamicRouterService` | Dynamic router. |
+| `DynamicSetHeader`, `DynamicSetHeaderIfAbsent`, `DynamicSetHeaderLayer` | stable | `pub use dynamic_set_header::{...}` | Header mutation. |
+| `DynamicSetProperty`, `DynamicSetPropertyLayer` | stable | `pub use dynamic_set_property::{...}` | Property mutation. |
+| `EndpointPipelineService` | stable | `pub use endpoint_pipeline::EndpointPipelineService` | Endpoint resolver/cache wrapper. |
+| `EnrichmentStrategy`, `ThrowOnNoPoll`, `UseEnrichedBody` | stable | `pub use enrichment_strategy::{...}` | Enrichment merge strategy. |
+| `DefaultRouteErrorHandler`, `RouteErrorHandler`, `invoke_processor` | stable | `pub use error_handler::{...}` | ADR-0019 in-pipeline handler API. |
+| `ErrorHandlerLayer`, `ErrorHandlerService` | stable | `pub use error_handler::{...}`; `struct ErrorHandlerLayer`, `struct ErrorHandlerService` | Legacy Tower layer/service for in-pipeline error handling; prefer `RouteChannelService` + `DefaultRouteErrorHandler` per ADR-0019 for new code. |
+| `FilterSegment`, `FilterService` | stable | `pub use filter::{...}` | Filter EIP. |
+| `IdempotentConsumerSegment`, `MessageIdExpression` | stable | `pub use idempotent_consumer::{...}` | Repository-backed idempotent consumer. |
+| `JsonSchemaValidateService` | stable | `pub use json_schema_validate::JsonSchemaValidateService` | JSON Schema validation. |
+| `LoadBalanceSegment`, `LoadBalancerService` | stable | `pub use load_balancer::{...}` | Load balancer EIP; service poll_ready migration pending. |
+| `LogLevel`, `LogProcessor` | stable | `pub use log::{...}` | Log EIP. |
+| `CAMEL_LOOP_INDEX`, `CAMEL_LOOP_SIZE`, `LoopSegment`, `LoopService` | stable | `pub use loop_eip::{...}` | Loop EIP metadata, segment, and service. |
+| `MapBody`, `MapBodyLayer` | stable | `pub use map_body::{...}` | Body mapping. |
+| `MarshalService`, `UnmarshalService` | stable | `pub use marshal::{...}` | Data format transform. |
+| `CAMEL_MULTICAST_COMPLETE`, `CAMEL_MULTICAST_INDEX`, `MulticastService` | stable | `pub use multicast::{...}` | Multicast metadata + service. |
+| `MulticastSegment` | stable | `pub use multicast_segment::MulticastSegment` | Outcome-aware multicast segment. |
+| `RecipientListService` | stable | `pub use recipient_list::RecipientListService` | Recipient list EIP. |
+| `RoutingSlipService` | stable | `pub use routing_slip::RoutingSlipService` | Routing slip EIP. |
+| `SamplingService` | stable | `pub use sampling::SamplingService` | Sampling EIP. |
+| `ScriptMutator` | stable | `pub use script_mutator::ScriptMutator` | Script mutation. |
+| `SecurityPolicyLayer`, `SecurityPolicyService` | stable | `pub use security_policy_layer::{...}` | Pre-pipeline authorization per ADR-0010. |
+| `SetBody`, `SetBodyLayer` | stable | `pub use set_body::{...}` | Body mutation. |
+| `SetHeader`, `SetHeaderIfAbsent`, `SetHeaderLayer` | stable | `pub use set_header::{...}` | Header mutation. |
+| `SetProperty`, `SetPropertyLayer` | stable | `pub use set_property::{...}` | Property mutation. |
+| `SortExpression`, `SortKey`, `SortService` | stable | `pub use sort::{...}` | Body sort EIP. |
+| `SplitSegment`, `SplitterService` | stable | `pub use split_segment::SplitSegment`; `pub use splitter::SplitterService` | Split EIP; service poll_ready migration pending. |
+| `StreamCacheService` | stable | `pub use stream_cache::StreamCacheService` | Stream body materialization. |
+| `StreamingSplitSegment`, `StreamingSplitterService` | stable | `pub use streaming_split_segment::StreamingSplitSegment`; `pub use streaming_splitter::StreamingSplitterService` | Streaming Split EIP; service poll_ready migration pending. |
+| `ThrottleSegment`, `ThrottlerService` | stable | `pub use throttler::{...}` | Throttle EIP. |
+| `ValidateService` | stable | `pub use validate::ValidateService` | Predicate validation. |
+| `WireTapConfig`, `WireTapLayer`, `WireTapService` | stable | `pub use wire_tap::{...}` | WireTap EIP; poll_ready migration pending. |
+| `BatchPolicy`, `StreamPolicy`, `PassthroughPolicy`, `ResequencePolicy`, `ResequencerConfig`, `ResequencerService` | stable | `pub use resequencer...` | Resequencer policies, config, and service. |
 
 ## poll_ready contract
 
@@ -116,16 +124,16 @@ ADR-0019 requires processors whose errors are routable/recoverable events to avo
 
 | Processor | poll_ready behavior | Status | Rationale / source |
 |---|---|---|---|
-| `MulticastService` | `Ready(Ok(()))` unconditional | migrated | Per-endpoint readiness happens inside fan-out logic; `src/multicast.rs:48-53`. |
-| `ErrorHandlerService` | preserves `Pending`, maps readiness `Err` to `Ok(())` | migrated | Deprecated compatibility shell still follows ADR-0019; `src/error_handler.rs:472-482`. |
-| `AggregatorService` | `Ready(Ok(()))` unconditional | migrated | Aggregation state is owned by `call()`; `src/aggregator.rs:188-190`. |
-| `RecipientListService` | `Ready(Ok(()))` unconditional | migrated | Dynamic recipients resolve and check readiness in `call()`; `src/recipient_list.rs:43-45`. |
-| `WireTapService` | delegates to tap endpoint | pending-fix | Fire-and-forget tap errors must not block the main route; `src/wire_tap.rs:60-62`. |
-| `LoadBalancerService` | polls all endpoints and returns first `Err` | pending-fix | Failover/selection must happen in `call()`; `src/load_balancer.rs:40-49`. |
-| `SplitterService` | delegates to sub-pipeline | pending-fix | Fragment processing already checks readiness per fragment in `call()`; `src/splitter.rs:75-77`, `src/splitter.rs:145-153`. |
-| `StreamingSplitterService` | delegates to sub-pipeline | pending-fix | Streaming fragment processing checks readiness per fragment in `call()`; `src/streaming_splitter.rs:54-56`, `src/streaming_splitter.rs:97-102`. |
-| `FilterService` | delegates to sub-pipeline | pending-fix | Conditional dispatch; predicate + sub-pipeline readiness belong in `call()`; `src/filter.rs:45-47`. |
-| `SecurityPolicyService` | delegates to inner service | excluded | Pre-pipeline authorization gate; authz faults are outside normal EIP recovery per ADR-0010; `src/security_policy_layer.rs:58-60`. |
+| `MulticastService` | `Ready(Ok(()))` unconditional | migrated | Per-endpoint readiness happens inside fan-out logic. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for MulticastService`. |
+| `ErrorHandlerService` | preserves `Pending`, maps readiness `Err` to `Ok(())` | migrated | Deprecated compatibility shell still follows ADR-0019. See `fn poll_ready` in `impl Service<Exchange> for ErrorHandlerService`. |
+| `AggregatorService` | starts the TTL sweep lazily, then returns `Ready(Ok(()))` | migrated | Readiness does not probe an endpoint. `call` owns aggregation state and also performs inline TTL eviction. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for AggregatorService`. |
+| `RecipientListService` | `Ready(Ok(()))` unconditional | migrated | Dynamic recipients resolve and check readiness in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for RecipientListService`. |
+| `WireTapService` | delegates to tap endpoint | pending-fix | Fire-and-forget tap errors must not block the main route. See `fn poll_ready` in `impl Service<Exchange> for WireTapService`. |
+| `LoadBalancerService` | polls all endpoints and returns first `Err` | pending-fix | Failover/selection must happen in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for LoadBalancerService`. |
+| `SplitterService` | delegates to sub-pipeline | pending-fix | Fragment processing checks readiness in `call()` through `process_sequential` or `process_parallel`. See `fn poll_ready` in `impl Service<Exchange> for SplitterService`. |
+| `StreamingSplitterService` | delegates to sub-pipeline | pending-fix | Streaming fragment processing checks readiness in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for StreamingSplitterService`. |
+| `FilterService` | delegates to sub-pipeline | pending-fix | Predicate evaluation and conditional dispatch happen in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for FilterService`. |
+| `SecurityPolicyService` | delegates to inner service | excluded | Authz faults are outside normal EIP recovery per ADR-0010. See `fn poll_ready` in `impl Service<Exchange> for SecurityPolicyService`. |
 
 ## Language
 
@@ -155,7 +163,7 @@ Exchange header key (`"CamelCsvHeaderRecord"`) populated by `CsvDataFormat::unma
 Groups the parent Exchange, the byte stream (`Pin<Box<dyn Stream<Item = Result<Bytes, CamelError>>>>`), and `StreamMetadata` into one argument for `StreamSplitCodec::split`.
 
 **Header exclusion**:
-`fragment_stream_exchange` strips `Content-Length` and `Content-Type` from fragment headers — these belong to the parent stream body, not individual fragments. See `stream_codec.rs:70-74`.
+`fragment_stream_exchange` strips `Content-Length` and `Content-Type` from fragment headers. These headers belong to the parent stream body, not individual fragments. See `fn fragment_stream_exchange` in `src/stream_codec.rs`.
 
 **fragment_stream_exchange**:
 Wraps `fragment_exchange` (camel-api) with stream-specific header exclusion. Used by all three built-in codecs to create each fragment Exchange from the parent Exchange and a parsed body.
@@ -192,26 +200,32 @@ content (not in a gitignored spike doc). Source: spike Splitter (commit
 
 ## Stateful repository EIPs (ADR-0046 retro-exempt)
 
-`IdempotentConsumerSegment` (`src/idempotent_consumer.rs:61`, `impl OutcomePipeline` at `:101`) and `ClaimCheckService` (`src/claim_check.rs:50`) are stateful EIPs backed by a repository trait, implemented 2026-06-27/28 (before ADR-0046 was accepted 2026-07-17). They are **retroactive-exempt** from the ADR-0046 consultation protocol per §Scope: no Camel test-mining is required. This section documents their contract **from existing behaviour** (not from a Camel comparison) so a future contributor understands the shape without re-deriving it.
+`IdempotentConsumerSegment` (`struct IdempotentConsumerSegment` and `impl OutcomePipeline for IdempotentConsumerSegment` in `src/idempotent_consumer.rs`) and `ClaimCheckService` (`struct ClaimCheckService` in `src/claim_check.rs`) are stateful EIPs backed by a repository trait, implemented 2026-06-27/28 (before ADR-0046 was accepted 2026-07-17). They are **retroactive-exempt** from the ADR-0046 consultation protocol per §Scope: no Camel test-mining is required. This section documents their contract **from existing behaviour** (not from a Camel comparison) so a future contributor understands the shape without re-deriving it.
 
-- **Idempotent Consumer** — backed by `Arc<dyn IdempotentRepository>` (`camel-api/src/idempotent.rs:21`). The segment computes a message id via `MessageIdExpression` (`Arc<dyn Fn(&Exchange) -> Option<String>>`, `src/idempotent_consumer.rs:34`), checks `contains(key)`, and either runs the body + records the key (first sighting) or skips the body (duplicate). Maps to Camel's `IdempotentConsumer` / `MessageIdRepository`; the repository abstraction is the rust-camel analogue.
-- **Claim Check** — backed by `Arc<dyn ClaimCheckRepository>` (`camel-api/src/claim_check.rs:27`), driven by `ClaimCheckOp` (Set / Get / GetAndRemove / Push / Pop) and a `KeyExpression` (`src/claim_check.rs:26`). Stash/retrieve of the message body against a key. Maps to Camel's Claim Check EIP operation set.
+- **Idempotent Consumer** — backed by `Arc<dyn IdempotentRepository>` (`trait IdempotentRepository` in `camel-api/src/idempotent.rs`). The segment computes a message id via `MessageIdExpression` (`type MessageIdExpression` in `src/idempotent_consumer.rs`), checks `contains(key)`, and either runs the body + records the key (first sighting) or skips the body (duplicate). Maps to Camel's `IdempotentConsumer` / `MessageIdRepository`; the repository abstraction is the rust-camel analogue.
+- **Claim Check** — backed by `Arc<dyn ClaimCheckRepository>` (`trait ClaimCheckRepository` in `camel-api/src/claim_check.rs`), driven by `ClaimCheckOp` (Set / Get / GetAndRemove / Push / Pop) and `KeyExpression` (`type KeyExpression` in `src/claim_check.rs`). Stash/retrieve of the message body against a key. Maps to Camel's Claim Check EIP operation set.
 
 If a concrete design question about divergence from Camel emerges for either EIP, it is escalated case-by-case at that point (ADR-0046 §Scope); until then the documented contract above is sufficient. No `gap-coverage` bd or mandatory protocol is opened — these are voluntary-resolution entries (blind spot #16), not `FC-BEHAVIORAL-PARITY-GAP`.
 
 ## ADR-0012 log-policy sites
 
-All 5 sites in this crate are category **(a) handler-owned** — EIP processor failures that occur
-INSIDE the pipeline where the route ErrorHandler owns ERROR responsibility. These have been
-downgraded from `error!` to `warn!`.
+The crate has 11 annotated log-policy sites. Seven **(a) handler-owned** sites use `warn!` because
+the route ErrorHandler owns ERROR responsibility. Three **system-broken** sites use `error!`. One
+post-ack best-effort site uses `warn!` and reports a metric under ADR-0029.
 
-| File | Line | Category | Annotation |
-|------|------|----------|------------|
-| `aggregator.rs` | 119 | (a) handler-owned | `// log-policy: handler-owned` — force_complete_all failed |
-| `aggregator.rs` | 463 | (a) handler-owned | `// log-policy: handler-owned` — timeout task failed |
-| `log.rs` | 64 | (a) handler-owned | `// log-policy: handler-owned` — LogProcessor::call default Error level |
-| `log.rs` | 113 | (a) handler-owned | `// log-policy: handler-owned` — DynamicLog::call default Error level |
-| `wire_tap.rs` | 87 | (a) handler-owned | `// log-policy: handler-owned` — WireTap processing error |
+| File | Symbol / site | Category | Annotation |
+|------|---------------|----------|------------|
+| `aggregator.rs` | `AggregatorService::force_complete_all` | (a) handler-owned | `// log-policy: handler-owned` — force-complete aggregation failed |
+| `aggregator.rs` | `fn spawn_timeout_task` | (a) handler-owned | `// log-policy: handler-owned` — timeout aggregation failed |
+| `log.rs` | `LogProcessor::call`, `LogLevel::Error` arm | (a) handler-owned | `// log-policy: handler-owned` — default Error level |
+| `log.rs` | `DynamicLog::call`, `LogLevel::Error` arm | (a) handler-owned | `// log-policy: handler-owned` — default Error level |
+| `wire_tap.rs` | `WireTapService::call` | (a) handler-owned | `// log-policy: handler-owned` — processing error |
+| `resequencer/batch.rs` | `BatchPolicy::accept` | (a) handler-owned | `// log-policy: handler-owned` — correlation expression failed |
+| `error_handler.rs` | `fn execute_on_steps` | (a) handler-owned | `// log-policy: handler-owned` — on-steps pipeline failed |
+| `resequencer/mod.rs` | `ResequencerService::with_config` post-driver task | post-ack best-effort | `// log-policy: post-ack failure (ADR-0012 best-effort, ADR-0029 I7)` — continuation call failed |
+| `error_handler.rs` | `fn send_to_handler`, no producer | system-broken | `// log-policy: system-broken` — no error handler configured |
+| `error_handler.rs` | `fn send_to_handler`, producer not ready | system-broken | `// log-policy: system-broken` — DLC/handler not ready |
+| `error_handler.rs` | `fn send_to_handler`, producer call failed | system-broken | `// log-policy: system-broken` — DLC/handler call failed |
 
 ## Metrics
 
