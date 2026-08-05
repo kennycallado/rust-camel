@@ -5,14 +5,18 @@ constructing Routes that the Runtime can execute.
 
 ## ADR-0012 log-policy sites
 
-Both sites in this crate are category **(c) system-broken** — DSL compile/validation failures
-that occur before any route ErrorHandler exists. The `error!` level is preserved; each call site
-carries a `// log-policy: system-broken` annotation.
+All three sites in this crate are **system-broken** — DSL compile/parse failures that occur
+before any route ErrorHandler exists. The `error!` level is preserved; every call site carries
+a `// log-policy: system-broken` annotation.
 
 | File | Line | Category | Annotation |
 |------|------|----------|------------|
-| `yaml.rs` | 75 | (c) system-broken | `// log-policy: system-broken` — YAML parse failure |
-| `yaml.rs` | 1277 | (c) system-broken | `// log-policy: system-broken` — file read failure |
+| `yaml.rs` | ~101 | system-broken | `// log-policy: system-broken` — YAML parse failure (`parse_yaml_to_declarative_inner`) |
+| `yaml.rs` | ~138 | system-broken | `// log-policy: system-broken` — YAML parse failure (`extract_rest_blocks`) |
+| `yaml.rs` | ~1787 | system-broken | `// log-policy: system-broken` — file read failure (`load_from_file`) |
+
+> Line numbers are illustrative; the `// log-policy: system-broken` annotation is the durable
+> marker. Re-verify with `rg -n '// log-policy' src/yaml.rs`.
 
 ## Language
 
