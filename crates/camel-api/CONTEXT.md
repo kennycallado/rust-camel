@@ -114,6 +114,23 @@ Trait defining the query interface for runtime component metadata lookup. Return
 implemented by `RuntimeComponentMetadataCatalog` in camel-core.
 _Avoid_: metadata store, metadata service
 
+**IdempotentRepository**:
+Key-only pluggable store for the Idempotent Consumer EIP (`idempotent.rs:21`). `contains()` returns
+`Result<bool, CamelError>` (NOT `bool`) — backends (Redis, SQL) propagate transient failures as
+`Err`, never as "not a duplicate" (Contract C1). Stores keys, not messages: it tracks *which*
+messages were seen, not *what* they contained. Payload-bearing storage is `ClaimCheckRepository`, a
+distinct trait. Canonical impl: `MemoryIdempotentRepository` in camel-core. Established by ADR-0023.
+_Avoid_: idempotent store, dedup store, claim check (that is the payload-bearing trait)
+
+**ClaimCheckRepository**:
+Payload-bearing pluggable store for the Claim Check EIP (`claim_check.rs:27`). `set`/`get` work with
+whole `Message` payloads (body + headers) — NOT key-only like `IdempotentRepository`. Supports
+single-value keys (`set`/`get`/`get_and_remove`) and key-scoped LIFO stacks (`push`/`pop`). The
+key-only vs payload-bearing split from `IdempotentRepository` is the central decision of ADR-0028
+(each pattern owns its trait; only the `NamedRegistry` wiring is shared). Canonical impl:
+`MemoryClaimCheckRepository` in camel-core. Established by ADR-0028.
+_Avoid_: claim store, payload cache, idempotent repository (that is the key-only trait)
+
 ## Example dialogue
 
 > "Where is `Exchange` defined, and where is its lifecycle?"
