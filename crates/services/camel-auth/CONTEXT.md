@@ -108,6 +108,21 @@ Applied to:
 - `CachedToken.access_token` (oauth2.rs:29), `TokenResponse.access_token` (oauth2.rs:36).
 - `M2mClient.secret_value` (native_client_store.rs:40), `M2mClientSecret` enum value (native_client_store.rs:35).
 - `NativeClient.secret_value` (native_auth.rs:21), `NativeClientSecret` enum value (native_auth.rs:16).
+- `native_issuer::TokenResponse.access_token` (native_issuer.rs:124).
+
+> **Debug redaction is separate.** In zeroize 1.9.0, `Zeroizing<T>` derives `Debug`. Its
+> implementation prints the inner value. `Zeroizing<String>` clears memory on drop, but it does not
+> redact formatted output. Each type that contains a secret must also implement `Debug` manually.
+>
+> Follow the redacting implementations for `NativeCredentialSecret`, `M2mClientSecret`,
+> `ExtractedToken`, `CachingTokenIntrospector`, `ClientCredentialsProvider`,
+> `IntrospectionAuthenticator`, `NativeSigningKey`, and `NativeTokenIssuer`.
+>
+> Two known gaps remain in the code stream. `native_issuer::TokenResponse` is tracked by
+> `rc-c9xo` (C1). `oauth2::TokenResponse` is tracked by `rc-fvl5` (I1). Their derived `Debug`
+> implementations expose access tokens until the fixes land. Do not format either type with `?` or
+> `:#?`. This restriction supports the ADR-0032 trust boundary by keeping token data out of
+> diagnostic sinks.
 
 ## Example dialogue
 
