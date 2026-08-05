@@ -1,7 +1,7 @@
 # DSL
 
-The route definition layer. Provides a fluent builder API and YAML/JSON configuration format for
-constructing Routes that the Runtime can execute.
+The declarative route-authoring layer. Parses YAML/JSON configuration into Routes that the
+Runtime can execute. The fluent Rust API lives in camel-builder.
 
 ## ADR-0012 log-policy sites
 
