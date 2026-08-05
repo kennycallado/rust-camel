@@ -78,8 +78,11 @@ RouteDefinition ordering key. Auto-start Routes start in ascending `startup_orde
 _Avoid_: priority, dependency order
 
 **RouteBuilder**:
-Fluent Rust API for constructing a RouteDefinition programmatically using method chaining.
-_Avoid_: builder, route factory
+The fluent Rust API for constructing a RouteDefinition programmatically. Lives in
+**camel-builder**, not this crate — see `crates/camel-builder/CONTEXT.md` for its glossary
+entry and design notes. Referenced here only because the declarative YAML/JSON authoring form
+in camel-dsl (`RouteDslRoute`) lowers to the same `RouteDefinition`.
+_Avoid_: builder, route factory, DSL builder
 
 **RouteTemplate**:
 Parameterized DSL definition that expands into one or more RouteDefinitions before the Runtime sees them. Template parameters are substituted before DSL deserialization.

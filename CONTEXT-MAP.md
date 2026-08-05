@@ -4,7 +4,8 @@
 
 - [API Contracts](./crates/camel-api/CONTEXT.md) — pure contract crate: canonical data types (Exchange, Message, Body, CamelError) and EIP/trait abstractions (Processor, BoxProcessor, PipelineOutcome, CQRS bus traits, CanonicalRouteSpec). Type-definition site; behavioral vocabulary lives in Runtime.
 - [Runtime](./crates/camel-core/CONTEXT.md) — core execution engine: Exchange lifecycle, Route management, and component/language/function/service registries
-- [DSL](./crates/camel-dsl/CONTEXT.md) — route definition via fluent builder API and YAML/JSON configuration files (ADR-0026)
+- [Builder](./crates/camel-builder/CONTEXT.md) — programmatic route authoring: the fluent Rust `RouteBuilder` API that constructs a `RouteDefinition` (and `CanonicalRouteSpec` on the canonical path) by method chaining
+- [DSL](./crates/camel-dsl/CONTEXT.md) — declarative route authoring: YAML/JSON configuration format (`RouteDslRoute` AST) that parses to the same `RouteDefinition` (ADR-0017, ADR-0026)
 - [Components](./crates/components/CONTEXT.md) — inbound/outbound adapters (timer, HTTP, Kafka, file, etc.) that feed Exchanges into Routes and send them to external systems
   - [LLM Component](./crates/components/camel-component-llm/CONTEXT.md) — LLM chat and embedding component (OpenAI, Ollama, Mock) with streaming and materialized modes
   - [File Component](./crates/components/camel-file/CONTEXT.md) — polls directories and writes exchange bodies to disk; `atomic_write` helper powers `Override`/`TryRename` write strategies (`Fail` uses `create_new(true)` directly — already atomic)
