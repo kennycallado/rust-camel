@@ -3,6 +3,9 @@
 docs/*
 !docs/adr
 !docs/benchmarks
+!docs/book.toml
+!docs/src/
+!docs/src/**
 docs/adr/*
 !docs/adr/*.md
 bridges/*/build/

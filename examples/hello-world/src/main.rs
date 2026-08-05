@@ -4,6 +4,7 @@ use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
 
+// ANCHOR: first-route
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt()
@@ -29,3 +30,4 @@ async fn main() -> Result<(), CamelError> {
     ctx.stop().await?;
     Ok(())
 }
+// ANCHOR_END: first-route

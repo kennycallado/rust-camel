@@ -200,7 +200,7 @@ pub fn compose_traced_pipeline(
 
 /// Compose a list of `CompiledStep` items into a single pipeline with body coercion.
 ///
-/// Each processor is optionally wrapped with [`BodyCoercingProcessor`] based on its
+/// Each processor is optionally wrapped with `BodyCoercingProcessor` based on its
 /// contract. Processors with `None` contract are passed through with zero overhead.
 /// `CompiledStep::Stop` passes through without coercion.
 pub fn compose_pipeline_with_contracts(

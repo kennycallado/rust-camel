@@ -21,6 +21,7 @@ Patterns (EIP) without a JVM — every processor and producer is a
 ## Table of Contents
 
 - [What is rust-camel?](#what-is-rust-camel)
+- [Documentation](#documentation)
 - [Quick Start](#quick-start)
 - [Core Concepts](#core-concepts)
 - [Components & EIP Patterns](#components--eip-patterns)
@@ -83,6 +84,15 @@ shape of the problem.
 - Your workload is pure request/response **without** routing, EIP patterns, or
   multi-system orchestration (a plain web framework is simpler).
 
+## Documentation
+
+- **[Guide](https://kennycallado.github.io/rust-camel/)** — concepts,
+  tutorials, recipes, and operations.
+- **[API reference](https://docs.rs/camel-api/)** — public Rust types, traits,
+  methods, and contracts.
+- **[Examples](examples/)** — runnable Rust and YAML integrations in this
+  repository.
+
 ## Quick Start
 
 ### Run an example
@@ -95,48 +105,10 @@ cargo run -p hello-world
 
 A route receives an `Exchange` from `timer:tick` and sends it to `log:info`.
 
-### Your first route (Rust)
-
-```rust
-use camel_api::{CamelError, Value};
-use camel_builder::{RouteBuilder, StepAccumulation};
-use camel_component_log::LogComponent;
-use camel_component_timer::TimerComponent;
-use camel_core::context::CamelContext;
-
-#[tokio::main]
-async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
-
-    let mut ctx = CamelContext::builder().build().await?;
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(LogComponent::new());
-
-    let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=5")
-        .set_header("source", Value::String("timer".into()))
-        .to("log:info?showHeaders=true")
-        .build()?;
-
-    ctx.add_route_definition(route).await?;
-    ctx.start().await?;
-    tokio::signal::ctrl_c().await.ok();
-    ctx.stop().await?;
-    Ok(())
-}
-```
-
-### Your first route (YAML)
-
-```yaml
-# routes/hello.yaml
-routes:
-  - id: "hello-timer"
-    from: "timer:tick?period=1000"
-    steps:
-      - to: "log:info"
-```
-
-Save it as `routes/hello.yaml` and run with `camel run`.
+Follow the guide to build your [first route in
+Rust](https://kennycallado.github.io/rust-camel/getting-started/rust-route.html)
+or [first route in
+YAML](https://kennycallado.github.io/rust-camel/getting-started/yaml-route.html).
 
 ### Use the CLI
 

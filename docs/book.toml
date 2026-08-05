@@ -1,0 +1,13 @@
+[book]
+authors = ["rust-camel contributors"]
+language = "en"
+multilingual = false
+src = "src"
+title = "rust-camel Guide"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/kennycallado/rust-camel"
+site-url = "/rust-camel/"

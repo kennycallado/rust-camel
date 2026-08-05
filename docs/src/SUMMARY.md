@@ -1,0 +1,16 @@
+# Summary
+
+- [Introduction](introduction.md)
+- [Getting started](getting-started/index.md)
+  - [Installation](getting-started/installation.md)
+  - [First route in Rust](getting-started/rust-route.md)
+  - [First route in YAML](getting-started/yaml-route.md)
+- [Core concepts](concepts/index.md)
+- [EIP patterns](eip/index.md)
+- [Components](components/index.md)
+- [YAML DSL](yaml-dsl/index.md)
+- [Operations](operations/index.md)
+- [Extending rust-camel](extending/index.md)
+- [Architecture](architecture/index.md)
+- [API reference](api-reference.md)
+- [Documentation workflow](contributing.md)

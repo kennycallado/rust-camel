@@ -235,7 +235,7 @@ impl DefaultRouteController {
 
     /// Set the crash notifier for supervision.
     ///
-    /// When set, the controller will send a [`CrashNotification`] whenever
+    /// When set, the controller will send a `CrashNotification` whenever
     /// a consumer crashes.
     pub fn set_crash_notifier(&mut self, tx: mpsc::Sender<CrashNotification>) {
         self.crash_notifier = Some(tx);
