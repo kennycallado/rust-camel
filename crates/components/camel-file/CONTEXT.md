@@ -16,11 +16,11 @@ Spec reference: `docs/superpowers/specs/2026-06-20-rc-o6o-framework-contract-bug
 - **`fileName` URI param** and **`CamelFileName` exchange header**: arbitrary non-empty
   strings. Nested paths (`a/b/c.bin`) are accepted; the producer creates parent directories
   via `create_dir_all(target_path.parent())` before writing. Path-traversal protection is
-  enforced by `validate_path_is_within_base` (`lib.rs:927`).
+  enforced by `validate_path_is_within_base` (`src/lib.rs`).
 - **`fileExist` URI param**: `Override` (default), `Append`, `Fail`, `Ignore`, `TryRename`.
   Unknown values raise `CamelError::InvalidUri` at config time.
 - **`tempPrefix` URI param**: a plain filename prefix (no path separators, no absolute paths,
-  no null bytes). Validated by `is_valid_temp_prefix` (`lib.rs:919`). Required when
+  no null bytes). Validated by `is_valid_temp_prefix` (`src/lib.rs`). Required when
   `fileExist=TryRename`.
 - **`durable` URI param**: boolean, default `false`. When `true`, the producer fsyncs the
   temp file and the parent directory after the atomic rename, in the order
@@ -30,9 +30,10 @@ Spec reference: `docs/superpowers/specs/2026-06-20-rc-o6o-framework-contract-bug
 
 - **`fileName` containing `..`**: rejected by `validate_path_is_within_base`.
 - **`tempPrefix` containing path separators (`/`, `\`) or null bytes**: rejected at config
-  time (`lib.rs:640-646`).
+  time by `FileConfig::validate` (`src/lib.rs`).
 - **`tempPrefix` that is an absolute path**: rejected at config time.
-- **`fileExist=TryRename` without `tempPrefix`**: rejected at config time (`lib.rs:648`).
+- **`fileExist=TryRename` without `tempPrefix`**: rejected at config time by
+  `FileConfig::validate` (`src/lib.rs`).
 - **`durable=maybe` (or any non-boolean)**: rejected with `CamelError::InvalidUri` by
   `parse_bool_param`.
 - **Cross-filesystem rename (EXDEV)**: if the OS rejects the rename with EXDEV (errno 18),
@@ -52,8 +53,9 @@ Spec reference: `docs/superpowers/specs/2026-06-20-rc-o6o-framework-contract-bug
 
 **FileConfig**: URI-deserialized configuration for `file:` endpoints. Holds directory path,
 polling delays, write strategy, temp-file prefix, durable flag, charset, and recursive-scan
-options. Validated at construction (`lib.rs:613-694`); invalid configurations surface as
-`CamelError::Config` or `CamelError::InvalidUri` before any exchange is processed.
+options. `FileConfig::validate` (`src/lib.rs`) validates it at construction. Invalid
+configurations surface as `CamelError::Config` or `CamelError::InvalidUri` before any
+exchange is processed.
 _Avoid_: file options, file settings (use FileConfig when referring to the parsed struct).
 
 **FileProducer**: Tower `Service<Exchange>` that writes the exchange body to disk under
