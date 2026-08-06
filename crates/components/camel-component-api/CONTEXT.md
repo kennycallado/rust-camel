@@ -61,9 +61,9 @@ ADR-0049 places this contract crate in its mandatory scope.
 | `ConsumerStartupMode` | Yes | ADR-0049 names it in the application set. External components return it from `startup_mode()`. |
 | `ConcurrencyModel` | Yes | ADR-0049 names it in the application set. External components return it from `concurrency_model()`. |
 
-Both enums must gain `#[non_exhaustive]` before the v1.0 freeze. The code fix is tracked by
-`rc-3pw3`. New contract enums in this crate use `#[non_exhaustive]` from birth. ADR-0049 Rule 3
-governs public structs and external struct literals.
+Both enums carry `#[non_exhaustive]` (landed in rc-3pw3). New contract enums in this crate use
+`#[non_exhaustive]` from birth. ADR-0049 Rule 3 governs public structs and external struct
+literals. Compliance is enforced by `cargo xtask lint-non-exhaustive`.
 
 ## `test-support` feature
 
