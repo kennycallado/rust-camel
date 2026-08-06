@@ -1,12 +1,55 @@
+# WebSocket component
+
+This file defines crate-local terms and invariants. See `../CONTEXT.md` for the shared
+Component, Endpoint, Consumer, and Producer terms.
+
+## Language
+
+**`WsComponent` / `WssComponent`**:
+Components for plain and TLS WebSocket Endpoints. Each Endpoint can create an inbound Consumer or
+an outbound Producer.
+
+**`ServerRegistry`**:
+Process-wide owner of shared inbound servers. It keys servers by port and keeps them alive after
+the last Consumer stops. Paths can register and deregister independently on one server.
+
+**`WsConnectionRegistry`**:
+Per-path registry of active WebSocket connections. Producers use it for targeted or broadcast
+delivery.
+
+**`dispatch_handler`**:
+Inbound upgrade handler. It checks path and origin before optional bearer authentication and
+policy evaluation.
+
+## Lifecycle and security invariants
+
+- `ServerRegistry::get_or_spawn` creates at most one server per port. The first registration fixes
+  the host and TLS mode. A later registration with the other TLS mode fails.
+- `ServerRegistry::release` removes the Consumer reference but does not stop the server. Consumer
+  shutdown removes its path, policy, and connection registry.
+- `WsReloadHandler::matches` matches `wss` servers by port and intentionally ignores host. This
+  mirrors the port-keyed `ServerRegistry`.
+- Plain WS binds its TCP listener before `ConsumerContext::mark_ready`. WSS starts its bind in the
+  server task, so readiness can precede a successful TLS bind. This known I2 asymmetry means the
+  health pin and `WsConsumer::stop` error remain the failure signals. ADR-0007 requires such task
+  failures to remain visible to Route supervision.
+- When a SecurityContext exists, `dispatch_handler` fails closed on missing credentials, denied
+  policy decisions, and future `AuthorizationDecision` variants. Query-token values are redacted
+  before logging.
+- `WsEndpointConfig::fmt` redacts TLS certificate and key paths. ADR-0051 does not classify paths
+  as credential bytes, so this crate uses a stricter diagnostic policy.
+- ADR-0052 does not apply. `camel-ws` is an inbound data-plane component, not a diagnostic
+  endpoint. Its `0.0.0.0` default therefore does not inherit the diagnostic loopback rule.
+
 ## Log-level policy
 
-Per ADR-0012, this component's `error!` sites are categorized as:
+Per ADR-0012, this component's `error!` sites are outside the handler contract:
 
-- **(g) outside-contract** (lib.rs L212, L234):
-  - L212 = TLS bind failure in `spawn_server`. Calls `runtime.health().force_unhealthy_for_route(route_id, "g:ws:bind-tls", &e.to_string())` BEFORE the `error!`. The health pin is the operator signal; `error!` provides loud log visibility.
-  - L234 = plain bind failure in `spawn_server`. Calls `runtime.health().force_unhealthy_for_route(route_id, "g:ws:bind-plain", &e.to_string())` BEFORE the `error!`. Same pattern.
-  Both sites keep `error!` with `// log-policy: outside-contract`.
+- **Class (g)** (`spawn_server`, TLS-bind arm): the code first calls
+  `force_unhealthy_for_route` with `g:ws:bind-tls`. The health pin is the operator signal.
+- **Class (g)** (`spawn_server`, plain-bind arm): the code first calls
+  `force_unhealthy_for_route` with `g:ws:bind-plain`. The health pin is the operator signal.
+- **Class (e)** (`dispatch_handler`, policy-evaluation error arm): the code first increments
+  `e:ws:policy-eval`. The metric is the operator signal.
 
-- **(e) outside-contract** (lib.rs L393): per-request policy evaluation error during WS upgrade in `dispatch_handler`. Calls `runtime.metrics().increment_errors(route_id, "e:ws:policy-eval")` BEFORE the `error!`. The metric is the operator signal; `error!` provides loud log visibility. Site keeps `error!` with `// log-policy: outside-contract`.
-
-Reviewer: r_glm5.1 verifies these classifications against source at Phase C review time.
+Each site keeps `error!` for loud log visibility and carries `// log-policy: outside-contract`.
