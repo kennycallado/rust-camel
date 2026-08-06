@@ -63,6 +63,25 @@ review time.
 
 ## Batch 6 — Security hardening
 
+### Secret redaction in diagnostics
+
+SASL and SSL credentials are redacted to `[REDACTED]` in `Debug` output. This
+rule covers `sasl_password`, `ssl_keystore_password`, and
+`ssl_truststore_password`. These three manual implementations enforce the rule:
+
+- `impl Debug for KafkaBrokerConfig` in `broker_config.rs`
+- `impl Debug for KafkaEndpointConfig` in `config.rs`
+- `impl Debug for ResolvedKafkaEndpointConfig` in `config.rs`
+
+Tests `test_broker_config_debug_redacts_secrets`, `test_debug_masks_passwords`,
+and `test_resolved_config_debug_masks_passwords` verify this behavior.
+
+**Known gap:** `KafkaBrokerConfig` and `KafkaConfig` still derive
+`serde::Serialize`. `KafkaConfig` includes broker credentials through
+`brokers_named`. Serialization can therefore emit plaintext credentials. No
+in-crate serialization call site exists. F-camel-kafka-I1 tracks this gap in
+bd issue rc-xbl1.
+
 ### SSL/SASL feature gates
 
 SSL and SASL protocols are gated behind cargo features to control OpenSSL linkage:
