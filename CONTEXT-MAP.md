@@ -72,6 +72,7 @@ are a convenience index and may lag the file.
 - [0045](./docs/adr/0045-camel-core-architecture-charter.md) — camel-core architecture charter: codifies the Clean + DDD + CQRS + vertical-slices + hexagonal promise crate-wide; declares the module-discipline ceiling (no crate-split through 1.0) and scopes CQRS to the control plane (synchronous-projection)
 - [0046](./docs/adr/0046-apache-camel-inspiration-not-conformance.md) — Apache Camel is design-inspiration corpus, not conformance authority; consultation protocol (trigger by divergence-density, 3 tests, classify-while-reading, native tests, KPI = divergences-documentadas/EIP); rejects `cargo xtask port-camel-test`
 - [0047](./docs/adr/0047-template-rendering-engine.md) — MiniJinja-based external template rendering engine: operator-owned file sources (openat-confined closure walk), compile-once in-memory `TemplateSet`, and atomic hot-reload (all-or-nothing `reload_route`) behind the `template:` producer scheme
+- [0050](./docs/adr/0050-wasm-sandbox-capability-posture.md) — Per-world WASM capability posture: explicit Camel grants and selective WASI registration; no filesystem, sockets, environment, CLI, or stdio by default
 
 ## Key Terms
 
@@ -129,6 +130,7 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **ServerTlsSource** — Shared cert-file source struct (`cert_path`, `key_path`, `client_ca_path`). `build_server_config()` reads PEM files, parses, and constructs `rustls::ServerConfig` with mTLS support. Used by all three server components (gRPC, HTTP, WS) for both initial TLS setup and reload. (camel-component-api)
 - **ArcSwap<TlsAcceptor>** — gRPC uses `Arc<ArcSwap<TlsAcceptor>>` for atomic cert swap. The accept loop calls `load_full()` per connection (snapshot isolation). HTTP/WS use `axum_server::tls_rustls::RustlsConfig` which internally wraps ArcSwap; `reload_from_config()` swaps the cert. ADR-0004. (camel-component-grpc + camel-http + camel-ws)
 - **template rendering language** — A Language SPI implementation that produces structured output (HTML, JSON, prompts) by rendering templates against Exchange data. Phase 1 (`crates/languages/camel-language-minijinja`) covers inline templates only; Phase 2 (bd rc-64if, `crates/components/camel-template`) adds external file loading, includes, and hot-reload. Authority: ADR-0047.
+- **WASM sandbox capability posture** — Per-world grants across two surfaces: Camel host functions and WASI interfaces. Camel calls use explicit scheme allowlists; policy worlds deny call and store operations. WASI uses selective registration, not full-linker registration with runtime-only denial. Authority: ADR-0050. (camel-component-wasm)
 
 ## Documentation Authority & Refresh
 
