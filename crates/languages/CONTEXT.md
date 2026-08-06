@@ -26,7 +26,10 @@ _Avoid_: mutating condition, side-effecting predicate
 
 ## Implementations
 
+- **[JavaScript](./camel-language-js/CONTEXT.md)** — synchronous Boa-backed expression, predicate, and mutating-expression language. Its crate context defines the in-process sandbox, exchange-data boundary, and resource limits. Authority: ADR-0006 and ADR-0032.
 - **[MiniJinja](./camel-language-minijinja/CONTEXT.md)** — template rendering language for inline template execution. Produces structured output (HTML, JSON, prompts) from Exchange data via MiniJinja (Python Jinja2-inspired). Phase 1 covers inline templates only; Phase 2 (bd rc-64if, `crates/components/camel-template`) adds external file loading, includes, and hot-reload. Authority: ADR-0047.
+- **[Rhai](./camel-language-rhai/CONTEXT.md)** — sandboxed expression, predicate, and mutating-expression language. Its crate context defines the unconditional host-access closure, resource limits, and mutation model. Authority: ADR-0032.
+- **[XPath](./camel-language-xpath/CONTEXT.md)** — XPath 1.0 expression and predicate language over `sxd-xpath`. It evaluates a trusted query against an untrusted XML body with a configurable input-size bound. Authority: ADR-0032.
 
 ## Example dialogue
 
