@@ -60,7 +60,12 @@ Every ExchangeEnvelope emitted by the delegate carries the `x-camel-leader-epoch
 _Avoid_: load balancer, consumer restart, supervision
 
 **ControlBus**:
-Producer-only Component that sends Route lifecycle commands (`start`, `stop`, `suspend`, `resume`, `restart`, `status`) from one Route to another through the RuntimeBus. Target Route comes from the URI `routeId` parameter or `CamelRouteId` header.
+Producer-only Component that sends Route lifecycle commands (`start`, `stop`, `suspend`,
+`resume`, `restart`, `status`) from one Route to another through the RuntimeBus. The target
+`routeId` must be declared in the Endpoint URI. The `CamelRouteId` header cannot override it
+because Exchange data is untrusted (ADR-0032). The Endpoint must declare an `authorizedRoutes`
+allowlist or fail closed. It also denies self-targeting (ADR-0034). `restart` maps to
+`RuntimeCommand::ReloadRoute`, which performs the atomic swap from ADR-0004.
 _Avoid_: command bus, admin API, route controller (unless naming Runtime type)
 
 **SEDA**:
