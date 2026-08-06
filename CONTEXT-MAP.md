@@ -12,6 +12,7 @@
   - [LLM Component](./crates/components/camel-component-llm/CONTEXT.md) — LLM chat and embedding component (OpenAI, Ollama, Mock) with streaming and materialized modes
   - [File Component](./crates/components/camel-file/CONTEXT.md) — polls directories and writes exchange bodies to disk; `atomic_write` helper powers `Override`/`TryRename` write strategies (`Fail` uses `create_new(true)` directly — already atomic)
   - [Cron Component](./crates/components/camel-cron/CONTEXT.md) — calendar-triggered scheduling via Unix 5-field cron expressions; backed by `CronService` SPI (default: `TokioCronService`) in `component-api`
+  - [SurrealDB Component](./crates/components/camel-component-surrealdb/CONTEXT.md) — multi-model database Component for 12 SurrealQL document, graph, vector, function, and live-query operations through a named datasource
 - [Languages](./crates/languages/CONTEXT.md) — expression and predicate evaluation against Exchanges (JavaScript, JSONPath, XPath, Simple, Rhai, MiniJinja)
   - [Language SPI](./crates/languages/camel-language-api/CONTEXT.md) — the trait contract every language implements (Language, Expression, Predicate, MutatingExpression/Predicate) and `LanguageError`
 - [Functions](./crates/services/camel-function/CONTEXT.md) — out-of-process executable units invoked as pipeline steps; inspired by serverless functions, running in isolated containers
