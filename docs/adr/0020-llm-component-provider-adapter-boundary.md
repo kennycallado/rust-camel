@@ -5,11 +5,13 @@
 
 ## Decision
 
-Define a project-owned `LlmProvider` trait with Camel-shaped request/response types. Confine all siumai imports to **exactly two production files** (`provider/siumai_adapter.rs` and `provider_factory.rs`) plus one **test-only** file (`provider/siumai_adapter_tests.rs`, gated by `#[cfg(all(test, feature = "openai"))]`).
+Define a project-owned `LlmProvider` trait with Camel-shaped request/response types. Confine all production siumai imports to the adapter file (`provider/siumai_adapter.rs`) plus one **test-only** file (`provider/siumai_adapter_tests.rs`, gated by `#[cfg(all(test, feature = "openai"))]`). `provider_factory.rs` selects and dispatches to adapter constructors without importing siumai directly.
+
+The original boundary included two production files. Refactoring `provider_factory.rs` to delegate narrowed it to one production file without changing the architectural decision.
 
 Test fixtures legitimately need siumai types (`StubChat`, `StubEmbed` implement siumai traits) and cannot be expressed through the public adapter API.
 
-No other file in the crate may import siumai. A test (`tests/boundary.rs`) enforces this by scanning all `.rs` files for `use siumai` or `siumai::` references outside the allowed files.
+No other file in the crate may import siumai. A test (`tests/boundary.rs`) scans all `.rs` files for direct siumai references outside its allowlist. The allowlist still permits `provider_factory.rs` for historical compatibility, although that file has no direct siumai imports.
 
 ## Context
 
@@ -33,13 +35,13 @@ Rejected. The beta status of siumai (0.11.0-beta.9) means API churn is likely. D
 
 ### Define a project-owned trait (Accepted)
 
-Accepted. A project-owned `LlmProvider` trait with Camel-shaped types isolates siumai to two files. Mock provider works without siumai at all (`--features mock` only). If siumai breaks, only the adapter file changes. Future non-siumai providers are possible without breaking the component API.
+Accepted. A project-owned `LlmProvider` trait with Camel-shaped types isolates production siumai imports to one adapter file. Mock provider works without siumai at all (`--features mock` only). If siumai breaks, only the adapter file changes. Future non-siumai providers are possible without breaking the component API.
 
 ## Consequences
 
 **Positive:**
 
-- siumai API churn is confined to two files.
+- siumai API churn is confined to one production adapter file.
 - Mock provider works without siumai dependency (`--features mock` only).
 - Testing is deterministic without network.
 - Future non-siumai providers are possible without breaking the component API.
@@ -50,4 +52,4 @@ Accepted. A project-owned `LlmProvider` trait with Camel-shaped types isolates s
 - Boilerplate: own request/response types that don't mirror siumai.
 - Manual translation between Camel types and siumai types in the adapter.
 
-**Failure mode:** If siumai API churn leaks past `provider_factory.rs`, the design has failed.
+**Failure mode:** If production siumai imports or siumai-shaped public types leak past `provider/siumai_adapter.rs`, the design has failed.

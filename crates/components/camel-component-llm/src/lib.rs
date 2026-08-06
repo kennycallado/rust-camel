@@ -7,7 +7,7 @@
 //! override (ADR-0021), and concurrency control via producer semaphore.
 //!
 //! Uses a project-owned `LlmProvider` trait with strict adapter boundary
-//! isolating the siumai SDK to exactly two production files (ADR-0020).
+//! isolating the siumai SDK behind `provider/siumai_adapter.rs` (ADR-0020).
 
 pub mod bundle;
 pub mod config;

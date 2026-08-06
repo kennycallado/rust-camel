@@ -104,7 +104,7 @@ Enable multiple: `--features "openai,ollama"` or use `all-providers`.
 
 ## Architecture Decisions
 
-- [ADR-0020](https://github.com/kenny/rust-camel/blob/main/docs/adr/0020-llm-component-provider-adapter-boundary.md) — Project-owned `LlmProvider` trait isolates siumai SDK behind two files
+- [ADR-0020](https://github.com/kenny/rust-camel/blob/main/docs/adr/0020-llm-component-provider-adapter-boundary.md) — Project-owned `LlmProvider` trait isolates siumai SDK behind `provider/siumai_adapter.rs`
 - [ADR-0021](https://github.com/kenny/rust-camel/blob/main/docs/adr/0021-llm-retry-retry-after-manual-loop.md) — Manual retry loop honors `retry_after` over exponential backoff
 
 ## Example
