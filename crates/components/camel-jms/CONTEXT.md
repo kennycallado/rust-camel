@@ -28,6 +28,44 @@ remain. `consumer_loop` observes cancellation through `tokio::select!`. An
 in-flight `ConsumerContext::send` completes before the loop checks cancellation
 again. The Consumer does not restart itself. Route supervision owns restart.
 
+## Trust boundary and credential redaction
+
+### Message data
+
+Incoming JMS headers, bodies, correlation IDs, and destinations enter
+`exchange.input` without validation or redaction. ADR-0032 assigns validation
+to the route where data enters a control action, resource decision, or
+executable or interpretable sink.
+
+### Bridge credentials
+
+camel-jms does not use JNDI to resolve broker connections. Broker configuration
+crosses an explicit gRPC boundary to the Java bridge process. The process path
+comes from `ensure_binary`, which uses the configured bridge version and cache
+directory.
+
+`BrokerConfig` implements `Debug` manually and replaces its password with
+`<redacted>`. `BridgeSlot` also implements `Debug` manually and omits its
+`credentials` field. `LazyJmsProducer` does not implement `Debug`. The bridge
+process receives the username as plain text and the password through
+`Redacted::new`. `redact_url` removes URL user information before logging.
+Tests `broker_config_debug_redacts_password` and
+`redact_url_strips_userinfo_with_password` verify these properties.
+
+Do not derive `Debug` for a type that contains a password, username,
+credential, secret, or token. Implement `Debug` manually and redact or omit
+each sensitive field. Use this audit command to check the crate:
+
+```text
+rg '#\[derive.*Debug' crates/components/camel-jms/src/
+```
+
+### Lifecycle boundary
+
+Bridge restart stays inside `JmsBridgePool`. Consumer task failure remains
+route-supervised. `JmsConsumer::stop` cancels, joins with a five-second grace,
+and then aborts remaining tasks. This shutdown sequence complies with ADR-0007.
+
 ## Log-level policy
 
 Per ADR-0012:
