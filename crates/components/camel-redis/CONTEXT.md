@@ -51,3 +51,46 @@ Default: 10 seconds (in `RedisConfig::default()`). Applied at 4 connection sites
 
 Derived from `connection_timeout_secs + 5` seconds. The outer timeout at `check()` (health.rs:108)
 must exceed the inner connection timeout so the inner fires first with a specific error message.
+
+## Scope boundary
+
+camel-redis follows the Component, Endpoint, Consumer, and Producer contracts
+defined in `crates/components/CONTEXT.md`. `RedisComponent` creates
+`RedisEndpoint` values for `redis:` URIs. Each Endpoint creates an outbound
+`RedisProducer` or a supported inbound `RedisConsumer`.
+
+The component does not implement EIPs. EIP behavior belongs in
+`camel-processor`, so ADR-0046 behavioral parity does not apply to this crate.
+`RedisCommand` defines the supported Redis command surface. Operator-owned URI
+configuration selects a command before exchange processing starts.
+
+## Trust boundary
+
+ADR-0032 defines exchange headers and bodies as untrusted. camel-redis does not
+use exchange data as a Redis command name. The command comes from the
+operator-owned Endpoint URI and must parse as a `RedisCommand` variant.
+
+Keys, fields, values, channels, scores, and other dynamic values cross the
+boundary as command arguments. `redis::Cmd::arg` and `AsyncCommands` encode
+these values as length-prefixed Redis protocol arguments instead of
+concatenating them into command text. Argument contents therefore cannot add a
+second command or change the selected command. Missing required headers return
+`CamelError`.
+
+The component does not expose `EVAL`, `EVALSHA`, or script-loading commands.
+This argument framing prevents command-syntax injection. It does not make the
+operation or its target key semantically safe. Routes must still validate those
+values when their meaning creates a resource or authorization decision under
+ADR-0032.
+
+## Dependency boundary
+
+The `redis` crate is a direct dependency in 11 production source files:
+`producer.rs`, `consumer.rs`, `health.rs`, and the eight files under
+`commands/`. No project-owned adapter trait wraps it.
+
+ADR-0020 does not govern this boundary. That ADR isolates the beta `siumai` SDK
+because LLM provider APIs can change rapidly. camel-redis uses `redis` as its
+protocol driver, and its command modules intentionally use the driver types
+directly. Reassess this boundary if driver API churn makes changes spread beyond
+the component's Redis-specific modules.
