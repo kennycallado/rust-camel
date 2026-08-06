@@ -18,6 +18,7 @@ _Avoid_: event subscriber, docker listener
 
 **ContainerTracker**:
 Internal state that records created containers for cleanup on shutdown; safe for hot-reload.
+`CONTAINER_TRACKER` is one process-global static shared by all `CamelContext` instances and tests in the process. This accepted trade-off preserves cleanup state across route hot-reload. It does not provide the multi-context or test isolation of the component-owned `ProviderMap` in ADR-0020.
 _Avoid_: container registry, container state
 
 **Auto-pull**:
@@ -42,3 +43,5 @@ All 4 sites are category (e) outside-contract: the Docker daemon operation faile
 
 > "Can I track created containers for cleanup?"
 > "Yes — the ContainerTracker records every container created by a `run` operation. On shutdown, it removes orphaned containers. The tracker is safe for hot-reload: stopping and restarting a route does not lose tracked containers."
+> "Is ContainerTracker isolated per CamelContext?"
+> "No. `CONTAINER_TRACKER` is process-global, so cleanup state is shared across contexts and tests in the same process. This is an accepted trade-off for retaining cleanup state across route hot-reload."
