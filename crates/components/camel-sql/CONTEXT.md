@@ -151,3 +151,14 @@ TCP connect timeout, NOT the pool `acquire_timeout`.
 
 SQLite URLs (`sqlite*` scheme) return early at config.rs:583 before any SSL enrichment or connect_timeout
 appending. SSL options set alongside a SQLite URL produce a `warn!` log but are silently ignored.
+
+## Dependency boundary
+
+`sqlx` is a direct, unwrapped dependency in seven production source files:
+`lib.rs`, `endpoint.rs`, `producer.rs`, `consumer.rs`, `health.rs`,
+`pool_factory.rs`, and `utils.rs`. No project-owned adapter trait wraps it.
+
+This pattern is deliberate. ADR-0020, Context, records why the SQL component
+keeps direct `sqlx` dependencies while the LLM component isolates `siumai`.
+ADR-0020 owns that justification. Reassess this boundary if its assumptions
+about `sqlx` API stability or database-domain stability no longer hold.
