@@ -349,7 +349,7 @@ The component provides clear, actionable error messages:
 
 ## Known Limitations
 
-- **Unix socket only**: TCP/TLS Docker hosts are not supported
+- **Local sockets only**: TCP/TLS Docker hosts are not supported; use a Unix socket or Windows named pipe
 - **No event filtering**: The `events` consumer receives all Docker events
 - **No SELinux labels**: Volume mount options `:z` and `:Z` are not supported
 - **No image operations**: `pull`, `build`, `push`, `tag` are not implemented (use `autoPull=true` instead)
@@ -464,12 +464,14 @@ Configure default Docker host in `Camel.toml` that applies to all Container endp
 docker_host = "unix:///var/run/docker.sock"  # Docker daemon socket (default)
 ```
 
-### Remote Docker Host
+### Non-default Docker Socket
 
 ```toml
 [production.components.container]
-docker_host = "tcp://docker-proxy:2375"  # TCP socket (note: only Unix sockets fully supported)
+docker_host = "unix:///run/user/1000/docker.sock"
 ```
+
+Remote TCP/TLS Docker hosts are not supported. `docker_host` accepts Unix sockets and Windows named pipes only.
 
 URI parameter `host` always overrides global default:
 
