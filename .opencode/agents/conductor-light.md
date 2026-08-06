@@ -302,9 +302,26 @@ i. Resolve legitimate minor issues before advancing — they are
 
 2. **QUALITY GATES** (mandatory, all must pass before review):
    Run from `$WT`. Any failure → loop back to PHASE 3.
+
+   **Source of truth**: the authoritative gate registry is the
+   `## QUALITY GATES` block in `AGENTS.md` (repo root). Run every gate
+   listed there — do NOT maintain a separate copy here. A hardcoded
+   copy drifts (it already did: `lint-non-exhaustive` and the clippy
+   `--exclude` set diverged between the two files). The
+   conductor-specific deviations below are the ONLY additions/exclusions.
+
    NOTE: do NOT run `cargo test --workspace` (full) — it requires
    Docker + native bridges and can hang autopilot. Integration tests
    with infra are CI's responsibility, not the conductor's.
+
+   **Conductor-specific deviations from the AGENTS.md list**:
+   - ADD `cargo build --workspace` (local build gate, run before tests).
+   - ADD `cargo test --workspace --lib` and
+     `cargo test -p camel-core --test hexagonal_architecture_boundaries_test`
+     (local substitute for CI's full Docker test suite).
+   - SKIP `lint-commits` (it runs `git fetch origin main` — a remote
+     op; CI owns branch-diff checks, the conductor works locally in
+     the worktree and never fetches).
 
    **N/A gate detection**: Before running gates, enumerate the
    diff for `*.rs` or `Cargo.toml`
@@ -314,27 +331,14 @@ i. Resolve legitimate minor issues before advancing — they are
    recorded as a pre-existing-failure exemption); only non-Rust
    gates run. The self-check below enumerates N/A gates explicitly.
 
-   Run EACH gate as a separate command and record exit codes:
-   ```bash
-   cargo fmt --check --all
-   cargo clippy --workspace --all-features \
-     --exclude camel-cli \
-     --exclude camel-component-kafka \
-     -- -D warnings
-   cargo clippy -p camel-component-kafka --all-targets -- -D warnings
-   cargo clippy -p camel-cli -- -D warnings
-   cargo build --workspace
-   cargo test --workspace --lib
-   cargo test -p camel-core --test hexagonal_architecture_boundaries_test
-   cargo xtask lint-unwrap
-   cargo xtask lint-secrets
-   cargo xtask lint-log-levels
-   cargo xtask schema --check
-   cargo audit
-   ```
+   Run EACH gate (every gate in AGENTS.md `## QUALITY GATES`, plus the
+   conductor additions above, minus `lint-commits`) as a separate
+   command and record exit codes.
 
    **Gate-coverage self-check**: BEFORE claiming "all gates green",
-   enumerate each of the 12 gates above and confirm its exit status.
+   enumerate each gate from AGENTS.md `## QUALITY GATES` (plus the
+   conductor-specific build/test additions, minus `lint-commits`) and
+   confirm its exit status.
    N/A gates are explicitly enumerated and marked `"N/A — no Rust
    changed"` (not silently skipped). If ANY gate was skipped or not
    run without a valid N/A or pre-existing-failure exemption, you
