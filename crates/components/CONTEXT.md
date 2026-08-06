@@ -56,6 +56,7 @@ _Avoid_: retry policy (ambiguous), redelivery, ConsumerRestart
 
 **Master**:
 Component that runs a delegate Consumer only while this node holds a LeadershipService lock. Losing leadership stops delegate intake and steps down with a drain timeout.
+Every ExchangeEnvelope emitted by the delegate carries the `x-camel-leader-epoch` Exchange property. The Master bridge captures this monotonic fencing token when it starts, so a stale bridge retains its old epoch. Downstream sinks should reject older epochs for split-brain safety. Established by ADR-0035.
 _Avoid_: load balancer, consumer restart, supervision
 
 **ControlBus**:
