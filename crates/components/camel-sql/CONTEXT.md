@@ -133,6 +133,23 @@ parser accepts, rejects, and silently does NOT do. Aligned with ADR-0016
 
 ## Batch 6 — Security hardening
 
+### `allow_dynamic_query=false` by default (H7)
+
+The `allowDynamicQuery` URI parameter defaults to `false`. In this mode,
+`SqlProducer::resolve_query_source` ignores the `CamelSql.Query` header and the
+exchange body. The Producer uses only the query from its Endpoint configuration,
+including a query loaded through the `file:` form.
+
+This default enforces the exchange-data trust boundary from ADR-0032. Exchange
+headers and bodies are untrusted. Treating either one as SQL text would let that
+data cross into an interpretable sink without validation and would permit SQL
+injection, including DDL statements.
+
+An operator can opt in with `allowDynamicQuery=true`. This setting permits the
+header to supply SQL text. The body can supply SQL text only when both
+`allowDynamicQuery=true` and `useMessageBodyForSql=true`. The opt-in makes the
+route responsible for establishing that the selected exchange data is trusted.
+
 ### `ssl_mode` default at connection build time
 
 Applied in `enrich_db_url_with_ssl_params()` (config.rs:561-636), NOT in `Default::default()`:
