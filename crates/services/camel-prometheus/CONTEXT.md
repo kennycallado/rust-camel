@@ -34,9 +34,9 @@ policy or a firewall. The configuration path is opt-in through
 `observability.prometheus.enabled`, but `PrometheusService::new` starts from the
 address supplied by its caller and has no equivalent enablement guard.
 
-This is the current implementation, not a settled workspace policy. bd `rc-asm9`
-tracks the exposure gap. ADR-0052, which will decide the shared diagnostic-endpoint
-posture, is pending the T2 documentation sweep.
+ADR-0052 settles the shared diagnostic-endpoint posture: unauthenticated by scrape
+convention, TLS and auth as opt-in hooks, loopback-preferred bind with a warning on
+non-loopback opt-out. bd `rc-asm9` tracks the code work (bind default, warning, hooks).
 
 ## Cardinality contract
 
@@ -44,8 +44,9 @@ Dynamic label values must come from a closed or bounded set. Never pass raw Exch
 body, header, property, or correlation-key data as a label value. Each distinct label
 combination creates a Prometheus series. The dynamic registries have no cardinality
 cap or eviction, so unbounded values can cause unbounded memory growth. bd `rc-0pyv`
-tracks this risk. ADR-0032 supplies the exchange-data trust boundary. Its metrics-label
-application remains pending the T2 documentation sweep.
+tracks this risk. ADR-0032 supplies the exchange-data trust boundary; its amendment
+(2026-08-06) names metric label values as an unbounded resource sink and requires
+closed-set or bounded label values here.
 
 Counter observations reject NaN, negative, and fractional values. Histogram
 observations reject NaN. These value checks do not bound label cardinality.
@@ -66,4 +67,4 @@ The crate defines no public enums, so no case-by-case enum decision is required.
 
 - ADR-0032: exchange-data trust boundary and bounded resource decisions
 - ADR-0049: workspace `#[non_exhaustive]` policy; not applicable to this crate
-- Pending ADR-0052: diagnostic-endpoint exposure posture
+- ADR-0052: diagnostic-endpoint exposure posture

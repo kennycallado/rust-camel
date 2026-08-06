@@ -58,3 +58,16 @@ inherit the checklist; existing fixes re-state the same boundary case consistent
   out of the boundary per-route; they can only narrow it (more specific bindings).
 - The CONTEXT-MAP glossary adds the term "Exchange-data trust boundary" so the
   rule is searchable in code review.
+- **Metric label values** join the roster of unbounded resource sinks (amendment
+  2026-08-06, origin `FC-METRICS-CARDINALITY`, bd `rc-0pyv`). A label value
+  derived from exchange data (header, body, property, correlation key) creates a
+  new time series per distinct value in backends such as Prometheus and OTel; the
+  series registry grows without eviction, so an adversary who controls exchanges
+  can inflate cardinality toward OOM. The `MetricsCollector::record_counter` and
+  `record_histogram` contract (`camel-api`) and its implementations MUST receive
+  only closed-set or otherwise bounded label values; a raw exchange-derived value
+  is never an admissible label. Enforcement is the same shape as the other sinks:
+  a rustdoc contract on the trait plus a crate-local soft cap (warn-and-drop past
+  N distinct series per name). This is the same principle — untrusted datum must
+  not cross into an unbounded resource decision — applied to a sink the original
+  8-instance roster did not name.
