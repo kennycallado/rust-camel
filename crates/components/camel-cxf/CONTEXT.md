@@ -1,3 +1,21 @@
+## Security posture
+
+### XML parsing delegation
+
+The Rust Component treats SOAP and WSDL XML as opaque bytes. It does not run an
+XML parser. The supervised Java CXF bridge owns XML parsing, DTD handling, and
+entity resolution. This places the XXE boundary in the sidecar, not in this
+crate. Audit parser hardening in the bridge process. See ADR-0032 for the trust
+boundary.
+
+### Credential channel separation
+
+The bridge process receives keystore, truststore, and signature passwords
+through per-profile environment variables. `CxfProfileEnvVars` wraps these
+values in `Redacted` while it builds the child-process configuration. gRPC
+requests carry only the configured `security_profile` selector. They do not
+carry password bytes. See ADR-0051 for credential redaction requirements.
+
 ## Log-level policy
 
 Per ADR-0012:
