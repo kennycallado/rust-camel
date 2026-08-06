@@ -1,3 +1,41 @@
+## Trust boundary and credential redaction
+
+### Exchange data
+
+ADR-0032 defines request headers, body, query values, path values, and path
+parameters as untrusted exchange data. The HTTP Consumer copies this data into
+`exchange.input` without validation or redaction. Each route must validate the
+data where it crosses into a control action, resource decision, or
+executable/interpretable sink.
+
+The Consumer bounds resource use with a 2 MiB default request-body limit, a
+read timeout, and an in-flight request semaphore. The Producer has a 10 MiB
+default response-body limit.
+
+### Credential redaction
+
+`HttpAuth` implements `Debug` manually and redacts passwords and bearer tokens.
+`ServerTlsConfig` also implements `Debug` manually and redacts certificate and
+key paths. Follow these patterns for types that contain credentials or sensitive
+paths.
+
+`TlsConfig` currently derives `Debug` and can expose `client_key_path`. Do not
+log `HttpConfig` or `TlsConfig` with `Debug` formatting until that code finding
+is fixed.
+
+### Outbound SSRF and TLS defaults
+
+The Producer validates each outbound URL and redirect hop. By default,
+`allow_internal=false` rejects internal addresses. DNS resolution pins validated
+addresses with `resolve_to_addrs` to prevent DNS rebinding. Cross-origin
+redirects remove `Authorization` and `Cookie` headers. When
+`allow_internal=true`, cleartext HTTP to public addresses remains forbidden.
+
+`TlsConfig` verifies peer certificates by default. The Producer disables
+verification only when an operator sets `tls.insecure=true` or
+`tls.verify_peer=false`, and it emits a warning. The Consumer rejects a partial
+server TLS configuration that supplies only a certificate or only a key.
+
 ## Log-level policy
 
 Per ADR-0012, this component's `error!` sites are categorized as:
