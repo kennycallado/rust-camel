@@ -74,6 +74,7 @@ are a convenience index and may lag the file.
 - [0046](./docs/adr/0046-apache-camel-inspiration-not-conformance.md) — Apache Camel is design-inspiration corpus, not conformance authority; consultation protocol (trigger by divergence-density, 3 tests, classify-while-reading, native tests, KPI = divergences-documentadas/EIP); rejects `cargo xtask port-camel-test`
 - [0047](./docs/adr/0047-template-rendering-engine.md) — MiniJinja-based external template rendering engine: operator-owned file sources (openat-confined closure walk), compile-once in-memory `TemplateSet`, and atomic hot-reload (all-or-nothing `reload_route`) behind the `template:` producer scheme
 - [0050](./docs/adr/0050-wasm-sandbox-capability-posture.md) — Per-world WASM capability posture: explicit Camel grants and selective WASI registration; no filesystem, sockets, environment, CLI, or stdio by default
+- [0051](./docs/adr/0051-credential-redaction-at-diagnostic-boundaries.md) — Credential-bearing types use manual redacting `Debug` or a tested redacting wrapper; general-purpose `Serialize` must not expose credential bytes; credential-file paths are metadata, not credential bytes
 
 ## Key Terms
 
@@ -132,6 +133,7 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **ArcSwap<TlsAcceptor>** — gRPC uses `Arc<ArcSwap<TlsAcceptor>>` for atomic cert swap. The accept loop calls `load_full()` per connection (snapshot isolation). HTTP/WS use `axum_server::tls_rustls::RustlsConfig` which internally wraps ArcSwap; `reload_from_config()` swaps the cert. ADR-0004. (camel-component-grpc + camel-http + camel-ws)
 - **template rendering language** — A Language SPI implementation that produces structured output (HTML, JSON, prompts) by rendering templates against Exchange data. Phase 1 (`crates/languages/camel-language-minijinja`) covers inline templates only; Phase 2 (bd rc-64if, `crates/components/camel-template`) adds external file loading, includes, and hot-reload. Authority: ADR-0047.
 - **WASM sandbox capability posture** — Per-world grants across two surfaces: Camel host functions and WASI interfaces. Camel calls use explicit scheme allowlists; policy worlds deny call and store operations. WASI uses selective registration, not full-linker registration with runtime-only denial. Authority: ADR-0050. (camel-component-wasm)
+- **Credential redaction boundary** — Types that hold passwords, tokens, API keys, client secrets, private-key bytes, credential-bearing URLs, or credential-capable opaque state must not expose those values through `Debug` or general-purpose `Serialize`. Use manual redaction or a tested redacting wrapper. `Zeroizing<String>` clears memory but does not redact formatting. Credential-file paths are metadata and are outside this rule. Authority: ADR-0051. (workspace-wide)
 
 ## Documentation Authority & Refresh
 
