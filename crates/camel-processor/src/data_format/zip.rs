@@ -71,6 +71,11 @@ impl DataFormat for ZipDataFormat {
                     "cannot marshal Body::Stream — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
                 ));
             }
+            _ => {
+                return Err(CamelError::TypeConversionFailed(
+                    "ZipDataFormat::marshal does not support this body type".to_string(),
+                ));
+            }
         };
 
         if content.len() as u64 > self.config.max_input_size {
@@ -133,6 +138,11 @@ impl DataFormat for ZipDataFormat {
                 return Err(CamelError::TypeConversionFailed(
                     "ZipDataFormat::unmarshal only supports Body::Bytes and Body::Text (ZIP data)"
                         .to_string(),
+                ));
+            }
+            _ => {
+                return Err(CamelError::TypeConversionFailed(
+                    "ZipDataFormat::unmarshal does not support this body type".to_string(),
                 ));
             }
         };

@@ -77,10 +77,6 @@ pub async fn build_ssrf_pinned_client(
     }
 
     let validated_addrs: Vec<std::net::SocketAddr> = match options.policy {
-        SsrfPolicy::PublicHttpsOnly => resolved
-            .into_iter()
-            .filter(|sa| !camel_api::is_ssrf_blocked_ip(&sa.ip()))
-            .collect(),
         SsrfPolicy::AllowInternal => {
             // HTTP over public IP is cleartext to internet — reject.
             if parsed.scheme() == "http"
@@ -94,6 +90,12 @@ pub async fn build_ssrf_pinned_client(
             }
             resolved
         }
+        // PublicHttpsOnly and any future variant fail closed: filter
+        // SSRF-blocked IPs.
+        _ => resolved
+            .into_iter()
+            .filter(|sa| !camel_api::is_ssrf_blocked_ip(&sa.ip()))
+            .collect(),
     };
 
     if validated_addrs.is_empty() {
@@ -131,7 +133,13 @@ pub fn validate_uri(uri: &str, label: &str, policy: SsrfPolicy) -> Result<url::U
     let host = parsed.host_str().unwrap_or("");
 
     match policy {
-        SsrfPolicy::PublicHttpsOnly => {
+        SsrfPolicy::AllowInternal => {
+            // Accept http and https; IP-gated decision deferred to async layer.
+            // Only reject obviously non-http(s) schemes (already handled above).
+        }
+        // PublicHttpsOnly and any future variant fail closed: require HTTPS
+        // and reject private/loopback hosts.
+        _ => {
             if parsed.scheme() != "https" {
                 return Err(AuthError::ConfigError(format!(
                     "{label} must use HTTPS (got scheme '{}')",
@@ -143,10 +151,6 @@ pub fn validate_uri(uri: &str, label: &str, policy: SsrfPolicy) -> Result<url::U
                     "{label} host '{host}' is a private or loopback address (SSRF guard)"
                 )));
             }
-        }
-        SsrfPolicy::AllowInternal => {
-            // Accept http and https; IP-gated decision deferred to async layer.
-            // Only reject obviously non-http(s) schemes (already handled above).
         }
     }
 

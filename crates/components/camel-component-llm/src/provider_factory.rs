@@ -75,18 +75,19 @@ pub fn validate_llm_url_pinned(
     for addr in &addrs {
         let is_blocked = camel_api::is_ssrf_blocked_ip(&addr.ip());
         match policy {
-            SsrfPolicy::PublicHttpsOnly => {
-                if is_blocked {
-                    return Err(LlmError::InvalidRequest(format!(
-                        "llm base_url resolves to blocked SSRF address: {}",
-                        addr.ip()
-                    )));
-                }
-            }
             SsrfPolicy::AllowInternal => {
                 if scheme_is_http && !is_blocked {
                     return Err(LlmError::InvalidRequest(format!(
                         "llm base_url resolves to public IP {} — HTTP not permitted (use HTTPS or allow_internal for internal only)",
+                        addr.ip()
+                    )));
+                }
+            }
+            // PublicHttpsOnly and any future variant fail closed: reject blocked IPs.
+            _ => {
+                if is_blocked {
+                    return Err(LlmError::InvalidRequest(format!(
+                        "llm base_url resolves to blocked SSRF address: {}",
                         addr.ip()
                     )));
                 }

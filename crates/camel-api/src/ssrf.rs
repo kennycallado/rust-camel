@@ -23,6 +23,7 @@ use std::net::IpAddr;
 /// HTTP scheme **only when all resolved IPs are internal**. Public IPs
 /// over HTTP remain blocked to prevent cleartext credentials to the internet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum SsrfPolicy {
     #[default]
     PublicHttpsOnly,

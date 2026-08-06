@@ -9,6 +9,7 @@
 /// resequencer window). Timeout values are in milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[non_exhaustive]
 pub enum BatchCompletion {
     /// Emit when `size` exchanges accumulate for a correlation key.
     Size(usize),
@@ -21,6 +22,7 @@ pub enum BatchCompletion {
 /// What to do when a stream resequencer gap timer fires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[non_exhaustive]
 pub enum GapPolicy {
     /// Emit the contiguous run from `next_expected` and advance past the gap.
     EmitPartial,
@@ -31,6 +33,7 @@ pub enum GapPolicy {
 /// What to do when the stream resequencer priority queue reaches capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[non_exhaustive]
 pub enum CapacityPolicy {
     /// Log a warning and drop the incoming exchange (no dead-letter sink wired).
     LogAndDrop,
@@ -41,6 +44,7 @@ pub enum CapacityPolicy {
 /// Configurable resequencing policy mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[non_exhaustive]
 pub enum ResequenceMode {
     /// Window-based batch resequencing.
     Batch {

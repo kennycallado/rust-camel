@@ -70,6 +70,9 @@ impl HealthSource for ContextHealthSource {
                 ServiceStatus::Started => HealthStatus::Healthy,
                 ServiceStatus::Stopped => HealthStatus::Degraded,
                 ServiceStatus::Failed => HealthStatus::Unhealthy,
+                // Forward-safe fail-closed: an unknown future ServiceStatus keeps
+                // the pod NotReady (no traffic) rather than guessing Degraded.
+                _ => HealthStatus::Unhealthy,
             };
             if matches!(worst, HealthStatus::Healthy)
                 && matches!(health, HealthStatus::Degraded | HealthStatus::Unhealthy)

@@ -9,6 +9,12 @@ shared `LanguageError`. It owns no engine: each language crate implements these 
 > This file documents the **SPI-contract** angle — trait object-safety, the sync/async split, the
 > default `NotSupported` behavior, and the error type — without re-defining those terms.
 
+## `#[non_exhaustive]` posture
+
+ADR-0049 places this contract crate in its mandatory scope. The single `pub enum`,
+`LanguageError`, carries `#[non_exhaustive]`. New contract enums use `#[non_exhaustive]` from
+birth. Compliance is enforced by `cargo xtask lint-non-exhaustive`.
+
 ## Language
 
 **Language (trait)**:

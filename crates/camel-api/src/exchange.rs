@@ -42,6 +42,7 @@ pub const PROPERTY_EXCEPTION_CAUGHT: &str = "CamelExceptionCaught";
 pub const PROPERTY_EXCEPTION_HANDLED: &str = "CamelExceptionHandled";
 
 /// The exchange pattern (fire-and-forget or request-reply).
+/// exhaustive-by-contract: the InOnly|InOut MEP dichotomy is a fixed, spec-level closed set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExchangePattern {
     /// Fire-and-forget: message sent, no reply expected.

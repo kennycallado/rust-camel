@@ -211,51 +211,6 @@ impl camel_api::RouteController for DefaultRouteController {
 
         // Spawn pipeline task with its own cancellation token
         let pipeline_handle = match effective_concurrency {
-            ConcurrencyModel::Sequential => {
-                tokio::spawn(async move {
-                    loop {
-                        // Use select! to exit promptly on cancellation even when idle
-                        let envelope = tokio::select! {
-                            envelope = rx.recv() => match envelope {
-                                Some(e) => e,
-                                None => return, // Channel closed
-                            },
-                            _ = pipeline_cancel.cancelled() => {
-                                // Cancellation requested - exit gracefully
-                                return;
-                            }
-                        };
-                        let ExchangeEnvelope { exchange, reply_tx } = envelope;
-
-                        // Load current pipeline from ArcSwap (picks up hot-reloaded pipelines)
-                        let mut pipeline = pipeline.load().processor.clone_inner();
-
-                        if let Err(e) = ready_with_backoff(&mut pipeline, &pipeline_cancel).await {
-                            if let Some(tx) = reply_tx {
-                                let _ = tx.send(Err(e));
-                            }
-                            return;
-                        }
-
-                        // B1: scope CANCEL_TOKEN so run_steps can check cancellation
-                        // between steps. Per-start task-local — child token expires
-                        // when this pipeline task exits; the next start re-scopes a
-                        // fresh one (avoids the lifecycle bug where a compiled-in
-                        // child token stays cancelled after stop→restart).
-                        let cancel = pipeline_cancel.clone();
-                        let _drain_guard = DrainGuard::new(Arc::clone(&drain_in_flight));
-                        let result = CANCEL_TOKEN
-                            .scope(cancel, async move { pipeline.call(exchange).await })
-                            .await;
-                        if let Some(tx) = reply_tx {
-                            let _ = tx.send(result);
-                        } else if let Err(ref e) = result {
-                            // log-policy: system-broken
-                            error!("Pipeline error: {e}");
-                        }
-                    }
-                })
-            }
             ConcurrencyModel::Concurrent { max } => {
                 let sem = max.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
                 tokio::spawn(async move {
@@ -312,6 +267,56 @@ impl camel_api::RouteController for DefaultRouteController {
                                 error!("Pipeline error: {e}");
                             }
                         });
+                    }
+                })
+            }
+            // Forward-compat: an unknown future variant is treated as
+            // Sequential — the safe, simplest pipeline topology. A consumer
+            // that needs Concurrent semantics for a future variant must
+            // override the route's `?concurrent=` setting explicitly so the
+            // operator (not the wildcard) chooses the topology.
+            _ => {
+                tokio::spawn(async move {
+                    loop {
+                        // Use select! to exit promptly on cancellation even when idle
+                        let envelope = tokio::select! {
+                            envelope = rx.recv() => match envelope {
+                                Some(e) => e,
+                                None => return, // Channel closed
+                            },
+                            _ = pipeline_cancel.cancelled() => {
+                                // Cancellation requested - exit gracefully
+                                return;
+                            }
+                        };
+                        let ExchangeEnvelope { exchange, reply_tx } = envelope;
+
+                        // Load current pipeline from ArcSwap (picks up hot-reloaded pipelines)
+                        let mut pipeline = pipeline.load().processor.clone_inner();
+
+                        if let Err(e) = ready_with_backoff(&mut pipeline, &pipeline_cancel).await {
+                            if let Some(tx) = reply_tx {
+                                let _ = tx.send(Err(e));
+                            }
+                            return;
+                        }
+
+                        // B1: scope CANCEL_TOKEN so run_steps can check cancellation
+                        // between steps. Per-start task-local — child token expires
+                        // when this pipeline task exits; the next start re-scopes a
+                        // fresh one (avoids the lifecycle bug where a compiled-in
+                        // child token stays cancelled after stop→restart).
+                        let cancel = pipeline_cancel.clone();
+                        let _drain_guard = DrainGuard::new(Arc::clone(&drain_in_flight));
+                        let result = CANCEL_TOKEN
+                            .scope(cancel, async move { pipeline.call(exchange).await })
+                            .await;
+                        if let Some(tx) = reply_tx {
+                            let _ = tx.send(result);
+                        } else if let Err(ref e) = result {
+                            // log-policy: system-broken
+                            error!("Pipeline error: {e}");
+                        }
                     }
                 })
             }

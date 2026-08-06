@@ -116,8 +116,9 @@ impl BatchPolicy {
     fn is_complete_by_size(&self, count: usize) -> bool {
         match self.completion {
             BatchCompletion::Size(s) => count >= s,
-            BatchCompletion::Timeout(_) => false,
             BatchCompletion::SizeOrTimeout(s, _) => count >= s,
+            // Timeout and any future variant are not size-complete.
+            _ => false,
         }
     }
 

@@ -35,6 +35,7 @@ pub struct ExchangeEnvelope {
 /// Adding this as a default-returning trait method keeps every existing
 /// `Consumer` impl backward compatible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ConsumerStartupMode {
     /// Consumer's `start()` IS the lifetime loop. The runtime treats the
     /// consumer as ready the moment `start()` is invoked. (Default)
@@ -371,6 +372,7 @@ impl std::fmt::Debug for SecurityContext {
 
 /// How a consumer's exchanges should be processed by the pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConcurrencyModel {
     /// Exchanges are processed one at a time, in order. Default for polling
     /// consumers (timer, file) and synchronous consumers (direct).

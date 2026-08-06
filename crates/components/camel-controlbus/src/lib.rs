@@ -401,6 +401,10 @@ async fn execute_runtime_action(
                 "controlbus: runtime returned unexpected response for route status".to_string(),
             )),
         },
+        // Future RouteAction variants are unsupported.
+        _ => Err(CamelError::ProcessorError(
+            "controlbus: unsupported route action".to_string(),
+        )),
     }
 }
 
@@ -473,6 +477,7 @@ mod tests {
                 }
                 RuntimeCommand::ReloadTlsCerts { .. } => "reload_tls_certs".to_string(),
                 RuntimeCommand::ReloadTemplates { .. } => "reload_templates".to_string(),
+                _ => "unknown_command".to_string(),
             };
             self.commands.lock().await.push(marker);
             Ok(RuntimeCommandResult::Accepted)
@@ -530,6 +535,7 @@ mod tests {
             RouteStatus::Stopping => "Stopping".to_string(),
             RouteStatus::Suspended => "Suspended".to_string(),
             RouteStatus::Failed(msg) => format!("Failed: {msg}"),
+            _ => "Unknown".to_string(),
         }
     }
 

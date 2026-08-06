@@ -261,7 +261,8 @@ impl HealthCheckRegistry {
             let status = match result.status {
                 HealthStatus::Healthy => camel_api::ServiceStatus::Started,
                 HealthStatus::Degraded => camel_api::ServiceStatus::Started,
-                HealthStatus::Unhealthy => camel_api::ServiceStatus::Failed,
+                // Unhealthy and any future variant map to Failed (fail closed).
+                _ => camel_api::ServiceStatus::Failed,
             };
             services.push(ServiceHealth {
                 name: result.name,

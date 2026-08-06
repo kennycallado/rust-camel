@@ -133,6 +133,10 @@ fn map_invocation_error(err: FunctionInvocationError, id: &FunctionId) -> CamelE
         FunctionInvocationError::InvalidPatch(msg) => {
             CamelError::ProcessorError(format!("function:invalid_patch: {}: {}", id.0, msg))
         }
+        _ => CamelError::ProcessorError(format!(
+            "function:error: {}: unknown invocation error",
+            id.0
+        )),
     }
 }
 
@@ -142,6 +146,8 @@ fn apply_patch(ex: &mut Exchange, patch: ExchangePatch) {
             PatchBody::Text(s) => s.into(),
             PatchBody::Json(v) => v.into(),
             PatchBody::Empty => camel_api::Body::Empty,
+            // Future PatchBody variants leave the body unchanged.
+            _ => ex.input.body.clone(),
         };
     }
     for (k, v) in patch.headers_set {

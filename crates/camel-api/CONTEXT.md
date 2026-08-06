@@ -11,6 +11,21 @@ execution engine, no registries, no lifecycle implementation.
 > When a term means "the shape of the data/contract", define it here; when it means "what the
 > runtime does with it", define it in camel-core and cross-link.
 
+## `#[non_exhaustive]` posture
+
+ADR-0049 places this contract crate in its mandatory scope: every `pub enum` is
+`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 53 `pub enum`s
+split into:
+
+| Category | Count | Posture |
+|---|---|---|
+| `#[non_exhaustive]` | 51 | 48 attributed by rc-3pw3 + 3 pre-existing (`CamelError`, `ConfigValidationError`, `TemplateError`). |
+| `exhaustive-by-contract` exception | 2 | `PipelineOutcome` (the ADR-0024 outcome algebra) and `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
+
+New contract enums use `#[non_exhaustive]` from birth; a closed-set exception needs a
+`/// exhaustive-by-contract: <rationale>` note. ADR-0049 Rule 3 governs public structs (out of
+the enum mandate). Compliance is enforced by `cargo xtask lint-non-exhaustive`.
+
 ## Language
 
 **Exchange**:

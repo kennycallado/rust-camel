@@ -159,6 +159,7 @@ impl AsyncRead for StreamAsyncRead {
 
 /// The body of a message, supporting common payload types.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub enum Body {
     /// No body content.
     #[default]

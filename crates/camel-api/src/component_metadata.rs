@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[cfg_attr(feature = "schema", ts(rename_all = "snake_case"))]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum OptionKind {
     String,
     Int,

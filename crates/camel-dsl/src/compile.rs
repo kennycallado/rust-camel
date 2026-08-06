@@ -354,10 +354,11 @@ pub fn compile_canonical_route(
 
     if let Some(concurrency) = spec.concurrency {
         definition = definition.with_concurrency(match concurrency {
-            CanonicalConcurrencySpec::Sequential => ConcurrencyModel::Sequential,
             CanonicalConcurrencySpec::Concurrent { max } => {
                 ConcurrencyModel::Concurrent { max: Some(max) }
             }
+            // Sequential and any future variant default to sequential execution.
+            _ => ConcurrencyModel::Sequential,
         });
     }
 
@@ -435,6 +436,9 @@ pub fn compile_canonical_step(
             stream_cache_threshold,
         ),
         CanonicalStepSpec::Aggregate(config) => compile_canonical_aggregate(config),
+        _ => Err(CamelError::RouteError(
+            "unsupported canonical step".to_string(),
+        )),
     }
 }
 
@@ -461,6 +465,11 @@ fn compile_canonical_split(
         CanonicalSplitAggregationSpec::LastWins => SplitAggregation::LastWins,
         CanonicalSplitAggregationSpec::CollectAll => SplitAggregation::CollectAll,
         CanonicalSplitAggregationSpec::Original => SplitAggregation::Original,
+        _ => {
+            return Err(CamelError::RouteError(
+                "unsupported split aggregation".to_string(),
+            ));
+        }
     };
     let compiled_steps = compile_canonical_steps(steps, stream_cache_threshold)?;
     match expression {
@@ -510,6 +519,9 @@ fn compile_canonical_split(
                 steps: compiled_steps,
             })
         }
+        _ => Err(CamelError::RouteError(
+            "unsupported split expression".to_string(),
+        )),
     }
 }
 
@@ -532,6 +544,11 @@ fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<Builder
     builder = match config.strategy {
         CanonicalAggregateStrategySpec::CollectAll => {
             builder.strategy(AggregatorStrategy::CollectAll)
+        }
+        _ => {
+            return Err(CamelError::RouteError(
+                "unsupported aggregate strategy".to_string(),
+            ));
         }
     };
     if let Some(max_buckets) = config.max_buckets {
@@ -836,6 +853,9 @@ fn compile_declarative_step_with_threshold(
                     level: compiled_level,
                     message,
                 }),
+                _ => Err(CamelError::RouteError(
+                    "unsupported log message source".to_string(),
+                )),
             }
         }
         DeclarativeStep::SetHeader(SetHeaderStepDef { key, value }) => {
@@ -1437,6 +1457,9 @@ fn compile_log_message(message: ValueSourceDef) -> Result<String, CamelError> {
             }
             Ok(source)
         }
+        _ => Err(CamelError::RouteError(
+            "unsupported log message source".to_string(),
+        )),
     }
 }
 

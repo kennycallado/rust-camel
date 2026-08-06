@@ -25,6 +25,7 @@ pub type StreamingSplitExpression = Arc<
 
 /// Strategy for aggregating fragment results back into a single exchange.
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub enum AggregationStrategy {
     /// Result is the last fragment's exchange (default).
     #[default]
@@ -62,6 +63,7 @@ impl std::fmt::Debug for AggregationStrategy {
 )]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StreamSplitFormat {
     /// Auto-detect the format from the body content.
     #[default]

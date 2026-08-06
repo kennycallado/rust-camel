@@ -40,6 +40,7 @@ impl SimulatedLeadershipService {
         match event {
             LeadershipEvent::StartedLeading => eprintln!("[platform] leadership acquired"),
             LeadershipEvent::StoppedLeading => eprintln!("[platform] leadership lost"),
+            _ => {}
         }
 
         let mut senders = self.senders.lock().await;

@@ -407,7 +407,8 @@ impl KubernetesPlatformService {
                             warn!(error = %err, "failed to notify kubernetes readiness state");
                         }
                     }
-                    camel_api::HealthStatus::Unhealthy => {
+                    // Unhealthy and any future variant keep the pod not-ready (fail closed).
+                    _ => {
                         if let Err(err) = readiness_gate.notify_not_ready("Unhealthy").await {
                             warn!(error = %err, "failed to notify kubernetes readiness state");
                         }

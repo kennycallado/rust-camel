@@ -231,6 +231,8 @@ pub(crate) async fn reconcile_event(
             tracing::info!(lock = %ctx.lock_name, "metrics emission placeholder: leadership lost");
             stop_delegate(state, ctx.drain_timeout).await?;
         }
+        // Future leadership events require no state change.
+        _ => {}
     }
     Ok(())
 }

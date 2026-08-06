@@ -485,6 +485,10 @@ async fn extract_correlation_key(
         CorrelationStrategy::Fn(f) => f(exchange).map(serde_json::Value::String).ok_or_else(|| {
             CamelError::ProcessorError("Aggregator: correlation function returned None".to_string())
         }),
+        // Future correlation strategies are unsupported here.
+        _ => Err(CamelError::ProcessorError(
+            "Aggregator: unsupported correlation strategy".to_string(),
+        )),
     }
 }
 
@@ -559,6 +563,8 @@ fn check_sync_completion(
             }
             (false, CompletionReason::Size)
         }
+        // Future completion modes are not synchronously complete.
+        _ => (false, CompletionReason::Size),
     }
 }
 
@@ -574,6 +580,8 @@ fn check_single(
             (predicate_satisfied, CompletionReason::Predicate)
         }
         CompletionCondition::Timeout(_) => (false, CompletionReason::Timeout),
+        // Future condition types cannot be evaluated synchronously.
+        _ => (false, CompletionReason::Size),
     }
 }
 
@@ -695,7 +703,6 @@ fn aggregate(
                     Body::Bytes(b) => {
                         serde_json::Value::String(String::from_utf8_lossy(&b).into_owned())
                     }
-                    Body::Empty => serde_json::Value::Null,
                     Body::Stream(s) => serde_json::json!({
                         "_stream": {
                             "origin": s.metadata.origin,
@@ -703,6 +710,8 @@ fn aggregate(
                             "hint": "Materialize exchange body with .into_bytes() before aggregation if content needed"
                         }
                     }),
+                    // Empty and future variants contribute no extractable value.
+                    _ => serde_json::Value::Null,
                 })
                 .collect();
             Ok(Exchange::new(Message {
@@ -717,6 +726,10 @@ fn aggregate(
             })?;
             Ok(iter.fold(first, |acc, next| f(acc, next)))
         }
+        // Future aggregation strategies are unsupported here.
+        _ => Err(CamelError::ProcessorError(
+            "Aggregator: unsupported aggregation strategy".to_string(),
+        )),
     }
 }
 

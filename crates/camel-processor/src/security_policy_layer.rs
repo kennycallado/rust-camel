@@ -81,6 +81,10 @@ where
                     Err(CamelError::Unauthorized(msg))
                 }
                 Err(e) => Err(e),
+                // Future AuthorizationDecision variants fail closed.
+                _ => Err(CamelError::Unauthorized(
+                    "access denied by security policy".to_string(),
+                )),
             }
         })
     }

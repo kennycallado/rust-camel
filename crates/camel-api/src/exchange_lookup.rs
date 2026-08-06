@@ -17,6 +17,7 @@ use crate::{Body, Exchange, Value};
 /// Lives in `camel-api` so both SQL (`ExchangeLookupPath`) and Simple
 /// (`Expr::BodyField`) share the same segment type without cyclic deps.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PathSegment {
     /// Named object field: `"name"`, `"user"`.
     Key(String),
@@ -27,6 +28,7 @@ pub enum PathSegment {
 
 /// A parsed Exchange lookup path. See module docs for the grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExchangeLookupPath {
     /// `body.a.b.c` — walk JSON tree via path segments. Empty vec means
     /// "whole body" (corresponds to Simple `${body}`).
@@ -43,6 +45,7 @@ pub enum ExchangeLookupPath {
 /// Error raised by [`ExchangeLookupPath::parse`]. Aligns with ADR-0016 strict
 /// rejection: ambiguous / malformed paths are reported, never silently coerced.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum LookupPathError {
     /// The whole input was empty.
     #[error("empty lookup path")]

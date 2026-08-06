@@ -20,6 +20,7 @@ pub struct LanguageExpressionDef {
 
 /// A declarative value source for set_header / set_body.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ValueSourceDef {
     Literal(Value),
     Expression(LanguageExpressionDef),

@@ -123,9 +123,17 @@ impl OutcomePipeline for DoTrySegment {
                                 // Catch handled — exit catch chain with this exchange.
                                 PipelineOutcome::Completed(next) => {
                                     match catch.disposition {
-                                        ExceptionDisposition::Propagate => {
-                                            // Run finally with the exchange from the catch body,
-                                            // then propagate the original try error.
+                                        ExceptionDisposition::Handled => {
+                                            current_ex = next;
+                                            break;
+                                        }
+                                        ExceptionDisposition::Continued => {
+                                            current_ex = next;
+                                            break;
+                                        }
+                                        // Propagate and any future variant run finally then
+                                        // surface the original error (fail-closed).
+                                        _ => {
                                             match run_finally_body(&mut self.finally, next).await {
                                                 Ok(_) => {}
                                                 Err(FinallyOutcome::Stopped(e)) => {
@@ -141,14 +149,6 @@ impl OutcomePipeline for DoTrySegment {
                                                 }
                                             }
                                             return PipelineOutcome::Failed(err);
-                                        }
-                                        ExceptionDisposition::Handled => {
-                                            current_ex = next;
-                                            break;
-                                        }
-                                        ExceptionDisposition::Continued => {
-                                            current_ex = next;
-                                            break;
                                         }
                                     }
                                 }

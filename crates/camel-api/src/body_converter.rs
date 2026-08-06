@@ -6,6 +6,7 @@ use thiserror::Error;
 
 /// Target type for body conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BodyType {
     Text,
     Json,
@@ -15,6 +16,7 @@ pub enum BodyType {
 }
 
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum BodyConverterError {
     #[error("invalid UTF-8 input: {0}")]
     InvalidUtf8(String),

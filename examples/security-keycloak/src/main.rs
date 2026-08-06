@@ -175,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Alice vs RolePolicy[admin]: DENIED ({reason})");
         }
         Err(e) => println!("Alice vs RolePolicy[admin]: ERROR ({e})"),
+        _ => println!("Alice vs RolePolicy[admin]: UNKNOWN decision"),
     }
 
     match bob_decision {
@@ -188,6 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Bob vs RolePolicy[admin]:   DENIED ({reason})");
         }
         Err(e) => println!("Bob vs RolePolicy[admin]:   ERROR ({e})"),
+        _ => println!("Bob vs RolePolicy[admin]:   UNKNOWN decision"),
     }
 
     println!();

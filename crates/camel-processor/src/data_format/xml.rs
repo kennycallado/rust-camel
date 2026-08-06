@@ -60,6 +60,9 @@ impl DataFormat for XmlDataFormat {
                 "XmlDataFormat::marshal does not accept Body::Xml — use unmarshal to convert XML to JSON"
                     .to_string(),
             )),
+            _ => Err(CamelError::TypeConversionFailed(
+                "XmlDataFormat::marshal does not support this body type".to_string(),
+            )),
         }
     }
 
@@ -90,6 +93,9 @@ impl DataFormat for XmlDataFormat {
             Body::Empty => Err(CamelError::TypeConversionFailed(
                 "XmlDataFormat::unmarshal only supports Body::Json, Body::Text, Body::Bytes, and Body::Xml"
                     .to_string(),
+            )),
+            _ => Err(CamelError::TypeConversionFailed(
+                "XmlDataFormat::unmarshal does not support this body type".to_string(),
             )),
         }
     }

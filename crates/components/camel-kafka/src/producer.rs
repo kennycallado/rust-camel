@@ -82,6 +82,9 @@ impl KafkaProducer {
             Body::Stream(_) => Err(CamelError::ProcessorError(
                 "Body::Stream must be materialized before sending to Kafka".to_string(),
             )),
+            _ => Err(CamelError::ProcessorError(
+                "unsupported body type for Kafka producer".to_string(),
+            )),
         }
     }
 

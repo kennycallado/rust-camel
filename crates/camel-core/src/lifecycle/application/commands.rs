@@ -65,6 +65,7 @@ pub async fn execute_command(
         RuntimeCommand::ReloadTemplates { .. } => Err(CamelError::Config(
             "ReloadTemplates not handled: should be intercepted in execute()".into(),
         )),
+        _ => Err(CamelError::Config("unsupported runtime command".into())),
     }
 }
 
@@ -961,6 +962,9 @@ fn canonical_step_to_builder_step(
                 camel_api::runtime::CanonicalSplitAggregationSpec::Original => {
                     CanonicalSplitAggregation::Original
                 }
+                _ => {
+                    return Err(CamelError::Config("unsupported split aggregation".into()));
+                }
             };
             let steps = canonical_steps_to_builder_steps(steps)?;
             match expression {
@@ -1002,6 +1006,7 @@ fn canonical_step_to_builder_step(
                         steps,
                     })
                 }
+                _ => Err(CamelError::Config("unsupported split expression".into())),
             }
         }
         camel_api::runtime::CanonicalStepSpec::Aggregate(config) => {
@@ -1024,6 +1029,9 @@ fn canonical_step_to_builder_step(
             builder = match config.strategy {
                 camel_api::runtime::CanonicalAggregateStrategySpec::CollectAll => {
                     builder.strategy(CanonicalAggregateStrategy::CollectAll)
+                }
+                _ => {
+                    return Err(CamelError::Config("unsupported aggregate strategy".into()));
                 }
             };
             if let Some(max_buckets) = config.max_buckets {
@@ -1061,6 +1069,7 @@ fn canonical_step_to_builder_step(
                 max_delay_ms: camel_api::DEFAULT_MAX_DELAY_MS,
             },
         }),
+        _ => Err(CamelError::Config("unsupported canonical step".into())),
     }
 }
 

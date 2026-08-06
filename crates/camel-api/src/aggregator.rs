@@ -19,6 +19,7 @@ use crate::exchange::Exchange;
 pub type AggregationFn = Arc<dyn Fn(Exchange, Exchange) -> Exchange + Send + Sync>;
 
 /// Strategy for correlating exchanges into aggregation buckets.
+#[non_exhaustive]
 pub enum CorrelationStrategy {
     /// Correlate by the value of a named header.
     HeaderName(String),
@@ -58,6 +59,7 @@ impl Clone for CorrelationStrategy {
 
 /// How to combine collected exchanges into one.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum AggregationStrategy {
     /// Collects all bodies into Body::Json([body1, body2, ...]).
     CollectAll,
@@ -76,6 +78,7 @@ impl std::fmt::Debug for AggregationStrategy {
 
 /// When the bucket is considered complete and should be emitted.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum CompletionCondition {
     /// Emit when bucket reaches exactly N exchanges.
     Size(usize),
@@ -110,6 +113,7 @@ impl std::fmt::Debug for CompletionCondition {
 /// Determines how a bucket's completion is evaluated.
 /// `Single` wraps one condition; `Any` completes when the first condition triggers.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum CompletionMode {
     Single(CompletionCondition),
     Any(Vec<CompletionCondition>),
@@ -125,6 +129,7 @@ impl std::fmt::Debug for CompletionMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CompletionReason {
     Size,
     Predicate,

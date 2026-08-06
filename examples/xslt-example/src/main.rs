@@ -16,6 +16,7 @@ fn body_to_string(body: &Body) -> String {
         Body::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
         Body::Json(v) => v.to_string(),
         Body::Stream(_) => "<stream body>".to_string(),
+        _ => "<unknown body>".to_string(),
     }
 }
 

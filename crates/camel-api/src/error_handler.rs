@@ -90,6 +90,7 @@ impl RedeliveryPolicy {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ExceptionDisposition {
     /// After retry exhaustion / on_steps / DLC, re-throw to upstream.
     #[default]
@@ -109,6 +110,7 @@ pub struct PolicyId(pub usize);
 
 /// Result of a single retry attempt by `RouteErrorHandler::retry_step`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RetryOutcome {
     /// Retry succeeded; pipeline continues with this Exchange.
     Recovered(Exchange),
@@ -160,6 +162,7 @@ impl RetryableStep for crate::BoxProcessor {
 
 /// Result of Phase 2 (handle) of step error handling.
 /// Handled and Continued MUST have Exchange.error cleared.
+#[non_exhaustive]
 pub enum StepDisposition {
     Propagate(CamelError),
     Handled(Exchange),
@@ -168,6 +171,7 @@ pub enum StepDisposition {
 
 /// Identifies which boundary gate produced an infrastructure error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BoundaryKind {
     Security,
     CircuitBreaker,

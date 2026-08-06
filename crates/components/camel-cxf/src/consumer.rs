@@ -103,6 +103,9 @@ fn build_response_body(exchange: &Exchange) -> Result<Vec<u8>, CamelError> {
         Body::Stream(_) => Err(CamelError::ProcessorError(
             "streaming body not supported by CXF component".into(),
         )),
+        _ => Err(CamelError::ProcessorError(
+            "unsupported body type for CXF component".into(),
+        )),
     }
 }
 

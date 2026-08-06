@@ -133,12 +133,13 @@ impl Service<Exchange> for StreamingSplitterService {
                                     Body::Bytes(b) => {
                                         Value::String(String::from_utf8_lossy(b).into_owned())
                                     }
-                                    Body::Empty => Value::Null,
                                     Body::Stream(_) => {
                                         return Err(CamelError::TypeConversionFailed(
                                             "StreamingSplitter CollectAll cannot aggregate Body::Stream — use 'stream_cache' or 'convert_body_to' before this step".to_string(),
                                         ));
                                     }
+                                    // Empty and future variants contribute no value.
+                                    _ => Value::Null,
                                 };
                                 acc_bodies.push(v);
                             }
@@ -166,14 +167,15 @@ impl Service<Exchange> for StreamingSplitterService {
             }
 
             match &aggregation {
-                AggregationStrategy::LastWins => Ok(acc.unwrap_or(original)),
                 AggregationStrategy::Original => Ok(original),
                 AggregationStrategy::CollectAll => {
                     let mut out = original;
                     out.input.body = Body::Json(Value::Array(acc_bodies));
                     Ok(out)
                 }
-                AggregationStrategy::Custom(_) => Ok(acc.unwrap_or(original)),
+                // LastWins, Custom, and any future variant return the accumulated
+                // exchange (or the original if nothing accumulated).
+                _ => Ok(acc.unwrap_or(original)),
             }
         })
     }

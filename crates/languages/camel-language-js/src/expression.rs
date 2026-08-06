@@ -40,12 +40,13 @@ fn snapshot_exchange(exchange: &Exchange) -> Result<JsExchange, LanguageError> {
     let body = match &exchange.input.body {
         Body::Json(v) => v.clone(),
         Body::Text(s) | Body::Xml(s) => Value::String(s.clone()),
-        Body::Empty | Body::Bytes(_) => Value::Null,
         Body::Stream(_) => {
             return Err(LanguageError::EvalError(
                 "Body::Stream cannot be used in JS — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
             ));
         }
+        // Empty, Bytes, and any future variant expose no value to JS → null.
+        _ => Value::Null,
     };
 
     Ok(JsExchange::from_headers_body_properties(

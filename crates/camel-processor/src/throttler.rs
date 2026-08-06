@@ -121,7 +121,15 @@ impl Service<Exchange> for ThrottlerService {
                 next.call(exchange).await
             } else {
                 match config.strategy {
-                    ThrottleStrategy::Delay => {
+                    ThrottleStrategy::Reject => Err(CamelError::ProcessorError(
+                        "Throttled: rate limit exceeded".to_string(),
+                    )),
+                    ThrottleStrategy::Drop => {
+                        exchange.set_property(CAMEL_STOP, Value::Bool(true));
+                        Ok(exchange)
+                    }
+                    // Delay and any future variant wait for an available token.
+                    _ => {
                         loop {
                             let wait_time = {
                                 let limiter = limiter.lock().unwrap(); // allow-unwrap
@@ -142,13 +150,6 @@ impl Service<Exchange> for ThrottlerService {
                             tokio::task::yield_now().await;
                         }
                         next.call(exchange).await
-                    }
-                    ThrottleStrategy::Reject => Err(CamelError::ProcessorError(
-                        "Throttled: rate limit exceeded".to_string(),
-                    )),
-                    ThrottleStrategy::Drop => {
-                        exchange.set_property(CAMEL_STOP, Value::Bool(true));
-                        Ok(exchange)
                     }
                 }
             }
@@ -231,7 +232,18 @@ impl camel_api::OutcomePipeline for ThrottleSegment {
                 return self.body.run(exchange).await;
             }
             match self.config.strategy {
-                ThrottleStrategy::Delay => {
+                ThrottleStrategy::Reject => {
+                    camel_api::PipelineOutcome::Failed(camel_api::CamelError::ProcessorError(
+                        "Throttled: rate limit exceeded".to_string(),
+                    ))
+                }
+                ThrottleStrategy::Drop => {
+                    let mut ex = exchange;
+                    ex.set_property(CAMEL_STOP, camel_api::Value::Bool(true));
+                    camel_api::PipelineOutcome::Stopped(ex)
+                }
+                // Delay and any future variant wait for an available token.
+                _ => {
                     loop {
                         let wait_time = {
                             let limiter = self.limiter.lock().unwrap(); // allow-unwrap
@@ -250,16 +262,6 @@ impl camel_api::OutcomePipeline for ThrottleSegment {
                         tokio::task::yield_now().await;
                     }
                     self.body.run(exchange).await
-                }
-                ThrottleStrategy::Reject => {
-                    camel_api::PipelineOutcome::Failed(camel_api::CamelError::ProcessorError(
-                        "Throttled: rate limit exceeded".to_string(),
-                    ))
-                }
-                ThrottleStrategy::Drop => {
-                    let mut ex = exchange;
-                    ex.set_property(CAMEL_STOP, camel_api::Value::Bool(true));
-                    camel_api::PipelineOutcome::Stopped(ex)
                 }
             }
         })

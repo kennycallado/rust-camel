@@ -382,6 +382,11 @@ impl<'a> serde::Serialize for BodyAsJson<'a> {
             Body::Xml(x) => s.serialize_str(x),
             Body::Bytes(b) => s.serialize_str(&String::from_utf8_lossy(b)),
             Body::Stream(_) => unreachable!("S4 rejects Body::Stream before context build"),
+            // Future Body variants cannot be meaningfully serialized into the
+            // template context — surface a serializer error instead of guessing.
+            _ => Err(<S::Error as serde::ser::Error>::custom(
+                "minijinja context: unsupported Body variant",
+            )),
         }
     }
 }

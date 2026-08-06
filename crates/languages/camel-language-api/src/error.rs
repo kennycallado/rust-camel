@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LanguageError {
     #[error("parse error in expression `{expr}`: {reason}")]
     ParseError { expr: String, reason: String },

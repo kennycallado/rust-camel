@@ -241,6 +241,11 @@ impl LlmProducer {
                     "stream body must be materialized before sending to LLM producer".into(),
                 ));
             }
+            _ => {
+                return Err(CamelError::ProcessorError(
+                    "unsupported body type for LLM producer".into(),
+                ));
+            }
         };
 
         if prompt.len() > self.max_prompt_bytes {

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 /// Represents the current lifecycle status of a route.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteStatus {
     /// Route is stopped and not running.
     Stopped,
@@ -26,6 +27,7 @@ pub enum RouteStatus {
 
 /// Represents actions that can be performed on a route.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum RouteAction {
     /// Start the route.
     Start,

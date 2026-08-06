@@ -56,9 +56,6 @@ impl Service<Exchange> for LoadBalancerService {
             }
 
             match &config.strategy {
-                LoadBalanceStrategy::RoundRobin => {
-                    process_round_robin(exchange, endpoints, round_robin_index).await
-                }
                 LoadBalanceStrategy::Random => process_random(exchange, endpoints).await,
                 LoadBalanceStrategy::Weighted(weights) => {
                     process_weighted(exchange, endpoints, weights).await
@@ -66,6 +63,8 @@ impl Service<Exchange> for LoadBalancerService {
                 LoadBalanceStrategy::Failover => {
                     process_failover(exchange, endpoints, failover_index).await
                 }
+                // RoundRobin and any future variant default to round-robin dispatch.
+                _ => process_round_robin(exchange, endpoints, round_robin_index).await,
             }
         })
     }
@@ -192,12 +191,11 @@ impl camel_api::OutcomePipeline for LoadBalanceSegment {
             }
 
             let start_idx = match &self.strategy {
-                camel_api::LoadBalanceStrategy::RoundRobin => {
-                    self.round_robin_index.fetch_add(1, Ordering::SeqCst) % len
-                }
                 camel_api::LoadBalanceStrategy::Random => rand::random_range(0..len),
                 camel_api::LoadBalanceStrategy::Weighted(weights) => pick_weighted(weights, len),
                 camel_api::LoadBalanceStrategy::Failover => 0,
+                // RoundRobin and any future variant default to round-robin indexing.
+                _ => self.round_robin_index.fetch_add(1, Ordering::SeqCst) % len,
             };
 
             let mut idx = start_idx;

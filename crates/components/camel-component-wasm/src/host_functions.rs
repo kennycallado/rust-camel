@@ -146,6 +146,7 @@ async fn run_async_call(
             camel_api::Body::Xml(s) => s.clone(),
             camel_api::Body::Empty => String::new(),
             camel_api::Body::Stream(_) => "<stream>".to_string(),
+            _ => String::new(),
         },
         None => match &result.input.body {
             camel_api::Body::Text(s) => s.clone(),
@@ -154,6 +155,7 @@ async fn run_async_call(
             camel_api::Body::Xml(s) => s.clone(),
             camel_api::Body::Empty => String::new(),
             camel_api::Body::Stream(_) => "<stream>".to_string(),
+            _ => String::new(),
         },
     };
 

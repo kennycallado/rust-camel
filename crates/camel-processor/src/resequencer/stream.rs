@@ -241,7 +241,9 @@ impl StreamPolicy {
                         }
                     }
                 }
-                GapPolicy::DropAndLog => {
+                // DropAndLog and any future variant clean up held exchanges
+                // without violating resequencing order (drop + log).
+                _ => {
                     let (held, max_seq) = policy.drain_all_with_max();
 
                     if held.is_empty() {
@@ -250,14 +252,12 @@ impl StreamPolicy {
 
                     policy.set_next_expected(max_seq + 1);
 
-                    // Drop-and-log: log and drop (best-effort, no dead-letter sink)
                     for ex in &held {
                         tracing::warn!(
                             correlation_id = %ex.correlation_id(),
                             "stream resequencer: gap timeout — dropping held exchange (no dead-letter sink wired)"
                         );
                     }
-                    // Held exchanges are dropped
                     let _ = held;
                 }
             }
@@ -343,14 +343,6 @@ impl ResequencePolicy for StreamPolicy {
                 // Capacity overflow check
                 if queue_len >= self.capacity {
                     match self.on_capacity_exceeded {
-                        CapacityPolicy::LogAndDrop => {
-                            tracing::warn!(
-                                seq = seq,
-                                capacity = self.capacity,
-                                "StreamPolicy: capacity exceeded, dropping incoming exchange"
-                            );
-                            return vec![];
-                        }
                         CapacityPolicy::DropOldest => {
                             // Remove the smallest seq in the queue
                             let oldest_key = queue.keys().next().copied();
@@ -363,6 +355,15 @@ impl ResequencePolicy for StreamPolicy {
                                 );
                                 let _ = dropped;
                             }
+                        }
+                        // LogAndDrop and any future variant drop the incoming exchange.
+                        _ => {
+                            tracing::warn!(
+                                seq = seq,
+                                capacity = self.capacity,
+                                "StreamPolicy: capacity exceeded, dropping incoming exchange"
+                            );
+                            return vec![];
                         }
                     }
                 }

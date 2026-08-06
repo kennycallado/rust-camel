@@ -6,6 +6,7 @@ use std::time::Duration;
 pub type MulticastAggregationFn = Arc<dyn Fn(Exchange, Exchange) -> Exchange + Send + Sync>;
 
 #[derive(Clone, Default)]
+#[non_exhaustive]
 pub enum MulticastStrategy {
     #[default]
     LastWins,

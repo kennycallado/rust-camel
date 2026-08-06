@@ -153,6 +153,9 @@ impl OpenSearchProducer {
                 "Stream body not supported for OpenSearch operations. Materialize first."
                     .to_string(),
             )),
+            _ => Err(CamelError::TypeConversionFailed(
+                "unsupported body type for OpenSearch operations".to_string(),
+            )),
         }
     }
 

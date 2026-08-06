@@ -291,6 +291,11 @@ impl CsvDataFormat {
                         "CsvDataFormat::unmarshal does not accept Body::Xml".into(),
                     ));
                 }
+                _ => {
+                    return Err(CamelError::TypeConversionFailed(
+                        "CsvDataFormat::unmarshal expects Body::Text or Body::Bytes".into(),
+                    ));
+                }
             };
 
         let mut rdr_builder = csv::ReaderBuilder::new();
@@ -462,6 +467,11 @@ impl DataFormat for CsvDataFormat {
                 "CsvDataFormat::marshal does not accept Body::Xml — use unmarshal(\"xml\") first"
                     .into(),
             )),
+            _ => {
+                return Err(CamelError::TypeConversionFailed(
+                    "CsvDataFormat::marshal expects Body::Json".into(),
+                ));
+            }
         };
 
         let mut wtr_builder = csv::WriterBuilder::new();

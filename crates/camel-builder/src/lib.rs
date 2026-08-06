@@ -984,6 +984,9 @@ fn canonicalize_split_aggregation(
         camel_api::splitter::AggregationStrategy::Original => {
             Ok(CanonicalSplitAggregationSpec::Original)
         }
+        _ => Err(CamelError::RouteError(
+            "canonical v1 does not support this split aggregation strategy".to_string(),
+        )),
     }
 }
 
@@ -1001,6 +1004,9 @@ fn extract_completion_fields(
                         .to_string(),
                 ))
             }
+            _ => Err(CamelError::RouteError(
+                "unsupported completion condition".to_string(),
+            )),
         },
         CompletionMode::Any(conds) => {
             let mut size = None;
@@ -1017,10 +1023,18 @@ fn extract_completion_fields(
                                 .to_string(),
                         ));
                     }
+                    _ => {
+                        return Err(CamelError::RouteError(
+                            "unsupported completion condition".to_string(),
+                        ));
+                    }
                 }
             }
             Ok((size, timeout_ms))
         }
+        _ => Err(CamelError::RouteError(
+            "unsupported completion mode".to_string(),
+        )),
     }
 }
 
@@ -1035,12 +1049,20 @@ fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregate
                 "canonical v1 does not support Fn correlation strategy".to_string(),
             ));
         }
+        _ => {
+            return Err(CamelError::RouteError(
+                "canonical v1 does not support this correlation strategy".to_string(),
+            ));
+        }
     };
 
     let correlation_key = match &config.correlation {
         CorrelationStrategy::HeaderName(_) => None,
         CorrelationStrategy::Expression { expr, .. } => Some(expr.clone()),
-        CorrelationStrategy::Fn(_) => unreachable!(),
+        // INVARIANT: every other correlation variant (Fn and any future
+        // variant) is rejected by the `header` match above, which returns
+        // early — so this branch is unreachable here.
+        _ => unreachable!(),
     };
 
     let strategy = match config.strategy {
@@ -1048,6 +1070,11 @@ fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregate
         AggregationStrategy::Custom(_) => {
             return Err(CamelError::RouteError(
                 "canonical v1 does not support custom aggregate strategy".to_string(),
+            ));
+        }
+        _ => {
+            return Err(CamelError::RouteError(
+                "canonical v1 does not support this aggregate strategy".to_string(),
             ));
         }
     };

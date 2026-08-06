@@ -115,6 +115,9 @@ impl CxfProducer {
             Body::Stream(_) => Err(CamelError::ProcessorError(
                 "Body::Stream must be materialized before sending to CXF".to_string(),
             )),
+            _ => Err(CamelError::ProcessorError(
+                "unsupported body type for CXF producer".to_string(),
+            )),
         }
     }
 }

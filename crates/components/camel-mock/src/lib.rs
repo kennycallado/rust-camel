@@ -690,10 +690,8 @@ fn clone_body(body: &camel_component_api::Body) -> camel_component_api::Body {
         camel_component_api::Body::Json(v) => camel_component_api::Body::Json(v.clone()),
         camel_component_api::Body::Xml(s) => camel_component_api::Body::Xml(s.clone()),
         camel_component_api::Body::Bytes(b) => camel_component_api::Body::Bytes(b.clone()),
-        camel_component_api::Body::Stream(_) => {
-            // Streams cannot be cloned; use Empty as fallback
-            camel_component_api::Body::Empty
-        }
+        // Streams and future uncloneable variants fall back to Empty.
+        _ => camel_component_api::Body::Empty,
     }
 }
 

@@ -178,6 +178,9 @@ impl DataFormat for ProtobufDataFormat {
             Body::Xml(_) => Err(CamelError::TypeConversionFailed(
                 "protobuf marshal does not support XML body".to_string(),
             )),
+            _ => Err(CamelError::TypeConversionFailed(
+                "protobuf marshal does not support this body type".to_string(),
+            )),
         }
     }
 
@@ -213,6 +216,9 @@ impl DataFormat for ProtobufDataFormat {
             )),
             Body::Xml(_) => Err(CamelError::TypeConversionFailed(
                 "protobuf unmarshal does not support XML body".to_string(),
+            )),
+            _ => Err(CamelError::TypeConversionFailed(
+                "protobuf unmarshal does not support this body type".to_string(),
             )),
         }
     }

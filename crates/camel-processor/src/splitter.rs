@@ -269,7 +269,6 @@ fn aggregate(
                     Body::Json(v) => v.clone(),
                     Body::Xml(s) => Value::String(s.clone()),
                     Body::Bytes(b) => Value::String(String::from_utf8_lossy(b).into_owned()),
-                    Body::Empty => Value::Null,
                     Body::Stream(s) => serde_json::json!({
                         "_stream": {
                             "origin": s.metadata.origin,
@@ -277,6 +276,8 @@ fn aggregate(
                             "hint": "Materialize exchange body with .into_bytes() before aggregation if content needed"
                         }
                     }),
+                    // Empty and future variants contribute no extractable value.
+                    _ => Value::Null,
                 };
                 bodies.push(value);
             }
@@ -284,7 +285,6 @@ fn aggregate(
             out.input.body = Body::Json(Value::Array(bodies));
             Ok(out)
         }
-        AggregationStrategy::Original => Ok(original),
         AggregationStrategy::Custom(fold_fn) => {
             // Fold using the custom function, starting from the first result.
             let mut iter = results.into_iter();
@@ -294,6 +294,8 @@ fn aggregate(
                 Ok(fold_fn(acc, next))
             })
         }
+        // Original and any future variant return the original exchange.
+        _ => Ok(original),
     }
 }
 

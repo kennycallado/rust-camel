@@ -146,7 +146,6 @@ fn aggregate_results(
 ) -> Exchange {
     match strategy {
         camel_api::MulticastStrategy::LastWins => results.into_iter().last().unwrap_or(original),
-        camel_api::MulticastStrategy::Original => original,
         camel_api::MulticastStrategy::CollectAll => {
             let bodies: Vec<Value> = results
                 .iter()
@@ -155,7 +154,6 @@ fn aggregate_results(
                     Body::Json(v) => v.clone(),
                     Body::Xml(s) => Value::String(s.clone()),
                     Body::Bytes(b) => Value::String(String::from_utf8_lossy(b).into_owned()),
-                    Body::Empty => Value::Null,
                     Body::Stream(s) => serde_json::json!({
                         "_stream": {
                             "origin": s.metadata.origin,
@@ -163,6 +161,8 @@ fn aggregate_results(
                             "hint": "Materialize exchange body with .into_bytes() before recipient-list aggregation"
                         }
                     }),
+                    // Empty and future variants contribute no extractable value.
+                    _ => Value::Null,
                 })
                 .collect();
             let mut result = results.into_iter().last().unwrap_or(original);
@@ -172,6 +172,8 @@ fn aggregate_results(
         camel_api::MulticastStrategy::Custom(fn_) => {
             results.into_iter().fold(original, |acc, ex| fn_(acc, ex))
         }
+        // Original and any future variant return the original exchange.
+        _ => original,
     }
 }
 

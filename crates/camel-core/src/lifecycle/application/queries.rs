@@ -45,6 +45,9 @@ pub async fn execute_query(
                 "InFlightCount for '{route_id}' must be handled by RuntimeBus, not execute_query"
             )))
         }
+        _ => Err(CamelError::RouteError(
+            "unsupported runtime query".to_string(),
+        )),
     }
 }
 

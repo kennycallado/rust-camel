@@ -441,6 +441,11 @@ impl GrpcConsumer {
                                             let _ = reply_tx.send(GrpcReply::Err(tonic::Status::internal(format!("authorization error: {e}"))));
                                             return;
                                         }
+                                        // Future AuthorizationDecision variants fail closed.
+                                        _ => {
+                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::permission_denied("authorization denied")));
+                                            return;
+                                        }
                                     }
                                 }
 
@@ -479,6 +484,11 @@ impl GrpcConsumer {
                                             let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::internal(format!("authorization error: {e}")))).await;
                                             return;
                                         }
+                                        // Future AuthorizationDecision variants fail closed.
+                                        _ => {
+                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::permission_denied("authorization denied"))).await;
+                                            return;
+                                        }
                                     }
                                 }
 
@@ -511,6 +521,11 @@ impl GrpcConsumer {
                                             let _ = reply_tx.send(GrpcReply::Err(tonic::Status::internal(format!("authorization error: {e}"))));
                                             return;
                                         }
+                                        // Future AuthorizationDecision variants fail closed.
+                                        _ => {
+                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::permission_denied("authorization denied")));
+                                            return;
+                                        }
                                     }
                                 }
 
@@ -541,6 +556,11 @@ impl GrpcConsumer {
                                             // log-policy: system-broken
                                             tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
                                             let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::internal(format!("authorization error: {e}")))).await;
+                                            return;
+                                        }
+                                        // Future AuthorizationDecision variants fail closed.
+                                        _ => {
+                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::permission_denied("authorization denied"))).await;
                                             return;
                                         }
                                     }

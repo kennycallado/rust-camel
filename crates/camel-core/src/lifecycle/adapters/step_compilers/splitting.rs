@@ -347,9 +347,6 @@ impl StepCompiler for SplittingCompiler {
                 let strategy = config.aggregation.clone();
                 let aggregator: Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> = Arc::new(
                     move |outputs| match &strategy {
-                        MulticastStrategy::LastWins => {
-                            outputs.into_iter().last().unwrap_or_default()
-                        }
                         MulticastStrategy::CollectAll => {
                             let bodies: Vec<Value> = outputs
                                 .iter()
@@ -360,7 +357,6 @@ impl StepCompiler for SplittingCompiler {
                                     Body::Bytes(b) => {
                                         Value::String(String::from_utf8_lossy(b).into_owned())
                                     }
-                                    Body::Empty => Value::Null,
                                     Body::Stream(s) => serde_json::json!({
                                         "_stream": {
                                             "origin": s.metadata.origin,
@@ -368,6 +364,8 @@ impl StepCompiler for SplittingCompiler {
                                             "hint": "Materialize exchange body with .into_bytes() before multicast aggregation"
                                         }
                                     }),
+                                    // Empty and future variants contribute no extractable value.
+                                    _ => Value::Null,
                                 })
                                 .collect();
                             let mut out = Exchange::default();
@@ -382,6 +380,8 @@ impl StepCompiler for SplittingCompiler {
                             let first = iter.next().unwrap_or_default();
                             iter.fold(first, |acc, next| fold_fn(acc, next))
                         }
+                        // LastWins and any future variant return the last output.
+                        _ => outputs.into_iter().last().unwrap_or_default(),
                     },
                 );
                 let segment = camel_processor::MulticastSegment {

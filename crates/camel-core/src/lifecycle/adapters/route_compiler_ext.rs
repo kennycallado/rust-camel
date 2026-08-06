@@ -502,6 +502,10 @@ impl RouteCompilerExt<'_> {
                     );
                     stream_policy as Arc<dyn ResequencePolicy>
                 }
+                // Future ResequenceMode variants cannot be compiled.
+                _ => {
+                    return Err(CamelError::Config("unsupported resequence mode".into()));
+                }
             };
 
             let reseq_config = camel_processor::resequencer::ResequencerConfig {

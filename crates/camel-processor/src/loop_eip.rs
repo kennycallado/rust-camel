@@ -77,6 +77,8 @@ impl Service<Exchange> for LoopService {
                         );
                     }
                 }
+                // Future loop modes: no iteration, pass exchange through unchanged.
+                _ => {}
             }
             Ok(exchange)
         })
@@ -171,6 +173,8 @@ impl camel_api::OutcomePipeline for LoopSegment {
                     }
                     PipelineOutcome::Completed(ex)
                 }
+                // Future loop modes: no iteration, complete with the exchange unchanged.
+                _ => PipelineOutcome::Completed(exchange),
             }
         })
     }

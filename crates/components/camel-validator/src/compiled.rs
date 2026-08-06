@@ -23,7 +23,8 @@ pub(crate) fn approx_body_byte_len(body: &Body) -> Option<usize> {
         Body::Text(s) => Some(s.len()),
         Body::Xml(s) => Some(s.len()),
         Body::Json(v) => serde_json::to_vec(v).ok().map(|v| v.len()),
-        Body::Stream(_) => None,
+        // Stream and future variants are not measurably-sized.
+        _ => None,
     }
 }
 

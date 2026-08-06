@@ -34,6 +34,7 @@ impl Principal {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AuthorizationDecision {
     Granted {
         principal: Principal,

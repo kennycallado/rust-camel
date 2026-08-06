@@ -502,14 +502,12 @@ fn lookup_path_to_expr(s: &str) -> Result<Expr, LanguageError> {
         camel_api::ExchangeLookupPath::Body(segments) => Ok(Expr::BodyField(segments)),
         camel_api::ExchangeLookupPath::Header(key) => Ok(Expr::Header(key)),
         camel_api::ExchangeLookupPath::Property(key) => Ok(Expr::ExchangeProperty(key)),
-        camel_api::ExchangeLookupPath::Unscoped(_) => {
-            // Unscoped reaches here only if `s` had no recognized prefix.
-            // The `starts_with` guards above prevent that — but defend anyway.
-            Err(LanguageError::ParseError {
-                expr: format!("${{{s}}}"), // allow-secret
-                reason: "unrecognized token".to_string(),
-            })
-        }
+        // `Unscoped` (and any future variant) reach here only for inputs the
+        // `starts_with` guards above did not recognise — return a parse error.
+        _ => Err(LanguageError::ParseError {
+            expr: format!("${{{s}}}"), // allow-secret
+            reason: "unrecognized token".to_string(),
+        }),
     }
 }
 

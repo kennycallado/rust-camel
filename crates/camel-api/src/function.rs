@@ -45,6 +45,7 @@ pub struct ExchangePatch {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum PatchBody {
     Text(String),
     Json(serde_json::Value),
@@ -52,6 +53,7 @@ pub enum PatchBody {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FunctionInvocationError {
     #[error("function {function_id} not registered on runtime")]
     NotRegistered { function_id: FunctionId },

@@ -264,6 +264,7 @@ mod tests {
                 assert_eq!(p.subject, "alice");
             }
             AuthorizationDecision::Denied { .. } => panic!("expected Granted, got Denied"),
+            _ => panic!("unexpected AuthorizationDecision variant"),
         }
     }
 
@@ -286,6 +287,7 @@ mod tests {
                 assert_eq!(reason, "insufficient scope");
             }
             AuthorizationDecision::Granted { .. } => panic!("expected Denied, got Granted"),
+            _ => panic!("unexpected AuthorizationDecision variant"),
         }
     }
 

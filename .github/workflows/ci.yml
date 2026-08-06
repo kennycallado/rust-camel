@@ -188,6 +188,8 @@ jobs:
         run: cargo xtask lint-unwrap
       - name: lint-secrets
         run: cargo xtask lint-secrets
+      - name: lint-non-exhaustive
+        run: cargo xtask lint-non-exhaustive
       - name: lint-commits
         # Fail if any commit in the PR range mentions breaking in prose
         # without the conventional `!:` subject marker. Default checkout

@@ -294,6 +294,9 @@ fn body_to_wasm(body: &Body) -> Result<WasmBody, CamelError> {
         Body::Stream(_) => Err(CamelError::ProcessorError(
             "wasm: streaming body requires assemble_stream_body inside run_concurrent".into(),
         )),
+        _ => Err(CamelError::ProcessorError(
+            "wasm: unsupported body variant for wasm bridge".into(),
+        )),
     }
 }
 

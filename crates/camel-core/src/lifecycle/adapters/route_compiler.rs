@@ -527,7 +527,19 @@ async fn run_steps(
                                 );
                                 return PipelineOutcome::Failed(e);
                             }
+                            // Future StepDisposition variants fail the pipeline.
+                            _ => {
+                                return PipelineOutcome::Failed(CamelError::ProcessorError(
+                                    "unknown step disposition".to_string(),
+                                ));
+                            }
                         }
+                    }
+                    // Future RetryOutcome variants fail the pipeline.
+                    _ => {
+                        return PipelineOutcome::Failed(CamelError::ProcessorError(
+                            "unknown retry outcome".to_string(),
+                        ));
                     }
                 }
             }

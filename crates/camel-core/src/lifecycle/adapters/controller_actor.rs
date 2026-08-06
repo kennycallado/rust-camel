@@ -505,7 +505,8 @@ mod tests {
                 | RuntimeQuery::InFlightCount { route_id } => {
                     RuntimeQueryResult::RouteNotFound { route_id }
                 }
-                RuntimeQuery::ListRoutes => RuntimeQueryResult::Routes {
+                // ListRoutes and any future variant return an empty result.
+                _ => RuntimeQueryResult::Routes {
                     route_ids: Vec::new(),
                 },
             })

@@ -2,6 +2,7 @@ use crate::filter::FilterPredicate;
 
 /// How the loop terminates.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum LoopMode {
     /// Fixed iteration count.
     Count(usize),

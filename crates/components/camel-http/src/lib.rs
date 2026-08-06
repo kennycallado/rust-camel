@@ -1426,7 +1426,6 @@ impl Consumer for HttpConsumer {
                                     .and_then(|v| v.as_str().map(|s| s.to_string()));
 
                                 let (reply_body, inferred_content_type): (HttpReplyBody, Option<String>) = match out.input.body {
-                                    Body::Empty => (HttpReplyBody::Bytes(bytes::Bytes::new()), None),
                                     Body::Bytes(b) => (HttpReplyBody::Bytes(b), None),
                                     Body::Text(s) => (HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())), Some("text/plain; charset=utf-8".to_string())),
                                     Body::Xml(s) => (HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())), Some("application/xml".to_string())),
@@ -1457,6 +1456,8 @@ impl Consumer for HttpConsumer {
                                             }
                                         }
                                     }
+                                    // Empty and future variants produce an empty reply body.
+                                    _ => (HttpReplyBody::Bytes(bytes::Bytes::new()), None),
                                 };
 
                                 let mut resp_headers: Vec<(String, String)> = out

@@ -21,12 +21,12 @@ async fn evaluate_impl(
         Expr::Header(key) => Ok(exchange.input.header(key).cloned().unwrap_or(Value::Null)),
 
         Expr::Body => match &exchange.input.body {
-            Body::Empty => Ok(Value::Null),
-            Body::Stream(_) => Ok(Value::Null),
             Body::Text(s) => Ok(Value::String(s.clone())),
             Body::Bytes(b) => Ok(Value::String(String::from_utf8_lossy(b).into_owned())),
             Body::Json(v) => Ok(Value::String(v.to_string())),
             Body::Xml(s) => Ok(Value::String(s.clone())),
+            // Empty, Stream, and any future variant render as JSON null.
+            _ => Ok(Value::Null),
         },
 
         Expr::BodyField(segments) => {
@@ -36,6 +36,8 @@ async fn evaluate_impl(
                     let next = match seg {
                         PathSegment::Key(k) => current.get(k.as_str()),
                         PathSegment::Index(i) => current.get(*i),
+                        // Future PathSegment variants can't index JSON → treat as absent.
+                        _ => None,
                     };
                     match next {
                         Some(v) => current = v,

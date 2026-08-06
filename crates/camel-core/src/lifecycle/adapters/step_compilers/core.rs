@@ -181,6 +181,7 @@ impl StepCompiler for CoreCompiler {
                         lifecycle: None,
                     }))
                 }
+                _ => Err(CamelError::Config("unsupported value source".into())),
             },
 
             // ── SetHeaderIfAbsent (declarative, internal-only) ──
@@ -207,6 +208,7 @@ impl StepCompiler for CoreCompiler {
                         lifecycle: None,
                     }))
                 }
+                _ => Err(CamelError::Config("unsupported value source".into())),
             },
 
             // ── SetProperty (declarative) ──
@@ -232,6 +234,7 @@ impl StepCompiler for CoreCompiler {
                         lifecycle: None,
                     }))
                 }
+                _ => Err(CamelError::Config("unsupported value source".into())),
             },
 
             // ── SetBody (declarative) ──
@@ -263,6 +266,7 @@ impl StepCompiler for CoreCompiler {
                         lifecycle: None,
                     }))
                 }
+                _ => Err(CamelError::Config("unsupported value source".into())),
             },
 
             // ── Declarative Script (graceful degradation: try mutating, fallback to SetBody) ──

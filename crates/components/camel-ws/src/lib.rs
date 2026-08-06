@@ -423,6 +423,8 @@ pub async fn dispatch_handler(
                                 )
                                     .into_response();
                             }
+                            // Future AuthorizationDecision variants fail closed.
+                            _ => return (StatusCode::FORBIDDEN, "Forbidden").into_response(),
                         }
                     }
                     Err(e) => {
@@ -1443,7 +1445,6 @@ async fn body_to_client_ws_message(
 
 async fn body_to_text(body: CamelBody) -> Result<String, CamelError> {
     Ok(match body {
-        CamelBody::Empty => String::new(),
         CamelBody::Text(s) => s,
         CamelBody::Xml(s) => s,
         CamelBody::Json(v) => v.to_string(),
@@ -1454,6 +1455,8 @@ async fn body_to_text(body: CamelBody) -> Result<String, CamelError> {
                 .await?;
             String::from_utf8_lossy(&bytes).to_string()
         }
+        // Empty and future variants render as an empty string.
+        _ => String::new(),
     })
 }
 

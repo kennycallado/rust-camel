@@ -13,6 +13,7 @@ use crate::exchange::Exchange;
 ///
 /// Produced by `run_steps`; consumed by the pipeline's `Service<Exchange>` impl
 /// and (transitively) by the route controller and consumer reply channels.
+/// exhaustive-by-contract: the Completed|Stopped|Failed set is the deliberate outcome algebra of ADR-0024; adding a variant is a reviewed breaking change, not additive growth.
 #[derive(Debug, Clone)]
 pub enum PipelineOutcome {
     /// Normal end of pipeline (all steps completed, or handler returned `Handled`).

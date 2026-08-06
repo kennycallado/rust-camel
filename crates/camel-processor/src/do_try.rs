@@ -211,7 +211,6 @@ impl tower::Service<Exchange> for DoTryService {
                                 //                 Propagate + log if we ever reach runtime)
                                 let prev = match disposition {
                                     ExceptionDisposition::Handled => None,
-                                    ExceptionDisposition::Propagate => Some(original_err.clone()),
                                     ExceptionDisposition::Continued => {
                                         tracing::warn!(
                                             "ExceptionDisposition::Continued reached doTry runtime; \
@@ -219,6 +218,8 @@ impl tower::Service<Exchange> for DoTryService {
                                         );
                                         Some(original_err.clone())
                                     }
+                                    // Propagate and any future variant thread the original error.
+                                    _ => Some(original_err.clone()),
                                 };
                                 let mut ex = run_finally(
                                     finally_steps.clone(),

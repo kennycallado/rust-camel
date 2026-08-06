@@ -298,7 +298,9 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                         ex.clear_error();
                         return Ok(StepDisposition::Continued(ex));
                     }
-                    ExceptionDisposition::Propagate => {
+                    // Propagate and any future variant restore the snapshot
+                    // and fall through to the DLC/handler path.
+                    _ => {
                         exchange = snapshot;
                     }
                 },
@@ -314,7 +316,6 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
         exchange.set_error(error.clone());
         match send_to_handler(exchange, producer).await {
             Ok(handler_ex) => match disposition {
-                ExceptionDisposition::Propagate => Ok(StepDisposition::Propagate(error)),
                 ExceptionDisposition::Handled => {
                     let mut ex = handler_ex;
                     ex.clear_error();
@@ -325,6 +326,8 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                     ex.clear_error();
                     Ok(StepDisposition::Continued(ex))
                 }
+                // Propagate and any future variant forward the error.
+                _ => Ok(StepDisposition::Propagate(error)),
             },
             // Dead code by construction: send_to_handler always returns Ok.
             Err(_) => Ok(StepDisposition::Propagate(error)),
@@ -371,7 +374,8 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                         ex.handle_error();
                         return Ok(ex);
                     }
-                    ExceptionDisposition::Propagate | ExceptionDisposition::Continued => {
+                    // Propagate | Continued and any future variant restore the snapshot.
+                    _ => {
                         exchange = snapshot;
                     }
                 },
@@ -391,7 +395,8 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                     ex.clear_error();
                     Ok(ex)
                 }
-                ExceptionDisposition::Propagate | ExceptionDisposition::Continued => {
+                // Propagate | Continued and any future variant forward the error.
+                _ => {
                     let mut ex = handler_ex;
                     ex.set_error(error);
                     Ok(ex)

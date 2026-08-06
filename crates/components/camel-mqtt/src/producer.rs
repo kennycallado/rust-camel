@@ -57,6 +57,9 @@ fn body_to_bytes(body: &Body) -> Result<Vec<u8>, CamelError> {
         Body::Stream(_) => Err(CamelError::ProcessorError(
             "Body::Stream must be materialized before sending to MQTT".into(),
         )),
+        _ => Err(CamelError::ProcessorError(
+            "unsupported body type for MQTT producer".into(),
+        )),
     }
 }
 

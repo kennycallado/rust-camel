@@ -31,6 +31,7 @@ impl PlatformIdentity {
 
 /// Leadership state change events delivered asynchronously.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LeadershipEvent {
     StartedLeading,
     StoppedLeading,
@@ -38,6 +39,7 @@ pub enum LeadershipEvent {
 
 /// Platform errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PlatformError {
     #[error("leadership lock already active: {lock_name}")]
     LockAlreadyActive { lock_name: String },

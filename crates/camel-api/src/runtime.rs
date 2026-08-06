@@ -110,6 +110,7 @@ pub struct CanonicalRouteSpec {
 )]
 #[serde(tag = "step", content = "config", rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CanonicalStepSpec {
     To {
         uri: String,
@@ -177,6 +178,7 @@ pub struct CanonicalWhenSpec {
 )]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CanonicalSplitExpressionSpec {
     BodyLines,
     BodyJsonArray,
@@ -196,6 +198,7 @@ pub enum CanonicalSplitExpressionSpec {
 )]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CanonicalSplitAggregationSpec {
     LastWins,
     CollectAll,
@@ -214,6 +217,7 @@ pub enum CanonicalSplitAggregationSpec {
 )]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CanonicalAggregateStrategySpec {
     CollectAll,
 }
@@ -278,6 +282,7 @@ pub struct CanonicalCircuitBreakerSpec {
     ts_rs::TS,
 )]
 #[serde(tag = "mode", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CanonicalConcurrencySpec {
     Sequential,
     Concurrent { max: usize },
@@ -441,6 +446,7 @@ fn validate_steps(steps: &[CanonicalStepSpec]) -> Result<(), CamelError> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RuntimeCommand {
     RegisterRoute {
         spec: CanonicalRouteSpec,
@@ -539,6 +545,7 @@ impl RuntimeCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RuntimeCommandResult {
     Accepted,
     Duplicate {
@@ -562,6 +569,7 @@ pub enum RuntimeCommandResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RuntimeQuery {
     GetRouteStatus {
         route_id: String,
@@ -576,6 +584,7 @@ pub enum RuntimeQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RuntimeQueryResult {
     InFlightCount { route_id: String, count: u64 },
     RouteNotFound { route_id: String },
@@ -584,6 +593,7 @@ pub enum RuntimeQueryResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RuntimeEvent {
     RouteRegistered { route_id: String },
     RouteStartRequested { route_id: String },

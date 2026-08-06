@@ -46,6 +46,8 @@ impl BodyWire {
                 tracing::debug!("stream body cannot cross process boundary, mapping to Empty");
                 BodyWire::Empty
             }
+            // Future body variants cannot cross the process boundary.
+            _ => BodyWire::Empty,
         }
     }
 

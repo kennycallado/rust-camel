@@ -81,6 +81,10 @@ enum Commands {
     /// or list `<relative path>:<line>` in
     /// `scripts/xtask/allowlist-log-levels.txt`.
     LintLogLevels,
+    /// Enforce ADR-0049: pub enums in the contract crates must be
+    /// #[non_exhaustive] or carry a `/// exhaustive-by-contract: <rationale>`
+    /// rustdoc note. Exits non-zero on violations.
+    LintNonExhaustive,
     /// Compute the correct publish order for workspace crates by performing
     /// a topological sort over normal (non-dev) internal dependencies.
     /// Outputs shell commands suitable for publish-crates.sh.
@@ -221,6 +225,26 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-log-levels error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintNonExhaustive => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_non_exhaustive(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-non-exhaustive: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("NON-EXHAUSTIVE VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-non-exhaustive: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-non-exhaustive error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -1490,6 +1514,153 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
             .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
 
         violations.extend(lint_unwrap_src(&content, &path.to_string_lossy()));
+    }
+
+    Ok(violations)
+}
+
+/// Core scanner: scan source `src` (a single `.rs` file) for `pub enum`
+/// declarations that violate ADR-0049: a contract-crate pub enum must carry
+/// `#[non_exhaustive]` OR a directly attached
+/// `/// exhaustive-by-contract: <non-empty rationale>` rustdoc note.
+/// A plain `//` comment or an empty rationale does NOT satisfy the rule.
+///
+/// The scanner is purely lexical (no I/O, no parser) so it can be unit-tested
+/// in isolation via `lint_non_exhaustive_src`. The walker that drives it is
+/// [`lint_non_exhaustive`].
+pub fn lint_non_exhaustive_src(src: &str, file_path: &str) -> Vec<Violation> {
+    use regex::Regex;
+
+    let enum_re = Regex::new(r"^\s*pub\s+enum\s+(\w+)").expect("valid regex");
+    let note_re = Regex::new(r"^///\s*exhaustive-by-contract:\s*(\S.*)$").expect("valid regex");
+
+    let lines: Vec<&str> = src.lines().collect();
+    let mut violations = Vec::new();
+
+    for (idx, raw_line) in lines.iter().enumerate() {
+        if !enum_re.is_match(raw_line) {
+            continue;
+        }
+
+        // Walk backwards over the attached attribute/doc/comment region.
+        // The region terminates at the first blank line, at the first non-
+        // attribute/doc/comment line, or at the start of the file.
+        let mut has_non_exhaustive = false;
+        let mut has_valid_note = false;
+
+        let mut i = idx;
+        while i > 0 {
+            i -= 1;
+            let trimmed = lines[i].trim();
+
+            if trimmed.is_empty() {
+                // Blank line: rustdoc above is detached, does not satisfy.
+                break;
+            }
+            if trimmed.starts_with("#[") {
+                if trimmed.contains("non_exhaustive") {
+                    has_non_exhaustive = true;
+                }
+                continue;
+            }
+            if trimmed.starts_with("///") {
+                if !has_valid_note && note_re.is_match(trimmed) {
+                    has_valid_note = true;
+                }
+                continue;
+            }
+            if trimmed.starts_with("//") {
+                // Plain comment: included in the region but does NOT satisfy
+                // the rule (only `///` rustdoc counts).
+                continue;
+            }
+            // Anything else (use, struct, code, …): region ends.
+            break;
+        }
+
+        if !has_non_exhaustive && !has_valid_note {
+            violations.push(Violation {
+                file: file_path.to_string(),
+                line: idx + 1,
+                snippet: raw_line.to_string(),
+            });
+        }
+    }
+
+    violations
+}
+
+/// Scan the three contract-crate source roots
+/// (`crates/camel-api/src`, `crates/components/camel-component-api/src`,
+/// `crates/languages/camel-language-api/src`) for `pub enum` declarations
+/// that violate ADR-0049. See [`lint_non_exhaustive_src`] for the rule.
+///
+/// Test files are excluded by [`is_test_file`] so a pub enum inside
+/// `#[cfg(test)] mod tests { ... }` is not released contract surface.
+/// Returns true if `path` contains a `.worktrees/` component that is a
+/// STRICT SUBDIRECTORY of `workspace_root` (i.e. a nested worktree).
+///
+/// The current worktree's own path is NOT considered nested — when the
+/// workspace itself lives under `.worktrees/<branch>/`, every path under the
+/// workspace root would otherwise be incorrectly excluded.
+fn is_nested_worktree(path: &Path, workspace_root: &Path) -> bool {
+    use std::path::Component;
+    let rel = match path.strip_prefix(workspace_root) {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    rel.components()
+        .any(|c| c == Component::Normal(".worktrees".as_ref()))
+}
+
+pub fn lint_non_exhaustive(workspace_root: &Path) -> Result<Vec<Violation>, String> {
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let roots = [
+        workspace_root.join("crates/camel-api/src"),
+        workspace_root.join("crates/components/camel-component-api/src"),
+        workspace_root.join("crates/languages/camel-language-api/src"),
+    ];
+
+    let mut violations = Vec::new();
+
+    for root in roots.iter() {
+        if !root.exists() {
+            // Be permissive: a missing root is not a hard error (e.g. when
+            // the crate is filtered out of a partial checkout). The other
+            // roots are still scanned.
+            continue;
+        }
+
+        for entry in WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if is_test_file(path) {
+                continue;
+            }
+            if path
+                .components()
+                .any(|c| c == Component::Normal("target".as_ref()))
+            {
+                continue;
+            }
+            if is_nested_worktree(path, workspace_root) {
+                continue;
+            }
+
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+            violations.extend(lint_non_exhaustive_src(&content, &path.to_string_lossy()));
+        }
     }
 
     Ok(violations)
@@ -3514,6 +3685,79 @@ camel-core = { workspace = true }
             assert!(!is_dependency_section("[target.'cfg(unix)']"));
             // Bare `[target]` table header (no nested dep section) must not match.
             assert!(!is_dependency_section("[target]"));
+        }
+    }
+
+    mod lint_non_exhaustive {
+        use super::*;
+
+        #[test]
+        fn lint_passes_enum_with_non_exhaustive() {
+            let src = "#[non_exhaustive]\npub enum E { A }\n";
+            let v = lint_non_exhaustive_src(src, "test.rs");
+            assert!(v.is_empty(), "expected no violations, got {v:?}");
+        }
+
+        #[test]
+        fn lint_fails_enum_without_attribute_or_note() {
+            let src = "pub enum E { A }\n";
+            let v = lint_non_exhaustive_src(src, "test.rs");
+            assert_eq!(v.len(), 1, "expected 1 violation, got {v:?}");
+            assert_eq!(v[0].file, "test.rs");
+            assert_eq!(v[0].line, 1);
+        }
+
+        #[test]
+        fn lint_passes_enum_with_valid_exception_note() {
+            let src = "/// exhaustive-by-contract: closed set is the contract\npub enum E { A }\n";
+            let v = lint_non_exhaustive_src(src, "test.rs");
+            assert!(v.is_empty(), "expected no violations, got {v:?}");
+        }
+
+        #[test]
+        fn lint_rejects_plain_comment_marker() {
+            let src = "// exhaustive-by-contract: foo\npub enum E { A }\n";
+            let v = lint_non_exhaustive_src(src, "test.rs");
+            assert_eq!(
+                v.len(),
+                1,
+                "plain `//` comment must NOT satisfy the rule, got {v:?}"
+            );
+            assert_eq!(v[0].line, 2);
+        }
+
+        #[test]
+        fn lint_rejects_empty_rationale() {
+            let src = "/// exhaustive-by-contract:\npub enum E { A }\n";
+            let v = lint_non_exhaustive_src(src, "test.rs");
+            assert_eq!(
+                v.len(),
+                1,
+                "empty rationale after the colon must NOT satisfy, got {v:?}"
+            );
+            assert_eq!(v[0].line, 2);
+        }
+
+        #[test]
+        fn lint_ignores_non_pub_enum() {
+            let src = "enum Internal { A }\n";
+            let v = lint_non_exhaustive_src(src, "test.rs");
+            assert!(
+                v.is_empty(),
+                "non-pub enum is not released contract surface, got {v:?}"
+            );
+        }
+
+        #[test]
+        fn lint_rejects_detached_marker() {
+            let src = "/// exhaustive-by-contract: closed set\n\npub enum E { A }\n";
+            let v = lint_non_exhaustive_src(src, "test.rs");
+            assert_eq!(
+                v.len(),
+                1,
+                "blank line between rustdoc and enum detaches the note, got {v:?}"
+            );
+            assert_eq!(v[0].line, 3);
         }
     }
 }

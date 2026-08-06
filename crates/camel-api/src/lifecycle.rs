@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 /// Status of a Lifecycle service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ServiceStatus {
     Stopped,
     Started,
@@ -13,6 +14,7 @@ pub enum ServiceStatus {
 
 /// Aggregated system health status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum HealthStatus {
     Healthy,
     /// Service is operational but with reduced capability.

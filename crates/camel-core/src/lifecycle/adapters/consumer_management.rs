@@ -121,7 +121,12 @@ pub(crate) fn spawn_consumer_task(
             let _ = _drop_rx;
             (signal, immediate)
         }
-        ConsumerStartupMode::Explicit => {
+        // Forward-compat: any future variant is treated as Explicit so the
+        // consumer must signal readiness (or its start() error) before the
+        // controller treats the route as started. This is the conservative
+        // fallback — assuming Immediate would risk racing past a
+        // not-yet-bound listener.
+        _ => {
             let (signal, receiver) = StartupSignal::pair();
             (signal, receiver)
         }

@@ -80,6 +80,9 @@ impl DataFormat for JsonDataFormat {
                     ))
                 })?))
             }
+            _ => Err(CamelError::TypeConversionFailed(
+                "JsonDataFormat::marshal does not support this body type".to_string(),
+            )),
         }
     }
 
@@ -128,6 +131,9 @@ impl DataFormat for JsonDataFormat {
                 "JsonDataFormat::unmarshal only supports Body::Json, Body::Text, Body::Bytes, \
                  and Body::Empty"
                     .to_string(),
+            )),
+            _ => Err(CamelError::TypeConversionFailed(
+                "JsonDataFormat::unmarshal does not support this body type".to_string(),
             )),
         }
     }

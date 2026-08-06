@@ -85,6 +85,7 @@ pub fn resolve_incremental_codec(
         StreamSplitFormat::Auto => Err(CamelError::Config(
             "resolve_incremental_codec requires a resolved format, not Auto".into(),
         )),
+        _ => Err(CamelError::Config("unsupported stream split format".into())),
     }
 }
 

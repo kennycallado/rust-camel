@@ -359,6 +359,8 @@ impl LogProducer {
                             "[Stream]".to_string()
                         }
                     }
+                    // Future body variants render as an opaque placeholder.
+                    _ => "[unsupported body type]".to_string(),
                 }
             };
 

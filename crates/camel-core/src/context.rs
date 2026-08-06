@@ -950,6 +950,9 @@ impl camel_api::HealthSource for CamelContext {
                 camel_api::ServiceStatus::Started => camel_api::HealthStatus::Healthy,
                 camel_api::ServiceStatus::Stopped => camel_api::HealthStatus::Degraded,
                 camel_api::ServiceStatus::Failed => camel_api::HealthStatus::Unhealthy,
+                // Forward-safe fail-closed: an unknown future ServiceStatus keeps
+                // the pod NotReady (no traffic) rather than guessing Degraded.
+                _ => camel_api::HealthStatus::Unhealthy,
             };
             if matches!(worst, camel_api::HealthStatus::Healthy)
                 && matches!(

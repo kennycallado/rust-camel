@@ -2746,6 +2746,7 @@ routes:
                 ValueSourceDef::Literal(_) => {
                     panic!("expected Expression, got Literal")
                 }
+                _ => panic!("unexpected ValueSourceDef variant"),
             },
             _ => panic!("expected Log step, got {:?}", step),
         }

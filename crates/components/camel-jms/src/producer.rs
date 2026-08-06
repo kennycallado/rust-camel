@@ -84,6 +84,9 @@ impl JmsProducer {
             Body::Stream(_) => Err(CamelError::ProcessorError(
                 "Body::Stream must be materialized before sending to JMS".to_string(),
             )),
+            _ => Err(CamelError::ProcessorError(
+                "unsupported body type for JMS producer".to_string(),
+            )),
         }
     }
 
