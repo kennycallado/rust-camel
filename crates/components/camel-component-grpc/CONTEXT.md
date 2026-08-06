@@ -28,6 +28,31 @@ _Avoid_: server pool, connection multiplex
 For cross-route infra (e.g., `e:grpc:accept` accept-loop failures), the route_id is the stable string `format!("grpc-server:{addr}")` (Q-B1 oracle). Per-route sites use the owning route's actual route_id.
 _Avoid_: server route id, listener id
 
+## Trust boundary and authorization enforcement
+
+ADR-0032 classifies inbound gRPC metadata and protobuf payloads as untrusted.
+`extract_metadata` copies metadata into Exchange headers and skips reserved
+transport keys. These keys include `content-type`, `te`, `grpc-*`, and
+`user-agent`. `DynamicMessage::decode` decodes the payload without a panic path.
+
+Security enforcement has two layers:
+
+1. The server handler authenticates the request. `extract_principal` parses an
+   `Authorization: Bearer <token>` value and calls
+   `TokenAuthenticator::authenticate_bearer`. Missing or invalid credentials
+   return `Status::unauthenticated`. An unavailable provider returns
+   `Status::unavailable`. An unexpected authenticator failure returns
+   `Status::internal` and emits the category (h) log.
+2. `GrpcConsumer` authorizes before pipeline dispatch, as required by
+   ADR-0010. It calls `SecurityPolicy::evaluate` in unary, server-streaming,
+   client-streaming, and bidirectional modes. `Denied` returns
+   `Status::permission_denied`. Evaluation errors return `Status::internal`.
+   Unknown future decisions fail closed as `Status::permission_denied`.
+
+Transport setup also fails closed under ADR-0033. Every Endpoint declares
+`transport=plaintext|tls`. The component rejects `insecure_skip_verify=true`,
+an incomplete mTLS identity, and a TLS/plaintext mismatch on a shared listener.
+
 ## Log-level policy
 
 Per ADR-0012. This is the complete non-test inventory of 29 `error!` and
