@@ -30,20 +30,49 @@ _Avoid_: server route id, listener id
 
 ## Log-level policy
 
-Per ADR-0012.
+Per ADR-0012. This is the complete non-test inventory of 29 `error!` and
+`warn!` sites. Symbol names are authoritative because line numbers change.
 
-**Labels wired in Phase B (commit 8455aa70 + rework 269094f8):**
-- `e:grpc:accept` (`src/server.rs:193` accept-loop failure) — category (e) cross-route infra: HTTP/2 listener cannot accept new connections. Uses stable route_id `"grpc-server:{addr}"` (Q-B1 oracle) since the failure spans all routes sharing the listener. Calls `runtime.metrics().increment_errors(route_id, label)` then logs at `error!` with `// log-policy: outside-contract`.
+### Category (e): cross-route infrastructure
 
-**Labels wired in Phase B (commit 089cffd8):**
-All 5 sites are category (g) endpoint-creation failures — the producer's creation cannot establish a gRPC channel to the target. Each site calls `runtime.health().force_unhealthy_for_route(route_id, label, reason)` then logs at `error!` with `// log-policy: outside-contract`.
-- `g:grpc:producer-create` (`src/producer/mod.rs:95` channel open failure)
-- `g:grpc:producer-create` (`src/producer/mod.rs:110` proto compilation failure)
-- `g:grpc:producer-create` (`src/producer/mod.rs:124` service descriptor not found)
-- `g:grpc:producer-create` (`src/producer/mod.rs:141` method descriptor not found)
-- `g:grpc:producer-create` (`src/producer/mod.rs:154` invalid gRPC path)
+- `run_grpc_server` has one accept-loop `error!`. It increments
+  `e:grpc:accept` for the stable route ID `grpc-server:{addr}` before logging.
 
-All five sites use the same label `"g:grpc:producer-create"` (Q-B2 oracle — no helper extraction, sites inlined).
+### Category (g): Endpoint and Producer creation
+
+- `GrpcProducer::new` has six `error!` sites: invalid Endpoint, rejected
+  `insecure_skip_verify`, proto compilation, missing service descriptor,
+  missing method descriptor, and invalid gRPC path. Each site uses
+  `g:grpc:producer-create` and forces the owning route unhealthy.
+- `GrpcServerRegistry::get_or_spawn` and
+  `GrpcServerRegistry::get_or_spawn_with_listener` each have one TLS-config
+  build `error!`. Both use `g:grpc:tls-read` and force the shared server route
+  unhealthy.
+- `read_tls_file` has one TLS-file `error!`. It uses `g:grpc:tls-read` and
+  forces the owning route unhealthy.
+
+### Category (h): pre-pipeline security faults
+
+- `GrpcConsumer::start_inner` has four policy-evaluation `error!` sites, one
+  for each RPC mode.
+- `extract_principal` has one authentication `error!` for an unexpected
+  authenticator failure.
+
+### Handler-owned warnings
+
+- `GrpcConsumer::start_inner` has four authorization-denied `warn!` sites, one
+  for each RPC mode.
+- The client-stream and bidirectional-stream handlers each have one decode
+  `warn!`.
+- The producer retry loop has one non-retryable-status `warn!`.
+- Producer protobuf conversion has four `warn!` sites.
+
+### Operational warnings and no-ops
+
+- `GrpcReloadHandler::reload` has one `warn!` when reload fails and the old
+  certificate remains active.
+- URI parsing has two `warn!` sites: an unrecognized parameter and the ignored
+  `reflection=true` option.
 
 ## Example dialogue
 
