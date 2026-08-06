@@ -30,10 +30,10 @@ Per ADR-0012.
 
 **Labels wired in Phase B (commit 5dcb80e1):**
 All 4 sites are category (e) outside-contract: the Docker daemon operation failed and the route cannot meaningfully retry (daemon down, image not found, container ID invalid). Each site calls `runtime.metrics().increment_errors(route_id, label)` then logs at `error!` with `// log-policy: outside-contract`:
-- `e:container:events-connect` (`src/lib.rs:1433` events consumer initial connection failure)
-- `e:container:events-stream` (`src/lib.rs:1463` events stream broken mid-flight)
-- `e:container:logs-connect` (`src/lib.rs:1520` logs consumer initial connection failure)
-- `e:container:logs-stream` (`src/lib.rs:1602` logs stream broken mid-flight)
+- `e:container:events-connect` (`ContainerConsumer::start_events_consumer`, initial connection failure)
+- `e:container:events-stream` (`ContainerConsumer::start_events_consumer`, event stream broken mid-flight)
+- `e:container:logs-connect` (`ContainerConsumer::start_logs_consumer`, initial connection failure)
+- `e:container:logs-stream` (`ContainerConsumer::start_logs_consumer`, log stream broken mid-flight)
 
 ## Example dialogue
 
