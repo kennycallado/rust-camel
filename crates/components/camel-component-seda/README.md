@@ -14,7 +14,7 @@ This is ideal for decoupling routes, buffering bursts of messages, and building 
 - **Bounded queues**: Configurable queue size with fail-fast or blocking behavior
 - **Exchange patterns**: InOnly (fire-and-forget) and InOut (request-reply with timeout)
 - **Fanout**: Multiple consumers on the same SEDA name (pub-sub)
-- **Configurable concurrency**: `concurrentConsumers` hint for parallel processing
+- **Concurrency hint**: `concurrentConsumers` informs the runtime, but one forwarder serializes InOut intake even when greater than `1`
 
 ## Installation
 
