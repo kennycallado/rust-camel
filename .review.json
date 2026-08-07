@@ -1,36 +1,8 @@
 {
   "verdict": "APPROVE",
   "reviewer": "r_glm",
-  "change": "non-exhaustive-contract-enforcement",
-  "review_kind": "holistic (whole-change, fresh eyes, pre-archive)",
-  "impl_head": "c03146478ae097fac9345306864f37bdac6ac0ce",
-  "merge_base": "95d0886b6e294e1597cea1a722862e4a7a254628",
-  "diff_stat": "103 files changed, 1267 insertions(+), 153 deletions(-)",
-  "impl_hash": "sha256:<run hash-artifacts for final value>",
-  "findings": {
-    "critical": [],
-    "important": [],
-    "minor_blocking": [],
-    "non_blocking_observations": [
-      "commit 9e201270 inventory is class-grouped rather than ~67 per-arm lines; scoped Task-1.3 review already accepted — audit purpose served, no action"
-    ]
-  },
-  "gates": {
-    "all_green": true,
-    "ran": ["fmt", "clippy-workspace", "clippy-kafka", "clippy-cli", "build-workspace", "test-lib", "test-hexarch", "lint-unwrap", "lint-secrets", "lint-log-levels", "lint-non-exhaustive", "schema-check", "cargo-audit"],
-    "na": [],
-    "notes": "cargo audit: 5 allowed warnings, exit 0. Change modifies Rust -> no N/A gates."
-  },
-  "spec_validation": "valid: true (delta structure parseable, no drift from subagent edits)",
-  "docs_alignment": "clean — no stale posture tables (camel-config CONTEXT.md struct table is out-of-scope non-contract crate); no stale exhaustive claims in CONTEXT-MAP/GLOSSARY/contract CONTEXT.md; examples use consistent forward-safe patterns",
-  "coverage_summary": {
-    "enums_attributed": "51 (48 camel-api + 2 component-api + 1 language-api)",
-    "exception_notes": "2 (PipelineOutcome, ExchangePattern)",
-    "already_compliant": "3 (CamelError, ConfigValidationError, TemplateError)",
-    "forward_safe_arms": "123 (122 explicit-default, 1 invariant-justified unreachable! in camel-builder)",
-    "bare_no_variant_unreachable": "0",
-    "lint_unit_tests": "7"
-  },
-  "merge_ready": true,
-  "merge_gate": "PAUSED — requires human approval (mandatory, never autonomous even in autopilot)"
+  "session": "ses_023d13bf9ffepF917S1Witsbe0",
+  "impl_hash": "sha256:aedfd083bd2a31b06c5a7d87e9b03208eb5020b714791494018310aa88b003c7",
+  "findings": [],
+  "date": "2026-08-07"
 }

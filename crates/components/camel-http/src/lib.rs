@@ -3829,6 +3829,7 @@ mod tests {
     // D-L10: HTTP monitor_axum_task refcounted shutdown
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_unregister_last_http_route_keeps_server_alive() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
@@ -4029,6 +4030,7 @@ mod tests {
     /// happens. Verified here by injecting our own signal pair into the
     /// ConsumerContext and asserting the receiver resolves within a bounded
     /// window even before any HTTP request is made.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_http_consumer_emits_mark_ready_after_bind() {
         use camel_component_api::{ConsumerContext, StartupSignal};

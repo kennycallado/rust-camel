@@ -371,6 +371,7 @@ mod tests {
     /// rc-w1u9: HttpStaticConsumer::start() MUST call ctx.mark_ready() after
     /// the static mount is registered. Inject our own StartupSignal pair and
     /// assert the receiver resolves within a bounded window.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_static_consumer_emits_mark_ready_after_register() {
         use camel_component_api::{ConsumerContext, StartupSignal};

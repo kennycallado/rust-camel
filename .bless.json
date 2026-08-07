@@ -1,45 +1,9 @@
 {
   "kind": "plan",
   "verdict": "BLESS",
-  "hash": "sha256:65e451106127ad62da1b84ab1471eaf8b1b8de8a09338c7b430a07c066a0c0c7",
   "expert": "e_gpt",
-  "change": "non-exhaustive-contract-enforcement",
-  "hash_tool": "cargo run -p xtask -- hash-artifacts (canonical)",
-  "note": "Plan blessed (e_gpt, zero substantive defects). Post-bless human-directed scope revert at interactive gate: removed conductor-light.md modification from Task 2.2 (out of rc-ierl AC scope = AGENTS.md+CI only; conductor-light gate-list duplication tracked as bd rc-fuxr). Plan hash updated to d27a0bc9. Spec coverage and task executability unaffected.",
-  "rounds": {
-    "spec": [
-      {
-        "verdict": "BLESS-WITH-FIXES",
-        "hash": "sha256:0071121a398cb1cf27433769f95b3b85819026a2ed9855875edd8dfdff86811a",
-        "fixes": [
-          "require /// exhaustive-by-contract: <rationale> rustdoc note + negative tests",
-          "forward-safe wildcard rule (unreachable! only with invariant-independent justification)",
-          "correct inventory: 48 camel-api + 2 component-api + 1 language-api = 51 new attributes"
-        ]
-      },
-      { "verdict": "BLESS", "hash": "sha256:0b481f904767929333a0bda015271e85fd381f6469018c3f6057ea0aef3320ef" }
-    ],
-    "plan": [
-      {
-        "verdict": "BLESS-WITH-FIXES",
-        "hash": "sha256:698c730dfe29e6fb4e0b4f1bea95a09596181049cd32f8a8a51d1879e6679389",
-        "fixes": [
-          "predicted blast zone for match-fix sites (134-file candidate set) + commit-inventory",
-          "command-level negative test (remove #[non_exhaustive], assert non-zero exit + file:line)",
-          "register gate in conductor-light.md PHASE 4 (12 -> 13 gates)"
-        ]
-      },
-      {
-        "verdict": "BLESS",
-        "hash": "sha256:7b9dd74874de665443e3191dab4abae56f772d9a16042f0d1384a6e518b53ad4",
-        "note": "expert raised hash-provenance only; canonical hash-artifacts digest confirmed stable; zero substantive defects"
-      }
-    ],
-    "human_gate_revision": {
-      "action": "reverted Task 2.2 conductor-light.md edit (out of scope; duplication anti-pattern)",
-      "follow_up": "rc-fuxr",
-      "hash_after": "sha256:65e451106127ad62da1b84ab1471eaf8b1b8de8a09338c7b430a07c066a0c0c7"
-    }
-  }
+  "session": "ses_023ee01b3ffeEVT24nJpfoaKDd",
+  "hash": "sha256:aedfd083bd2a31b06c5a7d87e9b03208eb5020b714791494018310aa88b003c7",
+  "findings": [],
+  "date": "2026-08-07"
 }
-
