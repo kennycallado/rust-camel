@@ -76,11 +76,10 @@ rule covers `sasl_password`, `ssl_keystore_password`, and
 Tests `test_broker_config_debug_redacts_secrets`, `test_debug_masks_passwords`,
 and `test_resolved_config_debug_masks_passwords` verify this behavior.
 
-**Known gap:** `KafkaBrokerConfig` and `KafkaConfig` still derive
-`serde::Serialize`. `KafkaConfig` includes broker credentials through
-`brokers_named`. Serialization can therefore emit plaintext credentials. No
-in-crate serialization call site exists. F-camel-kafka-I1 tracks this gap in
-bd issue rc-xbl1.
+**Resolved:** `KafkaBrokerConfig` and `KafkaConfig` no longer derive
+`serde::Serialize`. ADR-0051 permits `Deserialize` without `Serialize` for
+configuration types. Debug output was already redacted via manual implementations.
+No in-crate serialization call site exists. Fixed by rc-xbl1.
 
 ### SSL/SASL feature gates
 

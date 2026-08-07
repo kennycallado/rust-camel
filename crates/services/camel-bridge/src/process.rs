@@ -182,7 +182,6 @@ impl CxfProfileEnvVars {
 
 /// Configuration for spawning a bridge subprocess.
 /// Password fields use [`Redacted`] to prevent accidental credential leakage in logs.
-#[derive(Debug)]
 pub struct BridgeProcessConfig {
     pub spec: &'static BridgeSpec,
     pub binary_path: PathBuf,
@@ -192,6 +191,24 @@ pub struct BridgeProcessConfig {
     pub password: Option<Redacted<String>>,
     pub start_timeout_ms: u64,
     pub env_vars: Vec<(String, String)>,
+}
+
+impl fmt::Debug for BridgeProcessConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BridgeProcessConfig")
+            .field("spec", &self.spec)
+            .field("binary_path", &self.binary_path)
+            .field("broker_url", &"[REDACTED]")
+            .field("broker_type", &self.broker_type)
+            .field("username", &self.username)
+            .field("password", &self.password)
+            .field("start_timeout_ms", &self.start_timeout_ms)
+            .field(
+                "env_vars",
+                &format!("[REDACTED; {} entries]", self.env_vars.len()),
+            )
+            .finish()
+    }
 }
 
 impl BridgeProcessConfig {
@@ -956,6 +973,36 @@ mod tests {
         assert_eq!(
             password_debug, "Some([REDACTED])",
             "Password field must show [REDACTED]: {password_debug}"
+        );
+    }
+
+    #[test]
+    fn bridge_process_config_debug_redacts_broker_url_and_env_vars() {
+        let cfg = BridgeProcessConfig {
+            spec: &JMS_BRIDGE,
+            binary_path: PathBuf::from("/tmp/jms-bridge"),
+            broker_url: "amqp://u:SENTINEL-BRIDGE-PASS@host:5672".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            username: Some("user".to_string()),
+            password: Some(Redacted::new("pass".to_string())),
+            start_timeout_ms: 1000,
+            env_vars: vec![(
+                "KEYSTORE_PASSWORD".to_string(),
+                "SENTINEL-ENV-PASS".to_string(),
+            )],
+        };
+        let debug_output = format!("{cfg:?}");
+        assert!(
+            !debug_output.contains("SENTINEL-BRIDGE-PASS"),
+            "broker_url must be redacted in Debug: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("SENTINEL-ENV-PASS"),
+            "env_vars values must be redacted in Debug: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("[REDACTED; 1 entries]"),
+            "env_vars must show redacted count: {debug_output}"
         );
     }
 

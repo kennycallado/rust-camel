@@ -1,3 +1,5 @@
+use std::fmt;
+
 /// Protocol for OTLP export.
 #[derive(Debug, Clone, Default)]
 pub enum OtelProtocol {
@@ -21,7 +23,7 @@ pub enum OtelSampler {
 }
 
 /// Configuration for the OpenTelemetry service.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OtelConfig {
     pub endpoint: String,
     pub service_name: String,
@@ -30,6 +32,20 @@ pub struct OtelConfig {
     pub resource_attrs: Vec<(String, String)>,
     pub logs_enabled: bool,
     pub metrics_interval_ms: u64,
+}
+
+impl fmt::Debug for OtelConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtelConfig")
+            .field("endpoint", &"[REDACTED]")
+            .field("service_name", &self.service_name)
+            .field("protocol", &self.protocol)
+            .field("sampler", &self.sampler)
+            .field("resource_attrs", &"[REDACTED]")
+            .field("logs_enabled", &self.logs_enabled)
+            .field("metrics_interval_ms", &self.metrics_interval_ms)
+            .finish()
+    }
 }
 
 impl OtelConfig {
@@ -157,5 +173,20 @@ mod tests {
             ..OtelConfig::new("http://localhost:4317", "myservice")
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_otel_debug_redacts_secrets() {
+        let cfg = OtelConfig::new("https://user:SENTINEL-PASS@collector:4317", "test-service")
+            .with_resource_attr("api.key", "SENTINEL-API-KEY");
+        let debug_str = format!("{:?}", cfg);
+        assert!(
+            !debug_str.contains("SENTINEL-API-KEY"),
+            "Debug output must not contain resource_attr secrets"
+        );
+        assert!(
+            !debug_str.contains("SENTINEL-PASS"),
+            "Debug output must not contain endpoint credentials"
+        );
     }
 }

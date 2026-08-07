@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::de::Deserializer;
+use std::fmt;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use zeroize::Zeroizing;
@@ -25,13 +26,23 @@ pub trait TokenProvider: Send + Sync + std::fmt::Debug {
     async fn get_token(&self) -> Result<String, AuthError>;
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TokenResponse {
     #[serde(deserialize_with = "deserialize_zeroizing_string")]
     access_token: Zeroizing<String>,
     #[allow(dead_code)]
     token_type: String,
     expires_in: u64,
+}
+
+impl fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 struct CachedToken {
@@ -426,5 +437,20 @@ mod tests {
             let token = h.await.unwrap().unwrap();
             assert_eq!(token, "single-flight-token");
         }
+    }
+
+    #[test]
+    fn debug_redacts_access_token() {
+        let resp = TokenResponse {
+            access_token: Zeroizing::new("SENTINEL-OAUTH-TOKEN".to_string()),
+            token_type: "Bearer".to_string(),
+            expires_in: 300,
+        };
+        let debug = format!("{:?}", resp);
+        assert!(
+            !debug.contains("SENTINEL-OAUTH-TOKEN"),
+            "Debug output must not contain access_token: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
     }
 }

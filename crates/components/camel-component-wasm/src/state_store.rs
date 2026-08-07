@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -7,9 +8,17 @@ use std::sync::Mutex;
 /// Each route endpoint using a WASM component gets its own independent state store.
 /// If two routes use the same `.wasm` file, they maintain separate state.
 /// Owned by `WasmProducer` and passed to `WasmRuntime` when creating host state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StateStore {
     data: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl fmt::Debug for StateStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StateStore")
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl StateStore {
@@ -48,5 +57,22 @@ impl StateStore {
 impl Default for StateStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let store = StateStore::new();
+        store.store("api-key", "SENTINEL-GUEST-SECRET").unwrap();
+        let debug_output = format!("{:?}", store);
+        assert!(
+            !debug_output.contains("SENTINEL-GUEST-SECRET"),
+            "Debug output must not contain secret values: {}",
+            debug_output
+        );
     }
 }

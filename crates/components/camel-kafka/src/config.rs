@@ -146,7 +146,7 @@ fn check_feature_gates(protocol: SecurityProtocol) -> Option<&'static str> {
 ///
 /// This struct holds component-level defaults that can be set via YAML config
 /// and applied to endpoint configurations when specific values aren't provided.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(default)]
 pub struct KafkaConfig {
     pub brokers: String,

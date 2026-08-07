@@ -41,12 +41,10 @@ stateful resources.
 ## Credential redaction posture
 
 ADR-0051 applies to every diagnostic representation of bridge configuration.
-`BridgeProcessConfig.env_vars` currently contains raw passwords for subprocess
-injection, while `BridgeProcessConfig` derives `Debug`. The `Redacted<T>` fields do
-not protect duplicate values in `env_vars`. Do not format or log the full
-`BridgeProcessConfig` until bd `rc-4tbt` removes this invariant violation. A fix must
-add a sentinel regression test for the complete configuration, not only for an
-individual `Redacted<T>` field.
+`BridgeProcessConfig` now uses a manual `Debug` implementation that redacts
+`broker_url` and `env_vars` values. The `Redacted<T>` password field remains
+protected via its own `Debug` impl. A sentinel regression test verifies that
+credential values do not appear in `Debug` output.
 
 ## ADR-0012 log-policy annotations
 

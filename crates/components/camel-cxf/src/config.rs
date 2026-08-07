@@ -765,4 +765,20 @@ mod tests {
         assert!(cfg.reconnect.enabled);
         assert_eq!(cfg.reconnect.max_attempts, 0);
     }
+
+    // ── Credential redaction (rc-ryl0) ──────────────────────────────────────
+
+    #[test]
+    fn cxf_security_fields_debug_redacts_passwords() {
+        let fields = CxfSecurityFields {
+            keystore_password: Some("SENTINEL-KEYSTORE-PASS".into()),
+            truststore_password: Some("SENTINEL-TRUSTSTORE-PASS".into()),
+            sig_password: Some("SENTINEL-SIG-PASS".into()),
+            ..Default::default()
+        };
+        let debug = format!("{:?}", fields);
+        assert!(!debug.contains("SENTINEL-KEYSTORE-PASS"));
+        assert!(!debug.contains("SENTINEL-TRUSTSTORE-PASS"));
+        assert!(!debug.contains("SENTINEL-SIG-PASS"));
+    }
 }

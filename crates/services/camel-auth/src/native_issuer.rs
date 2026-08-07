@@ -118,13 +118,23 @@ struct NativeTokenClaims {
     roles: Vec<String>,
 }
 
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct TokenResponse {
     pub access_token: Zeroizing<String>,
     pub token_type: String,
     pub expires_in: u64,
     pub scope: String,
+}
+
+impl fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 pub struct NativeTokenIssuer {
@@ -670,5 +680,21 @@ mod tests {
             std::env::remove_var("TEST_ISSUER_KEY_PEM_WIRING");
             std::env::remove_var("TEST_M2M_CLIENT_SECRET_WIRING");
         }
+    }
+
+    #[test]
+    fn debug_redacts_access_token() {
+        let resp = TokenResponse {
+            access_token: Zeroizing::new("SENTINEL-JWT-SECRET".to_string()),
+            token_type: "Bearer".to_string(),
+            expires_in: 900,
+            scope: "read".to_string(),
+        };
+        let debug = format!("{:?}", resp);
+        assert!(
+            !debug.contains("SENTINEL-JWT-SECRET"),
+            "Debug output must not contain access_token: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
     }
 }

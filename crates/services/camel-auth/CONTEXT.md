@@ -118,10 +118,10 @@ Applied to:
 > `ExtractedToken`, `CachingTokenIntrospector`, `ClientCredentialsProvider`,
 > `IntrospectionAuthenticator`, `NativeSigningKey`, and `NativeTokenIssuer`.
 >
-> Two known gaps remain in the code stream. `native_issuer::TokenResponse` is tracked by
-> `rc-c9xo` (C1). `oauth2::TokenResponse` is tracked by `rc-fvl5` (I1). Their derived `Debug`
-> implementations expose access tokens until the fixes land. Do not format either type with `?` or
-> `:#?`. This restriction supports the ADR-0032 trust boundary by keeping token data out of
+> Both known gaps are resolved. `native_issuer::TokenResponse` (rc-c9xo) and
+> `oauth2::TokenResponse` (rc-fvl5) now use manual `Debug` implementations that
+> redact `access_token` as `[REDACTED]`. Regression tests verify sentinel exclusion.
+> This supports the ADR-0032 trust boundary by keeping token data out of
 > diagnostic sinks.
 
 ## Example dialogue
