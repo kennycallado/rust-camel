@@ -1,8 +1,8 @@
 # Language SPI
 
-The contract crate for the [Languages](../CONTEXT.md) bounded context. Defines the traits every
-expression/predicate language implements (`js`, `jsonpath`, `xpath`, `simple`, `rhai`) and the
-shared `LanguageError`. It owns no engine: each language crate implements these traits.
+The contract crate for the [Languages](../CONTEXT.md) bounded context. It defines shared
+`LanguageError` and traits used by `js`, `jsonpath`, `xpath`, `simple`, `rhai`, and `minijinja`.
+It owns no engine: each language crate implements these traits.
 
 > **Scope boundary.** The domain concepts (Language, Expression, Predicate, MutatingExpression,
 > MutatingPredicate) are glossed once in the parent [`crates/languages/CONTEXT.md`](../CONTEXT.md).
@@ -36,8 +36,10 @@ _Avoid_: side-effecting expression (use the precise trait name)
 
 **LanguageError**:
 The shared error enum (`error.rs`): `ParseError { expr, reason }` (compile/parse failure),
-`EvalError(String)` (runtime evaluation failure), `NotSupported { feature, language }` (the default
-for unimplemented mutating variants). Helper `EvalError::in_expr` attaches the expression text.
+`EvalError(String)` (runtime evaluation failure), `UnknownVariable(String)` (missing variable),
+`NotFound(String)` (unregistered language), and `NotSupported { feature, language }` (the default
+for unimplemented mutating variants). `LanguageError::eval_error` attaches the expression text
+to an `EvalError` (`error.rs:26`).
 _Avoid_: ScriptError, eval failure (use LanguageError and its variant names)
 
 ## Example dialogue
