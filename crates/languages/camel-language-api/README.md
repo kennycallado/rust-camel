@@ -23,7 +23,6 @@ All operations return `Result<_, LanguageError>` with variants:
 - `EvalError` — runtime evaluation failure
 - `UnknownVariable` — referenced variable not found
 - `NotFound` — language not registered
-- `AlreadyRegistered` — language already registered under this name
 - `NotSupported` — language does not implement mutating expressions/predicates
 
 ## Usage
@@ -32,12 +31,12 @@ All operations return `Result<_, LanguageError>` with variants:
 use camel_language_api::{Language, Expression, Predicate, LanguageError};
 use camel_api::exchange::Exchange;
 
-fn evaluate_with(lang: &dyn Language, exchange: &Exchange) -> Result<(), LanguageError> {
+async fn evaluate_with(lang: &dyn Language, exchange: &Exchange) -> Result<(), LanguageError> {
     let expr = lang.create_expression("${header.name}")?;
-    let value = expr.evaluate(exchange)?;
+    let value = expr.evaluate(exchange).await?;
 
     let pred = lang.create_predicate("${header.type} == 'order'")?;
-    let matches = pred.matches(exchange)?;
+    let matches = pred.matches(exchange).await?;
 
     Ok(())
 }
