@@ -16,6 +16,7 @@
 - [Languages](./crates/languages/CONTEXT.md) — expression and predicate evaluation against Exchanges (JavaScript, JSONPath, XPath, Simple, Rhai, MiniJinja)
   - [Language SPI](./crates/languages/camel-language-api/CONTEXT.md) — the trait contract every language implements (Language, Expression, Predicate, MutatingExpression/Predicate) and `LanguageError`
 - [Functions](./crates/services/camel-function/CONTEXT.md) — out-of-process executable units invoked as pipeline steps; inspired by serverless functions, running in isolated containers
+- [WIT Contracts](./crates/camel-wit/CONTEXT.md) — canonical cross-language ABI for WASM plugin, bean, authorization-policy, and source guests; versioned independently from Rust crates
 - [Services](./crates/services/CONTEXT.md) — cross-cutting infrastructure services: observability (OTel, Prometheus), auth/security, and platform integration (Kubernetes)
   - [Auth Service](./crates/services/camel-auth/CONTEXT.md) — provider-neutral token validation, claim mapping, and permission evaluation (decision sources behind the route SecurityPolicy boundary)
 
@@ -76,6 +77,7 @@ are a convenience index and may lag the file.
 - [0047](./docs/adr/0047-template-rendering-engine.md) — MiniJinja-based external template rendering engine: operator-owned file sources (openat-confined closure walk), compile-once in-memory `TemplateSet`, and atomic hot-reload (all-or-nothing `reload_route`) behind the `template:` producer scheme
 - [0050](./docs/adr/0050-wasm-sandbox-capability-posture.md) — Per-world WASM capability posture: explicit Camel grants and selective WASI registration; no filesystem, sockets, environment, CLI, or stdio by default
 - [0051](./docs/adr/0051-credential-redaction-at-diagnostic-boundaries.md) — Credential-bearing types use manual redacting `Debug` or a tested redacting wrapper; general-purpose `Serialize` must not expose credential bytes; credential-file paths are metadata, not credential bytes
+- [0053](./docs/adr/0053-wit-interface-versioning.md) — `camel:plugin` uses one package-level WIT SemVer, independent from Rust crate versions; v1.0 establishes `camel:plugin@1.0.0`
 
 ## Key Terms
 
