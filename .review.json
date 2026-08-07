@@ -1,12 +1,13 @@
 {
   "verdict": "APPROVE",
   "reviewer": "r_glm",
-  "impl_hash": "sha256:5adf0fb47a3868147413ab1a04051321dc490dc943f7e817c5eca4937061f770",
-  "findings_resolved": ["declaration_line None-case: report with line 0 instead of skip (false-negative hardening)"],
+  "impl_hash": "sha256:f6a632c802187f0d768730cac38a27324ed4a970f61989bafbe4aecf32cf1c58",
+  "findings_resolved": [
+    "CONTEXT.md contract-surface paragraph: updated to reflect hardened 3-file non-skipping test",
+    "CONTEXT.md glossary: removed stale WitHost reference"
+  ],
   "findings_deferred": [
-    "first-match line attribution with duplicate names (low likelihood, cosmetic)",
-    "has_cfg_test over-matches cfg(not(test)) (rare attribute)",
-    "monolithic file growth (existing convention, requires cross-lint refactor)"
+    "ADR-0053 Context section present-tense wording (historical snapshot, non-blocking)"
   ],
   "date": "2026-08-07"
 }

@@ -1,7 +1,6 @@
-package camel:plugin;
+package camel:plugin@1.0.0;
 
 // TODO(WIT-001): This file is a canonical source; camel-all.wit duplicates its content.
-// TODO(WIT-006): WIT interface versioning strategy is not yet defined.
 
 /// Guest bean plugin with multi-method dispatch and init-time configuration.
 ///

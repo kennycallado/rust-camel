@@ -1,7 +1,7 @@
 # ADR-0053: WIT Interface Versioning
 
 **Date:** 2026-08-07
-**Status:** Accepted; implementation pending (`rc-aaxe`)
+**Status:** Accepted; implemented
 **Amends:** none
 **Related:** ADR-0014, ADR-0031, ADR-0049, ADR-0050
 **Origin:** `camel-wit` quality audit, `WIT-006` / DP-2

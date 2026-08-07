@@ -1,10 +1,7 @@
-package camel:plugin;
+package camel:plugin@1.0.0;
 
 // TODO(WIT-001): This file duplicates content from camel-plugin.wit and camel-bean.wit.
 // Consider generating this at build time from the canonical source files instead.
-// TODO(WIT-006): WIT interface versioning strategy is not yet defined. When the
-// WIT tooling supports it, add `@since(version = X.Y.Z)` annotations to each
-// interface and world definition to enable compatibility checks.
 
 /// Simplified exchange types crossing the WASM boundary.
 ///

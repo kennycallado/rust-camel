@@ -19,28 +19,25 @@ defines its versioning policy.
 | `FULL_WIT` | Manually merged reference document for all worlds | No consumer outside this crate. `WIT-001` tracks its duplication. |
 
 `camel-wit` is the contract source of truth. The host currently keeps copies
-under `crates/components/camel-component-wasm/wit/` and checks only one copy
-through an auto-skipping cross-crate file test. This is implementation drift,
-not the target ownership model. `rc-osj0` tracks replacement of those copies
-with consumption of this crate.
+under `crates/components/camel-component-wasm/wit/` and checks all three
+copies against canonical via a non-skipping cross-crate test
+(`test_host_wit_matches_canonical`). `rc-osj0` tracks replacement of those
+copies with consumption of this crate.
 
 ## Dependency posture
 
-This crate should be a zero-dependency leaf. WIT source publication does not
-need runtime types or a WIT toolchain dependency.
-
-The current `camel-api` dependency exists only for `CamelError` in `WitHost`.
+`camel-wit` is a zero-dependency leaf. WIT source publication does not need
+runtime types or a WIT toolchain dependency. The `camel-api` dependency,
 `WitHost`, the MIME constants such as `APPLICATION_JSON`, and `wit_dir()` have
-no external callers. They are runtime or convenience code in the wrong layer.
-`rc-m9nn` tracks their removal or relocation. Until that work lands, the
-dependency is current code, not an accepted architectural boundary.
+been removed. This crate now has no `Cargo.toml` dependencies and no runtime
+or convenience code outside contract publication.
 
 ## Interface evolution
 
-ADR-0053 makes WIT versioning a v1.0 requirement. The package has one SemVer
-for all interfaces and worlds, independent from the Rust crate version. The
-v1.0 release establishes `camel:plugin@1.0.0`. Package identity, compatibility
-classification, and host support replace the unresolved `WIT-006` comments.
+The package is versioned at `camel:plugin@1.0.0` per ADR-0053. One SemVer
+covers all interfaces and worlds and is independent from the Rust crate
+version. Package identity, compatibility classification, and host support are
+the contract evolution mechanism.
 
 ## Language
 
@@ -51,8 +48,7 @@ _Avoid_: Rust API, plugin implementation, host bindings
 
 **WIT host**:
 `camel-component-wasm`, which links generated bindings and executes guests.
-This term does not refer to the unused `WitHost` struct in this crate.
-_Avoid_: `WitHost`, plugin runtime
+_Avoid_: plugin runtime
 
 ## Self-grill record for DP-1
 

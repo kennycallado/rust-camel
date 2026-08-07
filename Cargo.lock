@@ -2476,9 +2476,6 @@ dependencies = [
 [[package]]
 name = "camel-wit"
 version = "0.26.0"
-dependencies = [
- "camel-api",
-]
 
 [[package]]
 name = "camel-xj"
