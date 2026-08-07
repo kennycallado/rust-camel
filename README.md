@@ -433,8 +433,8 @@ rust-camel separates two planes:
 ```
 
 Internals (domain model, event journaling, runtime state) are an
-implementation detail — see [`crates/camel-core/README.md`](crates/camel-core/README.md)
-and [`docs/ARCHITECT.md`](docs/ARCHITECT.md).
+implementation detail. See [`crates/camel-core/README.md`](crates/camel-core/README.md),
+[`CONTEXT-MAP.md`](CONTEXT-MAP.md), and [`docs/adr/`](docs/adr/).
 
 ### JSON Schema for the DSL
 

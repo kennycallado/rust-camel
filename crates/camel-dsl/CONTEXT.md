@@ -66,8 +66,8 @@ path compiles `RouteDefinition` directly (`CompileRouteDefinition { definition: 
 hot-reload (the `compile_declarative_route_to_canonical` path, gated by `allow_loss`). It is **not**
 the compile target of the normal route-start path — declarative DSL does **not** have to pass through
 canonical to run. `RuntimeCommand` registration accepts a `CanonicalRouteSpec` but immediately lowers
-it to a `RouteDefinition`; all runtime compilation still consumes `RouteDefinition`. (Resolves the
-canonical-vs-declarative authority question raised in `docs/ARCHITECT.md` §14.)
+it to a `RouteDefinition`. All runtime compilation still consumes `RouteDefinition`. This paragraph
+is the answer to the canonical-vs-declarative authority question (ADR-0011, ADR-0016, ADR-0026).
 
 **auto_startup**:
 RouteDefinition flag, default `true`. When `false`, CamelContext registers the Route but does not start its Consumer during `CamelContext::start()`; the Route must be started through RuntimeBus, RouteController, or ControlBus.

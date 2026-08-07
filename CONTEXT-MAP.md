@@ -66,6 +66,16 @@ are a convenience index and may lag the file.
 - [0026](./docs/adr/0026-json-canonical-route-authoring-format.md) — JSON is the canonical full-DSL authoring format for SDKs/generators; YAML is human convenience
 - [0027](./docs/adr/0027-mqtt-component-3-1-1-per-endpoint-connections.md) — MQTT component uses MQTT 3.1.1 (v1) via `rumqttc`; one connection per Consumer/Producer created lazily (route_id not available at `create_endpoint()`); MQTT 5.0 deferred to v2
 - [0028](./docs/adr/0028-claimcheck-repository-trait.md) — Separate `ClaimCheckRepository` trait (payload-bearing `set`/`get` with `Message` values; filter option for selective merge-back), distinct from key-only `IdempotentRepository` (ADR-0023); shared `NamedRegistry<T>` wiring pattern cross-referenced, not inherited
+- [0029](./docs/adr/0029-resequencer-continuation-boundary.md) — Resequencer continuation boundary: the compiler splits the step list at the top-level `Resequence` step; post-steps compile into a `BoxProcessor` continuation owned by `ResequencerService`. One `PipelineAssembly`, no side-channel, drain through `StepLifecycle` (ADR-0022, ADR-0024, ADR-0025)
+- [0030](./docs/adr/0030-exchange-aware-dataformat-hooks.md) — `DataFormat` gains default `marshal_in_exchange` / `unmarshal_in_exchange` hooks that receive `&mut Exchange`; existing impls inherit the defaults unchanged
+- [0031](./docs/adr/0031-wasm-source-world.md) — Fourth WIT world `source`: the guest owns the consumption loop through `run(listener)`; the host supplies raw capabilities as WIT resources. Cancellation by channel close plus epoch deadline; a trap fails the route and restart recreates the instance
+- [0034](./docs/adr/0034-controlbus-capability-authz.md) — ControlBus capability authorization: the target `routeId` is static in the URI, the `authorizedRoutes` allowlist is mandatory and fail-closed, the `CamelRouteId` header override is removed, and self-restart is denied
+- [0036](./docs/adr/0036-bridge-ipc-mtls.md) — Bridge IPC uses mutual TLS with ephemeral rcgen certificates instead of h2c; a fail-closed guard aborts the bridge when the resolved certificate paths are still placeholders
+- [0037](./docs/adr/0037-exec-component-fail-closed-capability-model.md) — Exec component fail-closed capability model: allowlisted binaries, argument policy, no shell, bounded stdin, and a `#[non_exhaustive]` `ExecError` surfaced through `CamelError::ProcessorErrorWithSource`
+- [0041](./docs/adr/0041-component-metadata-capabilities-schema.md) — `ComponentMetadata` schema in `camel-api` (`OptionKind`, `UriOption`, `ComponentCapabilities`, `CapabilityQuery`); `Component::metadata()` has a minimal default, and the Registry harvests metadata once at registration
+- [0048](./docs/adr/0048-attestation-provenance-retired.md) — **Retired (2026-07-26)**. Supersedes the original HMAC-SHA256 attestation-provenance decision. Kept for history; do not implement
+- [0049](./docs/adr/0049-workspace-non-exhaustive-policy-for-v1-contract-enums.md) — Public contract enums in contract crates are `#[non_exhaustive]` by default, applied before the 1.0 API freeze. Enforced by `cargo xtask lint-non-exhaustive`
+- [0052](./docs/adr/0052-diagnostic-endpoint-exposure-posture.md) — Diagnostic endpoints (`/metrics`, `/healthz`, `/readyz`, `/startupz`, `/health`) follow the Prometheus scrape model: unauthenticated by convention, loopback bind preferred, TLS and auth as optional hooks. Network isolation is the operator's duty. They are not data plane (ADR-0032)
 - [0038](./docs/adr/0038-configurable-dos-caps-via-per-format-config-channel.md) — Configurable DoS caps via per-format config channel; setting a non-default cap in YAML is the ADR-0033 per-item explicit choice
 - [0039](./docs/adr/0039-configurable-loop-iteration-cap.md) — Configurable per-Step loop iteration cap via `max_iterations` (ADR-0033/0038 per-item escape hatch)
 - [0040](./docs/adr/0040-configurable-materialize-limits.md) — Configurable materialize limits for XSLT/XJ/WASM producers (ADR-0032, ADR-0033, ADR-0038)
@@ -146,18 +156,23 @@ and an event-driven refresh rule.
 **Authority order (highest wins on conflict):**
 
 1. **Source code** — the only ground truth.
-2. **`docs/ARCHITECT.md`** — code-derived snapshot pinned to a git SHA. Authoritative over all
-   other prose, but may itself lag HEAD (see its header).
+2. **`docs/adr/*`** — decision record. Each ADR states its own `Status` and `Amends` metadata.
+   An ADR governs the decision it records. It does not describe current code shape.
 3. **`CONTEXT-MAP.md` + crate `CONTEXT.md`** — curated domain language and bounded-context map.
 4. **`README.md` files** — user-facing summaries; most drift-prone (enum tables, Cargo metadata).
+
+`docs/ARCHITECT.md` is outside this order. It is an untracked local snapshot pinned to a past git
+SHA (`.gitignore` excludes `docs/*`). No tooling regenerates it. Treat it as a historical reading
+aid. Never cite it to settle a conflict.
 
 **Term-landing rule:** a new cross-cutting domain term lands in `CONTEXT-MAP.md` Key Terms first;
 a crate-local term lands in that crate's `CONTEXT.md`. The defining ADR (if any) is cited inline.
 
 **Refresh is event-driven, not scheduled:**
 
-- After an **architecture-shaping merge** (new EIP, lifecycle change, contract change): regenerate
-  `docs/ARCHITECT.md` from code and re-run the drift cross-check (`docs/ARCHITECT-DRIFT-REPORT.md`).
+- After an **architecture-shaping merge** (new EIP, lifecycle change, contract change): update the
+  Contexts and Relationships sections of this map, plus the `CONTEXT.md` of every crate the merge
+  touched, in the same change.
 - When **adding/renaming a domain term**: update CONTEXT-MAP/CONTEXT in the same change.
 - When an **ADR is superseded or amended**: update both the ADR header metadata and this map's ADR
   index in the same change.
