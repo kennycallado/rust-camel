@@ -89,19 +89,22 @@ diagnostic representation or serialization.
 
 ## Enforcement
 
-Code review and crate-local regression tests enforce this policy now. Existing
-`cargo xtask lint-secrets` remains a sink lint for format and tracing macros.
+Code review and crate-local regression tests enforce this policy. Existing
+`cargo xtask lint-secrets` scans format and tracing macros for sink-pattern
+violations and performs AST-based derive inspection for ADR-0051 consistency.
 
-Do not add a derive-name lint yet. A field-name heuristic would miss opaque
-containers such as `StateStore.data`. It would also flag non-secret metadata
-such as `client_key_path`, token types, and cancellation tokens. A type-aware
-lint without semantic annotations would create both false negatives and false
-positives.
+Types annotated with `/// ADR-0051 credential boundary: <classification>`
+must comply with derive rules for their classification:
 
-Revisit mechanical enforcement at the T2 audit sweep, or when another confirmed
-secret-bearing derive appears, whichever comes first. The revisit must evaluate
-a semantic marker or redacting wrapper contract before it expands
-`lint-secrets`.
+- `manual-redaction`: must not derive `Debug` or `Serialize`.
+- `redacting-wrapper`: may derive `Debug`; must not derive `Serialize`.
+- `protocol-dto`: may derive `Serialize`; must not derive `Debug`.
+
+`Zeroizing<T>` fields trigger auto-detection: any struct or enum with a
+`Zeroizing` field must carry a `manual-redaction` classification. Unknown,
+malformed, or conflicting duplicate classifications produce violations.
+Parse failures hard-fail. The lint is a CI quality gate with non-zero exit
+on any violation.
 
 ## Considered Options
 

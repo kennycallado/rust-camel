@@ -146,6 +146,8 @@ fn check_feature_gates(protocol: SecurityProtocol) -> Option<&'static str> {
 ///
 /// This struct holds component-level defaults that can be set via YAML config
 /// and applied to endpoint configurations when specific values aren't provided.
+///
+/// ADR-0051 credential boundary: redacting-wrapper
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(default)]
 pub struct KafkaConfig {

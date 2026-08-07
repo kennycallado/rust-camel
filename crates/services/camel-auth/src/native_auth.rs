@@ -10,12 +10,14 @@ pub struct NativeCredential {
     pub principal: Principal,
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 #[derive(Clone)]
 pub enum NativeCredentialSecret {
     Env { name: String },
     Plaintext { value: Zeroizing<String> },
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 #[derive(Clone)]
 struct ResolvedCredential {
     secret_value: Zeroizing<String>,

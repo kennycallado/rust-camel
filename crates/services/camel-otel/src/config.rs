@@ -23,6 +23,8 @@ pub enum OtelSampler {
 }
 
 /// Configuration for the OpenTelemetry service.
+///
+/// ADR-0051 credential boundary: manual-redaction
 #[derive(Clone)]
 pub struct OtelConfig {
     pub endpoint: String,

@@ -1,8 +1,12 @@
 {
   "verdict": "APPROVE",
   "reviewer": "r_glm",
-  "session": "ses_0237e9f64ffepKw0MSR79xn1lU",
-  "impl_hash": "sha256:ca510bcabcdff5509bcf9a52cd1ef89025d298b38cbd34b46181a6ebb5ce4ac5",
-  "findings_resolved": ["CONTEXT.md drift (auth/bridge/kafka) — 3 files updated", "bd closure — deferred to PHASE 4 step 8"],
+  "impl_hash": "sha256:5adf0fb47a3868147413ab1a04051321dc490dc943f7e817c5eca4937061f770",
+  "findings_resolved": ["declaration_line None-case: report with line 0 instead of skip (false-negative hardening)"],
+  "findings_deferred": [
+    "first-match line attribution with duplicate names (low likelihood, cosmetic)",
+    "has_cfg_test over-matches cfg(not(test)) (rare attribute)",
+    "monolithic file growth (existing convention, requires cross-lint refactor)"
+  ],
   "date": "2026-08-07"
 }

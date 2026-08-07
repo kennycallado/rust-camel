@@ -11,6 +11,7 @@ clap = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
 regex = { workspace = true }
+syn = { workspace = true, features = ["full"] }
 walkdir = "2"
 zip = { workspace = true }
 serde_json = { workspace = true }

@@ -22,6 +22,8 @@ const RESERVED_RDKAFKA_KEYS: &[&str] = &[
 ///
 /// Define under `[components.kafka.brokers_named]` in Camel.toml,
 /// reference via `?brokerName=name` in URIs.
+///
+/// ADR-0051 credential boundary: redacting-wrapper
 #[derive(Clone, PartialEq, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct KafkaBrokerConfig {

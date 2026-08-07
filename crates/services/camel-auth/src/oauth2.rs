@@ -26,6 +26,7 @@ pub trait TokenProvider: Send + Sync + std::fmt::Debug {
     async fn get_token(&self) -> Result<String, AuthError>;
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 #[derive(Deserialize)]
 struct TokenResponse {
     #[serde(deserialize_with = "deserialize_zeroizing_string")]
@@ -45,6 +46,7 @@ impl fmt::Debug for TokenResponse {
     }
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 struct CachedToken {
     access_token: Zeroizing<String>,
     #[allow(dead_code)]
@@ -67,6 +69,7 @@ impl CachedToken {
     }
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 pub struct ClientCredentialsProvider {
     token_endpoint: String,
     client_id: String,

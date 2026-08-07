@@ -8,6 +8,8 @@ use std::sync::Mutex;
 /// Each route endpoint using a WASM component gets its own independent state store.
 /// If two routes use the same `.wasm` file, they maintain separate state.
 /// Owned by `WasmProducer` and passed to `WasmRuntime` when creating host state.
+///
+/// ADR-0051 credential boundary: manual-redaction
 #[derive(Clone)]
 pub struct StateStore {
     data: Arc<Mutex<HashMap<String, String>>>,

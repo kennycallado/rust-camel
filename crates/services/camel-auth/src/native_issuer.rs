@@ -118,6 +118,7 @@ struct NativeTokenClaims {
     roles: Vec<String>,
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 #[non_exhaustive]
 pub struct TokenResponse {
     pub access_token: Zeroizing<String>,

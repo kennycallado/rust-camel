@@ -29,12 +29,14 @@ pub struct M2mClient {
     pub scopes: Vec<String>,
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 #[derive(Clone)]
 pub enum M2mClientSecret {
     Env { name: String },
     Plaintext { value: Zeroizing<String> },
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 struct ResolvedM2mClient {
     client_id: String,
     secret_value: Zeroizing<String>,

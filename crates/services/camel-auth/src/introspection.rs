@@ -65,6 +65,7 @@ pub(crate) struct CachedEntry {
     expires_at: Instant,
 }
 
+/// ADR-0051 credential boundary: manual-redaction
 pub struct CachingTokenIntrospector {
     endpoint: String,
     client_id: String,

@@ -182,6 +182,8 @@ impl CxfProfileEnvVars {
 
 /// Configuration for spawning a bridge subprocess.
 /// Password fields use [`Redacted`] to prevent accidental credential leakage in logs.
+///
+/// ADR-0051 credential boundary: manual-redaction
 pub struct BridgeProcessConfig {
     pub spec: &'static BridgeSpec,
     pub binary_path: PathBuf,

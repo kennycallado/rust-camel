@@ -2336,6 +2336,427 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
     let mut seen = std::collections::HashSet::new();
     violations.retain(|v| seen.insert((v.file.clone(), v.line)));
 
+    // Layer 2: credential-derive lint (ADR-0051). Walks `crates/**/src/**/*.rs`,
+    // parses with `syn`, and flags structs/enums that violate the
+    // classification/derive contract (e.g. manual-redaction + Debug).
+    // Parse failures hard-fail: the caller exits non-zero on Err.
+    violations.extend(lint_credential_derives(workspace_root)?);
+
+    Ok(violations)
+}
+
+/// ADR-0051 credential-boundary classification for a struct or enum.
+///
+/// Declared via a rustdoc marker:
+///
+/// ```text
+/// /// ADR-0051 credential boundary: <classification>
+/// ```
+///
+/// where `<classification>` is one of the closed-vocabulary values below.
+/// See `openspec/specs/credential-lint/spec.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Classification {
+    /// Secret-bearing type. `Debug` and `Serialize` must be hand-written to
+    /// redact; deriving either is forbidden.
+    ManualRedaction,
+    /// Type whose derived `Debug` already redacts (e.g. a newtype wrapper).
+    /// `Debug` is safe; `Serialize` is forbidden.
+    RedactingWrapper,
+    /// Wire/protocol data-transfer object. `Serialize` is safe; `Debug` is
+    /// forbidden.
+    ProtocolDto,
+}
+
+impl Classification {
+    fn from_keyword(kw: &str) -> Option<Classification> {
+        match kw {
+            "manual-redaction" => Some(Classification::ManualRedaction),
+            "redacting-wrapper" => Some(Classification::RedactingWrapper),
+            "protocol-dto" => Some(Classification::ProtocolDto),
+            _ => None,
+        }
+    }
+}
+
+/// Prefix used by every credential-derive violation rule so they group cleanly
+/// in reports and are easy to assert on.
+const CREDENTIAL_RULE_PREFIX: &str = "credential-derive:";
+
+/// The rustdoc marker that declares a credential-boundary classification.
+const CREDENTIAL_BOUNDARY_MARKER: &str = "ADR-0051 credential boundary:";
+
+/// Read the string literal from a `#[doc = "..."]` name-value meta, if any.
+fn doc_literal(expr: &syn::Expr) -> Option<String> {
+    if let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(s),
+        ..
+    }) = expr
+    {
+        Some(s.value())
+    } else {
+        None
+    }
+}
+
+/// Scan a type's doc-comment attributes for the `ADR-0051 credential boundary:`
+/// marker and return the declared classification.
+///
+/// - `Ok(None)`: no marker present (classification is opt-in).
+/// - `Ok(Some(cls))`: a single, well-formed, closed-vocabulary value.
+/// - `Err(msg)`: missing value (malformed), an unknown value, or conflicting
+///   duplicate markers. The caller reports `msg` as a violation.
+fn parse_classification(attrs: &[syn::Attribute]) -> Result<Option<Classification>, String> {
+    let mut values: Vec<String> = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        let syn::Meta::NameValue(nv) = &attr.meta else {
+            continue;
+        };
+        let Some(doc) = doc_literal(&nv.value) else {
+            continue;
+        };
+        if let Some(rest) = doc.split(CREDENTIAL_BOUNDARY_MARKER).nth(1) {
+            // The classification keyword runs to the end of the marker's line
+            // (block doc-comments may place trailing prose on later lines).
+            let value = rest.lines().next().unwrap_or("").trim();
+            values.push(value.to_string());
+        }
+    }
+
+    if values.is_empty() {
+        return Ok(None);
+    }
+
+    // Any marker with no value after the colon is malformed.
+    if values.iter().any(String::is_empty) {
+        return Err("malformed classification (missing value)".to_string());
+    }
+
+    // Conflicting duplicates: more than one distinct value across markers.
+    let mut distinct: Vec<&String> = Vec::new();
+    for v in &values {
+        if !distinct.contains(&v) {
+            distinct.push(v);
+        }
+    }
+    if distinct.len() > 1 {
+        return Err("conflicting duplicate classifications".to_string());
+    }
+
+    let value = distinct[0].as_str();
+    match Classification::from_keyword(value) {
+        Some(cls) => Ok(Some(cls)),
+        None => Err(format!("unknown classification '{value}'")),
+    }
+}
+
+/// True when `ty` is (or ends in) a `Zeroizing` path segment, matching both
+/// `Zeroizing<T>` and `zeroize::Zeroizing<T>`.
+fn type_is_zeroizing(ty: &syn::Type) -> bool {
+    matches!(
+        ty,
+        syn::Type::Path(tp)
+            if tp.path.segments.iter().any(|seg| seg.ident == "Zeroizing")
+    )
+}
+
+/// True when a struct or enum has at least one field whose type is `Zeroizing`.
+fn has_zeroizing_field(item: &syn::Item) -> bool {
+    match item {
+        syn::Item::Struct(s) => s.fields.iter().any(|f| type_is_zeroizing(&f.ty)),
+        syn::Item::Enum(e) => e
+            .variants
+            .iter()
+            .any(|v| v.fields.iter().any(|f| type_is_zeroizing(&f.ty))),
+        _ => false,
+    }
+}
+
+/// Extract every trait name mentioned in `#[derive(...)]` attributes, across
+/// single-line and multi-line derives. Uses the last path segment so qualified
+/// forms like `#[derive(serde::Serialize)]` are detected, not just
+/// `#[derive(Serialize)]`.
+fn extract_derive_names(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut names = Vec::new();
+    for attr in attrs {
+        // Skip non-derive attributes so e.g. `#[serde(rename = "x")]` does
+        // not pollute the derive list with `rename`.
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if let Some(last) = meta.path.segments.last() {
+                names.push(last.ident.to_string());
+            }
+            Ok(())
+        });
+    }
+    names
+}
+
+/// True when `attrs` contains `#[cfg(test)]` (also `#[cfg(all(test, ...))]`).
+fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let Ok(list) = attr.meta.require_list() else {
+            return false;
+        };
+        let tokens = list.tokens.to_string();
+        // Match the standalone identifier `test` (not e.g. `testing`).
+        tokens == "test"
+            || tokens
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|tok| tok == "test")
+    })
+}
+
+/// True when `byte` may continue a Rust identifier (alnum or `_`).
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// True when `line` contains the `keyword` token (`struct`/`enum`) immediately
+/// followed by the `ident` token, with proper word boundaries (so `mystruct`
+/// does not match `struct`).
+fn line_has_decl(line: &str, keyword: &str, ident: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut search = 0usize;
+    while let Some(rel) = line[search..].find(keyword) {
+        let abs = search + rel;
+        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
+        let rest = &line[abs + keyword.len()..];
+        if before_ok && rest.starts_with(|c: char| c.is_whitespace()) {
+            let next = rest.trim_start();
+            if next.starts_with(ident)
+                && next[ident.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+            {
+                return true;
+            }
+        }
+        search = abs + 1;
+    }
+    false
+}
+
+/// Line number of a struct/enum item's declaration in `src`. Because
+/// `proc_macro2::Span` does not expose line numbers without the unstable
+/// semver-exempt cfg, the declaration is located lexically by matching the
+/// `struct`/`enum` keyword followed by the item's identifier, skipping comment
+/// lines. Returns `None` if the declaration cannot be located; callers skip
+/// the item rather than misreport line 1.
+fn declaration_line(src: &str, item: &syn::Item) -> Option<usize> {
+    let (keyword, ident): (&'static str, String) = match item {
+        syn::Item::Struct(s) => ("struct", s.ident.to_string()),
+        syn::Item::Enum(e) => ("enum", e.ident.to_string()),
+        _ => return None,
+    };
+    for (i, line) in src.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') {
+            continue;
+        }
+        if line_has_decl(line, keyword, &ident) {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
+/// True when a struct/enum item itself carries `#[cfg(test)]`.
+fn item_has_cfg_test(item: &syn::Item) -> bool {
+    match item {
+        syn::Item::Struct(s) => has_cfg_test(&s.attrs),
+        syn::Item::Enum(e) => has_cfg_test(&e.attrs),
+        _ => false,
+    }
+}
+
+/// Push a single credential-derive violation built from the declaration line.
+fn push_credential_violation(
+    violations: &mut Vec<SecretViolation>,
+    file_path: &str,
+    line: usize,
+    src: &str,
+    rule_tail: &str,
+) {
+    let snippet = src
+        .lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    violations.push(SecretViolation {
+        file: file_path.to_string(),
+        line,
+        snippet,
+        rule: format!("{CREDENTIAL_RULE_PREFIX} {rule_tail}"),
+    });
+}
+
+/// Check one struct/enum item for credential-derive consistency, appending any
+/// violations to `violations`.
+fn check_credential_item(
+    item: &syn::Item,
+    violations: &mut Vec<SecretViolation>,
+    file_path: &str,
+    src: &str,
+) {
+    let attrs: &[syn::Attribute] = match item {
+        syn::Item::Struct(s) => &s.attrs,
+        syn::Item::Enum(e) => &e.attrs,
+        _ => return,
+    };
+    // If the lexical matcher fails, report with line 0 rather than
+    // silently skip — a credential lint's dangerous failure mode is
+    // the false negative.
+    let line = declaration_line(src, item).unwrap_or(0);
+
+    let derives = extract_derive_names(attrs);
+    match parse_classification(attrs) {
+        Ok(Some(cls)) => {
+            let has_debug = derives.iter().any(|d| d == "Debug");
+            let has_serialize = derives.iter().any(|d| d == "Serialize");
+            let forbidden: Vec<&str> = match cls {
+                Classification::ManualRedaction => {
+                    let mut v = Vec::new();
+                    if has_debug {
+                        v.push("manual-redaction forbids Debug");
+                    }
+                    if has_serialize {
+                        v.push("manual-redaction forbids Serialize");
+                    }
+                    v
+                }
+                Classification::RedactingWrapper => {
+                    if has_serialize {
+                        vec!["redacting-wrapper forbids Serialize"]
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Classification::ProtocolDto => {
+                    if has_debug {
+                        vec!["protocol-dto forbids Debug"]
+                    } else {
+                        Vec::new()
+                    }
+                }
+            };
+            for tail in forbidden {
+                push_credential_violation(violations, file_path, line, src, tail);
+            }
+        }
+        Ok(None) => {
+            if has_zeroizing_field(item) {
+                push_credential_violation(
+                    violations,
+                    file_path,
+                    line,
+                    src,
+                    "Zeroizing field requires manual-redaction classification",
+                );
+            }
+        }
+        Err(msg) => {
+            push_credential_violation(violations, file_path, line, src, &msg);
+        }
+    }
+}
+
+/// Recursively visit items, skipping `#[cfg(test)]` modules and `#[cfg(test)]`
+/// items, checking each struct/enum for credential-derive consistency.
+fn collect_credential_violations(
+    items: &[syn::Item],
+    violations: &mut Vec<SecretViolation>,
+    file_path: &str,
+    src: &str,
+) {
+    for item in items {
+        match item {
+            syn::Item::Mod(m) => {
+                if has_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    collect_credential_violations(inner, violations, file_path, src);
+                }
+            }
+            syn::Item::Struct(_) | syn::Item::Enum(_) => {
+                if item_has_cfg_test(item) {
+                    continue;
+                }
+                check_credential_item(item, violations, file_path, src);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Core scanner: parse a single `.rs` source file with `syn` and return every
+/// credential-derive violation. On `syn::parse_file` failure, returns `Err`
+/// (hard-fail — parse failures must not silently skip enforcement).
+fn lint_credential_derives_src(src: &str, file_path: &str) -> Result<Vec<SecretViolation>, String> {
+    let file = syn::parse_file(src).map_err(|e| format!("{file_path}: {e}"))?;
+    let mut violations = Vec::new();
+    collect_credential_violations(&file.items, &mut violations, file_path, src);
+    Ok(violations)
+}
+
+/// Walk `crates/**/src/**/*.rs` under `workspace_root` and collect every
+/// credential-derive violation. Test files (`is_test_file`) are skipped at the
+/// file level; `#[cfg(test)]` modules are skipped at the item level. Any parse
+/// failure returns `Err`.
+pub fn lint_credential_derives(workspace_root: &Path) -> Result<Vec<SecretViolation>, String> {
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let mut violations = Vec::new();
+
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if is_test_file(path) {
+            continue;
+        }
+
+        let comps: Vec<_> = path.components().collect();
+        let under_crates = comps
+            .iter()
+            .any(|c| *c == Component::Normal("crates".as_ref()));
+        let under_src = comps
+            .iter()
+            .any(|c| *c == Component::Normal("src".as_ref()));
+        let blocked = comps
+            .iter()
+            .any(|c| *c == Component::Normal("target".as_ref()))
+            || path.starts_with(workspace_root.join(".worktrees"));
+        if !under_crates || !under_src || blocked {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        violations.extend(lint_credential_derives_src(
+            &content,
+            &path.to_string_lossy(),
+        )?);
+    }
+
     Ok(violations)
 }
 
@@ -3254,6 +3675,285 @@ mod tests {
                 "client_secret in format! must be caught: {violations:?}"
             );
             fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn test_lint_secrets_combines_sink_and_derive() {
+            // One sink-pattern violation (format! password) in crates/foo/src/sink.rs
+            // plus one credential-derive violation (manual-redaction struct + Debug)
+            // in crates/bar/src/cred.rs. lint_secrets must surface BOTH.
+            let ws = tmp_workspace_secrets(&[
+                (
+                    "crates/foo/src/sink.rs",
+                    r#"fn log() { let msg = format!("password {}", self.password); }"#, // allow-secret
+                ),
+                (
+                    "crates/bar/src/cred.rs",
+                    "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub struct Cred { x: u32 }\n",
+                ),
+            ]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                2,
+                "expected sink+derive = 2 violations, got: {violations:?}"
+            );
+            let rules: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
+            assert!(
+                rules.iter().any(|r| r.contains("format macro")),
+                "missing format-macro sink violation: {rules:?}"
+            );
+            assert!(
+                rules
+                    .iter()
+                    .any(|r| r.contains("manual-redaction forbids Debug")),
+                "missing credential-derive violation: {rules:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn test_lint_secrets_parse_failure_returns_err() {
+            // A syntactically invalid .rs file under crates/**/src/ makes
+            // lint_credential_derives return Err; lint_secrets must propagate
+            // it as Err (hard-fail, not silently swallowed).
+            let ws = tmp_workspace_secrets(&[("crates/foo/src/lib.rs", "struct Broken {\n")]);
+            let res = lint_secrets(&ws);
+            assert!(
+                res.is_err(),
+                "expected parse-failure Err, got Ok({:?})",
+                res.as_ref().map(|v| v.len())
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod lint_credential_derives_tests {
+        use super::*;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn tmp_workspace_cred(files: &[(&str, &str)]) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-cred-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap() // allow-unwrap
+                    .subsec_nanos()
+            ));
+            for (rel_path, content) in files {
+                let full = dir.join(rel_path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap(); // allow-unwrap
+                fs::write(&full, content).unwrap(); // allow-unwrap
+            }
+            fs::create_dir_all(dir.join("bridges")).unwrap(); // allow-unwrap
+            fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap(); // allow-unwrap
+            dir
+        }
+
+        #[test]
+        fn test_manual_redaction_debug_violation() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert_eq!(
+                v[0].rule,
+                "credential-derive: manual-redaction forbids Debug"
+            );
+        }
+
+        #[test]
+        fn test_enum_manual_redaction_debug_violation() {
+            // Exercises the Item::Enum arm of has_zeroizing_field,
+            // check_credential_item, and item_has_cfg_test.
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub enum Foo { A, B }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("manual-redaction forbids Debug"));
+        }
+
+        #[test]
+        fn test_enum_zeroizing_without_classification() {
+            // Exercises the Item::Enum arm of has_zeroizing_field by giving an
+            // enum variant a Zeroizing field and no classification marker.
+            let src = "pub enum Cred { Plain(String), Secret(Zeroizing<String>) }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(
+                v[0].rule
+                    .contains("Zeroizing field requires manual-redaction classification")
+            );
+        }
+
+        #[test]
+        fn test_qualified_derive_serialize_violation() {
+            // Regression: `serde::Serialize` is a multi-segment path; the old
+            // `meta.path.get_ident()` extraction silently dropped it.
+            let src = "/// ADR-0051 credential boundary: redacting-wrapper\n#[derive(serde::Serialize)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("redacting-wrapper forbids Serialize"));
+        }
+
+        #[test]
+        fn test_manual_redaction_serialize_violation() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Serialize)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("manual-redaction forbids Serialize"));
+        }
+
+        #[test]
+        fn test_manual_redaction_clean() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Clone)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_manual_redaction_with_manual_impl_debug() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\npub struct Foo { x: u32 }\nimpl std::fmt::Debug for Foo {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"redacted\") }\n}\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_redacting_wrapper_debug_ok() {
+            let src = "/// ADR-0051 credential boundary: redacting-wrapper\n#[derive(Debug)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_redacting_wrapper_serialize_violation() {
+            let src = "/// ADR-0051 credential boundary: redacting-wrapper\n#[derive(Serialize)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("redacting-wrapper forbids Serialize"));
+        }
+
+        #[test]
+        fn test_protocol_dto_serialize_ok() {
+            let src = "/// ADR-0051 credential boundary: protocol-dto\n#[derive(Serialize)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_protocol_dto_debug_violation() {
+            let src = "/// ADR-0051 credential boundary: protocol-dto\n#[derive(Debug)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("protocol-dto forbids Debug"));
+        }
+
+        #[test]
+        fn test_zeroizing_without_classification() {
+            let src = "pub struct Foo { value: Zeroizing<String> }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(
+                v[0].rule
+                    .contains("Zeroizing field requires manual-redaction classification")
+            );
+        }
+
+        #[test]
+        fn test_qualified_zeroizing_without_classification() {
+            let src = "pub struct Foo { value: zeroize::Zeroizing<String> }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(
+                v[0].rule
+                    .contains("Zeroizing field requires manual-redaction classification")
+            );
+        }
+
+        #[test]
+        fn test_zeroizing_with_classification() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\npub struct Foo { value: Zeroizing<String> }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_unannotated_no_zeroizing() {
+            let src = "pub struct Foo { path: String }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_credential_suggesting_name_no_violation() {
+            let src = "pub struct Foo { client_key_path: String }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_multiline_derive() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(\n    Debug,\n    Clone,\n)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("manual-redaction forbids Debug"));
+        }
+
+        #[test]
+        fn test_unknown_classification() {
+            let src =
+                "/// ADR-0051 credential boundary: unknown-value\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("unknown classification"));
+        }
+
+        #[test]
+        fn test_malformed_classification() {
+            let src = "/// ADR-0051 credential boundary:\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("malformed classification"));
+        }
+
+        #[test]
+        fn test_conflicting_duplicate() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n/// ADR-0051 credential boundary: protocol-dto\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("conflicting duplicate classifications"));
+        }
+
+        #[test]
+        fn test_parse_failure_returns_error() {
+            let src = "struct Broken {";
+            let res = lint_credential_derives_src(src, "t.rs");
+            assert!(res.is_err(), "expected parse error, got: {res:?}");
+        }
+
+        #[test]
+        fn test_violation_includes_file_and_line() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub struct Foo {\n    x: u32,\n}\n";
+            let v = lint_credential_derives_src(src, "my_file.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert_eq!(v[0].file, "my_file.rs");
+            let expected_line = src
+                .lines()
+                .position(|l| l.contains("pub struct Foo"))
+                .map(|i| i + 1)
+                .unwrap(); // allow-unwrap
+            assert_eq!(v[0].line, expected_line);
+        }
+
+        #[test]
+        fn test_violations_present_exit_nonzero() {
+            let ws = tmp_workspace_cred(&[(
+                "crates/foo/src/lib.rs",
+                "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub struct Foo { x: u32 }\n",
+            )]);
+            let v = lint_credential_derives(&ws).unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            fs::remove_dir_all(&ws).unwrap(); // allow-unwrap
         }
     }
 
