@@ -960,9 +960,9 @@ fn canonicalize_step(step: BuilderStep) -> Result<CanonicalStepSpec, CamelError>
         other => {
             let step_name = canonical_step_name(&other);
             let detail = camel_api::canonical_contract_rejection_reason(step_name)
-                .unwrap_or("not included in canonical v1");
+                .unwrap_or("not included in canonical v2");
             Err(CamelError::RouteError(format!(
-                "canonical v1 does not support step `{step_name}`: {detail}"
+                "canonical v2 does not support step `{step_name}`: {detail}"
             )))
         }
     }
@@ -979,13 +979,13 @@ fn canonicalize_split_aggregation(
             Ok(CanonicalSplitAggregationSpec::CollectAll)
         }
         camel_api::splitter::AggregationStrategy::Custom(_) => Err(CamelError::RouteError(
-            "canonical v1 does not support custom split aggregation".to_string(),
+            "canonical v2 does not support custom split aggregation".to_string(),
         )),
         camel_api::splitter::AggregationStrategy::Original => {
             Ok(CanonicalSplitAggregationSpec::Original)
         }
         _ => Err(CamelError::RouteError(
-            "canonical v1 does not support this split aggregation strategy".to_string(),
+            "canonical v2 does not support this split aggregation strategy".to_string(),
         )),
     }
 }
@@ -1046,12 +1046,12 @@ fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregate
         CorrelationStrategy::Expression { expr, .. } => expr.clone(),
         CorrelationStrategy::Fn(_) => {
             return Err(CamelError::RouteError(
-                "canonical v1 does not support Fn correlation strategy".to_string(),
+                "canonical v2 does not support Fn correlation strategy".to_string(),
             ));
         }
         _ => {
             return Err(CamelError::RouteError(
-                "canonical v1 does not support this correlation strategy".to_string(),
+                "canonical v2 does not support this correlation strategy".to_string(),
             ));
         }
     };
@@ -1069,12 +1069,12 @@ fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregate
         AggregationStrategy::CollectAll => CanonicalAggregateStrategySpec::CollectAll,
         AggregationStrategy::Custom(_) => {
             return Err(CamelError::RouteError(
-                "canonical v1 does not support custom aggregate strategy".to_string(),
+                "canonical v2 does not support custom aggregate strategy".to_string(),
             ));
         }
         _ => {
             return Err(CamelError::RouteError(
-                "canonical v1 does not support this aggregate strategy".to_string(),
+                "canonical v2 does not support this aggregate strategy".to_string(),
             ));
         }
     };
@@ -3315,8 +3315,8 @@ mod tests {
             .build_canonical()
             .unwrap_err();
 
-        // Split with closure-based expression is rejected in canonical v1.
-        assert!(format!("{err}").contains("canonical v1 does not support step `split`"));
+        // Split with closure-based expression is rejected in canonical v2.
+        assert!(format!("{err}").contains("canonical v2 does not support step `split`"));
     }
 
     #[test]
@@ -3464,7 +3464,7 @@ mod tests {
             .build_canonical()
             .unwrap_err();
 
-        assert!(format!("{err}").contains("canonical v1 does not support step `split`"));
+        assert!(format!("{err}").contains("canonical v2 does not support step `split`"));
     }
 
     // ── OnExceptionBuilder full chain tests ─────────────────────────────────────

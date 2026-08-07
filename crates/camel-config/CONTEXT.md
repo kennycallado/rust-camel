@@ -75,8 +75,7 @@ evolve independently of the runtime types.
 **Hot-reload wiring.**
 The `watch` and `watch_debounce_ms` fields are consumed by camel-cli (`run.rs`, via
 `--watch`) and implemented in camel-core (`reload_watcher::watch_and_reload`). The
-`TODO(CONFIG-004)` comments in this crate that claim hot-reload is unimplemented are stale
-(finding M1).
+stale `TODO(CONFIG-004)` comments (finding M1) have been removed.
 
 **Route discovery delegation.**
 `discovery.rs` delegates to `camel_dsl` and wraps its error as `DiscoveryError::Dsl`. This

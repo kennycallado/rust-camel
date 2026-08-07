@@ -16,13 +16,13 @@ use crate::message::Message;
 /// # Contract (C1)
 ///
 /// - `set` stores or overwrites a payload by key.
-/// - `get` returns a clone of the payload without removing it. Returns
-///   `Err(CamelError::NotFound(...))` if the key does not exist.
+/// - `get` returns a clone of the payload without removing it. Returns an
+///   error if the key does not exist.
 /// - `get_and_remove` returns and removes in one atomic step.
 /// - `remove` succeeds even if the key does not exist (no-op).
 /// - `push` appends to a LIFO stack for the given key.
-/// - `pop` removes and returns the top of the LIFO stack. Returns
-///   `Err(CamelError::NotFound(...))` if the stack is empty.
+/// - `pop` removes and returns the top of the LIFO stack. Returns an error
+///   if the stack is empty.
 #[async_trait::async_trait]
 pub trait ClaimCheckRepository: Send + Sync + std::fmt::Debug + 'static {
     /// Human-readable name for diagnostics.
@@ -33,12 +33,12 @@ pub trait ClaimCheckRepository: Send + Sync + std::fmt::Debug + 'static {
 
     /// Retrieve payload by key without removing it.
     ///
-    /// Returns `Err(CamelError::NotFound(...))` if the key does not exist.
+    /// Returns an error if the key does not exist.
     async fn get(&self, key: &str) -> Result<Message, CamelError>;
 
     /// Retrieve and remove in one atomic step.
     ///
-    /// Returns `Err(CamelError::NotFound(...))` if the key does not exist.
+    /// Returns an error if the key does not exist.
     async fn get_and_remove(&self, key: &str) -> Result<Message, CamelError>;
 
     /// Remove payload by key. Succeeds even if the key does not exist.
@@ -49,7 +49,7 @@ pub trait ClaimCheckRepository: Send + Sync + std::fmt::Debug + 'static {
 
     /// Pop payload from a LIFO stack for `key`.
     ///
-    /// Returns `Err(CamelError::NotFound(...))` if the stack is empty.
+    /// Returns an error if the stack is empty.
     async fn pop(&self, key: &str) -> Result<Message, CamelError>;
 }
 

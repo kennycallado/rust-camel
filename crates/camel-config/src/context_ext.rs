@@ -140,7 +140,6 @@ impl CamelConfig {
     /// When OTel is enabled, the OtelService is created *before* the subscriber
     /// so the LoggerProvider can be wired into the tracing bridge for log export.
     pub async fn configure_context(config: &CamelConfig) -> Result<CamelContext, CamelError> {
-        // TODO(CONFIG-004): config.watch flag is parsed, but hot-reload wiring is not implemented here yet.
         Self::configure_context_with_beans(config, None).await
     }
 

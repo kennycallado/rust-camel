@@ -28,5 +28,4 @@ current-HEAD positions and are secondary to the symbol.
 
 ## Metrics
 
-Metrics instrumentation is not yet wired for CLI commands. See TODO(PROC-004) in individual
-processor crates for the broader instrumentation gap.
+Metrics instrumentation for CLI commands is not yet wired; processor-crate instrumentation is tracked separately.

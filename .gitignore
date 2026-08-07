@@ -38,3 +38,8 @@ benchmarks/results/
 # Benchmark container-runner caches (bind-mounted into container)
 benchmarks/.cache/
 .docker-cache/
+
+# conductor-light workflow scratch (per-change blessing/review verdicts;
+# written at worktree root, must not be tracked)
+.bless.json
+.review.json

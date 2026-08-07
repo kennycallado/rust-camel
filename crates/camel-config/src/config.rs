@@ -16,7 +16,6 @@ pub struct CamelConfig {
 
     /// Enable file-watcher hot-reload. Defaults to false.
     /// Can be overridden per profile in Camel.toml or via `--watch` / `--no-watch` CLI flags.
-    // TODO(CONFIG-004): hot-reload watch plumbing not fully implemented yet.
     #[serde(default)]
     pub watch: bool,
 
@@ -41,9 +40,8 @@ pub struct CamelConfig {
     #[serde(default = "default_drain_timeout_ms")]
     pub drain_timeout_ms: u64,
 
+    /// Debounce window (ms) for the file-watcher hot-reload; consumed by `camel run`.
     #[serde(default = "default_watch_debounce_ms")]
-    // TODO(CONFIG-004): Hot-reload via file watcher not yet implemented.
-    // watch_debounce_ms is parsed but currently unused.
     pub watch_debounce_ms: u64,
 
     #[serde(default)]

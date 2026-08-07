@@ -39,7 +39,7 @@ fn builder_canonical_rejects_unsupported_steps() {
         .to_string();
 
     assert!(
-        err.contains("canonical v1 does not support step `processor`"),
+        err.contains("canonical v2 does not support step `processor`"),
         "unexpected error: {err}"
     );
 }
@@ -79,7 +79,7 @@ fn builder_canonical_rejects_closure_filter_with_explicit_subset_reason() {
         .to_string();
 
     assert!(
-        err.contains("canonical v1 does not support step `filter`"),
+        err.contains("canonical v2 does not support step `filter`"),
         "unexpected error: {err}"
     );
     assert!(

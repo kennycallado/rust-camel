@@ -21,7 +21,7 @@
 - **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker, unit-of-work hooks
 
 - **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax with optional defaults `${env:VAR_NAME:-default}`
-- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, recipient_list, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip, do_try
+- **All step types**: to, set_header, set_header_if_absent, set_property, set_body, convert_body_to, dynamic_router, filter, function, load_balance, log, choice, split, aggregate, wire_tap, multicast, routing_slip, recipient_list, stop, throttle, script, stream_cache, marshal, unmarshal, validate, bean, delay, loop, enrich, poll_enrich, idempotent_consumer, claim_check, sampling, sort, resequence, do_try
 - **REST DSL** — declarative `rest:` blocks in YAML/JSON that lower to HTTP
   consumer routes with automatic JSON binding, path templates (`/users/{id}`),
   and optional request schema validation.

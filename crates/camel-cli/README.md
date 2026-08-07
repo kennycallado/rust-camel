@@ -17,6 +17,8 @@ Commands:
   new      Scaffold a new Camel project
   run      Start a Camel context from route files (YAML or JSON) with hot-reload
   journal  Inspect a runtime journal file
+  plugin   Manage WASM plugins (processors and beans)
+  openapi  Generate OpenAPI document from REST route files
   help     Print help
 
 Options:
@@ -33,8 +35,6 @@ camel new <NAME>
 
 Arguments:
   <NAME>  Project name and directory to create
-
-## Overview
 
 Command-line interface for Apache Camel in Rust.
 
@@ -89,6 +89,9 @@ Options:
    --watch           Enable file-watcher hot-reload
    --no-watch        Disable file-watcher hot-reload (overrides Camel.toml)
    --health-port <PORT>  Override health server port (enables standalone health server)
+   --otel                Enable OpenTelemetry export (traces, metrics, logs)
+   --otel-endpoint <URL>  OTLP endpoint URL (implies --otel)
+   --service-name <NAME>  OTel service name (implies --otel)
 ```
 
 ### Quick start — no config file
