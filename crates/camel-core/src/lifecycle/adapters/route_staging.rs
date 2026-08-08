@@ -47,7 +47,7 @@ impl crate::lifecycle::adapters::route_controller::DefaultRouteController {
             self.prepared_staging
                 .insert(prepared.route_id.clone(), managed);
             return Err(CamelError::RouteError(format!(
-                "Route '{}' already exists",
+                "duplicate route ID '{}'",
                 prepared.route_id
             )));
         }

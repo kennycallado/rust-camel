@@ -335,8 +335,7 @@ impl DefaultRouteController {
 
         if self.routes.contains_key(&route_id) {
             return Err(CamelError::RouteError(format!(
-                "Route '{}' already exists",
-                route_id
+                "duplicate route ID '{route_id}'"
             )));
         }
 
@@ -474,8 +473,7 @@ impl DefaultRouteController {
 
         if self.routes.contains_key(&route_id) {
             return Err(CamelError::RouteError(format!(
-                "Route '{}' already exists",
-                route_id
+                "duplicate route ID '{route_id}'"
             )));
         }
 

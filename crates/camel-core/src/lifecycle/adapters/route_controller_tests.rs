@@ -192,7 +192,7 @@ async fn add_route_detects_duplicates() {
         .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
         .await
         .expect_err("duplicate must fail");
-    assert!(dup_err.to_string().contains("already exists"));
+    assert!(dup_err.to_string().contains("duplicate"));
 }
 
 #[tokio::test]
@@ -1152,7 +1152,7 @@ async fn add_route_with_generation_and_prepare_insert_behaviors() {
         )
         .await
         .expect_err("duplicate add with generation should fail");
-    assert!(dup.to_string().contains("already exists"));
+    assert!(dup.to_string().contains("duplicate"));
 
     let prepared = controller
         .prepare_route_definition_with_generation(
@@ -1177,7 +1177,7 @@ async fn add_route_with_generation_and_prepare_insert_behaviors() {
     let err = controller
         .insert_prepared_route(prepared_dup)
         .expect_err("insert duplicate prepared route should fail");
-    assert!(err.to_string().contains("already exists"));
+    assert!(err.to_string().contains("duplicate"));
 }
 
 #[test]
@@ -2233,7 +2233,7 @@ async fn insert_prepared_route_failure_drains_staging() {
     let err = controller
         .insert_prepared_route(prepared)
         .expect_err("insert must fail (duplicate route_id)");
-    assert!(err.to_string().contains("already exists"));
+    assert!(err.to_string().contains("duplicate"));
 
     // Pre-drain assertion: staging still holds the entry (caller contract).
     assert!(

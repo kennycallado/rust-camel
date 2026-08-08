@@ -690,10 +690,8 @@ impl RouteBuilder {
     }
 
     /// Consume the builder and produce a [`RouteDefinition`].
-    // TODO(rc-p9vq): Validate duplicate route IDs. When a route with the same
-    // ID is already registered in the context, return `Err(CamelError::RouteError)`.
-    // Currently, duplicate IDs are silently accepted; detection should happen at
-    // `CamelContext::add_route_definition` time.
+    // Duplicate route IDs are detected at `CamelContext::add_route_definition` time
+    // (RouteController rejects atomically with CamelError::RouteError).
     pub fn build(self) -> Result<RouteDefinition, CamelError> {
         validate_uri(&self.from_uri)?;
         let route_id = self

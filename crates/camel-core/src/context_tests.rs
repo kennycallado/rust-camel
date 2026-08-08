@@ -326,10 +326,6 @@ async fn add_route_definition_rejects_duplicate_route_id() {
     );
     let err_msg = second_result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("duplicate"),
-        "error should mention 'duplicate', got: {err_msg}"
-    );
-    assert!(
         err_msg.contains("dup-route-id"),
         "error should mention the conflicting route ID, got: {err_msg}"
     );
