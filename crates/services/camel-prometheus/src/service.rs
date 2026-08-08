@@ -112,8 +112,18 @@ impl Lifecycle for PrometheusService {
 
         self.bound_port.store(actual_port, Ordering::SeqCst);
 
+        if !self.addr.ip().is_loopback() {
+            warn!(
+                addr = %self.addr,
+                "prometheus metrics endpoint bound to non-loopback address; endpoint is reachable from all interfaces without application-layer restriction (ADR-0052)"
+            );
+        }
+
+        self.status.store(1, Ordering::SeqCst);
+
         let metrics = Arc::clone(&self.metrics);
         let health_source = self.health_source.clone();
+        let status = Arc::clone(&self.status);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
@@ -126,13 +136,13 @@ impl Lifecycle for PrometheusService {
                 )
                 .await
             {
+                status.store(2, Ordering::SeqCst);
                 warn!("prometheus metrics server exited with error: {err}");
             }
         });
 
         self.shutdown_tx = Some(shutdown_tx);
         self.server_handle = Some(handle);
-        self.status.store(1, Ordering::SeqCst);
         info!(port = %actual_port, "prometheus metrics service started");
         Ok(())
     }
@@ -321,6 +331,67 @@ mod tests {
         service.stop().await.unwrap();
 
         // After stop, start should succeed again
+        service.start().await.unwrap();
+        assert_eq!(service.status(), ServiceStatus::Started);
+
+        service.stop().await.unwrap();
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn loopback_bind_emits_no_warning() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let mut service = PrometheusService::new(addr);
+
+        assert!(service.start().await.is_ok());
+        assert!(!logs_contain("non-loopback"));
+
+        service.stop().await.unwrap();
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn non_loopback_bind_emits_warning() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let mut service = PrometheusService::new(addr);
+
+        assert!(service.start().await.is_ok());
+        assert!(logs_contain("non-loopback"));
+
+        service.stop().await.unwrap();
+    }
+
+    #[test]
+    fn server_task_error_sets_status_failed() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let service = PrometheusService::new(addr);
+
+        // Simulate server-task failure: the spawned closure would store
+        // status=2 (Failed) on Err. We reproduce that via the public
+        // status_arc() accessor.
+        let status = service.status_arc();
+        status.store(2, Ordering::SeqCst);
+
+        assert_eq!(service.status(), ServiceStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn clean_shutdown_does_not_set_failed() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let mut service = PrometheusService::new(addr);
+
+        service.start().await.unwrap();
+        service.stop().await.unwrap();
+
+        assert_ne!(service.status(), ServiceStatus::Failed);
+        assert_eq!(service.status(), ServiceStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn status_started_before_spawn() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let mut service = PrometheusService::new(addr);
+
         service.start().await.unwrap();
         assert_eq!(service.status(), ServiceStatus::Started);
 

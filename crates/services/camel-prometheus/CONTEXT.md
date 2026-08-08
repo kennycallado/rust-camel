@@ -42,21 +42,22 @@ non-loopback opt-out. bd `rc-asm9` tracks the code work (bind default, warning, 
 
 Dynamic label values must come from a closed or bounded set. Never pass raw Exchange
 body, header, property, or correlation-key data as a label value. Each distinct label
-combination creates a Prometheus series. The dynamic registries have no cardinality
-cap or eviction, so unbounded values can cause unbounded memory growth. bd `rc-0pyv`
-tracks this risk. ADR-0032 supplies the exchange-data trust boundary; its amendment
-(2026-08-06) names metric label values as an unbounded resource sink and requires
-closed-set or bounded label values here.
+combination creates a Prometheus series. The dynamic registries enforce a configurable
+collector-name cap (default 1024, independent per map). When the cap is exceeded, new
+names are rejected and the observation is dropped. The cap is checked before the
+DashMap entry guard to avoid deadlock. ADR-0032 supplies the exchange-data trust
+boundary; its amendment (2026-08-06) names metric label values as an unbounded
+resource sink and requires closed-set or bounded label values here.
 
 Counter observations reject NaN, negative, and fractional values. Histogram
 observations reject NaN. These value checks do not bound label cardinality.
 
-## Lifecycle status limitation
+## Lifecycle status
 
-`PrometheusService::start` marks the service as `Started` after it spawns the server
-task. If that task later exits with an error, it logs a warning but does not change
-the stored status to `Failed`. `Lifecycle::status()` can therefore report `Started`
-for a dead server. bd `rc-7zr3` tracks this status-fidelity bug.
+`PrometheusService::start` marks the service as `Started` before it spawns the server
+task. If that task later exits with an error, it stores `Failed` (atomic value 2)
+before logging the warning. `Lifecycle::status()` reports `Failed` for a dead server.
+Clean shutdown (graceful stop) stores `Stopped` (0), not `Failed`.
 
 ## `#[non_exhaustive]` posture
 

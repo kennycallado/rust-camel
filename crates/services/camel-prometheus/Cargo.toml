@@ -28,6 +28,7 @@ camel-component-timer.workspace = true
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 tower = { workspace = true, features = ["util"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [lints]
 workspace = true

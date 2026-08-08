@@ -80,6 +80,10 @@ pub struct PrometheusMetrics {
     /// Names that have already emitted a `warn!` — dedup so a bad metric
     /// logs once, not per-call (log-flood prevention).
     warned: dashmap::DashSet<String>,
+    /// Soft cap on the number of unique dynamic collector names
+    /// (counter + histogram) tracked in the DashMaps. Bounds memory growth
+    /// from unbounded label-value or name cardinality (rc-0pyv).
+    max_dynamic_collectors: usize,
 }
 
 impl PrometheusMetrics {
@@ -172,7 +176,22 @@ impl PrometheusMetrics {
             dyn_counters: dashmap::DashMap::new(),
             dyn_histograms: dashmap::DashMap::new(),
             warned: dashmap::DashSet::new(),
+            max_dynamic_collectors: 1024,
         }
+    }
+
+    /// Returns the soft cap on the number of unique dynamic collector names
+    /// (counter + histogram) that this instance will accept. The cap is
+    /// independent for counters and histograms.
+    pub fn max_dynamic_collectors(&self) -> usize {
+        self.max_dynamic_collectors
+    }
+
+    /// Builder-style override for the dynamic collector cap. Used to set a
+    /// tighter bound in tests or to raise/lower the production default.
+    pub fn with_max_dynamic_collectors(mut self, n: usize) -> Self {
+        self.max_dynamic_collectors = n;
+        self
     }
 
     /// Returns a reference to the underlying Prometheus registry
@@ -258,6 +277,24 @@ impl MetricsCollector for PrometheusMetrics {
         let sorted = sort_label_pairs(labels);
         let values: Vec<&str> = sorted.iter().map(|(_, v)| *v).collect();
 
+        // Cap check runs BEFORE acquiring the entry guard: calling `len()`
+        // while holding an `Entry` would deadlock the DashMap shard. The
+        // `contains_key` short-circuit allows updates to already-tracked
+        // names even when at cap (defense in depth, not exact enforcement
+        // under contention).
+        if self.dyn_counters.len() >= self.max_dynamic_collectors
+            && !self.dyn_counters.contains_key(&normalized)
+        {
+            if self.warned.insert(format!("cap:{}", normalized)) {
+                tracing::warn!(
+                    name,
+                    cap = self.max_dynamic_collectors,
+                    "dynamic counter cap exceeded; observation dropped"
+                );
+            }
+            return;
+        }
+
         use dashmap::mapref::entry::Entry;
         match self.dyn_counters.entry(normalized.clone()) {
             Entry::Occupied(o) => match o.get() {
@@ -327,6 +364,23 @@ impl MetricsCollector for PrometheusMetrics {
         }
         let sorted = sort_label_pairs(labels);
         let values: Vec<&str> = sorted.iter().map(|(_, v)| *v).collect();
+
+        // Cap check runs BEFORE acquiring the entry guard: calling `len()`
+        // while holding an `Entry` would deadlock the DashMap shard. The
+        // `contains_key` short-circuit allows updates to already-tracked
+        // names even when at cap.
+        if self.dyn_histograms.len() >= self.max_dynamic_collectors
+            && !self.dyn_histograms.contains_key(&normalized)
+        {
+            if self.warned.insert(format!("cap:{}", normalized)) {
+                tracing::warn!(
+                    name,
+                    cap = self.max_dynamic_collectors,
+                    "dynamic histogram cap exceeded; observation dropped"
+                );
+            }
+            return;
+        }
 
         use dashmap::mapref::entry::Entry;
         match self.dyn_histograms.entry(normalized.clone()) {
@@ -715,6 +769,82 @@ mod tests {
         dynref.record_histogram("trait_hist", 0.25, &[("route", "r1")]);
         let out = concrete.gather();
         assert!(out.contains("camel_trait_hist"));
+    }
+
+    #[test]
+    fn default_max_dynamic_collectors_is_1024() {
+        let metrics = PrometheusMetrics::new();
+        assert_eq!(metrics.max_dynamic_collectors(), 1024);
+    }
+
+    #[test]
+    fn dynamic_counter_within_cap_accepted() {
+        let metrics = PrometheusMetrics::new().with_max_dynamic_collectors(3);
+        metrics.record_counter("within_a", 1.0, &[]);
+        metrics.record_counter("within_b", 1.0, &[]);
+        metrics.record_counter("within_c", 1.0, &[]);
+        let out = metrics.gather();
+        assert!(out.contains("camel_within_a"), "missing a: {out}");
+        assert!(out.contains("camel_within_b"), "missing b: {out}");
+        assert!(out.contains("camel_within_c"), "missing c: {out}");
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn dynamic_counter_exceeding_cap_rejected() {
+        let metrics = PrometheusMetrics::new().with_max_dynamic_collectors(2);
+        metrics.record_counter("capd_a", 1.0, &[]);
+        metrics.record_counter("capd_b", 1.0, &[]);
+        metrics.record_counter("capd_c", 1.0, &[]); // over cap — must be dropped
+        let out = metrics.gather();
+        assert!(out.contains("camel_capd_a"), "a missing: {out}");
+        assert!(out.contains("camel_capd_b"), "b missing: {out}");
+        assert!(
+            !out.contains("camel_capd_c"),
+            "c should have been rejected, but appears in output: {out}"
+        );
+        assert!(logs_contain("cap exceeded"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn dynamic_histogram_exceeding_cap_rejected() {
+        let metrics = PrometheusMetrics::new().with_max_dynamic_collectors(2);
+        metrics.record_histogram("caph_a", 0.1, &[]);
+        metrics.record_histogram("caph_b", 0.2, &[]);
+        metrics.record_histogram("caph_c", 0.3, &[]); // over cap — must be dropped
+        let out = metrics.gather();
+        assert!(out.contains("camel_caph_a"), "a missing: {out}");
+        assert!(out.contains("camel_caph_b"), "b missing: {out}");
+        assert!(
+            !out.contains("camel_caph_c"),
+            "c should have been rejected, but appears in output: {out}"
+        );
+        assert!(logs_contain("cap exceeded"));
+    }
+
+    #[test]
+    fn existing_counter_still_works_after_cap_hit() {
+        let metrics = PrometheusMetrics::new().with_max_dynamic_collectors(2);
+        metrics.record_counter("repeat_a", 1.0, &[]);
+        metrics.record_counter("repeat_b", 1.0, &[]); // fills cap
+        metrics.record_counter("repeat_c", 1.0, &[]); // rejected
+        metrics.record_counter("repeat_a", 5.0, &[]); // already tracked — must still update
+        let out = metrics.gather();
+        // Total value for `a` series should be 1.0 + 5.0 = 6.0.
+        let total: f64 = out
+            .lines()
+            .filter(|l| l.contains("camel_repeat_a"))
+            .filter_map(|l| l.rsplit(' ').next().and_then(|v| v.parse::<f64>().ok()))
+            .sum();
+        assert_eq!(
+            total, 6.0,
+            "expected 6.0 for `a` after cap hit, got {total}"
+        );
+        assert!(
+            !out.contains("camel_repeat_c"),
+            "c should have been rejected: {out}"
+        );
     }
 }
 
