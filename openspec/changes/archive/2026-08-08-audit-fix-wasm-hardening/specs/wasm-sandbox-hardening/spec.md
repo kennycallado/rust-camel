@@ -1,6 +1,6 @@
 # Spec delta: wasm-sandbox-hardening
 
-## MODIFIED requirements
+## ADDED requirements
 
 ### Requirement: Host-side key-value store MUST enforce bounded allocations
 
