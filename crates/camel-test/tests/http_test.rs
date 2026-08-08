@@ -825,18 +825,20 @@ fn http_endpoint_config_invalid_auth() {
 #[test]
 fn http_endpoint_config_cookie_handling() {
     use camel_component_api::UriConfig;
-    use camel_component_http::{CookieHandling, HttpEndpointConfig};
+    use camel_component_http::HttpEndpointConfig;
 
-    let config =
-        HttpEndpointConfig::from_uri("http://example.com/api?cookieHandling=InMemory").unwrap();
-    assert!(matches!(config.cookie_handling, CookieHandling::InMemory));
+    // cookieHandling was a silently-ignored runtime state (TODO HTTP-013). It is
+    // now rejected by the URI parser so operators get an explicit error instead
+    // of a no-op.
+    let result = HttpEndpointConfig::from_uri("http://example.com/api?cookieHandling=InMemory");
+    assert!(
+        matches!(result, Err(camel_api::CamelError::InvalidUri(ref m)) if m.contains("cookieHandling is not supported"))
+    );
 
-    let config =
-        HttpEndpointConfig::from_uri("http://example.com/api?cookieHandling=Disabled").unwrap();
-    assert!(matches!(config.cookie_handling, CookieHandling::Disabled));
-
-    let result = HttpEndpointConfig::from_uri("http://example.com/api?cookieHandling=invalid");
-    assert!(result.is_err());
+    let result = HttpEndpointConfig::from_uri("http://example.com/api?cookieHandling=Disabled");
+    assert!(
+        matches!(result, Err(camel_api::CamelError::InvalidUri(ref m)) if m.contains("cookieHandling is not supported"))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -864,17 +866,34 @@ fn http_config_validates_max_redirects() {
 fn http_config_validates_proxy_url() {
     use camel_component_http::HttpConfig;
 
+    // proxy_url is retained for serde backward-compat, but any non-None
+    // value is rejected at validation time because it defeats SSRF DNS
+    // pinning. Both garbage and well-formed URLs fail the same way.
     let cfg = HttpConfig {
         proxy_url: Some("::not-a-proxy::".into()),
         ..HttpConfig::default()
     };
-    assert!(cfg.validate().is_err());
+    let err = cfg
+        .validate()
+        .expect_err("garbage proxy_url must be rejected");
+    assert!(
+        err.to_string()
+            .contains("incompatible with SSRF DNS pinning"),
+        "expected SSRF rejection message, got: {err}"
+    );
 
     let cfg = HttpConfig {
         proxy_url: Some("http://proxy.example.com:8080".into()),
         ..HttpConfig::default()
     };
-    assert!(cfg.validate().is_ok());
+    let err = cfg
+        .validate()
+        .expect_err("valid proxy_url must also be rejected");
+    assert!(
+        err.to_string()
+            .contains("incompatible with SSRF DNS pinning"),
+        "expected SSRF rejection message, got: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------

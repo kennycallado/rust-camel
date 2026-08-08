@@ -1345,10 +1345,7 @@ impl Service<Exchange> for WsProducer {
             )
             .await?;
 
-            ws_stream
-                .send(out_msg)
-                .await
-                .map_err(|e| CamelError::ProcessorError(format!("WebSocket send failed: {e}")))?;
+            send_with_timeout(ws_stream.send(out_msg), cfg.inner.send_timeout).await?;
 
             let incoming = tokio::time::timeout(cfg.inner.response_timeout, async {
                 loop {
@@ -1474,6 +1471,20 @@ fn try_send_with_backpressure(tx: &mpsc::Sender<WsMessage>, msg: WsMessage, cont
             tracing::warn!(%context, %error, "dropping websocket outbound message due to backpressure");
             false
         }
+    }
+}
+
+async fn send_with_timeout(
+    send_future: impl std::future::Future<Output = Result<(), tungstenite::Error>>,
+    timeout: std::time::Duration,
+) -> Result<(), CamelError> {
+    match tokio::time::timeout(timeout, send_future).await {
+        Ok(result) => {
+            result.map_err(|e| CamelError::ProcessorError(format!("WebSocket send failed: {e}")))
+        }
+        Err(_) => Err(CamelError::ProcessorError(format!(
+            "WebSocket send timeout after {timeout:?}"
+        ))),
     }
 }
 
@@ -2373,6 +2384,35 @@ mod tests {
             WsMessage::Text("second".into()),
             "test"
         ));
+    }
+
+    // WS-017: send_with_timeout fires when the underlying send future exceeds the budget.
+    #[tokio::test(start_paused = true)]
+    async fn send_with_timeout_fires_on_elapsed() {
+        // Advance the mock clock past the deadline before polling so the pending future
+        // is observed as already-elapsed on the first poll.
+        tokio::time::advance(Duration::from_millis(200)).await;
+        let result = send_with_timeout(
+            std::future::pending::<Result<(), tungstenite::Error>>(),
+            Duration::from_millis(100),
+        )
+        .await;
+        let err = result.expect_err("send_with_timeout must return Err on elapsed");
+        assert!(
+            err.to_string().contains("timeout"),
+            "expected timeout error, got: {err}"
+        );
+    }
+
+    // WS-017: send_with_timeout returns Ok when the underlying future completes within the budget.
+    #[tokio::test]
+    async fn send_with_timeout_succeeds_when_fast() {
+        let result = send_with_timeout(
+            async { Ok::<(), tungstenite::Error>(()) },
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
     #[test]

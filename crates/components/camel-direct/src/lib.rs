@@ -69,13 +69,8 @@ pub struct DirectConfig {
     pub name: String,
     /// Timeout in milliseconds for producer `call()`. Defaults to 30 000 ms.
     pub timeout_ms: Option<u64>,
-    /// When false, the producer returns immediately if no consumer is registered.
-    /// TODO(DIR-001): implement non-blocking send
-    pub block: Option<bool>,
     /// When false, skip readiness error if no consumer registered.
     pub fail_if_no_consumers: Option<bool>,
-    /// TODO(DIR-005): implement exchangePattern override
-    pub exchange_pattern: Option<String>,
 }
 
 impl DirectConfig {
@@ -109,11 +104,9 @@ impl DirectConfig {
             })
             .transpose()?;
 
-        let block = parts
-            .params
-            .get("block")
-            .map(|v| parse_bool("block", v))
-            .transpose()?;
+        if parts.params.contains_key("block") {
+            return Err(CamelError::InvalidUri("block is not supported".into()));
+        }
 
         let fail_if_no_consumers = parts
             .params
@@ -122,18 +115,18 @@ impl DirectConfig {
             .map(|v| parse_bool("fail_if_no_consumers", v))
             .transpose()?;
 
-        let exchange_pattern = parts
-            .params
-            .get("exchange_pattern")
-            .or_else(|| parts.params.get("exchangePattern"))
-            .cloned();
+        if parts.params.contains_key("exchange_pattern")
+            || parts.params.contains_key("exchangePattern")
+        {
+            return Err(CamelError::InvalidUri(
+                "exchange_pattern is not supported".into(),
+            ));
+        }
 
         Ok(Self {
             name: parts.path,
             timeout_ms,
-            block,
             fail_if_no_consumers,
-            exchange_pattern,
         })
     }
 }
@@ -622,6 +615,45 @@ mod tests {
     }
 
     #[test]
+    fn rejects_block_param() {
+        let result = DirectConfig::from_uri("direct:foo?block=true");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("block is not supported"),
+            "expected block rejection"
+        );
+    }
+
+    #[test]
+    fn rejects_exchange_pattern_snake_case() {
+        let result = DirectConfig::from_uri("direct:foo?exchange_pattern=InOnly");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exchange_pattern is not supported"),
+            "expected exchange_pattern rejection"
+        );
+    }
+
+    #[test]
+    fn rejects_exchange_pattern_camel_case() {
+        let result = DirectConfig::from_uri("direct:foo?exchangePattern=InOnly");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exchange_pattern is not supported"),
+            "expected exchangePattern rejection"
+        );
+    }
+
+    #[test]
     fn test_direct_endpoint_uri() {
         let component = DirectComponent::new();
         let endpoint = component
@@ -938,9 +970,7 @@ mod tests {
             config: DirectConfig {
                 name: "missing".to_string(),
                 timeout_ms: None,
-                block: None,
                 fail_if_no_consumers: None,
-                exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
             pending_permit: None,
@@ -969,9 +999,7 @@ mod tests {
             config: DirectConfig {
                 name: "active".to_string(),
                 timeout_ms: None,
-                block: None,
                 fail_if_no_consumers: None,
-                exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
             pending_permit: None,
@@ -994,9 +1022,7 @@ mod tests {
             config: DirectConfig {
                 name: "missing-ok".to_string(),
                 timeout_ms: None,
-                block: None,
                 fail_if_no_consumers: Some(false),
-                exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
             pending_permit: None,
@@ -1024,9 +1050,7 @@ mod tests {
             config: DirectConfig {
                 name: "closed".to_string(),
                 timeout_ms: None,
-                block: None,
                 fail_if_no_consumers: None,
-                exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
             pending_permit: None,
@@ -1133,9 +1157,7 @@ mod tests {
             config: DirectConfig {
                 name: "timeout-test".to_string(),
                 timeout_ms: Some(100), // 100ms timeout
-                block: None,
                 fail_if_no_consumers: None,
-                exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
             pending_permit: None,

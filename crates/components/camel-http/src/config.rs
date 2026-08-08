@@ -164,12 +164,10 @@ impl HttpConfig {
             parse_ok_status_code_range(range)?;
         }
 
-        if let Some(ref proxy) = self.proxy_url
-            && url::Url::parse(proxy).is_err()
-        {
-            return Err(CamelError::Config(format!(
-                "proxy_url '{proxy}' is not a valid URL"
-            )));
+        if self.proxy_url.is_some() {
+            return Err(CamelError::Config(
+                "proxy_url is incompatible with SSRF DNS pinning and cannot be used".to_string(),
+            ));
         }
 
         Ok(())
@@ -229,14 +227,6 @@ impl HttpConfig {
     }
     pub fn with_tls(mut self, tls: Option<TlsConfig>) -> Self {
         self.tls = tls;
-        self
-    }
-    /// Setting `proxy_url` is rejected at validation time because it
-    /// defeats DNS pinning. The field is kept for serde backward-compat
-    /// with existing TOML configs; new code must not set it.
-    #[deprecated(note = "proxy_url is incompatible with SSRF DNS pinning")]
-    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
-        self.proxy_url = proxy_url;
         self
     }
 }
@@ -346,21 +336,57 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_invalid_proxy_url() {
+    fn test_rejects_proxy_url_with_invalid_url() {
+        // The SSRF rejection fires regardless of URL well-formedness: a
+        // garbage value and a well-formed value both fail the same way.
         let cfg = HttpConfig {
             proxy_url: Some("::not-a-proxy::".into()),
             ..HttpConfig::default()
         };
-        assert!(cfg.validate().is_err());
+        let err = cfg.validate().expect_err("proxy_url must be rejected");
+        assert!(
+            err.to_string()
+                .contains("incompatible with SSRF DNS pinning"),
+            "expected SSRF rejection message, got: {err}"
+        );
     }
 
     #[test]
-    fn test_accepts_valid_proxy_url() {
+    fn test_rejects_proxy_url_with_valid_url() {
         let cfg = HttpConfig {
             proxy_url: Some("http://proxy:8080".into()),
             ..HttpConfig::default()
         };
-        assert!(cfg.validate().is_ok());
+        let err = cfg
+            .validate()
+            .expect_err("valid proxy_url must also be rejected");
+        assert!(
+            err.to_string()
+                .contains("incompatible with SSRF DNS pinning"),
+            "expected SSRF rejection message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_proxy_url_toml_deserialize_then_reject() {
+        // The field is retained for serde backward-compat so existing TOML
+        // configs still parse; validate() surfaces the SSRF incompatibility
+        // instead of letting the value silently slip through.
+        let toml_src = r#"
+            connect_timeout_ms = 5000
+            proxy_url = "http://proxy:8080"
+        "#;
+        let cfg: HttpConfig = toml::from_str(toml_src).expect("toml must deserialize");
+        assert_eq!(cfg.proxy_url.as_deref(), Some("http://proxy:8080"));
+
+        let err = cfg
+            .validate()
+            .expect_err("validate must reject deserialized proxy_url");
+        assert!(
+            err.to_string()
+                .contains("incompatible with SSRF DNS pinning"),
+            "expected SSRF rejection message, got: {err}"
+        );
     }
 
     #[test]

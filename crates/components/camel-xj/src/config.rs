@@ -26,12 +26,6 @@ pub struct XjEndpointConfig {
     /// Maximum allowed payload size in bytes before sending to the bridge process.
     /// Requests exceeding this limit are rejected immediately.
     pub max_payload_bytes: Option<usize>,
-    /// Transformation direction override: "XML2JSON" or "JSON2XML".
-    /// When set, takes precedence over `direction`. Default: auto-detect from content.
-    pub transform_direction: Option<String>,
-    /// Additional XSLT resource URI for transformation.
-    /// Default: None (no additional stylesheet applied beyond the primary one).
-    pub resource_uri: Option<String>,
     pub retry_count: u32,
     pub retry_delay_ms: u64,
 }
@@ -56,8 +50,6 @@ impl XjEndpointConfig {
         let mut direction = None;
         let mut params = Vec::new();
         let mut max_payload_bytes = None;
-        let mut transform_direction = None;
-        let mut resource_uri = None;
         let mut retry_count = 3u32;
         let mut retry_delay_ms = 500u64;
 
@@ -69,13 +61,15 @@ impl XjEndpointConfig {
                 }
 
                 if key == "transformDirection" {
-                    transform_direction = Some(value.into_owned());
-                    continue;
+                    return Err(CamelError::EndpointCreationFailed(
+                        "transformDirection is not supported; use 'direction' instead".into(),
+                    ));
                 }
 
                 if key == "resourceUri" {
-                    resource_uri = Some(value.into_owned());
-                    continue;
+                    return Err(CamelError::EndpointCreationFailed(
+                        "resourceUri is not supported".into(),
+                    ));
                 }
 
                 if key == "maxPayloadBytes" {
@@ -124,8 +118,6 @@ impl XjEndpointConfig {
             direction,
             params,
             max_payload_bytes,
-            transform_direction,
-            resource_uri,
             retry_count,
             retry_delay_ms,
         })
@@ -164,28 +156,28 @@ mod tests {
     }
 
     #[test]
-    fn parses_transform_direction_and_resource_uri() {
-        let cfg = XjEndpointConfig::from_uri(
-            "xj:file:///tmp/a.xslt?direction=xml2json&transformDirection=XML2JSON&resourceUri=classpath:extra.xslt",
+    fn rejects_transform_direction() {
+        let err = XjEndpointConfig::from_uri(
+            "xj:file:///tmp/a.xslt?direction=xml2json&transformDirection=XML2JSON",
         )
-        .unwrap();
-
-        assert_eq!(cfg.stylesheet_uri, "file:///tmp/a.xslt");
-        assert_eq!(cfg.direction, Direction::XmlToJson);
-        assert_eq!(cfg.transform_direction, Some("XML2JSON".to_string()));
-        assert_eq!(cfg.resource_uri, Some("classpath:extra.xslt".to_string()));
-        assert_eq!(cfg.retry_count, 3);
-        assert_eq!(cfg.retry_delay_ms, 500);
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("transformDirection is not supported"),
+            "expected transformDirection rejection, got: {err}"
+        );
     }
 
     #[test]
-    fn new_options_default_to_none() {
-        let cfg = XjEndpointConfig::from_uri("xj:classpath:identity?direction=json2xml").unwrap();
-
-        assert_eq!(cfg.transform_direction, None);
-        assert_eq!(cfg.resource_uri, None);
-        assert_eq!(cfg.retry_count, 3);
-        assert_eq!(cfg.retry_delay_ms, 500);
+    fn rejects_resource_uri() {
+        let err = XjEndpointConfig::from_uri(
+            "xj:file:///tmp/a.xslt?direction=xml2json&resourceUri=classpath:extra.xslt",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("resourceUri is not supported"),
+            "expected resourceUri rejection, got: {err}"
+        );
     }
 
     #[test]

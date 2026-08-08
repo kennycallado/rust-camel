@@ -120,7 +120,6 @@ pub struct HttpEndpointConfig {
     pub auth: HttpAuth,
     pub token_provider: Option<Arc<dyn TokenProvider>>,
     pub user_agent: Option<String>,
-    pub cookie_handling: CookieHandling,
     pub bridge_endpoint: bool,
     pub connection_close: bool,
     pub skip_request_headers: Vec<String>,
@@ -148,12 +147,6 @@ impl std::fmt::Debug for HttpAuth {
             HttpAuth::Bearer { .. } => f.debug_struct("Bearer").field("token", &"***").finish(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CookieHandling {
-    Disabled,
-    InMemory,
 }
 
 /// Camel options that should NOT be forwarded as HTTP query params
@@ -268,16 +261,11 @@ impl UriConfig for HttpEndpointConfig {
 
         let user_agent = parts.params.get("userAgent").cloned();
 
-        let cookie_handling = match parts.params.get("cookieHandling") {
-            Some(v) if v.eq_ignore_ascii_case("inmemory") => CookieHandling::InMemory,
-            Some(v) if v.eq_ignore_ascii_case("disabled") => CookieHandling::Disabled,
-            Some(v) => {
-                return Err(CamelError::InvalidUri(format!(
-                    "invalid value for cookieHandling: {v} (expected Disabled or InMemory)"
-                )));
-            }
-            None => CookieHandling::Disabled,
-        };
+        if parts.params.contains_key("cookieHandling") {
+            return Err(CamelError::InvalidUri(
+                "cookieHandling is not supported".into(),
+            ));
+        }
 
         let bridge_endpoint = match parts.params.get("bridgeEndpoint") {
             Some(v) => parse_bool_param_http(v).map_err(|e| {
@@ -353,7 +341,6 @@ impl UriConfig for HttpEndpointConfig {
             auth,
             token_provider: None,
             user_agent,
-            cookie_handling,
             bridge_endpoint,
             connection_close,
             skip_request_headers,
@@ -1582,7 +1569,6 @@ pub struct HttpComponent {
 
 pub(crate) fn build_client(
     config: &HttpConfig,
-    cookie_handling: CookieHandling,
     resolve_override: Option<(&str, &[std::net::SocketAddr])>,
 ) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
@@ -1598,10 +1584,6 @@ pub(crate) fn build_client(
 
     if let Some((host, addrs)) = resolve_override {
         builder = builder.resolve_to_addrs(host, addrs);
-    }
-
-    if matches!(cookie_handling, CookieHandling::InMemory) {
-        // TODO(HTTP-013): enable reqwest cookie jar once workspace reqwest features include cookie_store.
     }
 
     if let Some(tls) = &config.tls
@@ -1736,7 +1718,7 @@ impl Component for HttpComponent {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
-        let client = build_client(&self.config, config.cookie_handling, None);
+        let client = build_client(&self.config, None);
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -1854,7 +1836,7 @@ impl Component for HttpsComponent {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
-        let client = build_client(&self.config, config.cookie_handling, None);
+        let client = build_client(&self.config, None);
         ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
             server_config.host.clone(),
             server_config.port,
@@ -2047,11 +2029,7 @@ impl Service<Exchange> for HttpProducer {
             // directly to the validated addresses without re-resolving DNS.
             let resolved = ssrf::resolve_initial_url_for_ssrf(&url, config.allow_internal).await?;
             let client: reqwest::Client = if let Some((ref host, ref addrs)) = resolved {
-                build_client(
-                    &http_config,
-                    config.cookie_handling,
-                    Some((host.as_str(), addrs)),
-                )
+                build_client(&http_config, Some((host.as_str(), addrs)))
             } else {
                 client
             };
@@ -2420,7 +2398,6 @@ mod tests {
         assert_eq!(config.ok_status_code_range, (200, 299));
         assert!(config.response_timeout.is_none());
         assert!(matches!(config.auth, HttpAuth::None));
-        assert!(matches!(config.cookie_handling, CookieHandling::Disabled));
         assert!(!config.bridge_endpoint);
         assert!(!config.connection_close);
     }
@@ -2461,7 +2438,7 @@ mod tests {
     #[test]
     fn test_http_endpoint_config_auth_and_headers_options() {
         let config = HttpEndpointConfig::from_uri(
-            "http://localhost/api?authMethod=Basic&authUsername=u&authPassword=p&userAgent=camel-test&bridgeEndpoint=true&connectionClose=true&skipRequestHeaders=Authorization,X-Secret&skipResponseHeaders=Set-Cookie&cookieHandling=InMemory",
+            "http://localhost/api?authMethod=Basic&authUsername=u&authPassword=p&userAgent=camel-test&bridgeEndpoint=true&connectionClose=true&skipRequestHeaders=Authorization,X-Secret&skipResponseHeaders=Set-Cookie",
         )
         .unwrap();
 
@@ -2470,7 +2447,6 @@ mod tests {
             HttpAuth::Basic { username, password } if username == "u" && password == "p"
         ));
         assert_eq!(config.user_agent.as_deref(), Some("camel-test"));
-        assert!(matches!(config.cookie_handling, CookieHandling::InMemory));
         assert!(config.bridge_endpoint);
         assert!(config.connection_close);
         assert_eq!(
@@ -2490,6 +2466,34 @@ mod tests {
             config.auth,
             HttpAuth::Bearer { token } if token == "t"
         ));
+    }
+
+    #[test]
+    fn rejects_cookie_handling_inmemory() {
+        let result = HttpEndpointConfig::from_uri("http://localhost/api?cookieHandling=InMemory");
+        match result {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert!(
+                    msg.contains("cookieHandling is not supported"),
+                    "expected rejection message, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidUri error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_cookie_handling_disabled() {
+        let result = HttpEndpointConfig::from_uri("http://localhost/api?cookieHandling=Disabled");
+        match result {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert!(
+                    msg.contains("cookieHandling is not supported"),
+                    "expected rejection message, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidUri error, got: {other:?}"),
+        }
     }
 
     #[test]

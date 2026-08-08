@@ -372,11 +372,7 @@ pub(crate) async fn send_with_ssrf_safe_redirects(
         // Build a per-hop client with DNS pinning
         let redirect_host = redirect_url.host_str().unwrap_or("");
         let resolved_slice: &[SocketAddr] = &resolved_addrs;
-        current_client = build_client(
-            http_config,
-            endpoint_config.cookie_handling,
-            Some((redirect_host, resolved_slice)),
-        );
+        current_client = build_client(http_config, Some((redirect_host, resolved_slice)));
 
         current_method = new_method;
         current_url = redirect_url.to_string();

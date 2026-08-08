@@ -11,7 +11,7 @@ use std::sync::Arc;
 ///
 /// # Body Contract
 ///
-/// Input: XML or JSON string/bytes depending on `transform_direction`
+/// Input: XML or JSON string/bytes depending on `direction`
 /// Output: transformed JSON or XML string
 pub struct XjEndpoint {
     uri: String,

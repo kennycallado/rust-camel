@@ -21,14 +21,10 @@ the option is absent, `XjProducer::call` uses
 `DEFAULT_MATERIALIZE_LIMIT` (10 MiB). It passes the effective limit to
 `Body::into_bytes` before it sends input to the sidecar.
 
-## Accepted but inactive options
+## Rejected options
 
-`XjEndpointConfig::from_uri` accepts and stores `transformDirection` and
-`resourceUri`. Endpoint creation does not pass either field to `XjEndpoint` or
-`XjProducer`, so both options are silently ignored. Do not depend on them until
-rc-1v0s either wires them into behavior or removes them from the public URI
-surface.
-
+`XjEndpointConfig::from_uri` rejects `transformDirection` and `resourceUri`
+with an error. These options were previously accepted but silently ignored.
 ## `#[non_exhaustive]` posture
 
 ADR-0049 does not apply to this Component crate. Its default covers public

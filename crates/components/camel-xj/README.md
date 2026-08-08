@@ -43,8 +43,6 @@ xj:<stylesheet-uri>?direction=<direction>[&options]
 
 | Parameter            | Description                              | Default |
 |----------------------|------------------------------------------|---------|
-| `transformDirection` | Override: `XML2JSON` or `JSON2XML`       | auto    |
-| `resourceUri`        | Additional XSLT resource URI             | none    |
 | `maxPayloadBytes`    | Max payload size in bytes                | unlimited |
 | `retryCount`         | Number of retries on transient error     | 3       |
 | `retryDelayMs`       | Delay between retries in milliseconds    | 500     |
