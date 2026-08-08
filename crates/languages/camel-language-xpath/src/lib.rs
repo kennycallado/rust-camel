@@ -42,14 +42,29 @@ pub struct XPathLanguage {
 }
 
 struct XPathExpression {
-    query: String,
+    xpath: sxd_xpath::XPath,
     config: XPathConfig,
 }
 
 struct XPathPredicate {
-    query: String,
+    xpath: sxd_xpath::XPath,
     config: XPathConfig,
 }
+
+// SAFETY: Audited against sxd-xpath 0.4.2. `sxd_xpath::XPath` is
+// `Box<dyn sxd_xpath::expression::Expression + 'static>`. The inner
+// `Expression` trait is `&self`-only (see sxd-xpath `expression.rs`),
+// and concrete types in production code contain no `Cell`/`RefCell`/etc.
+// (the only `Rc<RefCell<…>>` in the crate lives behind `#[cfg(test)]`).
+// So `&XPathExpression` / `&XPathPredicate` can be shared across threads
+// without data races. `Send` is implied by the same reasoning plus the
+// absence of self-references in the value.
+// sxd-xpath is pinned to =0.4.2 in Cargo.toml; a version bump requires
+// re-auditing expression.rs for interior mutability.
+unsafe impl Send for XPathExpression {}
+unsafe impl Sync for XPathExpression {}
+unsafe impl Send for XPathPredicate {}
+unsafe impl Sync for XPathPredicate {}
 
 fn extract_xml(exchange: &Exchange) -> Result<String, LanguageError> {
     match &exchange.input.body {
@@ -69,7 +84,16 @@ fn extract_xml(exchange: &Exchange) -> Result<String, LanguageError> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn compile_xpath(query: &str) -> Result<sxd_xpath::XPath, LanguageError> {
+    #[cfg(test)]
+    {
+        COMPILE_COUNT.with(|c| c.set(c.get() + 1));
+    }
     let factory = Factory::new();
     factory
         .build(query)
@@ -91,7 +115,11 @@ fn compile_xpath(query: &str) -> Result<sxd_xpath::XPath, LanguageError> {
         })
 }
 
-fn run_query(query: &str, xml: &str, config: &XPathConfig) -> Result<JsonValue, LanguageError> {
+fn run_query(
+    xpath: &sxd_xpath::XPath,
+    xml: &str,
+    config: &XPathConfig,
+) -> Result<JsonValue, LanguageError> {
     if let Some(max) = config.max_input_bytes
         && xml.len() > max
     {
@@ -107,7 +135,6 @@ fn run_query(query: &str, xml: &str, config: &XPathConfig) -> Result<JsonValue, 
         LanguageError::EvalError("xml parse error: body is not valid XML".to_string())
     })?;
     let doc = package.as_document();
-    let xpath = compile_xpath(query)?;
     // TODO(XPH-001): Namespace declarations are not yet supported. The context
     // should be populated with namespace prefix → URI mappings from XPathConfig
     // before calling xpath.evaluate().
@@ -148,7 +175,7 @@ fn run_query(query: &str, xml: &str, config: &XPathConfig) -> Result<JsonValue, 
 impl Expression for XPathExpression {
     async fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
         let xml = extract_xml(exchange)?;
-        run_query(&self.query, &xml, &self.config)
+        run_query(&self.xpath, &xml, &self.config)
     }
 }
 
@@ -156,7 +183,7 @@ impl Expression for XPathExpression {
 impl Predicate for XPathPredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let xml = extract_xml(exchange)?;
-        let result = run_query(&self.query, &xml, &self.config)?;
+        let result = run_query(&self.xpath, &xml, &self.config)?;
         Ok(match &result {
             JsonValue::Null => false,
             JsonValue::Bool(b) => *b,
@@ -192,19 +219,19 @@ impl Language for XPathLanguage {
     }
 
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
-        compile_xpath(script)?;
+        let xpath = compile_xpath(script)?;
         debug!("xpath expression compiled");
         Ok(Box::new(XPathExpression {
-            query: script.to_string(),
+            xpath,
             config: self.config.clone(),
         }))
     }
 
     fn create_predicate(&self, script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
-        compile_xpath(script)?;
+        let xpath = compile_xpath(script)?;
         debug!("xpath expression compiled");
         Ok(Box::new(XPathPredicate {
-            query: script.to_string(),
+            xpath,
             config: self.config.clone(),
         }))
     }
@@ -214,6 +241,17 @@ impl Language for XPathLanguage {
 mod tests {
     use super::*;
     use camel_language_api::Message;
+    use std::cell::Cell;
+
+    /// Reset this thread's compile counter, returning the previous value.
+    fn reset_compile_count() -> usize {
+        COMPILE_COUNT.with(|c| c.replace(0))
+    }
+
+    /// Read this thread's compile counter without resetting.
+    fn read_compile_count() -> usize {
+        COMPILE_COUNT.with(Cell::get)
+    }
 
     async fn exchange_with_xml(xml: &str) -> Exchange {
         Exchange::new(Message::new(Body::Xml(xml.to_string())))
@@ -412,5 +450,59 @@ mod tests {
         let ex = exchange_with_xml(&big_xml).await;
         let result = pred.matches(&ex).await;
         assert!(result.is_err());
+    }
+
+    /// Regression test for FC-LANG-RECOMPILE: proves the XPath is compiled
+    /// exactly once at `create_expression` time, not on every evaluation.
+    /// Before the fix, each `evaluate` call re-invoked `compile_xpath`,
+    /// so the counter would increment 1 (create) + N (evaluates).
+    /// Uses a thread-local counter so parallel tokio tests do not interfere.
+    #[tokio::test]
+    async fn expression_compiles_only_once() {
+        let lang = XPathLanguage::new();
+        let _ = reset_compile_count();
+        let expr = lang.create_expression("/root/item").unwrap();
+        assert_eq!(
+            read_compile_count(),
+            1,
+            "create_expression should compile exactly once (got {})",
+            read_compile_count()
+        );
+
+        for i in 0..5 {
+            let ex = exchange_with_xml("<root><item>a</item></root>").await;
+            let _ = expr.evaluate(&ex).await.unwrap();
+            assert_eq!(
+                read_compile_count(),
+                1,
+                "evaluate call #{i} must not trigger recompilation (got {})",
+                read_compile_count()
+            );
+        }
+    }
+
+    /// Regression test for FC-LANG-RECOMPILE on the predicate path.
+    #[tokio::test]
+    async fn predicate_compiles_only_once() {
+        let lang = XPathLanguage::new();
+        let _ = reset_compile_count();
+        let pred = lang.create_predicate("/root/item").unwrap();
+        assert_eq!(
+            read_compile_count(),
+            1,
+            "create_predicate should compile exactly once (got {})",
+            read_compile_count()
+        );
+
+        for i in 0..5 {
+            let ex = exchange_with_xml("<root><item>a</item></root>").await;
+            let _ = pred.matches(&ex).await.unwrap();
+            assert_eq!(
+                read_compile_count(),
+                1,
+                "matches call #{i} must not trigger recompilation (got {})",
+                read_compile_count()
+            );
+        }
     }
 }

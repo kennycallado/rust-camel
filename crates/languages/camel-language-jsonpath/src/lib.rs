@@ -6,8 +6,14 @@
 use async_trait::async_trait;
 use camel_language_api::{Body, Exchange, Value};
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
-use jsonpath_rust::JsonPath;
+use jsonpath_rust::parser::model::JpQuery;
+use jsonpath_rust::parser::parse_json_path;
+use jsonpath_rust::query::js_path_process;
 use serde_json::Value as JsonValue;
+#[cfg(test)]
+thread_local! {
+    static COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Default maximum nesting depth for JSON values.
 const DEFAULT_MAX_DEPTH: usize = 64;
@@ -69,12 +75,12 @@ impl Default for JsonPathLanguage {
 }
 
 struct JsonPathExpression {
-    query: String,
+    query: JpQuery,
     config: JsonPathConfig,
 }
 
 struct JsonPathPredicate {
-    query: String,
+    query: JpQuery,
     config: JsonPathConfig,
 }
 
@@ -152,14 +158,15 @@ fn extract_json(exchange: &Exchange, config: &JsonPathConfig) -> Result<JsonValu
     }
 }
 
-fn run_query(query: &str, json: &JsonValue) -> Result<JsonValue, LanguageError> {
-    json.query(query)
-        .map_err(|e| LanguageError::EvalError(format!("jsonpath query '{query}' failed: {e}")))
-        .map(|results| match results.len() {
-            0 => JsonValue::Null,
-            1 => results[0].clone(),
-            _ => JsonValue::Array(results.into_iter().cloned().collect()),
-        })
+fn run_query(query: &JpQuery, json: &JsonValue) -> Result<JsonValue, LanguageError> {
+    let results = js_path_process(query, json)
+        .map_err(|e| LanguageError::EvalError(format!("jsonpath query '{query}' failed: {e}")))?;
+    let values: Vec<&JsonValue> = results.into_iter().map(|r| r.val).collect();
+    Ok(match values.len() {
+        0 => JsonValue::Null,
+        1 => values[0].clone(),
+        _ => JsonValue::Array(values.into_iter().cloned().collect()),
+    })
 }
 
 #[async_trait]
@@ -217,13 +224,16 @@ impl Language for JsonPathLanguage {
                 reason: "JsonPath expression must start with '$'".into(),
             });
         }
-        let empty = JsonValue::Object(serde_json::Map::new());
-        empty.query(script).map_err(|e| LanguageError::ParseError {
+        let parsed = parse_json_path(script).map_err(|e| LanguageError::ParseError {
             expr: script.to_string(),
             reason: e.to_string(),
         })?;
+        #[cfg(test)]
+        {
+            COMPILE_COUNT.with(|c| c.set(c.get() + 1));
+        }
         Ok(Box::new(JsonPathExpression {
-            query: script.to_string(),
+            query: parsed,
             config: self.config.clone(),
         }))
     }
@@ -235,13 +245,16 @@ impl Language for JsonPathLanguage {
                 reason: "JsonPath expression must start with '$'".into(),
             });
         }
-        let empty = JsonValue::Object(serde_json::Map::new());
-        empty.query(script).map_err(|e| LanguageError::ParseError {
+        let parsed = parse_json_path(script).map_err(|e| LanguageError::ParseError {
             expr: script.to_string(),
             reason: e.to_string(),
         })?;
+        #[cfg(test)]
+        {
+            COMPILE_COUNT.with(|c| c.set(c.get() + 1));
+        }
         Ok(Box::new(JsonPathPredicate {
-            query: script.to_string(),
+            query: parsed,
             config: self.config.clone(),
         }))
     }
@@ -655,6 +668,75 @@ mod tests {
         assert!(
             result.is_err(),
             "expected depth error for pre-parsed JSON, got {result:?}"
+        );
+    }
+
+    // --- FC-LANG-RECOMPILE: compile-once regression tests ---
+
+    /// Compile-time assertion that the compile-once implementation
+    /// produces `Send + Sync` types, matching the `Expression` /
+    /// `Predicate` trait contract.
+    #[test]
+    fn compile_once_types_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<JsonPathExpression>();
+        assert_send_sync::<JsonPathPredicate>();
+        assert_send_sync::<JpQuery>();
+    }
+
+    /// Regression test for FC-LANG-RECOMPILE: `create_expression` and
+    /// `create_predicate` must parse the script exactly once at creation
+    /// time. Re-evaluating the resulting `Expression` / `Predicate`
+    /// against new exchanges must NOT re-parse the query. The
+    /// `COMPILE_COUNT` thread-local is incremented inside
+    /// `create_expression` / `create_predicate` under `#[cfg(test)]`, so
+    /// a re-introduction of per-evaluation compilation would show up as
+    /// additional increments on this thread.
+    #[tokio::test]
+    async fn compilation_happens_only_once_for_expression() {
+        let before = COMPILE_COUNT.with(std::cell::Cell::get);
+        let lang = JsonPathLanguage::new();
+        let expr = lang.create_expression("$.foo.bar").unwrap();
+        let after_create = COMPILE_COUNT.with(std::cell::Cell::get);
+        assert_eq!(
+            after_create,
+            before + 1,
+            "create_expression must compile exactly once"
+        );
+
+        // Evaluate many times — compilation count must stay flat.
+        for _ in 0..50 {
+            let ex = exchange_with_json(r#"{"foo":{"bar":"baz"}}"#).await;
+            let result = expr.evaluate(&ex).await.unwrap();
+            assert_eq!(result, JsonValue::String("baz".to_string()));
+        }
+        assert_eq!(
+            COMPILE_COUNT.with(std::cell::Cell::get),
+            after_create,
+            "evaluate must NOT trigger re-compilation"
+        );
+    }
+
+    #[tokio::test]
+    async fn compilation_happens_only_once_for_predicate() {
+        let before = COMPILE_COUNT.with(std::cell::Cell::get);
+        let lang = JsonPathLanguage::new();
+        let pred = lang.create_predicate("$.items[*]").unwrap();
+        let after_create = COMPILE_COUNT.with(std::cell::Cell::get);
+        assert_eq!(
+            after_create,
+            before + 1,
+            "create_predicate must compile exactly once"
+        );
+
+        for _ in 0..50 {
+            let ex = exchange_with_json(r#"{"items":[1,2,3]}"#).await;
+            assert!(pred.matches(&ex).await.unwrap());
+        }
+        assert_eq!(
+            COMPILE_COUNT.with(std::cell::Cell::get),
+            after_create,
+            "matches must NOT trigger re-compilation"
         );
     }
 }

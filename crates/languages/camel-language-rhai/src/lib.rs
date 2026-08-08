@@ -84,13 +84,24 @@ use camel_language_api::{
     RhaiLimitsConfig, Value,
 };
 use rhai::{
-    Engine, Scope,
+    AST, Engine, Scope,
     packages::{Package, StandardPackage},
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, warn};
+
+// Test-only compile counter. Per-thread (via `thread_local!`) so parallel
+// test execution does not perturb the counter that a single test observes.
+// Incremented each time `engine.compile` is called from a `create_*`
+// method. The regression test asserts the counter is 1 after `create_*` +
+// N `evaluate`s — proving the AST is stored at create time and reused at
+// eval time, not re-compiled.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Result type for mutating eval (returns value + modified exchange fields).
 type EvalMutResult = Result<
@@ -272,10 +283,12 @@ impl RhaiLanguage {
         engine
     }
 
-    /// Sync eval for non-mutating expressions. Extracts exchange data into owned
-    /// values, builds engine+scope, evaluates, and returns the result.
+    /// Sync eval for non-mutating expressions. Extracts exchange data into
+    /// owned values, builds engine+scope, runs the pre-compiled AST, and
+    /// returns the script's last expression value. Compilation happens at
+    /// `create_*` time, never here.
     fn eval_sync(
-        script: &str,
+        ast: &rhai::AST,
         limits: &RhaiLimitsConfig,
         body_text: String,
         headers_map: rhai::Map,
@@ -287,36 +300,36 @@ impl RhaiLanguage {
 
         let engine = Self::create_eval_engine(limits, headers_map, properties_map);
 
-        let result: rhai::Dynamic = engine
-            .eval_with_scope::<rhai::Dynamic>(&mut scope, script)
-            .map_err(|e| {
-                let pos = e.position();
-                let location = match (pos.line(), pos.position()) {
-                    (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
-                    (Some(l), None) => format!(" at line {l}"),
-                    _ => String::new(),
-                };
-                // EvalAltResult::ErrorRuntime embeds the thrown value verbatim,
-                // which may contain exchange body/header secrets (e.g. `throw headers["Authorization"]`).
-                // Emit only the error kind and position; never the thrown value.
-                let safe_kind = if matches!(*e, rhai::EvalAltResult::ErrorRuntime(_, _)) {
-                    "script threw an exception (thrown value not logged)".to_string()
-                } else {
-                    format!("{e}")
-                };
-                let err_msg = format!("rhai evaluation error{location}: {safe_kind}");
-                warn!("rhai expression eval failed{location}");
-                LanguageError::EvalError(err_msg)
-            })?;
+        // eval_ast_with_scope reuses the pre-compiled AST — no re-parse per eval.
+        // The AST was built once in `create_expression` / `create_predicate`.
+        let result: rhai::Dynamic = engine.eval_ast_with_scope(&mut scope, ast).map_err(|e| {
+            let pos = e.position();
+            let location = match (pos.line(), pos.position()) {
+                (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
+                (Some(l), None) => format!(" at line {l}"),
+                _ => String::new(),
+            };
+            // EvalAltResult::ErrorRuntime embeds the thrown value verbatim,
+            // which may contain exchange body/header secrets (e.g. `throw headers["Authorization"]`).
+            // Emit only the error kind and position; never the thrown value.
+            let safe_kind = if matches!(*e, rhai::EvalAltResult::ErrorRuntime(_, _)) {
+                "script threw an exception (thrown value not logged)".to_string()
+            } else {
+                format!("{e}")
+            };
+            let err_msg = format!("rhai evaluation error{location}: {safe_kind}");
+            warn!("rhai expression eval failed{location}");
+            LanguageError::EvalError(err_msg)
+        })?;
 
         dynamic_to_json(result)
     }
 
-    /// Sync eval for mutating expressions. Takes owned exchange fields, runs the
-    /// script, and returns the result value + modified fields. The caller writes
-    /// fields back on success (implicit rollback on error).
+    /// Sync eval for mutating expressions. Takes owned exchange fields, runs
+    /// the pre-compiled AST, and returns the result value + modified fields.
+    /// The caller writes fields back on success (implicit rollback on error).
     fn eval_mut_sync(
-        script: &str,
+        ast: &rhai::AST,
         limits: &RhaiLimitsConfig,
         body: Body,
         headers: HashMap<String, Value>,
@@ -341,10 +354,10 @@ impl RhaiLanguage {
         scope.push("properties", properties_map);
         scope.push("body", body_str);
 
-        // 2. Evaluate script
+        // 2. Run the pre-compiled AST (no re-parse per eval).
         let engine = RhaiLanguage::create_base_engine(limits);
 
-        let result: rhai::Dynamic = match engine.eval_with_scope(&mut scope, script) {
+        let result: rhai::Dynamic = match engine.eval_ast_with_scope(&mut scope, ast) {
             Ok(v) => v,
             Err(e) => {
                 let pos = e.position();
@@ -459,19 +472,19 @@ fn rhai_map_to_value_map(map: &rhai::Map) -> std::collections::HashMap<String, V
 }
 
 struct RhaiExpression {
-    script: String,
+    ast: Arc<AST>,
     limits: RhaiLimitsConfig,
 }
 
 struct RhaiPredicate {
-    script: String,
+    ast: Arc<AST>,
     limits: RhaiLimitsConfig,
 }
 
 /// Shared async eval helper used by both [`RhaiExpression`] and [`RhaiPredicate`].
 /// Resolves limits, applies the timeout, and runs the script via `spawn_blocking`.
 async fn eval_async(
-    script: &str,
+    ast: Arc<AST>,
     limits: &RhaiLimitsConfig,
     exchange: &Exchange,
 ) -> Result<Value, LanguageError> {
@@ -480,11 +493,10 @@ async fn eval_async(
     let body_text = exchange.input.body.as_text().unwrap_or("").to_string();
     let (_, headers_map, properties_map) = RhaiLanguage::make_scope(exchange);
     let limits = limits.clone();
-    let script = script.to_string();
 
     tokio::time::timeout(timeout, async move {
         tokio::task::spawn_blocking(move || {
-            RhaiLanguage::eval_sync(&script, &limits, body_text, headers_map, properties_map)
+            RhaiLanguage::eval_sync(&ast, &limits, body_text, headers_map, properties_map)
         })
         .await
         .map_err(|join| LanguageError::EvalError(format!("rhai execution join error: {join}")))?
@@ -496,14 +508,14 @@ async fn eval_async(
 #[async_trait]
 impl Expression for RhaiExpression {
     async fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
-        eval_async(&self.script, &self.limits, exchange).await
+        eval_async(self.ast.clone(), &self.limits, exchange).await
     }
 }
 
 #[async_trait]
 impl Predicate for RhaiPredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
-        let val = eval_async(&self.script, &self.limits, exchange).await?;
+        let val = eval_async(self.ast.clone(), &self.limits, exchange).await?;
         Ok(match &val {
             Value::Bool(b) => *b,
             Value::Null => false,
@@ -535,7 +547,7 @@ impl Predicate for RhaiPredicate {
 /// let v = headers["existing"];      // read header
 /// ```
 struct RhaiMutatingExpression {
-    script: String,
+    ast: Arc<AST>,
     limits: RhaiLimitsConfig,
 }
 
@@ -550,11 +562,11 @@ impl MutatingExpression for RhaiMutatingExpression {
         let headers = exchange.input.headers.clone();
         let properties = exchange.properties.clone();
         let body = exchange.input.body.clone();
-        let script = self.script.clone();
+        let ast = self.ast.clone();
         let limits = self.limits.clone();
 
         let join = tokio::task::spawn_blocking(move || {
-            RhaiLanguage::eval_mut_sync(&script, &limits, body, headers, properties)
+            RhaiLanguage::eval_mut_sync(&ast, &limits, body, headers, properties)
         });
 
         // spawn_blocking gives Result<Result<..., JoinErr>, timeout gives Result<Result<..., JoinErr>, Elapsed>
@@ -590,33 +602,40 @@ impl Language for RhaiLanguage {
 
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
         let engine = Self::create_base_engine(&self.limits);
-        // Syntax-only validation — function resolution happens at eval time
-        engine.compile(script).map_err(|e| {
+        // Compile once at create time. The AST is reused on every `evaluate`
+        // call via `eval_ast_with_scope` — no re-parse per evaluation.
+        // Surface parse errors here so they show up at route construction
+        // rather than first message.
+        let ast = engine.compile(script).map_err(|e| {
             warn!(error = %e, "rhai expression compile failed");
             LanguageError::ParseError {
                 expr: script.to_string(),
                 reason: e.to_string(),
             }
         })?;
+        #[cfg(test)]
+        COMPILE_COUNT.with(|c| c.set(c.get() + 1));
         debug!("rhai expression compiled");
         Ok(Box::new(RhaiExpression {
-            script: script.to_string(),
+            ast: Arc::new(ast),
             limits: self.limits.clone(),
         }))
     }
 
     fn create_predicate(&self, script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
         let engine = Self::create_base_engine(&self.limits);
-        engine.compile(script).map_err(|e| {
+        let ast = engine.compile(script).map_err(|e| {
             warn!(error = %e, "rhai expression compile failed");
             LanguageError::ParseError {
                 expr: script.to_string(),
                 reason: e.to_string(),
             }
         })?;
+        #[cfg(test)]
+        COMPILE_COUNT.with(|c| c.set(c.get() + 1));
         debug!("rhai expression compiled");
         Ok(Box::new(RhaiPredicate {
-            script: script.to_string(),
+            ast: Arc::new(ast),
             limits: self.limits.clone(),
         }))
     }
@@ -630,16 +649,18 @@ impl Language for RhaiLanguage {
         script: &str,
     ) -> Result<Box<dyn MutatingExpression>, LanguageError> {
         let engine = Self::create_base_engine(&self.limits);
-        engine.compile(script).map_err(|e| {
+        let ast = engine.compile(script).map_err(|e| {
             warn!(error = %e, "rhai expression compile failed");
             LanguageError::ParseError {
                 expr: script.to_string(),
                 reason: e.to_string(),
             }
         })?;
+        #[cfg(test)]
+        COMPILE_COUNT.with(|c| c.set(c.get() + 1));
         debug!("rhai expression compiled");
         Ok(Box::new(RhaiMutatingExpression {
-            script: script.to_string(),
+            ast: Arc::new(ast),
             limits: self.limits.clone(),
         }))
     }
@@ -657,7 +678,15 @@ mod tests {
     use std::fs;
     use tempfile::NamedTempFile;
 
-    use super::RhaiLanguage;
+    use super::{RhaiExpression, RhaiLanguage, RhaiMutatingExpression, RhaiPredicate};
+
+    #[test]
+    fn types_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<RhaiExpression>();
+        assert_send_sync::<RhaiPredicate>();
+        assert_send_sync::<RhaiMutatingExpression>();
+    }
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
         let mut msg = Message::default();
@@ -1150,5 +1179,102 @@ mod tests {
         // text or variant. The test passes if any error happens (sandbox blocks)
         // and fails if the script evaluates successfully.
         let _ = err_msg; // string already validated by the match arms above
+    }
+
+    /// Regression test for FC-LANG-RECOMPILE: every `create_*` call must
+    /// compile the script exactly ONCE (at create time, surfacing parse
+    /// errors early), and every subsequent `evaluate`/`matches` call must
+    /// REUSE the pre-compiled AST — never re-parse the source string.
+    ///
+    /// Implementation: a `#[cfg(test)]` thread-local `COMPILE_COUNT` is
+    /// incremented at every compile call. The thread-local isolation makes
+    /// the counter robust against parallel test execution (each test thread
+    /// has its own counter, so other tests' compiles are not visible).
+    #[tokio::test]
+    async fn test_compile_count_expression_is_one_per_create() {
+        use super::COMPILE_COUNT;
+        let lang = RhaiLanguage::new();
+        let ex = exchange_with_body("test");
+
+        let before = COMPILE_COUNT.with(|c| c.get());
+        let expr = lang.create_expression("body + 1").unwrap();
+        let after_create = COMPILE_COUNT.with(|c| c.get());
+        assert_eq!(
+            after_create - before,
+            1,
+            "create_expression must compile exactly once (delta={})",
+            after_create - before
+        );
+
+        for _ in 0..3 {
+            let _ = expr.evaluate(&ex).await.unwrap();
+        }
+        let after_evals = COMPILE_COUNT.with(|c| c.get());
+        assert_eq!(
+            after_evals - after_create,
+            0,
+            "evaluate must not re-compile (delta={})",
+            after_evals - after_create
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compile_count_predicate_is_one_per_create() {
+        use super::COMPILE_COUNT;
+        let lang = RhaiLanguage::new();
+        let ex = exchange_with_body("test");
+
+        let before = COMPILE_COUNT.with(|c| c.get());
+        let pred = lang
+            .create_predicate(r#"header("type") == "order""#)
+            .unwrap();
+        let after_create = COMPILE_COUNT.with(|c| c.get());
+        assert_eq!(
+            after_create - before,
+            1,
+            "create_predicate must compile exactly once (delta={})",
+            after_create - before
+        );
+
+        for _ in 0..3 {
+            let _ = pred.matches(&ex).await.unwrap();
+        }
+        let after_evals = COMPILE_COUNT.with(|c| c.get());
+        assert_eq!(
+            after_evals - after_create,
+            0,
+            "matches must not re-compile (delta={})",
+            after_evals - after_create
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compile_count_mutating_expression_is_one_per_create() {
+        use super::COMPILE_COUNT;
+        let lang = RhaiLanguage::new();
+
+        let before = COMPILE_COUNT.with(|c| c.get());
+        let expr = lang
+            .create_mutating_expression(r#"headers["x"] = "y""#)
+            .unwrap();
+        let after_create = COMPILE_COUNT.with(|c| c.get());
+        assert_eq!(
+            after_create - before,
+            1,
+            "create_mutating_expression must compile exactly once (delta={})",
+            after_create - before
+        );
+
+        for _ in 0..3 {
+            let mut ex = Exchange::new(Message::default());
+            let _ = expr.evaluate(&mut ex).await.unwrap();
+        }
+        let after_evals = COMPILE_COUNT.with(|c| c.get());
+        assert_eq!(
+            after_evals - after_create,
+            0,
+            "mutating evaluate must not re-compile (delta={})",
+            after_evals - after_create
+        );
     }
 }

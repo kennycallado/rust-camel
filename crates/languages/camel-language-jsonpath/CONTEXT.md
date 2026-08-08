@@ -30,13 +30,11 @@ Evaluation has no wall-clock timeout. Expensive recursive-descent queries remain
 operator responsibility because the query is trusted configuration. The input bounds
 still constrain untrusted body structure on the paths described above.
 
-## Known limitation: query recompilation
+## Compilation model
 
-Language creation parses each query to validate it, then stores only the query string.
-Every `evaluate` or `matches` call asks `jsonpath-rust` to parse that string again. This
-violates the Language SPI compile-once intent and adds per-Exchange work. bd `rc-flny`
-tracks the workspace FC-LANG-RECOMPILE epic. A fix must preserve the trust separation
-and resource bounds in this document.
+Language creation parses each query into a compiled `JpQuery` once and stores
+the compiled artifact. Every `evaluate` or `matches` call reuses the stored
+`JpQuery` without reparsing. This satisfies the Language SPI compile-once intent.
 
 ## API evolution
 
