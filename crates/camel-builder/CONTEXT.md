@@ -7,7 +7,7 @@ form lives in camel-dsl. camel-builder qualifies for a crate-local `CONTEXT.md` 
 CONTEXT-MAP.md coverage policy — it is **user-visible** (consumed by 30+ callers across
 `camel-test/tests/*`, `camel-test/src/harness.rs`, `camel-core`/`camel-processor` READMEs,
 `examples/*`, and 14+ component READMEs) and **operationally surprising** (a mixed
-panic-vs-`Result` policy on the public surface, a non-`Clone` builder, and child builders
+panic-vs-`Result` policy on the public surface and child builders
 that carry ownership of their parent).
 
 ## Language
@@ -99,10 +99,13 @@ from the `Result`-returning terminal paths. This asymmetry is a recorded finding
 (camel-builder audit I1) whose resolution is deferred to the code stream — this document
 records the **current state**, not the fix direction.
 
-**`RouteBuilder` is not `Clone` (intentional).**
-Clone-and-reuse of a partially-built route is not supported (`// TODO(rc-8m5o)`
-at `struct RouteBuilder` lib.rs:355). No workspace caller needs it; every consumer uses a single-shot
-`RouteBuilder::from(...)...build()`. Deferred by design.
+**`RouteBuilder` is `Clone` (rc-8m5o, resolved before v1.0).**
+A partially-built route can be cloned and reused as a template for multiple routes,
+mirroring Apache Camel's cloneable `RouteBuilder` (ADR-0046 inspiration). Clone deep-copies
+the `Vec<BuilderStep>`; step closures already live behind `Arc` (`FilterPredicate`,
+`SplitExpression`) or `BoxCloneService` (`OpaqueProcessor`), so a clone shares the closure and
+duplicates only the light wrapper. The capability was landed pre-1.0 specifically to avoid
+`#[non_exhaustive]`-plus-non-`Clone` entrenchment on the camel-core `BuilderStep` enum (ADR-0049).
 
 **Thread-safety.**
 The builder itself is not `Send`/`Sync`-required — it lives only on the construction thread.

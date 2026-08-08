@@ -173,6 +173,7 @@ impl StreamSplitConfig {
 }
 
 /// Configuration for the Splitter EIP.
+#[derive(Clone)]
 pub struct SplitterConfig {
     /// Expression that splits an exchange into fragments.
     pub expression: SplitExpression,

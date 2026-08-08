@@ -352,9 +352,11 @@ pub trait StepAccumulator: Sized {
 ///     .to("log:info?showHeaders=true")
 ///     .build()?;
 /// ```
-// TODO(rc-8m5o): RouteBuilder does not support clone-and-reuse semantics.
-// Once built, the builder is consumed. Add `Clone` or a `fork()` method to allow
-// reusing a partially-built route as a template for multiple routes.
+/// `RouteBuilder` is `Clone`: a partially-built route can be cloned and reused as a
+/// template for multiple routes (mirrors Apache Camel's cloneable `RouteBuilder`).
+/// Clone is a deep copy of the step list; step closures live behind `Arc`/`BoxCloneService`
+/// so cloning shares the closure and duplicates only the light wrapper (rc-8m5o).
+#[derive(Clone)]
 pub struct RouteBuilder {
     from_uri: String,
     steps: Vec<BuilderStep>,
@@ -369,7 +371,7 @@ pub struct RouteBuilder {
     startup_order: Option<i32>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 enum ErrorHandlerMode {
     #[default]
     None,
@@ -4232,5 +4234,33 @@ mod tests {
         assert!(route1.is_ok());
         assert!(route2.is_ok());
         assert_eq!(route1.unwrap().route_id(), route2.unwrap().route_id());
+    }
+
+    #[test]
+    fn test_builder_clone_reuse_as_template() {
+        // rc-8m5o: a partially-built RouteBuilder can be cloned and reused as a
+        // template, then each clone varied independently before build().
+        let template = RouteBuilder::from("direct:in")
+            .set_header("stage", Value::String("shared".into()))
+            .log("shared prefix", LogLevel::Info);
+
+        let route_a = template
+            .clone()
+            .route_id("route-a")
+            .to("mock:a")
+            .build()
+            .expect("clone A builds");
+        let route_b = template
+            .route_id("route-b")
+            .to("mock:b")
+            .build()
+            .expect("clone B builds");
+
+        assert_eq!(route_a.route_id(), "route-a");
+        assert_eq!(route_b.route_id(), "route-b");
+        // Shared template steps (set_header + log) are present in both, plus the
+        // per-clone `to` step: the clone is a deep copy, not an alias.
+        assert_eq!(route_a.steps().len(), route_b.steps().len());
+        assert_eq!(route_a.from_uri(), route_b.from_uri());
     }
 }

@@ -16,6 +16,7 @@ use camel_auth::TokenAuthenticator;
 use camel_component_api::ConcurrencyModel;
 
 /// An unresolved when-clause: predicate + nested steps for the sub-pipeline.
+#[derive(Clone)]
 pub struct WhenStep {
     pub predicate: FilterPredicate,
     pub steps: Vec<BuilderStep>,
@@ -33,14 +34,14 @@ impl std::fmt::Debug for WhenStep {
 pub use camel_api::declarative::{LanguageExpressionDef, ValueSourceDef};
 
 /// Declarative `when` clause resolved later by the runtime.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeclarativeWhenStep {
     pub predicate: LanguageExpressionDef,
     pub steps: Vec<BuilderStep>,
 }
 
 /// Builder struct for a single `doCatch` clause in the declarative pipeline.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DoTryCatchClauseBuilder {
     pub exception: Option<Vec<String>>,
     pub when: Option<LanguageExpressionDef>,
@@ -50,14 +51,14 @@ pub struct DoTryCatchClauseBuilder {
 }
 
 /// Builder struct for the `doFinally` block in the declarative pipeline.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DoTryFinallyBuilder {
     pub on_when: Option<LanguageExpressionDef>,
     pub steps: Vec<BuilderStep>,
 }
 
 /// A step in an unresolved route definition.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BuilderStep {
     /// A pre-built Tower processor service.
     Processor(OpaqueProcessor),
