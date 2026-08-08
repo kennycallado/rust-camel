@@ -1579,8 +1579,8 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
 pub fn lint_non_exhaustive_src(src: &str, file_path: &str) -> Vec<Violation> {
     use regex::Regex;
 
-    let enum_re = Regex::new(r"^\s*pub\s+enum\s+(\w+)").expect("valid regex");
-    let note_re = Regex::new(r"^///\s*exhaustive-by-contract:\s*(\S.*)$").expect("valid regex");
+    let enum_re = Regex::new(r"^\s*pub\s+enum\s+(\w+)").expect("valid regex"); // allow-unwrap
+    let note_re = Regex::new(r"^///\s*exhaustive-by-contract:\s*(\S.*)$").expect("valid regex"); // allow-unwrap
 
     let lines: Vec<&str> = src.lines().collect();
     let mut violations = Vec::new();

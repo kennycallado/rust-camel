@@ -41,13 +41,13 @@ static LINE_REF_RE: OnceLock<Regex> = OnceLock::new();
 static BOLD_COLON_RE: OnceLock<Regex> = OnceLock::new();
 
 fn link_re() -> &'static Regex {
-    LINK_RE.get_or_init(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").expect("link regex compiles"))
+    LINK_RE.get_or_init(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").expect("link regex compiles")) // allow-unwrap
 }
 
 fn bare_re() -> &'static Regex {
     BARE_RE.get_or_init(|| {
         Regex::new(r"[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)+\.[A-Za-z0-9_]+")
-            .expect("bare path regex compiles")
+            .expect("bare path regex compiles") // allow-unwrap
     })
 }
 
@@ -60,14 +60,14 @@ fn symbol_re() -> &'static Regex {
         Regex::new(
             r"`((?:fn|struct|enum|trait)\s+[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*)`",
         )
-        .expect("symbol regex compiles")
+        .expect("symbol regex compiles") // allow-unwrap
     })
 }
 
 /// Match a bare line-reference of the form `<word>.rs:L?<digits>`.
 /// The optional `L` covers the `L80` style; `<word>` is the file stem.
 fn line_ref_re() -> &'static Regex {
-    LINE_REF_RE.get_or_init(|| Regex::new(r"\w+\.rs:L?\d+").expect("line ref regex compiles"))
+    LINE_REF_RE.get_or_init(|| Regex::new(r"\w+\.rs:L?\d+").expect("line ref regex compiles")) // allow-unwrap
 }
 
 /// Match a `**<Term>:**` bold-colon glossary line at the start of a line
@@ -76,7 +76,7 @@ fn line_ref_re() -> &'static Regex {
 /// `*` to keep the pattern simple.
 fn bold_colon_re() -> &'static Regex {
     BOLD_COLON_RE
-        .get_or_init(|| Regex::new(r"^\*\*([^*]+):\*\*").expect("bold colon regex compiles"))
+        .get_or_init(|| Regex::new(r"^\*\*([^*]+):\*\*").expect("bold colon regex compiles")) // allow-unwrap
 }
 
 /// True when `byte` may continue a Rust identifier (alnum or `_`).
@@ -290,9 +290,9 @@ pub fn check_symbols_src(
     for (idx, line) in masked_content.lines().enumerate() {
         let line_no = idx + 1;
         for cap in symbol_re().captures_iter(line) {
-            let token = cap
+            let sym = cap
                 .get(1)
-                .expect("group 1 always present")
+                .expect("group 1 always present") // allow-unwrap
                 .as_str()
                 .trim_end_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
 
@@ -301,11 +301,11 @@ pub fn check_symbols_src(
                 v.push(Violation {
                     file: file_path.to_string(),
                     line: line_no,
-                    snippet: format!("[symbol] {} -> undefined: {token}", line.trim()),
+                    snippet: format!("[symbol] {} -> undefined: {sym}", line.trim()),
                 });
             };
 
-            if let Some(ident) = token.strip_prefix("fn ") {
+            if let Some(ident) = sym.strip_prefix("fn ") {
                 let ident = ident.trim();
                 // FP2: `fn <ident>` may be defined as a method inside an
                 // impl block rather than as a free function. It also
@@ -321,28 +321,28 @@ pub fn check_symbols_src(
                 if !found {
                     push_violation(&mut violations);
                 }
-            } else if let Some(ident) = token.strip_prefix("struct ") {
+            } else if let Some(ident) = sym.strip_prefix("struct ") {
                 let ident = ident.trim();
                 let found = definition_exists(search_items, "struct", ident)
                     || definition_exists(workspace_items, "struct", ident);
                 if !found {
                     push_violation(&mut violations);
                 }
-            } else if let Some(ident) = token.strip_prefix("enum ") {
+            } else if let Some(ident) = sym.strip_prefix("enum ") {
                 let ident = ident.trim();
                 let found = definition_exists(search_items, "enum", ident)
                     || definition_exists(workspace_items, "enum", ident);
                 if !found {
                     push_violation(&mut violations);
                 }
-            } else if let Some(ident) = token.strip_prefix("trait ") {
+            } else if let Some(ident) = sym.strip_prefix("trait ") {
                 let ident = ident.trim();
                 let found = definition_exists(search_items, "trait", ident)
                     || definition_exists(workspace_items, "trait", ident);
                 if !found {
                     push_violation(&mut violations);
                 }
-            } else if let Some((type_name, method)) = token.split_once("::") {
+            } else if let Some((type_name, method)) = sym.split_once("::") {
                 let type_name = type_name.trim();
                 let method = method.trim();
                 // Type existence is scoped to `search_items` (the crate's
@@ -789,7 +789,7 @@ fn strip_inline_code_spans(line: &str) -> String {
     // SAFETY: bytes outside backtick spans are copied verbatim; bytes
     // inside spans (and the backticks themselves) become ASCII spaces,
     // so UTF-8 well-formedness is preserved.
-    String::from_utf8(out).expect("backtick strip preserves utf8")
+    String::from_utf8(out).expect("backtick strip preserves utf8") // allow-unwrap
 }
 
 /// Rule A: validate every markdown link `[text](target)` and every inline
@@ -814,7 +814,7 @@ pub fn check_paths_src(
         let mut link_target_ranges: Vec<(usize, usize)> = Vec::new();
 
         for cap in link_re().captures_iter(line) {
-            let target_match = cap.get(2).expect("group 2 always present");
+            let target_match = cap.get(2).expect("group 2 always present"); // allow-unwrap
             link_target_ranges.push((target_match.start(), target_match.end()));
             check_target(
                 target_match.as_str(),
@@ -833,7 +833,7 @@ pub fn check_paths_src(
         // because stripping preserves byte length.
         let bare_line = strip_inline_code_spans(line);
         for cap in bare_re().captures_iter(&bare_line) {
-            let m = cap.get(0).expect("group 0 always present");
+            let m = cap.get(0).expect("group 0 always present"); // allow-unwrap
             if link_target_ranges
                 .iter()
                 .any(|(s, e)| m.start() >= *s && m.end() <= *e)
