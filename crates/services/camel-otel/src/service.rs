@@ -333,6 +333,9 @@ impl Lifecycle for OtelService {
                 .build();
 
             global::set_meter_provider(meter_provider.clone());
+            if let Some(m) = &self.metrics {
+                m.mark_started();
+            }
             self.meter_provider = Some(meter_provider);
             info!(
                 endpoint = %self.config.endpoint,
@@ -413,6 +416,38 @@ impl Lifecycle for OtelService {
 impl Default for OtelService {
     fn default() -> Self {
         Self::with_defaults()
+    }
+}
+
+impl Drop for OtelService {
+    fn drop(&mut self) {
+        if self.tracer_provider.is_none()
+            && self.meter_provider.is_none()
+            && self.logger_provider.is_none()
+        {
+            return;
+        }
+
+        // log-policy: system-broken
+        warn!(
+            service_name = %self.config.service_name,
+            "OtelService dropped without stop(); shutting down providers best-effort"
+        );
+
+        if let Some(provider) = self.tracer_provider.take() {
+            let _ = provider.force_flush();
+            let _ = provider.shutdown();
+        }
+
+        if let Some(provider) = self.meter_provider.take() {
+            let _ = provider.force_flush();
+            let _ = provider.shutdown();
+        }
+
+        if let Some(provider) = self.logger_provider.take() {
+            let _ = provider.force_flush();
+            let _ = provider.shutdown();
+        }
     }
 }
 
@@ -725,5 +760,19 @@ mod tests {
         // NOTE: This test is best-effort — if no subscriber was set, it's a no-op.
         // The important thing is that start() doesn't *panic* or error due to subscriber conflict.
         let _ = BEFORE_COUNT.load(Ordering::SeqCst);
+    }
+
+    #[test]
+    fn drop_without_stop_does_not_panic() {
+        let mut service = OtelService::with_defaults();
+        service.tracer_provider = Some(SdkTracerProvider::builder().build());
+        // Drop without calling stop() — Drop impl should best-effort shutdown without panicking
+    }
+
+    #[test]
+    fn drop_after_stop_does_not_reshutdown() {
+        let config = OtelConfig::new("http://localhost:4317", "test-svc");
+        let _service = OtelService::new(config);
+        // Providers are None by construction (post-stop state). Drop should be a no-op.
     }
 }

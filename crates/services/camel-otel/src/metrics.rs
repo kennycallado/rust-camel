@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use camel_api::metrics::MetricsCollector;
@@ -66,6 +67,11 @@ struct MetricInstruments {
 /// the global meter provider is configured (by OtelService::start()) before use.
 pub struct OtelMetrics {
     service_name: Arc<str>,
+    /// Set to true by `mark_started()` after the global `MeterProvider` is
+    /// installed (audit-fix-otel-lifecycle task 1.1). All instrument and meter
+    /// resolution is gated on this flag so pre-start recording cannot bind
+    /// permanently to the no-op provider (FC-LAZY-CACHE-STALE-BINDING).
+    started: AtomicBool,
     instruments: OnceLock<MetricInstruments>,
     /// Cached meter for dynamic instruments — resolved once to prevent
     /// provider fragmentation (D5). Must use the same scope as `instruments`.
@@ -84,6 +90,7 @@ impl OtelMetrics {
     pub fn new(service_name: impl Into<String>) -> Self {
         Self {
             service_name: service_name.into().into(),
+            started: AtomicBool::new(false),
             instruments: OnceLock::new(),
             meter: OnceLock::new(),
             queue_depths: std::sync::Mutex::new(HashMap::new()),
@@ -94,9 +101,21 @@ impl OtelMetrics {
         }
     }
 
-    fn instruments(&self) -> &MetricInstruments {
-        self.instruments.get_or_init(|| {
-            let meter = self.meter();
+    /// Mark the metrics collector as started. Called by `OtelService::start()`
+    /// immediately after the global `MeterProvider` is installed. Recording
+    /// before this is a silent no-op (audit-fix-otel-lifecycle, task 1.1).
+    /// Exposed `pub` so integration tests that install their own provider can
+    /// signal readiness without going through `OtelService::start()`.
+    pub fn mark_started(&self) {
+        self.started.store(true, Ordering::Release);
+    }
+
+    fn instruments(&self) -> Option<&MetricInstruments> {
+        if !self.started.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(self.instruments.get_or_init(|| {
+            let meter = self.meter_inner();
             MetricInstruments {
                 exchanges_total: meter
                     .u64_counter(metric_names::EXCHANGES_TOTAL)
@@ -124,13 +143,23 @@ impl OtelMetrics {
                     .with_unit("{state}")
                     .build(),
             }
-        })
+        }))
     }
     /// Returns the cached meter for creating dynamic instruments.
     /// Resolved exactly once to prevent provider fragmentation (D5).
     /// Reuses the same InstrumentationScope as the fixed instruments so
     /// dynamic and fixed metrics share scope (no fragmentation).
-    fn meter(&self) -> &Meter {
+    /// Start-gated: returns `None` before `mark_started()` so dynamic
+    /// instruments cannot bind to the no-op provider.
+    fn meter(&self) -> Option<&Meter> {
+        if !self.started.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(self.meter_inner())
+    }
+    /// Un-gated meter resolution used by `instruments()`. Caller must ensure
+    /// the start gate has already been passed (acquired the `started` flag).
+    fn meter_inner(&self) -> &Meter {
         self.meter.get_or_init(|| {
             global::meter_with_scope(
                 InstrumentationScope::builder(self.service_name.to_string()).build(),
@@ -152,9 +181,10 @@ impl MetricsCollector for OtelMetrics {
             attribute_keys::ROUTE_ID,
             route_id.to_string(),
         )];
-        self.instruments()
-            .exchange_duration_seconds
-            .record(duration_secs, &attributes);
+        if let Some(inst) = self.instruments() {
+            inst.exchange_duration_seconds
+                .record(duration_secs, &attributes);
+        }
     }
 
     fn increment_errors(&self, route_id: &str, error_type: &str) {
@@ -162,7 +192,9 @@ impl MetricsCollector for OtelMetrics {
             KeyValue::new(attribute_keys::ROUTE_ID, route_id.to_string()),
             KeyValue::new(attribute_keys::ERROR_TYPE, error_type.to_string()),
         ];
-        self.instruments().errors_total.add(1, &attributes);
+        if let Some(inst) = self.instruments() {
+            inst.errors_total.add(1, &attributes);
+        }
     }
 
     fn increment_exchanges(&self, route_id: &str) {
@@ -170,7 +202,9 @@ impl MetricsCollector for OtelMetrics {
             attribute_keys::ROUTE_ID,
             route_id.to_string(),
         )];
-        self.instruments().exchanges_total.add(1, &attributes);
+        if let Some(inst) = self.instruments() {
+            inst.exchanges_total.add(1, &attributes);
+        }
     }
 
     fn set_queue_depth(&self, route_id: &str, depth: usize) {
@@ -184,7 +218,9 @@ impl MetricsCollector for OtelMetrics {
             attribute_keys::ROUTE_ID,
             route_id.to_string(),
         )];
-        self.instruments().queue_depth.add(delta, &attributes);
+        if let Some(inst) = self.instruments() {
+            inst.queue_depth.add(delta, &attributes);
+        }
     }
 
     fn record_circuit_breaker_change(&self, route_id: &str, _from: &str, to: &str) {
@@ -205,12 +241,18 @@ impl MetricsCollector for OtelMetrics {
             route_id.to_string(),
         )];
 
-        self.instruments()
-            .circuit_breaker_state
-            .add(delta, &attributes);
+        if let Some(inst) = self.instruments() {
+            inst.circuit_breaker_state.add(delta, &attributes);
+        }
     }
 
     fn record_counter(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+        // Start-gate: silent no-op before OtelService::start() installs the
+        // global MeterProvider. Returned BEFORE any validation/normalization
+        // so pre-start calls do not allocate, warn, or cache DashMap entries.
+        let Some(meter) = self.meter() else {
+            return;
+        };
         if !counter_value_ok(value) {
             if self.warned.insert(name.to_string()) {
                 tracing::warn!(
@@ -242,7 +284,7 @@ impl MetricsCollector for OtelMetrics {
                 // None = tombstone → skip silently
             }
             Entry::Vacant(v) => {
-                let counter = self.meter().u64_counter(normalized.clone()).build();
+                let counter = meter.u64_counter(normalized.clone()).build();
                 counter.add(value_u64, &attributes);
                 v.insert(Some(counter));
             }
@@ -250,6 +292,12 @@ impl MetricsCollector for OtelMetrics {
     }
 
     fn record_histogram(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+        // Start-gate: silent no-op before OtelService::start() installs the
+        // global MeterProvider. Returned BEFORE any validation/normalization
+        // so pre-start calls do not allocate, warn, or cache DashMap entries.
+        let Some(meter) = self.meter() else {
+            return;
+        };
         if value.is_nan() {
             if self.warned.insert(name.to_string()) {
                 tracing::warn!(
@@ -278,7 +326,7 @@ impl MetricsCollector for OtelMetrics {
                 }
             }
             Entry::Vacant(v) => {
-                let histogram = self.meter().f64_histogram(normalized.clone()).build();
+                let histogram = meter.f64_histogram(normalized.clone()).build();
                 histogram.record(value, &attributes);
                 v.insert(Some(histogram));
             }
@@ -294,13 +342,15 @@ mod tests {
     #[test]
     fn test_create_otel_metrics() {
         let metrics = OtelMetrics::new("test-service");
-        // Instruments are created lazily
+        // Instruments are created lazily after start.
+        metrics.mark_started();
         let _ = metrics.instruments();
     }
 
     #[test]
     fn test_default_implementation() {
         let metrics = OtelMetrics::default();
+        metrics.mark_started();
         let _ = metrics.instruments();
     }
 
@@ -435,6 +485,7 @@ mod tests {
     #[test]
     fn test_record_counter_dynamic_basic() {
         let metrics = OtelMetrics::new("test-service");
+        metrics.mark_started();
         // Under a no-op provider these should not panic and should record.
         metrics.record_counter("exec_spawns_total", 1.0, &[("route", "r1")]);
         metrics.record_counter("exec_spawns_total", 1.0, &[("route", "r2")]);
@@ -445,6 +496,7 @@ mod tests {
     #[test]
     fn test_record_counter_multi_label() {
         let metrics = OtelMetrics::new("test-service");
+        metrics.mark_started();
         metrics.record_counter(
             "exec_policy_denials_total",
             1.0,
@@ -460,6 +512,7 @@ mod tests {
     #[test]
     fn test_record_counter_value_guards() {
         let metrics = OtelMetrics::new("test-service");
+        metrics.mark_started();
         metrics.record_counter("bad_total", f64::NAN, &[("route", "r1")]);
         metrics.record_counter("bad_total", -1.0, &[("route", "r1")]);
         metrics.record_counter("bad_total", 1.5, &[("route", "r1")]);
@@ -470,6 +523,7 @@ mod tests {
     #[test]
     fn test_record_histogram_dynamic_basic() {
         let metrics = OtelMetrics::new("test-service");
+        metrics.mark_started();
         metrics.record_histogram("exec_duration_secs", 0.15, &[("route", "r1")]);
         metrics.record_histogram("exec_duration_secs", 1.5, &[("route", "r1")]);
         assert!(
@@ -482,6 +536,7 @@ mod tests {
     #[test]
     fn test_record_histogram_nan_rejected() {
         let metrics = OtelMetrics::new("test-service");
+        metrics.mark_started();
         metrics.record_histogram("nan_hist", f64::NAN, &[("route", "r1")]);
         assert!(!metrics.dyn_histograms.contains_key("camel.nan.hist"));
     }
@@ -491,6 +546,7 @@ mod tests {
         // Retain a concrete handle to verify post-call state; Arc::downcast
         // requires `Any` which MetricsCollector does not have.
         let concrete = Arc::new(OtelMetrics::new("test-service"));
+        concrete.mark_started();
         let dynref: Arc<dyn MetricsCollector> = concrete.clone();
         dynref.record_counter("trait_total", 1.0, &[("route", "r1")]);
         // Proves the override dispatched (the no-op default would leave the cache empty).
@@ -503,6 +559,7 @@ mod tests {
     #[test]
     fn test_dynamic_meter_cached_in_once_lock() {
         let metrics = OtelMetrics::new("test-service");
+        metrics.mark_started();
         // Trigger dynamic instrument creation.
         metrics.record_counter("cache_check_total", 1.0, &[("route", "r1")]);
         // Verify the meter OnceLock is populated (resolved exactly once).
@@ -515,6 +572,7 @@ mod tests {
     #[test]
     fn test_record_counter_warn_dedup() {
         let metrics = OtelMetrics::new("test-service");
+        metrics.mark_started();
         metrics.record_counter("dedup_total", f64::NAN, &[("route", "r1")]);
         metrics.record_counter("dedup_total", -1.0, &[("route", "r1")]);
         metrics.record_counter("dedup_total", 1.5, &[("route", "r1")]);
@@ -528,6 +586,7 @@ mod tests {
     fn test_dynamic_metrics_concurrent_no_panic() {
         use std::thread;
         let metrics = Arc::new(OtelMetrics::new("test-contention"));
+        metrics.mark_started();
         let mut handles = Vec::new();
         for i in 0..4 {
             let m = Arc::clone(&metrics);
@@ -544,6 +603,53 @@ mod tests {
         }
         assert!(metrics.dyn_counters.contains_key("camel.concurrent.total"));
         assert!(metrics.dyn_histograms.contains_key("camel.concurrent.hist"));
+    }
+
+    // --- Start-gate tests (audit-fix-otel-lifecycle, task 1.1) ---
+
+    #[test]
+    fn pre_start_recording_does_not_cache_instruments() {
+        let metrics = OtelMetrics::new("test-svc");
+        // started == false by construction
+        metrics.increment_exchanges("route-1");
+        metrics.record_counter("camel.exec.total", 1.0, &[]);
+        metrics.record_histogram("camel.dur.hist", 1.0, &[]);
+        assert!(
+            metrics.instruments.get().is_none(),
+            "fixed-instruments OnceLock must not populate before mark_started"
+        );
+        assert!(
+            metrics.dyn_counters.is_empty(),
+            "dyn_counters must not populate before mark_started"
+        );
+        assert!(
+            metrics.dyn_histograms.is_empty(),
+            "dyn_histograms must not populate before mark_started"
+        );
+    }
+
+    #[test]
+    fn post_start_populates_instruments() {
+        let metrics = OtelMetrics::new("test-svc");
+        metrics.mark_started();
+        metrics.increment_exchanges("route-1");
+        assert!(
+            metrics.instruments.get().is_some(),
+            "fixed-instruments OnceLock must populate after mark_started"
+        );
+    }
+
+    #[test]
+    fn meter_returns_none_before_start() {
+        let metrics = OtelMetrics::new("test-svc");
+        assert!(metrics.meter().is_none());
+    }
+
+    #[test]
+    fn meter_returns_some_after_start() {
+        let metrics = OtelMetrics::new("test-svc");
+        metrics.mark_started();
+        assert!(metrics.meter().is_some());
     }
 }
 

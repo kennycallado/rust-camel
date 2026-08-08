@@ -35,11 +35,18 @@ _Avoid_: tracing middleware, header copier
   is stopped. This is an OpenTelemetry SDK constraint, not a workspace-wide
   rust-camel policy. Keep one active `OtelService` per process and stop it before
   replacement.
-- **Start before metric use.** `OtelMetrics` resolves its `Meter` on first use
-  and caches it. Recording before `OtelService::start()` installs the global
-  provider binds that instance to the no-op provider. Later startup does not
-  replace the cached meter. Start the service before registering or recording
-  metrics.
+- **Start before metric use.** `OtelMetrics` resolves its `Meter` and instruments
+  only after `OtelService::start()` installs the global provider. A `started`
+  flag gates all meter/instrument resolution: recording before `start()` is a
+  silent no-op that populates nothing (no no-op meter is cached); after `start()`
+  the `OnceLock`s resolve from the real global provider and bind correctly. The
+  service should still be started before metrics are expected to export, but a
+  pre-start recording no longer causes silent permanent metric loss.
+- **Drop without stop is safe.** If an `OtelService` is dropped without
+  `stop()`, its `Drop` impl best-effort flushes and shuts down the surviving
+  providers and emits one `warn!`. Stopping explicitly is still preferred
+  (graceful, observable), but drop-without-stop no longer leaks batch-exporter
+  tasks.
 
 ## `#[non_exhaustive]` posture
 
@@ -63,3 +70,4 @@ Rule 3 framework therefore applies case by case, not as a blanket requirement.
 | File | Line | Category | Reason |
 |------|------|----------|--------|
 | `src/service.rs` | 288 | `system-broken` | Lifecycle service start failure — config validation failed |
+| `src/service.rs` | ~430 | `system-broken` | `OtelService` dropped without `stop()` — best-effort provider shutdown |
