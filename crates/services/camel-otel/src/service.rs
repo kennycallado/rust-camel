@@ -454,6 +454,7 @@ impl Drop for OtelService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_otel_service_new() {
@@ -774,5 +775,72 @@ mod tests {
         let config = OtelConfig::new("http://localhost:4317", "test-svc");
         let _service = OtelService::new(config);
         // Providers are None by construction (post-stop state). Drop should be a no-op.
+    }
+
+    /// Captures WARN-level tracing events into a shared buffer.
+    struct WarnCapture {
+        warnings: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().level() == &tracing::Level::WARN {
+                self.warnings
+                    .lock()
+                    .expect("warnings mutex poisoned")
+                    .push(event.metadata().name().to_string());
+            }
+        }
+    }
+
+    /// Runs a closure under a thread-local tracing subscriber that captures
+    /// WARN events, then returns the collected event names.
+    fn capture_warns_during<F: FnOnce()>(f: F) -> Vec<String> {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let _guard = tracing_subscriber::registry()
+            .with(WarnCapture {
+                warnings: warnings.clone(),
+            })
+            .set_default();
+        f();
+        warnings
+            .lock()
+            .expect("warnings mutex poisoned")
+            .drain(..)
+            .collect()
+    }
+
+    #[test]
+    fn drop_after_stop_emits_no_warn() {
+        // Post-stop state: all providers are None.
+        let service = OtelService::new(OtelConfig::new("http://localhost:4317", "test-svc"));
+
+        let warns = capture_warns_during(move || drop(service));
+
+        assert!(
+            warns.is_empty(),
+            "Drop after stop must NOT emit any WARN, got: {warns:?}"
+        );
+    }
+
+    #[test]
+    fn drop_without_stop_emits_warn() {
+        // Positive control: a surviving provider triggers the Drop warn.
+        let mut service = OtelService::with_defaults();
+        service.tracer_provider = Some(SdkTracerProvider::builder().build());
+
+        let warns = capture_warns_during(move || drop(service));
+
+        assert!(
+            !warns.is_empty(),
+            "Drop without stop MUST emit at least one WARN (proves capture works)"
+        );
     }
 }
