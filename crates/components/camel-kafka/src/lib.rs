@@ -322,64 +322,7 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// KAFKA-013: Integration test skeletons (require live Kafka)
-// ---------------------------------------------------------------------------
-
-/// These tests are compilable but skipped by default.
-/// Run with: `cargo test -p camel-component-kafka -- --ignored`
-#[cfg(test)]
-mod integration_tests {
-    use crate::config::KafkaEndpointConfig;
-    use crate::producer::KafkaProducer;
-    use camel_component_api::{Body, Exchange, Message};
-    use tower::Service;
-    use tower::ServiceExt;
-
-    fn make_resolved_config(topic: &str) -> crate::config::ResolvedKafkaEndpointConfig {
-        KafkaEndpointConfig::from_uri(&format!(
-            "kafka:{topic}?brokers=localhost:9092&groupId=integration-test"
-        ))
-        .expect("config should parse")
-        .resolve()
-        .expect("config should resolve")
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live Kafka at localhost:9092"]
-    async fn producer_sends_message_to_kafka() {
-        let config = make_resolved_config("camel-integration-test");
-        let mut producer = KafkaProducer::new(config).expect("producer should create");
-
-        let exchange = Exchange::new(Message::new(Body::Text(
-            "hello from integration test".to_string(),
-        )));
-
-        let result = producer
-            .ready()
-            .await
-            .expect("poll_ready should succeed")
-            .call(exchange)
-            .await;
-
-        assert!(
-            result.is_ok(),
-            "producer should send successfully: {:?}",
-            result.err()
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live Kafka at localhost:9092"]
-    async fn producer_health_check_succeeds() {
-        let config = make_resolved_config("camel-health-check");
-        let producer = KafkaProducer::new(config).expect("producer should create");
-
-        let result = producer.check_connection().await;
-        assert!(
-            result.is_ok(),
-            "health check should succeed: {:?}",
-            result.err()
-        );
-    }
-}
+// Integration tests for the Kafka component live in `crates/camel-test/tests/kafka_test.rs`
+// (testcontainers-backed). The inline `#[ignore]` skeletons that used to live here were
+// redundant duplicates of that coverage and have been removed; the `make_resolved_config`
+// helper and the two `#[ignore]` tests are gone.

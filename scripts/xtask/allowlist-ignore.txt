@@ -1,0 +1,6 @@
+# allowlist for ignore-test lint (see ADR-0054)
+# format: <relative path to test file>
+# Files listed here MUST contain only requires pre-built tests.
+crates/components/camel-component-wasm/tests/source_integration.rs
+crates/components/camel-component-wasm/tests/source_stream_integration.rs
+crates/components/camel-component-wasm/tests/integration.rs

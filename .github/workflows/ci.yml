@@ -83,6 +83,14 @@ jobs:
         run: cargo test -p camel-test --features integration-tests --test cxf_test
       - name: Container integration tests
         run: cargo test -p camel-test --features integration-tests --test container_test
+      - name: Kafka integration tests (testcontainers)
+        run: cargo test -p camel-test --features integration-tests --test kafka_test
+      - name: Redis integration tests (testcontainers)
+        run: cargo test -p camel-test --features integration-tests --test redis_test
+      - name: OpenSearch integration tests (testcontainers)
+        run: cargo test -p camel-test --features integration-tests --test opensearch_test
+      - name: Kubernetes integration tests (testcontainers K3s)
+        run: cargo test -p camel-test --features integration-tests --test kubernetes_test
       - name: Test (full workspace)
         run: cargo test --workspace
 
@@ -190,6 +198,8 @@ jobs:
         run: cargo xtask lint-secrets
       - name: lint-non-exhaustive
         run: cargo xtask lint-non-exhaustive
+      - name: lint-ignore
+        run: cargo xtask lint-ignore
       - name: lint-commits
         # Fail if any commit in the PR range mentions breaking in prose
         # without the conventional `!:` subject marker. Default checkout
@@ -203,3 +213,47 @@ jobs:
           tool: cargo-audit
       - name: audit
         run: cargo audit
+
+  wasm-integration:
+    name: WASM Integration (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install libclang for bindgen
+        run: sudo apt-get install -y libclang-dev
+      - name: Build WASM guest crates
+        run: |
+          # Build all guest crates that produce .wasm components.
+          # A guest compile failure MUST fail the job — this is the
+          # primary oracle for detecting WIT version breakage (ADR-0054).
+          for guest in examples/wasm-source-webhook/guest \
+                       examples/wasm-bean-example/guest \
+                       examples/wasm-streaming-plugin/guest \
+                       examples/security-wasm-policy/guest \
+                       examples/security-wasm-policy/guest-init-check \
+                       examples/wasm-example/guest; do
+            echo "::group::Building $guest"
+            (cd "$guest" && cargo build --target wasm32-wasip2 2>&1)
+            echo "::endgroup::"
+          done
+      - name: WASM integration tests (per-target, --ignored)
+        run: |
+          # Run buildable #[ignore] tests per cargo test target.
+          # Targets are derived from allowlist-ignore.txt so that
+          # adding a new requires pre-built file + allowlist entry
+          # automatically wires it into CI (ADR-0054 bidirectional contract).
+          for entry in $(grep -vE '^(#|$)' scripts/xtask/allowlist-ignore.txt); do
+            target=$(basename "$entry" .rs)
+            echo "Running --ignored tests for target: $target"
+            cargo test -p camel-component-wasm --test "$target" -- --ignored
+          done

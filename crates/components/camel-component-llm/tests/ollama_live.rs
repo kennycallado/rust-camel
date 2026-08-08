@@ -56,7 +56,7 @@ fn make_rt() -> Arc<dyn camel_component_api::RuntimeObservability> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Ollama with qwen3.5:4b"]
+#[ignore = "slow test: requires local Ollama with qwen3.5:4b model"]
 async fn ollama_chat_streaming() {
     let component = make_ollama_component();
     let endpoint = component
@@ -121,7 +121,7 @@ async fn ollama_chat_streaming() {
 }
 
 #[tokio::test]
-#[ignore = "requires local Ollama with qwen3.5:4b"]
+#[ignore = "slow test: requires local Ollama with qwen3.5:4b model"]
 async fn ollama_chat_materialized() {
     let component = make_ollama_component();
     let endpoint = component
@@ -169,7 +169,7 @@ async fn ollama_chat_materialized() {
 }
 
 #[tokio::test]
-#[ignore = "requires local Ollama with embeddinggemma"]
+#[ignore = "slow test: requires local Ollama with embeddinggemma model"]
 async fn ollama_embed() {
     let component = make_ollama_component();
     let endpoint = component
@@ -222,7 +222,7 @@ async fn ollama_embed() {
 }
 
 #[tokio::test]
-#[ignore = "requires local Ollama with qwen3.5:4b"]
+#[ignore = "slow test: requires local Ollama with qwen3.5:4b model"]
 async fn ollama_chat_with_system_prompt() {
     let component = make_ollama_component();
     let endpoint = component
@@ -266,7 +266,7 @@ async fn ollama_chat_with_system_prompt() {
 //     or CamelLlmToolCalls header (materialized)
 
 #[tokio::test]
-#[ignore = "requires local Ollama with qwen3.5:4b (tool-supporting model)"]
+#[ignore = "slow test: requires local Ollama with qwen3.5:4b (tool-supporting model)"]
 async fn ollama_chat_with_tools() {
     let component = make_ollama_component();
     let endpoint = component
@@ -344,7 +344,7 @@ async fn ollama_chat_with_tools() {
 //   - Tool definitions set via CamelLlmTools header
 
 #[tokio::test]
-#[ignore = "requires local Ollama with qwen3.5:4b (tool-supporting model)"]
+#[ignore = "slow test: requires local Ollama with qwen3.5:4b (tool-supporting model)"]
 async fn ollama_multi_turn() {
     let component = make_ollama_component();
     let endpoint = component
@@ -434,7 +434,7 @@ async fn ollama_multi_turn() {
 //   - Ollama with qwen3.5:4b
 
 #[tokio::test]
-#[ignore = "requires local Ollama with qwen3.5:4b and pricing configured"]
+#[ignore = "slow test: requires local Ollama with qwen3.5:4b and pricing configured"]
 async fn ollama_cost_computed() {
     let mut providers = std::collections::HashMap::new();
     providers.insert(
@@ -507,7 +507,7 @@ async fn ollama_cost_computed() {
 //   - Ollama with qwen3.5:4b
 
 #[tokio::test]
-#[ignore = "requires local Ollama with qwen3.5:4b and cache configured"]
+#[ignore = "slow test: requires local Ollama with qwen3.5:4b and cache configured"]
 async fn ollama_cache_hit() {
     let mut providers = std::collections::HashMap::new();
     providers.insert(

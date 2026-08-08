@@ -85,6 +85,9 @@ enum Commands {
     /// #[non_exhaustive] or carry a `/// exhaustive-by-contract: <rationale>`
     /// rustdoc note. Exits non-zero on violations.
     LintNonExhaustive,
+    /// Enforce ADR-0054: every #[ignore] must carry a reason string from a
+    /// closed vocabulary. Exits non-zero on violations.
+    LintIgnore,
     /// Compute the correct publish order for workspace crates by performing
     /// a topological sort over normal (non-dev) internal dependencies.
     /// Outputs shell commands suitable for publish-crates.sh.
@@ -245,6 +248,26 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-non-exhaustive error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintIgnore => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_ignore(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-ignore: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("IGNORE-POLICY VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-ignore: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-ignore error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -1660,6 +1683,310 @@ pub fn lint_non_exhaustive(workspace_root: &Path) -> Result<Vec<Violation>, Stri
                 .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
 
             violations.extend(lint_non_exhaustive_src(&content, &path.to_string_lossy()));
+        }
+    }
+
+    Ok(violations)
+}
+
+/// Read the ignore-policy allowlist from `scripts/xtask/allowlist-ignore.txt`.
+///
+/// Same format as `allowlist-log-levels.txt`: one relative path per line,
+/// `#` for comments, blank lines ignored. Returns an empty set if the file
+/// does not exist (caller treats empty set as "no allowlist entries").
+pub fn load_ignore_allowlist(workspace_root: &Path) -> std::collections::HashSet<String> {
+    let allowlist_path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join("allowlist-ignore.txt");
+    std::fs::read_to_string(&allowlist_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+/// Classified prefix on a `#[ignore = "..."]` reason string. The `Err` arm
+/// carries a short rule code that becomes the prefix of the violation snippet
+/// (e.g. `ignore:invalid-prefix:`, `ignore:empty-detail:`).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum IgnoreReasonKind {
+    PreBuilt,
+    SlowTest,
+}
+
+/// Validate a reason string against the closed vocabulary from ADR-0054.
+///
+/// Returns `Ok(kind)` for a well-formed reason, or `Err(code)` where
+/// `code` is one of `"invalid-prefix"` / `"empty-detail"`. The caller
+/// emits the rule code as `ignore:<code>:` in the Violation snippet.
+fn validate_ignore_reason(reason: &str) -> Result<IgnoreReasonKind, &'static str> {
+    if let Some(detail) = reason.strip_prefix("requires pre-built ") {
+        if detail.trim().is_empty() {
+            return Err("empty-detail");
+        }
+        return Ok(IgnoreReasonKind::PreBuilt);
+    }
+    // `requires live` was removed from the closed vocabulary per ADR-0054 rev.
+    // Emit a migration error instead of a generic invalid-prefix.
+    // Only match when followed by space or colon (not when `live` is part of
+    // a longer word like `livewire`).
+    if reason.starts_with("requires live ") || reason.starts_with("requires live:") {
+        return Err("migration-error");
+    }
+    if let Some(detail) = reason.strip_prefix("slow test: ") {
+        if detail.trim().is_empty() {
+            return Err("empty-detail");
+        }
+        return Ok(IgnoreReasonKind::SlowTest);
+    }
+    Err("invalid-prefix")
+}
+
+/// Sentinel `file` value for allowlist reverse-check violations that have no
+/// single source line (see ADR-0054 allowlist coupling rules).
+const IGNORE_ALLOWLIST_SENTINEL_FILE: &str = "<allowlist>";
+
+/// Prefix path under which allowlist entries must be a direct child.
+const IGNORE_ALLOWLIST_PREFIX: &str = "crates/components/camel-component-wasm/tests/";
+
+/// Scan all workspace `crates/**/*.rs` and `examples/**/*.rs` files for
+/// `#[ignore]` attributes that violate ADR-0054.
+///
+/// Rules enforced:
+///   - Every `#[ignore]` must carry a reason string from the closed
+///     vocabulary: `requires pre-built <detail>` | `slow test: <detail>`.
+///   - Bare `#[ignore]` is rejected.
+///   - The allowlist `scripts/xtask/allowlist-ignore.txt` is checked
+///     bidirectionally (forward + reverse + mixed-reason). See ADR-0054.
+///
+/// Exclusion rules:
+///   - Files under `target/`, `.worktrees/`, `scripts/`, `bridges/` are skipped.
+///   - Files NOT under a `crates/` or `examples/` subdirectory are skipped.
+///   - Test files are NOT skipped (unlike `lint_log_levels`) — `#[ignore]`
+///     semantics in `tests/` are exactly the surface the lint must police.
+pub fn lint_ignore(workspace_root: &Path) -> Result<Vec<Violation>, String> {
+    use regex::Regex;
+    use std::collections::HashMap;
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let allowlist = load_ignore_allowlist(workspace_root);
+    // Use `r#"..."#` (not `r"..."`) because the regex body contains `"`.
+    // The regex itself: `#[ignore]` optionally followed by ` = "..."`.
+    let ignore_re = Regex::new(r#"#\[ignore\s*(?:=\s*"([^"]*)")?\]"#).expect("valid regex"); // allow-unwrap
+
+    // Per-file state: (has_any_pre_built, has_any_non_pre_built)
+    // Drives the forward / mixed-reason checks.
+    let mut file_state: HashMap<String, (bool, bool)> = HashMap::new();
+
+    let mut violations = Vec::new();
+
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+
+        // Compute the path relative to the workspace root so the
+        // component-based filters see the in-workspace layout (e.g. when
+        // the workspace itself lives under `.worktrees/<branch>/`).
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        let rel_components: Vec<_> = rel.components().collect();
+
+        // Skip meta-tooling / build directories.
+        if rel.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+                || c == Component::Normal("scripts".as_ref())
+                || c == Component::Normal("bridges".as_ref())
+        }) {
+            continue;
+        }
+
+        // Only scan files under a `crates/` or `examples/` subdirectory.
+        if rel_components.is_empty() {
+            continue;
+        }
+        let first = rel_components[0];
+        if first != Component::Normal("crates".as_ref())
+            && first != Component::Normal("examples".as_ref())
+        {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+        // Normalize the relative path to forward slashes for consistent
+        // allowlist comparison (Windows paths use `\`).
+        let file_rel = rel.to_string_lossy().replace('\\', "/");
+
+        let mut has_pre_built = false;
+        let mut has_non_pre_built = false;
+
+        for (line_idx, raw_line) in content.lines().enumerate() {
+            let trimmed = raw_line.trim();
+
+            // Skip comment lines (single-line `//` and inner-doc `//!`).
+            // This prevents false positives on lines like
+            // `// REDIS-009: ... (#[ignore] by default)` and
+            // `//! All tests ... #[ignore] ...`.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+
+            // A line may carry multiple `#[ignore]` attributes (unusual but
+            // legal). Find all matches on this line.
+            for cap in ignore_re.captures_iter(raw_line) {
+                let line_no = line_idx + 1;
+                if let Some(reason_match) = cap.get(1) {
+                    let reason = reason_match.as_str();
+                    match validate_ignore_reason(reason) {
+                        Ok(IgnoreReasonKind::PreBuilt) => {
+                            has_pre_built = true;
+                        }
+                        Ok(IgnoreReasonKind::SlowTest) => {
+                            has_non_pre_built = true;
+                        }
+                        Err(code) => {
+                            violations.push(Violation {
+                                file: file_rel.clone(),
+                                line: line_no,
+                                snippet: format!(
+                                    "ignore:{}: reason {:?} must use one of the closed-vocabulary prefixes: \
+                                     `requires pre-built <detail>` | `slow test: <detail>` \
+                                     (see ADR-0054) — {}",
+                                    code, reason, raw_line.trim()
+                                ),
+                            });
+                        }
+                    }
+                } else {
+                    // Bare `#[ignore]` — no reason string supplied.
+                    violations.push(Violation {
+                        file: file_rel.clone(),
+                        line: line_no,
+                        snippet: format!(
+                            "ignore:missing-reason: bare #[ignore] — add a reason string from the \
+                             closed vocabulary (see ADR-0054): {}",
+                            raw_line.trim()
+                        ),
+                    });
+                }
+            }
+        }
+
+        file_state.insert(file_rel, (has_pre_built, has_non_pre_built));
+    }
+
+    // -------- Forward check --------
+    // Every file containing a `requires pre-built` test must be in the
+    // allowlist (which the CI job consumes to run those tests).
+    for (file_rel, (has_pre_built, _)) in &file_state {
+        if *has_pre_built && !allowlist.contains(file_rel) {
+            violations.push(Violation {
+                file: file_rel.clone(),
+                line: 0,
+                snippet: format!(
+                    "ignore:pre-built-not-in-allowlist: file contains `requires pre-built` tests \
+                     but is not listed in scripts/xtask/allowlist-ignore.txt (see ADR-0054): \
+                     {}",
+                    file_rel
+                ),
+            });
+        }
+    }
+
+    // -------- Reverse check --------
+    // For each allowlist entry, verify (a) the path is in-scope, (b) the
+    // file exists, (c) the file contains at least one pre-built test.
+    for entry in &allowlist {
+        // (a) In-scope: direct-child `.rs` file under the WASM tests dir.
+        let after_prefix = match entry.strip_prefix(IGNORE_ALLOWLIST_PREFIX) {
+            Some(s) => s,
+            None => {
+                violations.push(Violation {
+                    file: IGNORE_ALLOWLIST_SENTINEL_FILE.to_string(),
+                    line: 0,
+                    snippet: format!(
+                        "ignore:allowlist-out-of-scope: allowlist entry must be a direct-child \
+                         `.rs` file under `crates/components/camel-component-wasm/tests/` \
+                         (see ADR-0054): {}",
+                        entry
+                    ),
+                });
+                continue;
+            }
+        };
+        if after_prefix.is_empty() || after_prefix.contains('/') || !after_prefix.ends_with(".rs") {
+            violations.push(Violation {
+                file: IGNORE_ALLOWLIST_SENTINEL_FILE.to_string(),
+                line: 0,
+                snippet: format!(
+                    "ignore:allowlist-out-of-scope: allowlist entry must be a direct-child \
+                     `.rs` file under `crates/components/camel-component-wasm/tests/` \
+                     (see ADR-0054): {}",
+                    entry
+                ),
+            });
+            continue;
+        }
+
+        // (b) Exists on disk.
+        let full_path = workspace_root.join(entry);
+        if !full_path.is_file() {
+            violations.push(Violation {
+                file: IGNORE_ALLOWLIST_SENTINEL_FILE.to_string(),
+                line: 0,
+                snippet: format!(
+                    "ignore:allowlist-stale: allowlist entry points to a non-existent file \
+                     (see ADR-0054): {}",
+                    entry
+                ),
+            });
+            continue;
+        }
+
+        // (c) Contains at least one `requires pre-built` test.
+        let has_pre_built = file_state.get(entry).map(|(pb, _)| *pb).unwrap_or(false);
+        if !has_pre_built {
+            violations.push(Violation {
+                file: IGNORE_ALLOWLIST_SENTINEL_FILE.to_string(),
+                line: 0,
+                snippet: format!(
+                    "ignore:allowlist-no-pre-built-test: allowlist entry must contain at least \
+                     one `requires pre-built` test (see ADR-0054): {}",
+                    entry
+                ),
+            });
+        }
+    }
+
+    // -------- Mixed-reason check --------
+    // For each allowlisted file, every `#[ignore]` reason must be
+    // `requires pre-built`. A file with mixed reasons would cause the CI
+    // job to incorrectly execute live-service tests.
+    for entry in &allowlist {
+        if let Some((_, has_non_pre_built)) = file_state.get(entry)
+            && *has_non_pre_built
+        {
+            violations.push(Violation {
+                file: entry.clone(),
+                line: 0,
+                snippet: format!(
+                    "ignore:allowlist-mixed-reasons: allowlisted file must contain ONLY \
+                     `requires pre-built` tests (the wasm-integration CI job would otherwise \
+                     run live-service tests — see ADR-0054): {}",
+                    entry
+                ),
+            });
         }
     }
 
@@ -4458,6 +4785,503 @@ camel-core = { workspace = true }
                 "blank line between rustdoc and enum detaches the note, got {v:?}"
             );
             assert_eq!(v[0].line, 3);
+        }
+    }
+
+    #[cfg(test)]
+    mod lint_ignore_tests {
+        use super::*;
+        use std::fs;
+        use std::path::PathBuf;
+
+        /// Build a temp workspace containing the given relative-path files and
+        /// seed `scripts/xtask/allowlist-ignore.txt` (empty) so the lint does
+        /// not error on the missing path. Returns the workspace root.
+        fn tmp_workspace_ignore(files: &[(&str, &str)], allowlist: &[&str]) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-ignore-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            for (rel_path, content) in files {
+                let full = dir.join(rel_path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap();
+                fs::write(&full, content).unwrap();
+            }
+            fs::create_dir_all(dir.join("bridges")).unwrap();
+            fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+            let xtask = dir.join("scripts").join("xtask");
+            fs::create_dir_all(&xtask).unwrap();
+            let mut allowlist_contents =
+                String::from("# allowlist for ignore-test lint (see ADR-0054)\n");
+            for entry in allowlist {
+                allowlist_contents.push_str(entry);
+                allowlist_contents.push('\n');
+            }
+            fs::write(xtask.join("allowlist-ignore.txt"), allowlist_contents).unwrap();
+            dir
+        }
+
+        // ----- per-attribute validation -----
+
+        #[test]
+        fn bare_ignore_is_violation() {
+            let ws = tmp_workspace_ignore(
+                &[("crates/foo/src/lib.rs", "#[ignore]\n#[test]\nfn foo() {}\n")],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "expected 1 violation, got {violations:?}"
+            );
+            assert!(
+                violations[0].snippet.contains("ignore:missing-reason"),
+                "expected `ignore:missing-reason` in snippet, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn valid_requires_pre_built_passes() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/components/camel-component-wasm/tests/foo.rs",
+                    r#"#[ignore = "requires pre-built guest wasm"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &["crates/components/camel-component-wasm/tests/foo.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "valid allowlisted `requires pre-built` must pass, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn valid_slow_test_passes() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "slow test: file polling"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "valid `slow test:` must pass, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn invalid_prefix_is_violation() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "because reasons"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "expected 1 violation, got {violations:?}"
+            );
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "expected `ignore:invalid-prefix` in snippet, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn near_prefix_typo_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires livewire foo"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "near-prefix typo `requires livewire` must be rejected, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn case_sensitive_prefix() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "Requires live Redis"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "capitalized prefix `Requires live` must be rejected, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn empty_detail_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "slow test: "]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:empty-detail"),
+                "empty detail after delimiter must be rejected, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn prefix_without_detail_no_space() {
+            // `requires live` with no trailing space — does not match the
+            // closed-vocabulary prefix, so it must be flagged as
+            // `invalid-prefix` (no delimiter present at all).
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires live"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "missing delimiter must be `invalid-prefix`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn slow_test_wrong_delimiter_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "slow test file polling"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "missing colon in `slow test` must be `invalid-prefix`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn requires_live_wrong_delimiter_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires live: Kafka"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:migration-error"),
+                "colon instead of space in `requires live:` must be `migration-error`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn requires_live_is_migration_error() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires live Kafka"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:migration-error"),
+                "`requires live` must emit migration-error, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn requires_pre_built_wrong_delimiter_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires pre-built: wasm"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "colon instead of space in `requires pre-built:` must be `invalid-prefix`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // ----- comment-line / scope handling -----
+
+        #[test]
+        fn ignore_in_comment_not_violation() {
+            // Both `//` and `//!` lines must be skipped before regex matching,
+            // so `#[ignore]` inside a comment is never flagged.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    "// REDIS-009: ... (#[ignore] by default)\n\
+                     //! All tests here are #[ignore] by default.\n",
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "comment lines must be skipped, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn scripts_dir_excluded() {
+            // `scripts/` is in the path-component skip list — file is not
+            // scanned at all, so the bare `#[ignore]` is never seen.
+            let ws = tmp_workspace_ignore(
+                &[("scripts/foo.rs", "#[ignore]\n#[test]\nfn foo() {}\n")],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "scripts/ must be excluded, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn tests_dir_scanned() {
+            // Unlike `lint_log_levels`, test files under `crates/.../tests/`
+            // ARE scanned for `#[ignore]` policy violations. `requires live`
+            // is now a migration error (ADR-0054 rev).
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/tests/bar.rs",
+                    r#"#[ignore = "requires live Foo"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:migration-error"),
+                "tests/ must be scanned; `requires live` should be migration-error, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // ----- allowlist coupling -----
+
+        #[test]
+        fn pre_built_not_in_allowlist() {
+            // File has a `requires pre-built` test but is not in the
+            // allowlist → forward check violation.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/tests/bar.rs",
+                    r#"#[ignore = "requires pre-built wasm"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "expected 1 forward-check violation, got: {violations:?}"
+            );
+            assert!(
+                violations[0]
+                    .snippet
+                    .contains("ignore:pre-built-not-in-allowlist"),
+                "expected `ignore:pre-built-not-in-allowlist`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_out_of_scope() {
+            // Allowlist entry is under `crates/other/tests/...` not the WASM
+            // tests dir → reverse-check (a) violation.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/other/tests/foo.rs",
+                    r#"#[ignore = "requires pre-built guest wasm"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &["crates/other/tests/foo.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.snippet.contains("ignore:allowlist-out-of-scope")),
+                "expected `ignore:allowlist-out-of-scope`, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_stale() {
+            // Allowlist entry points to a file that does not exist on disk
+            // → reverse-check (b) violation. Line is the sentinel 0.
+            let ws = tmp_workspace_ignore(
+                &[],
+                &["crates/components/camel-component-wasm/tests/nonexistent.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.snippet.contains("ignore:allowlist-stale") && v.line == 0),
+                "expected `ignore:allowlist-stale` with line 0, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_no_pre_built_test() {
+            // Real WASM test file exists, is in the allowlist, but only has
+            // `requires live` tests (no `requires pre-built`) → reverse-check
+            // (c) violation.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/components/camel-component-wasm/tests/only_live.rs",
+                    r#"#[ignore = "requires live Foo"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &["crates/components/camel-component-wasm/tests/only_live.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.snippet.contains("ignore:allowlist-no-pre-built-test")),
+                "expected `ignore:allowlist-no-pre-built-test`, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_mixed_reasons() {
+            // Allowlisted file contains BOTH `requires pre-built` AND
+            // `requires live` → `requires live` is now a migration error
+            // (ADR-0054 rev), so the mixed-reasons check does NOT fire.
+            // Instead, the `requires live` line produces a migration-error
+            // violation.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/components/camel-component-wasm/tests/mixed.rs",
+                    r#"#[ignore = "requires pre-built guest wasm"]
+#[test]
+fn a() {}
+
+#[ignore = "requires live Foo"]
+#[test]
+fn b() {}
+"#,
+                )],
+                &["crates/components/camel-component-wasm/tests/mixed.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.snippet.contains("ignore:migration-error")),
+                "expected `ignore:migration-error`, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
         }
     }
 }

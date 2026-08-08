@@ -122,32 +122,6 @@ mod tests {
         // in the non-async sense (it's not async, which proves no I/O).
     }
 
-    /// Verify that state transitions through the ReadinessGate trait work
-    /// end-to-end, calling `notify_starting` → `notify_ready` → `notify_not_ready`.
-    ///
-    // requires live cluster
-    #[tokio::test]
-    #[ignore]
-    async fn state_transition_starting_to_ready_to_not_ready() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        let client = kube::Client::try_default()
-            .await
-            .expect("Kubernetes cluster required for this test");
-
-        let gate = KubernetesReadinessGate::new(client, "default", "readiness-test-pod");
-
-        gate.notify_starting()
-            .await
-            .expect("notify_starting should succeed");
-        gate.notify_ready()
-            .await
-            .expect("notify_ready should succeed");
-        gate.notify_not_ready("TestDrain")
-            .await
-            .expect("notify_not_ready should succeed");
-    }
-
     /// Verify that `patch_condition` returns an error when the Kubernetes API is
     /// unreachable. This tests that failure detection works end-to-end through the
     /// `ReadinessGate` trait methods.

@@ -2137,7 +2137,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    #[ignore] // Slow test - run with --ignored flag
+    #[ignore = "slow test: file polling (run with --ignored)"]
     async fn test_large_file_streaming_constant_memory() {
         use std::io::Write;
         use tempfile::NamedTempFile;

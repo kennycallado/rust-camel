@@ -274,7 +274,7 @@ fn serde_bridge_json_fallback_to_text_on_invalid_json_string() {
 
 // TODO(WASM-010): requires compiled WASM fixture — see tests/fixtures/README.md
 #[tokio::test]
-#[ignore]
+#[ignore = "requires pre-built guest wasm (see fixtures README)"]
 async fn wasm_integration_with_compiled_fixture() {
     // This test requires a compiled .wasm module placed in tests/fixtures/.
     // Run: cargo build --target wasm32-wasip2 -p <fixture-crate>

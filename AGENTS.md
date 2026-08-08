@@ -40,6 +40,8 @@
     cargo xtask changelog --check --from FETCH_HEAD --to HEAD
 - name: lint-log-levels
   run: cargo xtask lint-log-levels
+- name: lint-ignore
+  run: cargo xtask lint-ignore
 - name: schema-check
   run: cargo xtask schema --check
 - name: cargo-audit
