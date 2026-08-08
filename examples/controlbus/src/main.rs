@@ -1,5 +1,5 @@
+use camel_api::CamelError;
 use camel_api::body::Body;
-use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_controlbus::ControlBusComponent;
 use camel_component_log::LogComponent;
@@ -26,31 +26,27 @@ async fn main() -> Result<(), CamelError> {
         .to("log:target?showBody=true&showCorrelationId=true")
         .build()?;
 
-    // Route that suspends the target after 5 seconds
+    // Route that suspends the target after 5 seconds.
+    // ADR-0034: routeId AND authorizedRoutes must be declared statically in the URI.
+    // The CamelRouteId exchange header cannot override or select the target.
     let suspend_route = RouteBuilder::from("timer:suspend?delay=5000&repeatCount=1")
         .route_id("suspend-controller")
-        .process(|mut exchange| async move {
+        .process(|exchange| async move {
             println!("[CONTROL] Suspending target-route...");
-            exchange
-                .input
-                .set_header("CamelRouteId", Value::String("target-route".into()));
             Ok(exchange)
         })
-        .to("controlbus:route?action=suspend")
+        .to("controlbus:route?routeId=target-route&action=suspend&authorizedRoutes=target-route")
         .to("log:control?showBody=true")
         .build()?;
 
-    // Route that resumes the target after 10 seconds
+    // Route that resumes the target after 10 seconds (ADR-0034 static form).
     let resume_route = RouteBuilder::from("timer:resume?delay=10000&repeatCount=1")
         .route_id("resume-controller")
-        .process(|mut exchange| async move {
+        .process(|exchange| async move {
             println!("[CONTROL] Resuming target-route...");
-            exchange
-                .input
-                .set_header("CamelRouteId", Value::String("target-route".into()));
             Ok(exchange)
         })
-        .to("controlbus:route?action=resume")
+        .to("controlbus:route?routeId=target-route&action=resume&authorizedRoutes=target-route")
         .to("log:control?showBody=true")
         .build()?;
 

@@ -14,7 +14,7 @@ This is a **producer-only** component - it can only be used as a destination (`t
 - Restart routes
 - Query route status
 - Dynamic route management from within routes
-- Support for routeId from URI or header
+- Static route ID declaration in the endpoint URI (no header override)
 - Runtime-bus execution path (no controller fallback)
 - Per-exchange command IDs for idempotent command processing
 
@@ -30,7 +30,7 @@ camel-component-controlbus = "*"
 ## URI Format
 
 ```
-controlbus:route?routeId=xxx&action=yyy
+controlbus:route?routeId=xxx&action=yyy&authorizedRoutes=xxx
 ```
 
 ## Actions
@@ -49,7 +49,8 @@ controlbus:route?routeId=xxx&action=yyy
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `action` | Yes | Action to perform |
-| `routeId` | No* | Target route ID (*required unless using header) |
+| `routeId` | Yes | Target route ID (must be declared in the URI; header override removed in ADR-0034) |
+| `authorizedRoutes` | Yes | Comma-separated allowlist of route IDs this endpoint may target. If absent, every command is rejected (fail-closed per ADR-0034). The target `routeId` must appear in this list. |
 
 ## Usage
 
@@ -64,31 +65,35 @@ ctx.register_component("controlbus", Box::new(ControlBusComponent::new()));
 
 // Start a route
 let start_route = RouteBuilder::from("timer:start-schedule?period=86400000")
-    .to("controlbus:route?routeId=nightly-job&action=start")
+    .to("controlbus:route?routeId=nightly-job&action=start&authorizedRoutes=nightly-job")
     .build()?;
 
 // Stop a route
 let stop_route = RouteBuilder::from("timer:stop-schedule?period=86400000")
-    .to("controlbus:route?routeId=nightly-job&action=stop")
+    .to("controlbus:route?routeId=nightly-job&action=stop&authorizedRoutes=nightly-job")
     .build()?;
 ```
 
-### Dynamic Route ID (from Header)
+### Security: route ID is static (ADR-0034)
 
-```rust
-// Use CamelRouteId header for route ID
-let route = RouteBuilder::from("direct:control")
-    .set_header("CamelRouteId", Value::String("target-route".into()))
-    .to("controlbus:route?action=status")
-    .log("Route status: ${body}", camel_processor::LogLevel::Info)
-    .build()?;
+The `CamelRouteId` exchange header cannot select or override the target route. ADR-0034
+removed header-based route targeting because Exchange data is untrusted (ADR-0032) and a
+header-driven control plane would let any in-process caller escalate privileges by writing
+the header. Route IDs and the `authorizedRoutes` allowlist MUST be declared statically in
+the endpoint URI:
+
 ```
+controlbus:route?routeId=my-route&action=status&authorizedRoutes=my-route
+```
+
+Authorization failures return `CamelError::Unauthorized`. The endpoint also denies
+self-targeting (the calling route cannot suspend or stop itself).
 
 ### Get Route Status
 
 ```rust
 let route = RouteBuilder::from("direct:check")
-    .to("controlbus:route?routeId=my-route&action=status")
+    .to("controlbus:route?routeId=my-route&action=status&authorizedRoutes=my-route")
     .process(|ex| async move {
         let status = ex.input.body.as_text().unwrap_or("unknown");
         println!("Route status: {}", status);
@@ -102,12 +107,12 @@ let route = RouteBuilder::from("direct:check")
 ```rust
 // Suspend during maintenance
 let suspend = RouteBuilder::from("direct:maintenance-start")
-    .to("controlbus:route?routeId=api-route&action=suspend")
+    .to("controlbus:route?routeId=api-route&action=suspend&authorizedRoutes=api-route")
     .build()?;
 
 // Resume after maintenance
 let resume = RouteBuilder::from("direct:maintenance-end")
-    .to("controlbus:route?routeId=api-route&action=resume")
+    .to("controlbus:route?routeId=api-route&action=resume&authorizedRoutes=api-route")
     .build()?;
 ```
 
@@ -146,19 +151,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Route that starts the work route on demand
     let control_route = RouteBuilder::from("http://0.0.0.0:8080/control/start")
-        .to("controlbus:route?routeId=work-route&action=start")
+        .to("controlbus:route?routeId=work-route&action=start&authorizedRoutes=work-route")
         .set_body(Body::Text("Started work-route"))
         .build()?;
 
     // Route that stops the work route on demand
     let stop_route = RouteBuilder::from("http://0.0.0.0:8080/control/stop")
-        .to("controlbus:route?routeId=work-route&action=stop")
+        .to("controlbus:route?routeId=work-route&action=stop&authorizedRoutes=work-route")
         .set_body(Body::Text("Stopped work-route"))
         .build()?;
 
     // Route to check status
     let status_route = RouteBuilder::from("http://0.0.0.0:8080/control/status")
-        .to("controlbus:route?routeId=work-route&action=status")
+        .to("controlbus:route?routeId=work-route&action=status&authorizedRoutes=work-route")
         .build()?;
 
     ctx.add_route(work_route).await?;
@@ -179,12 +184,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 The component returns errors for:
 - Unknown route ID
 - Invalid action
-- Missing routeId (when not in header)
+- Missing `routeId` in the URI
+- Missing `authorizedRoutes` (fail-closed)
+- Target `routeId` not present in `authorizedRoutes`
+- Self-targeting (calling route ID == target `routeId`)
 
 ```rust
 let route = RouteBuilder::from("direct:control")
     .error_handler(ErrorHandlerConfig::log_only())
-    .to("controlbus:route?routeId=maybe-nonexistent&action=start")
+    .to("controlbus:route?routeId=maybe-nonexistent&action=start&authorizedRoutes=maybe-nonexistent")
     .build()?;
 ```
 
