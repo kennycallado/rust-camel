@@ -461,6 +461,7 @@ impl MockEndpointInner {
             if !guard.expected_bodies.is_empty() {
                 let received_bodies: Vec<_> = received.iter().map(|e| &e.input.body).collect();
                 if guard.expected_bodies.len() != received_bodies.len() {
+                    self.set_fail_fast_on_mismatch();
                     panic!(
                         "MockEndpoint '{}': expected {} bodies, got {}",
                         self.name,
@@ -479,15 +480,19 @@ impl MockEndpointInner {
                             Some(i) => {
                                 unmatched.remove(i);
                             }
-                            None => panic!(
-                                "MockEndpoint '{}': expected body {:?} not found in received exchanges (anyOrder mode)",
-                                self.name, expected
-                            ),
+                            None => {
+                                self.set_fail_fast_on_mismatch();
+                                panic!(
+                                    "MockEndpoint '{}': expected body {:?} not found in received exchanges (anyOrder mode)",
+                                    self.name, expected
+                                );
+                            }
                         }
                     }
                 } else {
                     for (i, expected) in guard.expected_bodies.iter().enumerate() {
                         if !body_eq(expected, received_bodies[i]) {
+                            self.set_fail_fast_on_mismatch();
                             panic!(
                                 "MockEndpoint '{}': body[{}] expected {:?}, got {:?}",
                                 self.name, i, expected, received_bodies[i]
@@ -503,6 +508,7 @@ impl MockEndpointInner {
                     .iter()
                     .any(|ex| ex.input.headers.get(key).is_some_and(|v| v == value));
                 if !found {
+                    self.set_fail_fast_on_mismatch();
                     panic!(
                         "MockEndpoint '{}': expected header '{}' = {} not found in any received exchange",
                         self.name, key, value
@@ -528,6 +534,7 @@ impl MockEndpointInner {
                     })
                 });
                 if !found {
+                    self.set_fail_fast_on_mismatch();
                     panic!(
                         "MockEndpoint '{}': no received exchange has header '{}' matching regex {:?}",
                         self.name, key, pattern
@@ -540,6 +547,35 @@ impl MockEndpointInner {
     /// Return the stored fail-fast error, if any.
     pub fn fail_fast_error(&self) -> Option<CamelError> {
         self.fail_fast_error.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Manually trip the fail-fast latch.
+    ///
+    /// Sets the internal `fail_fast_error` to `Some(error)`. The `MockProducer`
+    /// treats the presence of any error here as a sentinel — the actual
+    /// `CamelError` value is never propagated to the caller; a fixed
+    /// "fail-fast mode" message is returned instead. Use this hook when a
+    /// downstream component wants to short-circuit further processing on this
+    /// endpoint.
+    pub fn trigger_fail_fast(&self, error: CamelError) {
+        if let Ok(mut guard) = self.fail_fast_error.lock() {
+            *guard = Some(error);
+        }
+    }
+
+    /// When `fail_fast` is enabled, record the assertion-mismatch sentinel
+    /// before panicking. This ensures any concurrent or subsequent
+    /// `MockProducer::poll_ready` / `call` invocation rejects with the fixed
+    /// "fail-fast mode" message instead of being blocked on a panic-orphaned
+    /// lock or a stale `None` sentinel.
+    fn set_fail_fast_on_mismatch(&self) {
+        if self.fail_fast
+            && let Ok(mut guard) = self.fail_fast_error.lock()
+        {
+            *guard = Some(CamelError::ProcessorError(
+                "assert_satisfied expectation mismatch".to_string(),
+            ));
+        }
     }
 }
 
@@ -690,7 +726,9 @@ fn clone_body(body: &camel_component_api::Body) -> camel_component_api::Body {
         camel_component_api::Body::Json(v) => camel_component_api::Body::Json(v.clone()),
         camel_component_api::Body::Xml(s) => camel_component_api::Body::Xml(s.clone()),
         camel_component_api::Body::Bytes(b) => camel_component_api::Body::Bytes(b.clone()),
-        // Streams and future uncloneable variants fall back to Empty.
+        camel_component_api::Body::Stream(s) => camel_component_api::Body::Stream(s.clone()),
+        // Safety net for future #[non_exhaustive] variants; all current variants
+        // are handled explicitly above.
         _ => camel_component_api::Body::Empty,
     }
 }
@@ -1602,6 +1640,82 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // MOCK-003b: clone_body preserves Body::Stream
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_clone_body_preserves_stream() {
+        use bytes::Bytes;
+        use camel_component_api::{Body, StreamBody, StreamMetadata};
+        use futures::stream;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let chunks: Vec<Result<Bytes, camel_component_api::CamelError>> =
+            vec![Ok(Bytes::from("data"))];
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let config = MockConfig {
+            copy_on_exchange: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:stream-test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("stream-test").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let msg = Message::new(body);
+        let ex = Exchange::new(msg);
+        producer.call(ex).await.unwrap();
+
+        let received = inner.get_received_exchanges().await;
+        assert!(
+            matches!(received[0].input.body, Body::Stream(_)),
+            "expected Body::Stream, got {:?}",
+            received[0].input.body
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clone_body_stream_shares_arc() {
+        use bytes::Bytes;
+        use camel_component_api::{Body, StreamBody, StreamMetadata};
+        use futures::stream;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let chunks: Vec<Result<Bytes, camel_component_api::CamelError>> =
+            vec![Ok(Bytes::from("data"))];
+        let original = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let clone = clone_body(&original);
+
+        // Consume the original first
+        let _ = original.into_bytes(100).await.unwrap();
+
+        // Clone should fail with AlreadyConsumed (shared Arc semantics)
+        let result = clone.into_bytes(100).await;
+        assert!(
+            matches!(
+                result,
+                Err(camel_component_api::CamelError::AlreadyConsumed)
+            ),
+            "expected AlreadyConsumed, got {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // MOCK-004: expect_body / expect_header / assert_satisfied tests
     // -----------------------------------------------------------------------
 
@@ -1942,5 +2056,296 @@ mod tests {
         assert!(!cfg.copy_on_exchange);
         assert!(!cfg.fail_fast);
         assert!(!cfg.any_order);
+    }
+
+    // -----------------------------------------------------------------------
+    // M1: fail-fast trigger + assert_satisfied wires fail_fast_error
+    // -----------------------------------------------------------------------
+
+    use futures::FutureExt;
+
+    #[tokio::test]
+    async fn test_trigger_fail_fast_rejects_subsequent_producer() {
+        use camel_component_api::CamelError;
+        use std::panic::AssertUnwindSafe;
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("test").unwrap();
+
+        inner.trigger_fail_fast(CamelError::ProcessorError("boom".to_string()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        // poll_ready must reject in fail-fast mode.
+        assert!(producer.ready().await.is_err());
+        // The next call must reject with the fixed "fail-fast mode" message.
+        let result = AssertUnwindSafe(producer.call(Exchange::default()))
+            .catch_unwind()
+            .await
+            .expect("call should not panic");
+        match result {
+            Err(CamelError::ProcessorError(msg)) => {
+                assert!(
+                    msg.contains("fail-fast mode"),
+                    "message should contain 'fail-fast mode', got: {msg}"
+                );
+                assert!(
+                    !msg.contains("boom"),
+                    "supplied error must NOT be in fixed message, got: {msg}"
+                );
+            }
+            other => panic!("expected ProcessorError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_trigger_fail_fast_noop_when_fail_fast_false() {
+        use camel_component_api::CamelError;
+        use std::panic::AssertUnwindSafe;
+        let config = MockConfig {
+            fail_fast: false,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("test").unwrap();
+
+        inner.trigger_fail_fast(CamelError::ProcessorError("boom".to_string()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        let result = AssertUnwindSafe(producer.call(Exchange::default()))
+            .catch_unwind()
+            .await
+            .expect("call should not panic");
+        assert!(
+            result.is_ok(),
+            "fail_fast=false must let the call through even with stored error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reset_clears_trigger_fail_fast() {
+        use camel_component_api::CamelError;
+        use std::panic::AssertUnwindSafe;
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("test").unwrap();
+
+        inner.trigger_fail_fast(CamelError::ProcessorError("boom".to_string()));
+        assert!(inner.fail_fast_error().is_some());
+        inner.reset().await;
+        assert!(inner.fail_fast_error().is_none());
+
+        // Producer should accept the call now that reset cleared the error.
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        let result = AssertUnwindSafe(producer.call(Exchange::default()))
+            .catch_unwind()
+            .await
+            .expect("call should not panic");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_assert_satisfied_body_count_mismatch_sets_fail_fast() {
+        use std::panic::AssertUnwindSafe;
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("test").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("a".to_string()));
+        inner.expect_body(camel_component_api::Body::Text("b".to_string()));
+
+        // Send only 1 exchange (expects 2 -> mismatch).
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("a")))
+            .await
+            .unwrap();
+
+        // Wrap in catch_unwind so the test does not abort on panic.
+        let panic_result = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await;
+        assert!(
+            panic_result.is_err(),
+            "expected panic from assert_satisfied"
+        );
+        assert!(
+            inner.fail_fast_error().is_some(),
+            "fail_fast_error must be set when fail_fast=true and assertion panics"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assert_satisfied_body_mismatch_sets_fail_fast() {
+        use std::panic::AssertUnwindSafe;
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("test").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("expected".to_string()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("actual")))
+            .await
+            .unwrap();
+
+        let panic_result = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await;
+        assert!(
+            panic_result.is_err(),
+            "expected panic from assert_satisfied"
+        );
+        assert!(
+            inner.fail_fast_error().is_some(),
+            "fail_fast_error must be set on body mismatch when fail_fast=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assert_satisfied_no_set_error_when_fail_fast_false() {
+        use std::panic::AssertUnwindSafe;
+        let config = MockConfig {
+            fail_fast: false,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("test").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("a".to_string()));
+        inner.expect_body(camel_component_api::Body::Text("b".to_string()));
+
+        // Send only 1 exchange.
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("a")))
+            .await
+            .unwrap();
+
+        let panic_result = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await;
+        assert!(
+            panic_result.is_err(),
+            "expected panic from assert_satisfied"
+        );
+        assert!(
+            inner.fail_fast_error().is_none(),
+            "fail_fast_error must remain None when fail_fast=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assert_satisfied_any_order_body_mismatch_sets_fail_fast() {
+        use std::panic::AssertUnwindSafe;
+        let config = MockConfig {
+            fail_fast: true,
+            any_order: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("test").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("a".to_string()));
+        inner.expect_body(camel_component_api::Body::Text("b".to_string()));
+
+        // Send 2 exchanges: "a" and "c" — "b" is missing.
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("a")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("c")))
+            .await
+            .unwrap();
+
+        let panic_result = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await;
+        assert!(
+            panic_result.is_err(),
+            "expected panic from assert_satisfied (any-order body not found)"
+        );
+        assert!(
+            inner.fail_fast_error().is_some(),
+            "fail_fast_error must be set when fail_fast=true and any-order body is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_assert_satisfied_header_missing_sets_fail_fast() {
+        use std::panic::AssertUnwindSafe;
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("test").unwrap();
+
+        inner.expect_header("x-missing", serde_json::json!("value"));
+
+        // Send 1 exchange without the expected header.
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("body")))
+            .await
+            .unwrap();
+
+        let panic_result = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await;
+        assert!(
+            panic_result.is_err(),
+            "expected panic from assert_satisfied (header missing)"
+        );
+        assert!(
+            inner.fail_fast_error().is_some(),
+            "fail_fast_error must be set when fail_fast=true and expected header is missing"
+        );
     }
 }

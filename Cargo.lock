@@ -1727,6 +1727,7 @@ dependencies = [
  "bytes",
  "camel-api",
  "camel-component-api",
+ "futures",
  "regex",
  "serde_json",
  "tokio",

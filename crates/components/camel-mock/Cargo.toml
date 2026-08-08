@@ -24,6 +24,7 @@ regex.workspace = true
 camel-component-api = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
 bytes.workspace = true
+futures.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [package.metadata.docs.rs]

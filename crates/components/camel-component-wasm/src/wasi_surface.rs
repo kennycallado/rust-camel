@@ -68,8 +68,7 @@ mod tests {
     /// The helper must register successfully into a fresh linker.
     #[test]
     fn test_register_minimal_wasi_succeeds() {
-        let engine = wasmtime::Engine::new(&wasmtime::Config::new())
-            .expect("engine");
+        let engine = wasmtime::Engine::new(&wasmtime::Config::new()).expect("engine");
         let mut linker: wasmtime::component::Linker<crate::runtime::WasmHostState> =
             wasmtime::component::Linker::new(&engine);
         register_minimal_wasi(&mut linker).expect("clocks+random register");
