@@ -47,19 +47,19 @@ pub fn canonical_contract_supports_step(step: &str) -> bool {
 pub fn canonical_contract_rejection_reason(step: &str) -> Option<&'static str> {
     if CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS.contains(&step) {
         return Some(
-            "declared out-of-scope for canonical v1; use declarative route compilation path outside CQRS canonical commands",
+            "declared out-of-scope for canonical v2; use declarative route compilation path outside CQRS canonical commands",
         );
     }
 
     if CANONICAL_CONTRACT_RUST_ONLY_STEPS.contains(&step) {
-        return Some("rust-only programmable step; not representable in canonical v1 contract");
+        return Some("rust-only programmable step; not representable in canonical v2 contract");
     }
 
     if canonical_contract_supports_step(step)
         && CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS.contains(&step)
     {
         return Some(
-            "supported only as declarative/serializable expression form; closure/processor variants are outside canonical v1",
+            "supported only as declarative/serializable expression form; closure/processor variants are outside canonical v2",
         );
     }
 

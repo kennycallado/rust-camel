@@ -1357,35 +1357,35 @@ fn compile_declarative_step_to_canonical(
         }),
         DeclarativeStep::Loop(_) => {
             let detail = canonical_contract_rejection_reason("loop")
-                .unwrap_or("not included in canonical v1");
+                .unwrap_or("not included in canonical v2");
             Err(CamelError::RouteError(format!(
-                "canonical v1 does not support step `loop`: {detail}"
+                "canonical v2 does not support step `loop`: {detail}"
             )))
         }
         DeclarativeStep::Validate(_) => Err(CamelError::RouteError(
-            "canonical v1 does not support step `validate`".into(),
+            "canonical v2 does not support step `validate`".into(),
         )),
         DeclarativeStep::IdempotentConsumer(_) => Err(CamelError::RouteError(
-            "canonical v1 does not support step `idempotent_consumer`".into(),
+            "canonical v2 does not support step `idempotent_consumer`".into(),
         )),
         DeclarativeStep::ClaimCheck(_) => Err(CamelError::RouteError(
-            "canonical v1 does not support step `claim_check`".into(),
+            "canonical v2 does not support step `claim_check`".into(),
         )),
         DeclarativeStep::Sampling(_) => Err(CamelError::RouteError(
-            "canonical v1 does not support step `sampling`".into(),
+            "canonical v2 does not support step `sampling`".into(),
         )),
         DeclarativeStep::Sort(_) => Err(CamelError::RouteError(
-            "canonical v1 does not support step `sort`".into(),
+            "canonical v2 does not support step `sort`".into(),
         )),
         DeclarativeStep::Resequence(_) => Err(CamelError::RouteError(
-            "canonical v1 does not support step `resequence`".into(),
+            "canonical v2 does not support step `resequence`".into(),
         )),
         other => {
             let step_name = declarative_step_name(&other);
             let detail = canonical_contract_rejection_reason(step_name)
-                .unwrap_or("not included in canonical v1");
+                .unwrap_or("not included in canonical v2");
             Err(CamelError::RouteError(format!(
-                "canonical v1 does not support step `{step_name}`: {detail}"
+                "canonical v2 does not support step `{step_name}`: {detail}"
             )))
         }
     }
@@ -1452,7 +1452,7 @@ fn compile_log_message(message: ValueSourceDef) -> Result<String, CamelError> {
         ValueSourceDef::Expression(LanguageExpressionDef { language, source }) => {
             if language != "simple" {
                 return Err(CamelError::RouteError(format!(
-                    "canonical v1 only supports log expressions in simple language; got `{language}`"
+                    "canonical v2 only supports log expressions in simple language; got `{language}`"
                 )));
             }
             Ok(source)

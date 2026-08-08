@@ -2124,7 +2124,7 @@ routes:
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("canonical v1 does not support step `set_header`"),
+            err.contains("canonical v2 does not support step `set_header`"),
             "unexpected error: {err}"
         );
         assert!(
@@ -3427,7 +3427,7 @@ routes:
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("canonical v1 does not support step `function`"),
+            err.contains("canonical v2 does not support step `function`"),
             "unexpected error: {err}"
         );
     }

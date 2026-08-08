@@ -83,11 +83,11 @@ routes:
       - sampling: 5
 "#;
     match camel_dsl::parse_yaml_to_canonical(yaml, false) {
-        Ok(_) => panic!("canonical v1 should reject sampling"),
+        Ok(_) => panic!("canonical v2 should reject sampling"),
         Err(err) => {
             let msg = err.to_string();
             assert!(
-                msg.contains("canonical v1 does not support step `sampling`"),
+                msg.contains("canonical v2 does not support step `sampling`"),
                 "error should mention canonical rejection: {msg}"
             );
         }

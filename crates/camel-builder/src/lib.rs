@@ -352,7 +352,7 @@ pub trait StepAccumulator: Sized {
 ///     .to("log:info?showHeaders=true")
 ///     .build()?;
 /// ```
-// TODO(BUILDER-003): RouteBuilder does not support clone-and-reuse semantics.
+// TODO(rc-8m5o): RouteBuilder does not support clone-and-reuse semantics.
 // Once built, the builder is consumed. Add `Clone` or a `fork()` method to allow
 // reusing a partially-built route as a template for multiple routes.
 pub struct RouteBuilder {
@@ -690,7 +690,7 @@ impl RouteBuilder {
     }
 
     /// Consume the builder and produce a [`RouteDefinition`].
-    // TODO(BUILDER-006): Validate duplicate route IDs. When a route with the same
+    // TODO(rc-p9vq): Validate duplicate route IDs. When a route with the same
     // ID is already registered in the context, return `Err(CamelError::RouteError)`.
     // Currently, duplicate IDs are silently accepted; detection should happen at
     // `CamelContext::add_route_definition` time.
@@ -4216,12 +4216,12 @@ mod tests {
         );
     }
 
-    // ── BUILDER-006: Duplicate route IDs ──────────────────────────────────────
+    // ── rc-p9vq: Duplicate route IDs ──────────────────────────────────────
 
     #[test]
     fn test_builder_duplicate_route_ids_produce_identical_definitions() {
         // The builder itself doesn't check for duplicates (that's context-level).
-        // Verify both builds succeed with the same ID — detection is TODO(BUILDER-006).
+        // Verify both builds succeed with the same ID — detection is TODO(rc-p9vq).
         let route1 = RouteBuilder::from("direct:a")
             .route_id("dup-route")
             .to("mock:out")

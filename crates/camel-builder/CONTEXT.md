@@ -100,7 +100,7 @@ from the `Result`-returning terminal paths. This asymmetry is a recorded finding
 records the **current state**, not the fix direction.
 
 **`RouteBuilder` is not `Clone` (intentional).**
-Clone-and-reuse of a partially-built route is not supported (`// TODO(BUILDER-003)`
+Clone-and-reuse of a partially-built route is not supported (`// TODO(rc-8m5o)`
 at `struct RouteBuilder` lib.rs:355). No workspace caller needs it; every consumer uses a single-shot
 `RouteBuilder::from(...)...build()`. Deferred by design.
 

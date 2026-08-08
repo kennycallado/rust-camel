@@ -517,7 +517,7 @@ mod tests {
         }"#;
         let err = parse_json_to_canonical(json).unwrap_err().to_string();
         assert!(
-            err.contains("canonical v1 does not support step `function`"),
+            err.contains("canonical v2 does not support step `function`"),
             "unexpected error: {err}"
         );
     }

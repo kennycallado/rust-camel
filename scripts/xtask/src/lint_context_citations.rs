@@ -1474,11 +1474,7 @@ mod tests {
         let own_items: Vec<syn::Item> = vec![];
         let v = check_symbols_src("`fn nonexistent_fn`", "CONTEXT.md", &own_items, &[]);
         let sym = symbol_violations(&v);
-        assert_eq!(
-            sym.len(),
-            1,
-            "undefined fn must be flagged, got: {v:?}"
-        );
+        assert_eq!(sym.len(), 1, "undefined fn must be flagged, got: {v:?}");
     }
 
     // ----- Task 3: Rule C (line refs) + Rule D (glossary) tests -----
