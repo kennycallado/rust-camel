@@ -70,5 +70,5 @@ Per ADR-0012, this component's `error!` / `warn!` sites are categorized as:
 
 ### Component lifecycle
 
-- **shutdown cleanup** (`XsltComponent::shutdown`): `warn!` records failure to
+- **shutdown cleanup** (`XsltBridgeRuntime::shutdown`): `warn!` records failure to
   stop the bridge process during context shutdown.

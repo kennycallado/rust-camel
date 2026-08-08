@@ -1,4 +1,5 @@
 mod changelog;
+mod lint_context_citations;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -88,6 +89,10 @@ enum Commands {
     /// Enforce ADR-0054: every #[ignore] must carry a reason string from a
     /// closed vocabulary. Exits non-zero on violations.
     LintIgnore,
+    /// Validate CONTEXT.md and CONTEXT-MAP.md citation hygiene: path
+    /// existence, anchor resolution, and (later) symbol validation against
+    /// the workspace's own crate definitions. Exits non-zero on violations.
+    LintContextCitations,
     /// Compute the correct publish order for workspace crates by performing
     /// a topological sort over normal (non-dev) internal dependencies.
     /// Outputs shell commands suitable for publish-crates.sh.
@@ -228,6 +233,26 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-log-levels error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintContextCitations => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_context_citations::lint_context_citations(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-context-citations: OK (0 violations)");
+                }
+                Ok(violations) => {
+                    println!("CONTEXT-CITATION VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-context-citations: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-context-citations error: {e}");
                     std::process::exit(1);
                 }
             }

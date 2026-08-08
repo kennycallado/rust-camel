@@ -13,11 +13,11 @@ that carry ownership of their parent).
 ## Language
 
 Crate-specific vocabulary. Cross-cutting terms (Exchange, Message, RouteDefinition,
-CanonicalRouteSpec, ErrorHandler) live in CONTEXT-MAP.md and camel-dsl/CONTEXT.md and are not
+CanonicalRouteSpec, ErrorHandler) live in CONTEXT-MAP.md and `camel-dsl/CONTEXT.md` and are not
 redefined here.
 
 **RouteBuilder**:
-The fluent entry point (`crates/camel-builder/src/lib.rs:358`). `RouteBuilder::from(uri)`
+The fluent entry point (`struct RouteBuilder`, `crates/camel-builder/src/lib.rs:358`). `RouteBuilder::from(uri)`
 opens a route; chained methods take `mut self` / `self` and return `Self` or a child builder,
 so a route is built in a single expression and the builder is consumed by `build()` /
 `build_canonical()`. **Programmatic and Rust-side** — do **not** confuse it with
@@ -28,7 +28,7 @@ camel-dsl.
 _Avoid_: builder, route factory, DSL builder (ambiguous with camel-dsl)
 
 **StepAccumulator**:
-Public trait (`lib.rs:47`) that supplies the chainable step-appending methods (`to`,
+Public trait (`trait StepAccumulator`) that supplies the chainable step-appending methods (`to`,
 `set_header`, `log`, ...) via **default implementations** over a single required
 `steps_mut(&mut self) -> &mut Vec<BuilderStep>`. Un-sealed by design: it has no external
 implementors in the workspace (all uses are `use ...StepAccumulator` to bring the default
@@ -39,7 +39,7 @@ _Avoid_: step trait, accumulator, StepAccumulation (not a symbol — the real na
 `StepAccumulator`)
 
 **BuilderStep**:
-Re-exported from `camel_core::route::BuilderStep` (`lib.rs:32`); **not** owned by this crate.
+Re-exported from `camel_core::route::BuilderStep` (`enum BuilderStep`); **not** owned by this crate.
 camel-builder is the canonical *writer* of `BuilderStep` values through the fluent API, while
 camel-core owns the type. A `BuilderStep` is the intermediate form each fluent call appends;
 `build()` lowers the accumulated `Vec<BuilderStep>` to a `RouteDefinition`.
@@ -49,7 +49,7 @@ _Avoid_: step, builder instruction, BuildStep
 ThrottleBuilder / LoopBuilder / LoadBalancerBuilder / OnExceptionBuilder / DoTryBuilder /
 DoCatchBuilder / DoFinallyBuilder)**:
 A branching sub-builder that **takes the parent `RouteBuilder` by value** (`parent:
-RouteBuilder`, e.g. `lib.rs:830`) and whose `.end_*()` returns the parent. This is
+RouteBuilder`, e.g. `struct OnExceptionBuilder`) and whose `.end_*()` returns the parent. This is
 **typestate-via-parent-ownership**: the compile-time ordering guarantee comes from move
 semantics (the parent is unavailable until `.end_*()` hands it back), not from a real
 typestate encoded in the type parameters. State lives in the struct, not in the type.
@@ -57,8 +57,8 @@ _Avoid_: sub-builder, nested builder, typestate builder (there is no type-level 
 machine)
 
 **build() / build_canonical()**:
-The two terminal methods. `build()` (`lib.rs:697`) produces a full `RouteDefinition`.
-`build_canonical()` (`lib.rs:790`) produces a `CanonicalRouteSpec` **version 2** (ADR-0016;
+The two terminal methods. `build()` (`fn build`) produces a full `RouteDefinition`.
+`build_canonical()` (`fn build_canonical`) produces a `CanonicalRouteSpec` **version 2** (ADR-0016;
 `tests/canonical_spec_test.rs` asserts `spec.version == 2`) and supports a **subset** of steps
 — unsupported steps are strictly rejected with a `CamelError` (no silent loss), consistent
 with ADR-0011.
@@ -92,16 +92,16 @@ declarative authoring forms are separate front ends that converge on `RouteDefin
 **panic-vs-`Result` policy (mixed — decision noted, not prescribed here).**
 As of HEAD `7f9d8a03`, the terminal and format methods return `Result<_, CamelError>`
 (`build()`, `build_canonical()`, `marshal()`, `unmarshal()`), but two misuse paths **panic**:
-`DoTryBuilder::do_finally()` on a second call (`do_try.rs:104`) and
-`DoCatchBuilder::disposition(ExceptionDisposition::Continued)` (`do_try.rs:151`). Both panics
+`DoTryBuilder::do_finally()` on a second call (`fn do_finally`) and
+`DoCatchBuilder::disposition(ExceptionDisposition::Continued)` (`fn disposition`). Both panics
 are intentional, documented, and covered by `#[should_panic]` tests; neither is reachable
 from the `Result`-returning terminal paths. This asymmetry is a recorded finding
 (camel-builder audit I1) whose resolution is deferred to the code stream — this document
 records the **current state**, not the fix direction.
 
 **`RouteBuilder` is not `Clone` (intentional).**
-Clone-and-reuse of a partially-built route is not supported (`// TODO(BUILDER-003)`,
-`lib.rs:355`). No workspace caller needs it; every consumer uses a single-shot
+Clone-and-reuse of a partially-built route is not supported (`// TODO(BUILDER-003)`
+at `struct RouteBuilder` lib.rs:355). No workspace caller needs it; every consumer uses a single-shot
 `RouteBuilder::from(...)...build()`. Deferred by design.
 
 **Thread-safety.**

@@ -36,22 +36,22 @@ Per ADR-0012.
 
 **Labels wired in Phase B (commits cfb7c74c + 0a801cec):**
 
-All 4 sites are category (b′) outside-contract: a normal-data `send_and_wait` or post-processing call returned Err, meaning the route handler did NOT absorb the failure — the consumer's `error!` is the only ERROR signal. Each site calls `runtime.metrics().increment_errors(route_id, label)` via a shared `record_post_process_failure` helper (`consumer.rs:41-51`), then logs at `error!` with `// log-policy: outside-contract`:
-- `b-prime:sql:on-consume` (`consumer.rs:145`) — post-process single row failure.
-- `b-prime:sql:on-consume-batch` (`consumer.rs:187`) — post-process batch row failure.
-- `b-prime:sql:stream-list` (`consumer.rs:257`) — StreamList downstream send failure.
-- `b-prime:sql:poll-failed` (`consumer.rs:356`) — unbridged poll failure.
+All 4 sites are category (b′) outside-contract: a normal-data `send_and_wait` or post-processing call returned Err, meaning the route handler did NOT absorb the failure — the consumer's `error!` is the only ERROR signal. Each site calls `runtime.metrics().increment_errors(route_id, label)` via a shared `record_post_process_failure` helper (`fn record_post_process_failure`), then logs at `error!` with `// log-policy: outside-contract`:
+- `b-prime:sql:on-consume` (`fn poll_database`) — post-process single row failure.
+- `b-prime:sql:on-consume-batch` (`fn poll_database`) — post-process batch row failure.
+- `b-prime:sql:stream-list` (`fn poll_database_stream`) — StreamList downstream send failure.
+- `b-prime:sql:poll-failed` (`fn handle_poll_result`) — unbridged poll failure.
 
 **Category (g) labels wired in Phase B (commit 78ef8430):**
-- `g:sql:producer-pool-init` (`producer.rs:188`) — producer lazy pool init failure. Calls `runtime.health().force_unhealthy_for_route(route_id, label, reason)` + `// log-policy: outside-contract`.
-- `g:sql:consumer-pool-init` (`consumer.rs:442`) — consumer pool init giving up after retry budget exhausted. Calls `runtime.health().force_unhealthy_for_route(route_id, label, reason)` + `// log-policy: outside-contract`.
+- `g:sql:producer-pool-init` (`fn call`) — producer lazy pool init failure. Calls `runtime.health().force_unhealthy_for_route(route_id, label, reason)` + `// log-policy: outside-contract`.
+- `g:sql:consumer-pool-init` (`fn start`) — consumer pool init giving up after retry budget exhausted. Calls `runtime.health().force_unhealthy_for_route(route_id, label, reason)` + `// log-policy: outside-contract`.
 
 **Migration status (Phase B close):**
 - All handler-owned sites (categories a, b-bridged) → `warn!`.
 - All system-broken sites (category c) → `// log-policy: system-broken` + `error!`.
 - All outside-contract sites (categories b′, e, g) → WIRED in Phase B with real `increment_errors` / `force_unhealthy_for_route` calls + `// log-policy: outside-contract` annotations. See ADR-0012 Phase B closure notes.
-- Duplicate logs at `producer.rs:171` and `consumer.rs:160` removed (Phase 2).
-- `consumer.rs:429` duplicate-`error!` bug fixed (Phase 2; split into bridged warn + unbridged error with increment_errors).
+- Duplicate logs at `fn call` and `fn poll_database` removed (Phase 2).
+- `fn start` duplicate-`error!` bug fixed (Phase 2; split into bridged warn + unbridged error with increment_errors).
 
 ## Contract Surface
 
@@ -152,11 +152,11 @@ route responsible for establishing that the selected exchange data is trusted.
 
 ### `ssl_mode` default at connection build time
 
-Applied in `enrich_db_url_with_ssl_params()` (config.rs:561-636), NOT in `Default::default()`:
+Applied in `enrich_db_url_with_ssl_params()` (`fn enrich_db_url_with_ssl`, config.rs:561-636), NOT in `Default::default()`:
 - PostgreSQL (`postgres`/`postgresql` scheme): defaults to `"require"` when `ssl_mode` is `None`.
 - MySQL (`mysql` scheme): defaults to `"prefer"` when `ssl_mode` is `None`.
 - `SqlEndpointConfig.ssl_mode` stays `Option<String>` — `Default::default()` remains `None` for backward compatibility.
-- The `SqlGlobalConfig` also has `ssl_mode: Option<String>`; it propagates to endpoints via `apply_defaults()` (config.rs:467-470).
+- The `SqlGlobalConfig` also has `ssl_mode: Option<String>`; it propagates to endpoints via `apply_defaults()` (`fn apply_defaults`, config.rs:467-470).
 
 ### `connect_timeout=10` appended to URL
 
@@ -166,7 +166,7 @@ TCP connect timeout, NOT the pool `acquire_timeout`.
 
 ### SQLite unaffected
 
-SQLite URLs (`sqlite*` scheme) return early at config.rs:583 before any SSL enrichment or connect_timeout
+SQLite URLs (`sqlite*` scheme) return early at `fn enrich_db_url_with_ssl_params` (config.rs:583) before any SSL enrichment or connect_timeout
 appending. SSL options set alongside a SQLite URL produce a `warn!` log but are silently ignored.
 
 ## Dependency boundary

@@ -42,6 +42,8 @@
   run: cargo xtask lint-log-levels
 - name: lint-ignore
   run: cargo xtask lint-ignore
+- name: lint-context-citations
+  run: cargo xtask lint-context-citations
 - name: schema-check
   run: cargo xtask schema --check
 - name: cargo-audit

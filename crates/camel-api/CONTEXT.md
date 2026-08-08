@@ -55,13 +55,13 @@ above Tower (ADR-0024).
 _Avoid_: error type, failure, exception (use CamelError for the enum)
 
 **Processor**:
-The blanket trait (`processor.rs:15`) over every Tower
+The blanket trait (`trait Processor`) over every Tower
 `Service<Exchange, Response = Exchange, Error = CamelError> + Clone + Send + Sync + 'static`. The
 universal "one processing step" contract.
 _Avoid_: handler, middleware, transformer, step (Step is a DSL/compiled concept, not this trait)
 
 **BoxProcessor**:
-The runtime-erased processor type (`processor.rs:47`):
+The runtime-erased processor type alias:
 `tower::util::BoxCloneService<Exchange, Exchange, CamelError>`. The composable unit a Pipeline is
 built from. `SyncBoxProcessor` wraps it for `Sync` contexts.
 _Avoid_: boxed service, dyn processor
@@ -130,7 +130,7 @@ implemented by `RuntimeComponentMetadataCatalog` in camel-core.
 _Avoid_: metadata store, metadata service
 
 **IdempotentRepository**:
-Key-only pluggable store for the Idempotent Consumer EIP (`idempotent.rs:21`). `contains()` returns
+Key-only pluggable store for the Idempotent Consumer EIP (`trait IdempotentRepository`). `contains()` returns
 `Result<bool, CamelError>` (NOT `bool`) — backends (Redis, SQL) propagate transient failures as
 `Err`, never as "not a duplicate" (Contract C1). Stores keys, not messages: it tracks *which*
 messages were seen, not *what* they contained. Payload-bearing storage is `ClaimCheckRepository`, a
@@ -138,7 +138,7 @@ distinct trait. Canonical impl: `MemoryIdempotentRepository` in camel-core. Esta
 _Avoid_: idempotent store, dedup store, claim check (that is the payload-bearing trait)
 
 **ClaimCheckRepository**:
-Payload-bearing pluggable store for the Claim Check EIP (`claim_check.rs:27`). `set`/`get` work with
+Payload-bearing pluggable store for the Claim Check EIP (`trait ClaimCheckRepository`). `set`/`get` work with
 whole `Message` payloads (body + headers) — NOT key-only like `IdempotentRepository`. Supports
 single-value keys (`set`/`get`/`get_and_remove`) and key-scoped LIFO stacks (`push`/`pop`). The
 key-only vs payload-bearing split from `IdempotentRepository` is the central decision of ADR-0028

@@ -39,7 +39,7 @@ The shared error enum (`error.rs`): `ParseError { expr, reason }` (compile/parse
 `EvalError(String)` (runtime evaluation failure), `UnknownVariable(String)` (missing variable),
 `NotFound(String)` (unregistered language), and `NotSupported { feature, language }` (the default
 for unimplemented mutating variants). `LanguageError::eval_error` attaches the expression text
-to an `EvalError` (`error.rs:26`).
+to an `EvalError` (`fn eval_error`).
 _Avoid_: ScriptError, eval failure (use LanguageError and its variant names)
 
 ## Example dialogue
@@ -55,4 +55,4 @@ _Avoid_: ScriptError, eval failure (use LanguageError and its variant names)
 > "Where do per-language value-coercion or null-handling rules belong?"
 > "If a leaf language has semantics that diverge from this SPI (coercion, null handling, security
 > constraints), give that leaf crate its own CONTEXT.md per the coverage policy; otherwise the parent
-> languages/CONTEXT.md is sufficient."
+> `languages/CONTEXT.md` is sufficient."

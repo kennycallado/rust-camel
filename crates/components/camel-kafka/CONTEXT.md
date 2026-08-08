@@ -95,7 +95,7 @@ or `SASL_SSL`. Missing features produce a clear startup error with the required 
 
 ### Plaintext protocol warning
 
-The `validate()` method (config.rs:240-248) emits `tracing::warn!` when `security_protocol` is
+The `validate()` method (`fn validate`, config.rs:240-248) emits `tracing::warn!` when `security_protocol` is
 `Plaintext` or `SaslPlaintext`. Message: "Kafka using cleartext protocol — credentials and data
 in plaintext". The warning is advisory only — validation succeeds regardless. Both `KafkaConfig`
 (global defaults) and `ResolvedKafkaEndpointConfig` (per-endpoint) call `validate()`.

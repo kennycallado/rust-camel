@@ -50,19 +50,19 @@ _Avoid_: OAuth server, identity provider (it is a minimal native issuer, not a f
 
 ## Batch 6 — Security hardening
 
-### JWKS body cap (jwks.rs:40)
+### JWKS body cap (`fn fetch_and_store`, jwks.rs:40)
 
 `MAX_JWKS_BODY_BYTES = 1024 * 1024` (1 MiB). Applied in `fetch_and_store()`:
-- **Content-Length pre-check** (jwks.rs:103-108): rejects before buffering if declared size exceeds cap.
-- **Streaming abort** (jwks.rs:116-128): cumulative chunk bytes checked per-iteration; aborts with error if cap exceeded mid-stream.
+- **Content-Length pre-check** (`fn fetch_and_store`, jwks.rs:103-108): rejects before buffering if declared size exceeds cap.
+- **Streaming abort** (`fn fetch_and_store`, jwks.rs:116-128): cumulative chunk bytes checked per-iteration; aborts with error if cap exceeded mid-stream.
 
-### JWKS max-age clamp (jwks.rs:130-143)
+### JWKS max-age clamp (`fn fetch_and_store`, jwks.rs:130-143)
 
-- `MIN_JWKS_TTL_SECS = 60`, `MAX_JWKS_TTL_SECS = 3600` (jwks.rs:41-42).
+- `MIN_JWKS_TTL_SECS = 60`, `MAX_JWKS_TTL_SECS = 3600` (`fn fetch_and_store`, jwks.rs:41-42).
 - Only applied to the *parsed* `max-age` value from `Cache-Control` header.
 - When `Cache-Control` is absent or lacks `max-age`, the `default_ttl` (300s) is used unclamped.
 
-### JWKS DNS pinning (jwks.rs:52-58, http_client.rs:16-58)
+### JWKS DNS pinning (`fn build_ssrf_pinned_client`, jwks.rs:52-58, http_client.rs:16-58)
 
 `RemoteJwksProvider::new()` calls `build_ssrf_pinned_client()` which:
 - Validates the URI is public HTTPS (`validate_uri()` with `SsrfPolicy`).
@@ -70,30 +70,30 @@ _Avoid_: OAuth server, identity provider (it is a minimal native issuer, not a f
 - Pins validated IPs via `reqwest::Client::resolve_to_addrs()` — eliminates TOCTOU window.
 - Sets `redirect::Policy::none()` and 5s connect / 10s request timeout.
 
-### OAuth2 SSRF pinning (oauth2.rs:93-99)
+### OAuth2 SSRF pinning (`ClientCredentialsProvider::new`, oauth2.rs:93-99)
 
 `ClientCredentialsProvider::new()` calls the same `build_ssrf_pinned_client()` on the token endpoint,
 with 10s connect timeout and 30s request timeout.
 
-### Introspection SSRF pinning (introspection.rs:86-92)
+### Introspection SSRF pinning (`CachingTokenIntrospector::new`, introspection.rs:86-92)
 
 `CachingTokenIntrospector::new()` calls `build_ssrf_pinned_client()` on the introspection endpoint,
 with 5s connect timeout and 10s request timeout.
 
-### Introspection exp/nbf enforcement (introspection_auth.rs:42-52)
+### Introspection exp/nbf enforcement (`fn authenticate_bearer`, introspection_auth.rs:42-52)
 
 `IntrospectionAuthenticator::authenticate()` enforces:
 - `exp < now` → `AuthError::TokenExpired` (rejects expired tokens).
 - `nbf > now` → `AuthError::TokenInvalid` (rejects not-yet-valid tokens).
 
-### JWT alg/use matching (jwt.rs:60-70)
+### JWT alg/use matching (`fn key_matches`, jwt.rs:60-70)
 
 `key_matches()` requires:
 - `kid` matches token header.
 - `alg` is absent (spec default) OR equals `EXPECTED_ALG` (`"RS256"`).
 - `use` is absent (spec default) OR equals `"sig"`.
 
-### Constant-time comparison (native_client_store.rs:14-18, 142-146)
+### Constant-time comparison (`fn constant_time_eq`, native_client_store.rs:14-18, 142-146)
 
 `constant_time_eq(a, b)` compares byte slices in constant time (no early-exit on mismatch).
 Applied to:
@@ -103,12 +103,12 @@ Applied to:
 ### Zeroize (multiple files)
 
 `Zeroizing<String>` applied to all secret-bearing fields:
-- `ClientCredentialsProvider.client_secret` (oauth2.rs:60).
-- `CachingTokenIntrospector.client_secret` (introspection.rs:70).
-- `CachedToken.access_token` (oauth2.rs:29), `TokenResponse.access_token` (oauth2.rs:36).
-- `M2mClient.secret_value` (native_client_store.rs:40), `M2mClientSecret` enum value (native_client_store.rs:35).
-- `NativeClient.secret_value` (native_auth.rs:21), `NativeClientSecret` enum value (native_auth.rs:16).
-- `native_issuer::TokenResponse.access_token` (native_issuer.rs:124).
+- `ClientCredentialsProvider.client_secret` (`struct ClientCredentialsProvider`, oauth2.rs:60).
+- `CachingTokenIntrospector.client_secret` (`struct CachingTokenIntrospector`, introspection.rs:70).
+- `CachedToken.access_token` (`struct TokenResponse`, oauth2.rs:29), `TokenResponse.access_token` (oauth2.rs:36).
+- `M2mClient.secret_value` (`enum M2mClientSecret`, native_client_store.rs:40), `M2mClientSecret` enum value (native_client_store.rs:35).
+- `NativeClient.secret_value` (`enum NativeCredentialSecret`, native_auth.rs:21), `NativeClientSecret` enum value (native_auth.rs:16).
+- `native_issuer::TokenResponse.access_token` (`struct TokenResponse`, native_issuer.rs:124).
 
 > **Debug redaction is separate.** In zeroize 1.9.0, `Zeroizing<T>` derives `Debug`. Its
 > implementation prints the inner value. `Zeroizing<String>` clears memory on drop, but it does not

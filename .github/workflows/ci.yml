@@ -200,6 +200,8 @@ jobs:
         run: cargo xtask lint-non-exhaustive
       - name: lint-ignore
         run: cargo xtask lint-ignore
+      - name: lint-context-citations
+        run: cargo xtask lint-context-citations
       - name: lint-commits
         # Fail if any commit in the PR range mentions breaking in prose
         # without the conventional `!:` subject marker. Default checkout
