@@ -135,6 +135,94 @@ impl OpenSearchProducer {
             .unwrap_or_else(|| config.operation.clone())
     }
 
+    /// Validates a `CamelOpenSearch.Id` header value before it is interpolated
+    /// into a `_doc/{id}` request path. Rejects characters that enable path
+    /// injection (per ADR-0032 trust boundary).
+    pub(crate) fn validate_doc_id(id: &str) -> Result<(), ProducerError> {
+        if id.is_empty() {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: empty".to_string(),
+            ));
+        }
+        if id.contains('\0') {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: null byte".to_string(),
+            ));
+        }
+        if id.contains('/') {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: path separator '/'".to_string(),
+            ));
+        }
+        if id.contains('?') {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: query separator '?'".to_string(),
+            ));
+        }
+        if id.contains('#') {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: fragment separator '#'".to_string(),
+            ));
+        }
+        if id.contains('%') {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: percent sign '%'".to_string(),
+            ));
+        }
+        if id.contains('\\') {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: backslash".to_string(),
+            ));
+        }
+        if id == "." || id == ".." {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: dot segment".to_string(),
+            ));
+        }
+        if id.chars().any(|c| (c as u32) <= 0x1F || c == '\u{7F}') {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: control character".to_string(),
+            ));
+        }
+        if id.len() > 512 {
+            return Err(ProducerError::Permanent(
+                "invalid doc_id: exceeds 512 bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolves the optional `CamelOpenSearch.Id` header from the exchange,
+    /// validating it before returning. Returns `Ok(None)` when absent.
+    pub(crate) fn resolve_doc_id(exchange: &Exchange) -> Result<Option<&str>, ProducerError> {
+        if let Some(id) = exchange
+            .input
+            .header("CamelOpenSearch.Id")
+            .and_then(|v| v.as_str())
+        {
+            Self::validate_doc_id(id)?;
+            Ok(Some(id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Resolves a required `CamelOpenSearch.Id` header for operations where
+    /// the doc id is mandatory (GET, DELETE, UPDATE, EXISTS). Returns the
+    /// `ProducerError::Permanent` if the header is missing or invalid.
+    #[allow(clippy::needless_lifetimes)]
+    pub(crate) fn resolve_required_doc_id<'a>(
+        exchange: &'a Exchange,
+        op_name: &str,
+    ) -> Result<&'a str, ProducerError> {
+        Self::resolve_doc_id(exchange)?.ok_or_else(|| {
+            ProducerError::Permanent(format!(
+                "Missing CamelOpenSearch.Id header for {} operation",
+                op_name
+            ))
+        })
+    }
+
     /// Extracts the body from the exchange as a `serde_json::Value`.
     fn extract_body(exchange: &Exchange) -> Result<serde_json::Value, CamelError> {
         match &exchange.input.body {
@@ -255,10 +343,7 @@ impl OpenSearchProducer {
     ) -> Result<serde_json::Value, ProducerError> {
         debug!(index = %config.index_name, "indexing document");
         let body = Self::extract_body_pe(exchange)?;
-        let doc_id = exchange
-            .input
-            .header("CamelOpenSearch.Id")
-            .and_then(|v| v.as_str());
+        let doc_id: Option<&str> = Self::resolve_doc_id(exchange)?;
 
         let response = match doc_id {
             Some(id) => {
@@ -317,15 +402,7 @@ impl OpenSearchProducer {
         exchange: &Exchange,
     ) -> Result<serde_json::Value, ProducerError> {
         debug!(index = %config.index_name, "getting document");
-        let doc_id = exchange
-            .input
-            .header("CamelOpenSearch.Id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ProducerError::Permanent(
-                    "Missing CamelOpenSearch.Id header for GET operation".to_string(),
-                )
-            })?;
+        let doc_id = Self::resolve_required_doc_id(exchange, "GET")?;
 
         let response = client
             .get(GetParts::IndexId(&config.index_name, doc_id))
@@ -348,15 +425,7 @@ impl OpenSearchProducer {
         exchange: &Exchange,
     ) -> Result<serde_json::Value, ProducerError> {
         debug!(index = %config.index_name, "deleting document");
-        let doc_id = exchange
-            .input
-            .header("CamelOpenSearch.Id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ProducerError::Permanent(
-                    "Missing CamelOpenSearch.Id header for DELETE operation".to_string(),
-                )
-            })?;
+        let doc_id = Self::resolve_required_doc_id(exchange, "DELETE")?;
 
         let response = client
             .delete(DeleteParts::IndexId(&config.index_name, doc_id))
@@ -379,15 +448,7 @@ impl OpenSearchProducer {
         exchange: &Exchange,
     ) -> Result<serde_json::Value, ProducerError> {
         debug!(index = %config.index_name, "updating document");
-        let doc_id = exchange
-            .input
-            .header("CamelOpenSearch.Id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ProducerError::Permanent(
-                    "Missing CamelOpenSearch.Id header for UPDATE operation".to_string(),
-                )
-            })?;
+        let doc_id = Self::resolve_required_doc_id(exchange, "UPDATE")?;
 
         let body = Self::extract_body_pe(exchange)?;
 
@@ -461,15 +522,7 @@ impl OpenSearchProducer {
         exchange: &Exchange,
     ) -> Result<serde_json::Value, ProducerError> {
         debug!(index = %config.index_name, "checking document existence");
-        let doc_id = exchange
-            .input
-            .header("CamelOpenSearch.Id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ProducerError::Permanent(
-                    "Missing CamelOpenSearch.Id header for EXISTS operation".to_string(),
-                )
-            })?;
+        let doc_id = Self::resolve_required_doc_id(exchange, "EXISTS")?;
 
         let response = client
             .exists(ExistsParts::IndexId(&config.index_name, doc_id))
@@ -877,5 +930,121 @@ mod tests {
 
         let response = OpenSearchProducer::build_response(exchange, result.clone());
         assert_eq!(response.input.body, Body::Json(result));
+    }
+
+    // --- Trust boundary: CamelOpenSearch.Id validation ---
+
+    #[test]
+    fn validate_doc_id_rejects_path_separator() {
+        let result = OpenSearchProducer::validate_doc_id("foo/bar");
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_query_separator() {
+        let result = OpenSearchProducer::validate_doc_id("foo?bar");
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_fragment_separator() {
+        let result = OpenSearchProducer::validate_doc_id("foo#bar");
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_percent() {
+        let result = OpenSearchProducer::validate_doc_id("foo%2F");
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_null_byte() {
+        let result = OpenSearchProducer::validate_doc_id("foo\0bar");
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_backslash() {
+        let result = OpenSearchProducer::validate_doc_id("foo\\bar");
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_dot_segment() {
+        let dot = OpenSearchProducer::validate_doc_id(".");
+        assert!(matches!(dot, Err(ProducerError::Permanent(_))));
+        let dotdot = OpenSearchProducer::validate_doc_id("..");
+        assert!(matches!(dotdot, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_control_char() {
+        let nul = OpenSearchProducer::validate_doc_id("foo\u{0000}bar");
+        assert!(matches!(nul, Err(ProducerError::Permanent(_))));
+        let del = OpenSearchProducer::validate_doc_id("foo\u{007F}");
+        assert!(matches!(del, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_empty() {
+        let result = OpenSearchProducer::validate_doc_id("");
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_rejects_oversized() {
+        let oversized = "a".repeat(513);
+        let result = OpenSearchProducer::validate_doc_id(&oversized);
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn validate_doc_id_accepts_valid_ids() {
+        for id in ["abc123", "user-42", "doc_001", "a.b.c", "type:id"] {
+            let result = OpenSearchProducer::validate_doc_id(id);
+            assert!(
+                result.is_ok(),
+                "expected Ok for valid id {:?}, got {:?}",
+                id,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_doc_id_wiring_rejects_poisoned_header() {
+        let mut msg = Message::default();
+        msg.set_header("CamelOpenSearch.Id", serde_json::json!("foo/bar"));
+        let exchange = Exchange::new(msg);
+
+        let result = OpenSearchProducer::resolve_doc_id(&exchange);
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
+    }
+
+    #[test]
+    fn resolve_doc_id_wiring_accepts_valid_header() {
+        let mut msg = Message::default();
+        msg.set_header("CamelOpenSearch.Id", serde_json::json!("abc123"));
+        let exchange = Exchange::new(msg);
+
+        let result = OpenSearchProducer::resolve_doc_id(&exchange);
+        assert!(matches!(result, Ok(Some("abc123"))));
+    }
+
+    #[test]
+    fn resolve_doc_id_wiring_none_when_header_absent() {
+        let exchange = Exchange::new(Message::default());
+
+        let result = OpenSearchProducer::resolve_doc_id(&exchange);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn resolve_required_doc_id_wiring_missing_header_error() {
+        let exchange = Exchange::new(Message::default());
+
+        let result = OpenSearchProducer::resolve_required_doc_id(&exchange, "GET");
+        assert!(matches!(result, Err(ProducerError::Permanent(_))));
     }
 }

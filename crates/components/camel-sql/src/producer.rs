@@ -1355,4 +1355,13 @@ mod tests {
         assert_eq!(forced[0].1, "g:sql:producer-pool-init");
         assert!(!forced[0].2.is_empty(), "reason should be non-empty");
     }
+
+    // H7: from_uri must default allow_dynamic_query to false when the
+    // URI does not include the allowDynamicQuery parameter.
+    #[test]
+    fn sql_allow_dynamic_query_defaults_false_from_uri() {
+        let config =
+            SqlEndpointConfig::from_uri("sql:query?datasource=mydb&query=SELECT+1").unwrap();
+        assert!(!config.allow_dynamic_query);
+    }
 }

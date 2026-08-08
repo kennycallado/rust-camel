@@ -83,6 +83,12 @@ pub struct SurrealDbEndpointConfig {
     pub vector_field: Option<String>,
     pub limit: Option<usize>,
     pub query: Option<String>,
+    /// Trust-boundary gate for the `query` operation (R5-L1, ADR-0032).
+    /// When `false` (default), query text MUST NOT be resolved from the
+    /// `CamelSurrealDbQuery` header or the exchange body — only the
+    /// `query` URI parameter (config query) is honored. Operators expose
+    /// the untrusted header/body path by setting this to `true`.
+    pub allow_dynamic_query: bool,
     pub function: Option<String>,
     /// Retry policy for transient failures. Currently consumed by
     /// `SurrealDbPoolFactory` for connection establishment. Producer paths
@@ -112,6 +118,7 @@ impl Default for SurrealDbEndpointConfig {
             vector_field: Some(DEFAULT_VECTOR_FIELD.to_string()),
             limit: None,
             query: None,
+            allow_dynamic_query: false,
             function: None,
             retry: NetworkRetryPolicy::default(),
             retry_set_from_uri: false,
@@ -237,6 +244,21 @@ impl SurrealDbEndpointConfig {
         );
 
         let query = params.get("query").cloned();
+        let allow_dynamic_query = match params.get("allow_dynamic_query") {
+            Some(raw) => {
+                if raw.eq_ignore_ascii_case("true") {
+                    true
+                } else if raw.eq_ignore_ascii_case("false") {
+                    false
+                } else {
+                    return Err(CamelError::InvalidUri(format!(
+                        "allow_dynamic_query must be 'true' or 'false', got '{}'",
+                        raw
+                    )));
+                }
+            }
+            None => false,
+        };
         let function = params.get("function").cloned();
 
         // Parse retry policy from URI params (mirrors camel-sql exactly:
@@ -294,6 +316,7 @@ impl SurrealDbEndpointConfig {
             vector_field,
             limit,
             query,
+            allow_dynamic_query,
             function,
             retry,
             retry_set_from_uri,
@@ -850,5 +873,70 @@ mod tests {
         let cfg = SurrealDbEndpointConfig::default().with_retry(policy.clone());
         assert_eq!(cfg.retry.max_attempts, 3);
         assert!(cfg.retry_set_from_uri);
+    }
+
+    // --- allow_dynamic_query (R5-L1, ADR-0032 trust boundary) ---
+
+    #[test]
+    fn surrealdb_allow_dynamic_query_defaults_to_false() {
+        let cfg =
+            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=main").expect("uri");
+        assert!(
+            !cfg.allow_dynamic_query,
+            "allow_dynamic_query must default to false (trust boundary)"
+        );
+    }
+
+    #[test]
+    fn surrealdb_allow_dynamic_query_true_parsed() {
+        let cfg = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:query?datasource=main&allow_dynamic_query=true",
+        )
+        .expect("uri");
+        assert!(
+            cfg.allow_dynamic_query,
+            "allow_dynamic_query=true must be parsed as true"
+        );
+    }
+
+    #[test]
+    fn surrealdb_allow_dynamic_query_invalid_maybe_rejected() {
+        let result = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:query?datasource=main&allow_dynamic_query=maybe",
+        );
+        assert!(
+            result.is_err(),
+            "allow_dynamic_query=maybe must be rejected (only true/false accepted)"
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, CamelError::InvalidUri(_)));
+        assert!(
+            err.to_string().contains("allow_dynamic_query"),
+            "error must mention allow_dynamic_query: {err}"
+        );
+    }
+
+    #[test]
+    fn surrealdb_allow_dynamic_query_yes_rejected() {
+        let result = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:query?datasource=main&allow_dynamic_query=yes",
+        );
+        assert!(
+            result.is_err(),
+            "allow_dynamic_query=yes must be rejected (not a true/false literal)"
+        );
+        assert!(matches!(result.unwrap_err(), CamelError::InvalidUri(_)));
+    }
+
+    #[test]
+    fn surrealdb_allow_dynamic_query_one_rejected() {
+        let result = SurrealDbEndpointConfig::from_uri(
+            "surrealdb:query?datasource=main&allow_dynamic_query=1",
+        );
+        assert!(
+            result.is_err(),
+            "allow_dynamic_query=1 must be rejected (only true/false accepted)"
+        );
+        assert!(matches!(result.unwrap_err(), CamelError::InvalidUri(_)));
     }
 }

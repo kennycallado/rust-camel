@@ -65,11 +65,13 @@ bodies as untrusted.
 - `index_name` comes from operator endpoint configuration. URI parsing still
   validates its length, character set, null bytes, and traversal segments and
   fails closed.
-- `CamelOpenSearch.Id` is an untrusted Exchange header. Current GET, DELETE,
-  UPDATE, EXISTS, and explicit-ID INDEX paths pass it to typed `_doc/{id}`
-  request builders without component validation. Validation remains pending in
-  audit finding I1, tracked by `rc-25j3`. This is a known gap, not an accepted
-  contract.
+- `CamelOpenSearch.Id` is an untrusted Exchange header. GET, DELETE,
+  UPDATE, EXISTS, and explicit-ID INDEX paths validate it via
+  `validate_doc_id` / `resolve_doc_id` before passing it to typed
+  `_doc/{id}` request builders. The validation rejects path separators
+  (`/`, `?`, `#`, `%`), null bytes, backslashes, exact dot segments (`.`,
+  `..`), C0 control characters, DEL, empty strings, and strings exceeding
+  512 bytes. This closes audit finding I1 (rc-25j3).
 - Search and document bodies remain untrusted data, but serde supplies
   structured JSON values to typed request builders. The route grants the
   OpenSearch capability. The component does not interpret arbitrary query DSL

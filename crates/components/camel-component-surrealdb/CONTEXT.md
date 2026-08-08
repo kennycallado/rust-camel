@@ -84,13 +84,10 @@ has a regression test for embedded credentials.
 ### Raw-query trust boundary
 
 ADR-0032 classifies Exchange headers and bodies as untrusted. The `query`
-operation currently accepts SurrealQL from `CamelSurrealDbQuery` or the body
-before it falls back to Endpoint configuration. It has no default-deny switch
-equivalent to camel-sql's `allow_dynamic_query=false`.
-
-Route authors must filter these sources before the Producer. This is an open
-hardening gap, tracked as `F-camel-component-surrealdb-I1`. Documentation does
-not convert that gap into an accepted security posture.
+operation resolves SurrealQL from `CamelSurrealDbQuery` or the body only when
+the operator sets `allow_dynamic_query=true` in the Endpoint URI. The default
+is `false`: header and body query text is ignored, and the config query is
+used exclusively. This mirrors camel-sql's `allow_dynamic_query` gate.
 
 ## Dependency boundary
 

@@ -68,45 +68,36 @@ impl SurrealDbProducer {
     ///
     /// # Trust boundary (R5-L1, ADR-0032)
     ///
-    /// This is **by-design query passthrough**: the query text from the header
-    /// or body is untrusted/adversary-controlled. SurrealDB parameterizes
-    /// *values* via bindings (see `extract_params`), but the query *text*
-    /// itself is executed as-is. Operators exposing the `query` operation on an
-    /// untrusted-input route MUST ensure the query text is operator-curated
-    /// (e.g. set by a trusted upstream transform), not directly attacker-
-    /// controlled. A `warn!` is emitted whenever the query is taken from the
-    /// header or body to surface this on untrusted routes.
+    /// The header and body are untrusted exchange data. They are consulted
+    /// **only** when the endpoint has opted in via
+    /// `allow_dynamic_query=true` (URI param). When the gate is off (the
+    /// default), this method skips both branches and falls through to the
+    /// config query, so an untrusted-input route cannot force arbitrary
+    /// SurrealQL execution. Operators that need dynamic query text on a
+    /// controlled route set `allow_dynamic_query=true` and accept that the
+    /// query text becomes a passthrough.
     pub(crate) fn resolve_query_source(&self, exchange: &Exchange) -> String {
-        // Priority 1: Header
-        if let Some(query_value) = exchange.input.headers.get(headers::QUERY)
-            && let Some(query_str) = query_value.as_str()
-        {
-            tracing::warn!(
-                source = "header",
-                "SurrealDB query operation resolved query text from exchange header \
-                 (untrusted source); ensure the route does not expose raw query text \
-                 to adversaries"
-            );
-            return query_str.to_string();
+        if self.config.allow_dynamic_query {
+            // Priority 1: Header
+            if let Some(query_value) = exchange.input.headers.get(headers::QUERY)
+                && let Some(query_str) = query_value.as_str()
+            {
+                return query_str.to_string();
+            }
+
+            // Priority 2: Body — accept Body::Text or Body::Json(Value::String).
+            let body_str: Option<&str> = match &exchange.input.body {
+                Body::Text(s) => Some(s.as_str()),
+                Body::Json(serde_json::Value::String(s)) => Some(s.as_str()),
+                _ => None,
+            };
+            if let Some(s) = body_str.filter(|s| !s.is_empty()) {
+                return s.to_string();
+            }
         }
 
-        // Priority 2: Body — accept Body::Text or Body::Json(Value::String).
-        let body_str: Option<&str> = match &exchange.input.body {
-            Body::Text(s) => Some(s.as_str()),
-            Body::Json(serde_json::Value::String(s)) => Some(s.as_str()),
-            _ => None,
-        };
-        if let Some(s) = body_str.filter(|s| !s.is_empty()) {
-            tracing::warn!(
-                source = "body",
-                "SurrealDB query operation resolved query text from exchange body \
-                 (untrusted source); ensure the route does not expose raw query text \
-                 to adversaries"
-            );
-            return s.to_string();
-        }
-
-        // Priority 3: Config query (from URI)
+        // Priority 3: Config query (from URI). This is the only source the
+        // operator controls at deploy time, so it is the safe default.
         self.config.query.clone().unwrap_or_default()
     }
 
@@ -226,12 +217,7 @@ impl SurrealDbProducer {
         client: &SurrealClient,
         exchange: &Exchange,
     ) -> Result<JsonValue, SurrealDbError> {
-        let sql = self.resolve_query_source(exchange);
-        if sql.is_empty() {
-            return Err(SurrealDbError::MissingParam(
-                "query text (body or CamelSurrealDbQuery header)".into(),
-            ));
-        }
+        let sql = self.resolve_validated_query(exchange)?;
         let params = self.extract_params(exchange)?;
         let bindings: Vec<(&str, JsonValue)> = params
             .iter()
@@ -239,6 +225,24 @@ impl SurrealDbProducer {
             .collect();
         let results = Self::run_raw_query(client, &sql, bindings).await?;
         Ok(JsonValue::Array(results))
+    }
+
+    /// Resolve the SurrealQL query for the `query` operation and verify it is
+    /// non-empty. Returns `MissingParam` when no source (header, body, or
+    /// config) supplied query text. Extracted from `execute_query` so the
+    /// empty-string check is independently testable and so callers can fail
+    /// fast before doing any other work.
+    pub(crate) fn resolve_validated_query(
+        &self,
+        exchange: &Exchange,
+    ) -> Result<String, SurrealDbError> {
+        let sql = self.resolve_query_source(exchange);
+        if sql.is_empty() {
+            return Err(SurrealDbError::MissingParam(
+                "query text (body or CamelSurrealDbQuery header)".into(),
+            ));
+        }
+        Ok(sql)
     }
 
     async fn execute_select(&self, client: &SurrealClient) -> Result<JsonValue, SurrealDbError> {
@@ -659,12 +663,13 @@ impl Service<Exchange> for SurrealDbProducer {
 #[cfg(test)]
 mod tests {
     use crate::config::{SurrealDbEndpointConfig, SurrealDbOperation, VectorMetric};
+    use crate::error::SurrealDbError;
     use crate::headers;
     use crate::producer::SurrealDbProducer;
     use camel_component_api::{Body, Exchange, Message, Value};
 
-    fn make_producer(op: SurrealDbOperation) -> SurrealDbProducer {
-        let config = SurrealDbEndpointConfig {
+    fn producer_config(op: SurrealDbOperation) -> SurrealDbEndpointConfig {
+        SurrealDbEndpointConfig {
             operation: op,
             datasource: "test-ds".into(),
             table: Some("test_table".into()),
@@ -680,8 +685,11 @@ mod tests {
             query: None,
             function: None,
             ..Default::default()
-        };
-        SurrealDbProducer::new(config, None, "test-route")
+        }
+    }
+
+    fn make_producer(op: SurrealDbOperation) -> SurrealDbProducer {
+        SurrealDbProducer::new(producer_config(op), None, "test-route")
     }
 
     #[test]
@@ -702,7 +710,15 @@ mod tests {
 
     #[test]
     fn resolve_query_from_body_text() {
-        let producer = make_producer(SurrealDbOperation::Query);
+        // R5-L1: opt-in to the body path via allow_dynamic_query.
+        let producer = SurrealDbProducer::new(
+            SurrealDbEndpointConfig {
+                allow_dynamic_query: true,
+                ..producer_config(SurrealDbOperation::Query)
+            },
+            None,
+            "test-route",
+        );
         let exchange = Exchange::new(Message::new(Body::Text("SELECT * FROM users".into())));
         let sql = producer.resolve_query_source(&exchange);
         assert_eq!(sql, "SELECT * FROM users");
@@ -715,7 +731,15 @@ mod tests {
         // coerces it. Producer must still extract the SQL text. Regression
         // test for the body_contract=None change for the `query` operation
         // (producer_query integration test depends on this).
-        let producer = make_producer(SurrealDbOperation::Query);
+        // R5-L1: opt-in to the body path via allow_dynamic_query.
+        let producer = SurrealDbProducer::new(
+            SurrealDbEndpointConfig {
+                allow_dynamic_query: true,
+                ..producer_config(SurrealDbOperation::Query)
+            },
+            None,
+            "test-route",
+        );
         let exchange = Exchange::new(Message::new(Body::Json(serde_json::Value::String(
             "SELECT name, age FROM users ORDER BY name".into(),
         ))));
@@ -725,7 +749,15 @@ mod tests {
 
     #[test]
     fn resolve_query_from_header() {
-        let producer = make_producer(SurrealDbOperation::Query);
+        // R5-L1: opt-in to the header path via allow_dynamic_query.
+        let producer = SurrealDbProducer::new(
+            SurrealDbEndpointConfig {
+                allow_dynamic_query: true,
+                ..producer_config(SurrealDbOperation::Query)
+            },
+            None,
+            "test-route",
+        );
         let mut exchange = Exchange::new(Message::new(Body::Empty));
         exchange
             .input
@@ -1015,7 +1047,16 @@ mod tests {
     #[test]
     fn test_query_via_header_with_empty_body_accepted() {
         // Query op with SQL from CamelSurrealDbQuery header: priority 1.
-        let config = SurrealDbEndpointConfig::default();
+        // R5-L1: the header path now requires explicit opt-in via
+        // `allow_dynamic_query=true` (trust boundary, ADR-0032). The header
+        // is untrusted exchange data; without opt-in the producer must
+        // ignore it and fall through to the config query.
+        let config = SurrealDbEndpointConfig {
+            operation: SurrealDbOperation::Query,
+            datasource: "test-ds".into(),
+            allow_dynamic_query: true,
+            ..Default::default()
+        };
         let producer = SurrealDbProducer::new(config, None, "test-route");
         let mut exchange = Exchange::new(Message::new(Body::Empty));
         exchange
@@ -1085,6 +1126,109 @@ mod tests {
         assert!(
             !format!("{err}").contains("limit"),
             "limit-present must pass the guard: {err}"
+        );
+    }
+
+    // --- R5-L1: allow_dynamic_query trust-boundary gate ---
+
+    fn make_query_producer_with_config_query(
+        allow_dynamic_query: bool,
+        config_query: Option<&str>,
+    ) -> SurrealDbProducer {
+        let config = SurrealDbEndpointConfig {
+            operation: SurrealDbOperation::Query,
+            datasource: "test-ds".into(),
+            query: config_query.map(str::to_string),
+            allow_dynamic_query,
+            ..Default::default()
+        };
+        SurrealDbProducer::new(config, None, "test-route")
+    }
+
+    #[test]
+    fn surrealdb_query_rejects_header_by_default() {
+        // Gate OFF + CamelSurrealDbQuery header set: producer must IGNORE the
+        // header (untrusted exchange data, ADR-0032) and fall through to the
+        // config query.
+        let producer = make_query_producer_with_config_query(false, Some("SELECT config_q"));
+        let mut exchange = Exchange::new(Message::new(Body::Empty));
+        exchange.input.headers.insert(
+            headers::QUERY.into(),
+            Value::String("SELECT header_attacker".into()),
+        );
+        let sql = producer.resolve_query_source(&exchange);
+        assert_eq!(
+            sql, "SELECT config_q",
+            "gate-off must ignore header and return config query"
+        );
+    }
+
+    #[test]
+    fn surrealdb_query_accepts_header_with_opt_in() {
+        // Gate ON + CamelSurrealDbQuery header set: producer uses the header.
+        let producer = make_query_producer_with_config_query(true, Some("SELECT config_q"));
+        let mut exchange = Exchange::new(Message::new(Body::Empty));
+        exchange.input.headers.insert(
+            headers::QUERY.into(),
+            Value::String("SELECT header_q".into()),
+        );
+        let sql = producer.resolve_query_source(&exchange);
+        assert_eq!(
+            sql, "SELECT header_q",
+            "gate-on must use the header query text"
+        );
+    }
+
+    #[test]
+    fn surrealdb_query_rejects_body_text_by_default() {
+        // Gate OFF + Body::Text set: producer must IGNORE the body and fall
+        // through to the config query.
+        let producer = make_query_producer_with_config_query(false, Some("SELECT config_q"));
+        let exchange = Exchange::new(Message::new(Body::Text("SELECT body_attacker".into())));
+        let sql = producer.resolve_query_source(&exchange);
+        assert_eq!(
+            sql, "SELECT config_q",
+            "gate-off must ignore body text and return config query"
+        );
+    }
+
+    #[test]
+    fn surrealdb_query_accepts_body_text_with_opt_in() {
+        // Gate ON + Body::Text set: producer uses the body.
+        let producer = make_query_producer_with_config_query(true, Some("SELECT config_q"));
+        let exchange = Exchange::new(Message::new(Body::Text("SELECT body_q".into())));
+        let sql = producer.resolve_query_source(&exchange);
+        assert_eq!(sql, "SELECT body_q", "gate-on must use body text");
+    }
+
+    #[test]
+    fn surrealdb_query_accepts_body_json_string_with_opt_in() {
+        // Gate ON + Body::Json(Value::String) set: producer uses the body
+        // (matches the existing `resolve_query_from_body_json_string` test
+        // contract — the gate must preserve both accepted body shapes).
+        let producer = make_query_producer_with_config_query(true, Some("SELECT config_q"));
+        let exchange = Exchange::new(Message::new(Body::Json(serde_json::Value::String(
+            "SELECT body_json_str".into(),
+        ))));
+        let sql = producer.resolve_query_source(&exchange);
+        assert_eq!(
+            sql, "SELECT body_json_str",
+            "gate-on must use Body::Json(Value::String) body"
+        );
+    }
+
+    #[test]
+    fn surrealdb_query_no_source_gate_off_returns_runtime_error() {
+        // Gate OFF, no config query, no header, no body: resolve_validated_query
+        // must return MissingParam so the producer fails at runtime.
+        let producer = make_query_producer_with_config_query(false, None);
+        let exchange = Exchange::new(Message::new(Body::Empty));
+        let err = producer
+            .resolve_validated_query(&exchange)
+            .expect_err("no query source + gate off must be a runtime error");
+        assert!(
+            matches!(err, SurrealDbError::MissingParam(_)),
+            "expected MissingParam, got {err:?}"
         );
     }
 }
