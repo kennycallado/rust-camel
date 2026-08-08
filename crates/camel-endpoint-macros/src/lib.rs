@@ -18,6 +18,9 @@ use syn::{DeriveInput, parse_macro_input};
 /// - `#[uri_scheme = "xxx"]` - Required, defines the URI scheme
 /// - `#[uri_config(skip_impl)]` - Optional, generates only the parsing helper method
 ///   instead of the full trait impl. Use this when you need custom `validate()` logic.
+/// - `#[uri_config(crate = "path")]` - Optional, overrides the generated code's crate
+///   path. Defaults to `camel_endpoint`. Component crates using the
+///   `camel-component-api` re-exports set this to `camel_component_api`.
 ///
 /// ## Field-level attributes
 ///

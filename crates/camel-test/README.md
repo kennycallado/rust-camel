@@ -15,7 +15,7 @@ Testing utilities for [rust-camel](https://github.com/rust-camel/rust-camel).
 
 ```rust
 use camel_test::CamelTestContext;
-use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_builder::RouteBuilder;
 use std::time::Duration;
 
 #[tokio::test]
@@ -45,7 +45,7 @@ async fn test_route() {
 
 ```rust
 use camel_test::CamelTestContext;
-use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_builder::RouteBuilder;
 use std::time::Duration;
 
 #[tokio::test]
@@ -80,6 +80,7 @@ async fn test_route_fast() {
 | `.with_timer()` | Registers `TimerComponent` |
 | `.with_log()` | Registers `LogComponent` |
 | `.with_direct()` | Registers `DirectComponent` |
+| `.with_seda()` | Registers SedaComponent |
 | `.with_component(c)` | Registers any custom component |
 | `.with_time_control()` | Activates tokio mock clock; `build()` returns `(harness, TimeController)` |
 

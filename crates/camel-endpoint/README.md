@@ -47,11 +47,13 @@ The `#[derive(UriConfig)]` macro generates typed config structs from URI query p
 use camel_endpoint::UriConfig;
 
 #[derive(UriConfig)]
+#[uri_scheme = "timer"]
 pub struct TimerConfig {
+    #[uri_param(default = "1000")]
     pub period: u64,         // ?period=1000
-    #[uri(default = "*")]
+    #[uri_param(default = "0")]
     pub delay: u64,          // ?delay=500  (optional, default 0)
-    #[uri(rename = "repeatCount")]
+    #[uri_param(name = "repeatCount")]
     pub repeat_count: Option<u64>,
 }
 

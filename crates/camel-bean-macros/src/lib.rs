@@ -24,12 +24,12 @@ pub fn derive_bean(_input: TokenStream) -> TokenStream {
 }
 
 /// Marker attribute for handler methods
-/// This attribute does not transform the method - it's detected by the Bean derive macro
+/// This attribute does not transform the method - it's detected by `#[bean_impl]`
 /// to identify which methods should be exposed as bean handlers
 #[proc_macro_attribute]
 pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Pass through the method unchanged
-    // The Bean derive macro (or bean_impl attribute in Task 2.2) will detect this attribute
+    // `#[bean_impl]` will detect this attribute
     item
 }
 

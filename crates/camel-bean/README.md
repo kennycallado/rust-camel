@@ -46,7 +46,7 @@ impl OrderService {
 use camel_bean::BeanRegistry;
 
 let mut registry = BeanRegistry::new();
-registry.register("orderService", OrderService);
+registry.register("orderService", OrderService)?;
 
 // Invoke from code
 registry.invoke("orderService", "process", &mut exchange).await?;
@@ -189,7 +189,10 @@ pub enum BeanError {
     #[error("Handler execution failed: {0}")]
     ExecutionFailed(String),
 
-    #[error("Duplicate bean name: {0}")]
+    #[error("Bean name must not be empty or whitespace-only: '{0}'")]
+    InvalidName(String),
+
+    #[error("Bean already registered: {0}")]
     DuplicateName(String),
 }
 ```
@@ -203,7 +206,7 @@ pub enum BeanError {
 ```rust
 impl From<BeanError> for camel_api::CamelError {
     fn from(err: BeanError) -> Self {
-        camel_api::CamelError::ProcessorError(err.to_string())
+        camel_api::CamelError::ProcessorErrorWithSource(err.to_string(), Arc::new(err))
     }
 }
 ```
@@ -282,9 +285,9 @@ let mut registry = BeanRegistry::new();
 
 // Register different implementations based on config
 if cfg.feature_enabled {
-    registry.register("service", PremiumService);
+    registry.register("service", PremiumService)?;
 } else {
-    registry.register("service", BasicService);
+    registry.register("service", BasicService)?;
 }
 ```
 
