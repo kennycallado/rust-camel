@@ -9,7 +9,7 @@ use crate::{CamelError, Exchange};
 ///
 /// Provider-neutral: the `ClaimsMapper` trait in `camel-auth` is responsible
 /// for mapping provider-specific claim shapes into this structure.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Principal {
     pub subject: String,
     #[serde(default)]
@@ -30,6 +30,21 @@ impl Principal {
     /// Check if the principal has a specific scope.
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|s| s == scope)
+    }
+}
+
+// Manual Debug redacts untrusted `claims` (PII leak fix rc-yv1m).
+// Do NOT add `Debug` to the #[derive(...)] above — it would reintroduce the leak.
+impl std::fmt::Debug for Principal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Principal")
+            .field("subject", &self.subject)
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("scopes", &self.scopes)
+            .field("roles", &self.roles)
+            .field("claims", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -319,5 +334,69 @@ mod tests {
         assert_eq!(recovered.audience, vec!["api"]);
         assert_eq!(recovered.scopes, vec!["read"]);
         assert_eq!(recovered.roles, vec!["user"]);
+    }
+
+    #[test]
+    fn principal_debug_redacts_claims_compact() {
+        let principal = Principal {
+            subject: "subj-1".into(),
+            issuer: "iss".into(),
+            audience: vec!["a1".into()],
+            scopes: vec!["s1".into()],
+            roles: vec!["r1".into()],
+            claims: serde_json::json!({"piid": "SENTINEL_CLAIM_VALUE_9kq2"}),
+        };
+        let s = format!("{principal:?}");
+        assert!(
+            s.contains("claims: \"[REDACTED]\""),
+            "compact debug should show [REDACTED] for claims"
+        );
+        assert!(
+            !s.contains("SENTINEL_CLAIM_VALUE_9kq2"),
+            "compact debug should NOT contain raw claim value"
+        );
+        assert!(s.contains("subj-1"), "compact debug should contain subject");
+        assert!(s.contains("iss"), "compact debug should contain issuer");
+        assert!(s.contains("a1"), "compact debug should contain audience");
+        assert!(s.contains("s1"), "compact debug should contain scopes");
+        assert!(s.contains("r1"), "compact debug should contain roles");
+    }
+
+    #[test]
+    fn principal_debug_redacts_claims_pretty() {
+        let principal = Principal {
+            subject: "subj-1".into(),
+            issuer: "iss".into(),
+            audience: vec!["a1".into()],
+            scopes: vec!["s1".into()],
+            roles: vec!["r1".into()],
+            claims: serde_json::json!({"piid": "SENTINEL_CLAIM_VALUE_9kq2"}),
+        };
+        let s = format!("{principal:#?}");
+        assert!(
+            s.contains("[REDACTED]"),
+            "pretty debug should show [REDACTED]"
+        );
+        assert!(
+            !s.contains("SENTINEL_CLAIM_VALUE_9kq2"),
+            "pretty debug should NOT contain raw claim value"
+        );
+    }
+
+    #[test]
+    fn principal_serialize_preserves_claims() {
+        let principal = Principal {
+            subject: "subj-1".into(),
+            issuer: "iss".into(),
+            audience: vec!["a1".into()],
+            scopes: vec!["s1".into()],
+            roles: vec!["r1".into()],
+            claims: serde_json::json!({"piid": "SENTINEL_CLAIM_VALUE_9kq2"}),
+        };
+        let s = serde_json::to_string(&principal).unwrap();
+        assert!(
+            s.contains("SENTINEL_CLAIM_VALUE_9kq2"),
+            "serialization should preserve raw claim value"
+        );
     }
 }
