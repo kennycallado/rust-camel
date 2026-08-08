@@ -34,6 +34,15 @@ const DEFAULT_MAX_INSTANCES: usize = 10_000;
 /// Default maximum tables per store (matches wasmtime default).
 const DEFAULT_MAX_TABLES: usize = 10_000;
 
+/// Default maximum number of `StateStore` entries per producer.
+pub(crate) const DEFAULT_MAX_KV_ENTRIES: usize = 256;
+
+/// Default maximum byte length of a `StateStore` key.
+pub(crate) const DEFAULT_MAX_KEY_BYTES: usize = 1024;
+
+/// Default maximum byte length of a `StateStore` value (64 KiB).
+pub(crate) const DEFAULT_MAX_VALUE_BYTES: usize = 65_536;
+
 /// Epoch tick interval in milliseconds (same as Surrealism).
 const EPOCH_INTERVAL_MILLIS: u64 = 10;
 
@@ -74,6 +83,17 @@ pub struct WasmConfig {
 
     /// Maximum table elements. `None` = no cap (wasmtime unlimited).
     pub max_table_elements: Option<usize>,
+
+    /// Maximum number of key/value entries in the per-producer `StateStore`.
+    /// Bounds the host-side KV allocation that wasmtime store limits do not
+    /// account for (gap `F-camel-component-wasm-I4`).
+    pub max_kv_entries: usize,
+
+    /// Maximum byte length of a `StateStore` key.
+    pub max_key_bytes: usize,
+
+    /// Maximum byte length of a `StateStore` value.
+    pub max_value_bytes: usize,
 }
 
 impl Default for WasmConfig {
@@ -88,6 +108,9 @@ impl Default for WasmConfig {
             max_instances: DEFAULT_MAX_INSTANCES,
             max_tables: DEFAULT_MAX_TABLES,
             max_table_elements: None,
+            max_kv_entries: DEFAULT_MAX_KV_ENTRIES,
+            max_key_bytes: DEFAULT_MAX_KEY_BYTES,
+            max_value_bytes: DEFAULT_MAX_VALUE_BYTES,
         }
     }
 }
@@ -111,6 +134,9 @@ impl WasmConfig {
             max_instances: limits.max_instances.unwrap_or(DEFAULT_MAX_INSTANCES),
             max_tables: limits.max_tables.unwrap_or(DEFAULT_MAX_TABLES),
             max_table_elements: limits.max_table_elements,
+            max_kv_entries: limits.max_kv_entries.unwrap_or(DEFAULT_MAX_KV_ENTRIES),
+            max_key_bytes: limits.max_key_bytes.unwrap_or(DEFAULT_MAX_KEY_BYTES),
+            max_value_bytes: limits.max_value_bytes.unwrap_or(DEFAULT_MAX_VALUE_BYTES),
         }
     }
 
@@ -189,6 +215,27 @@ impl WasmConfig {
                                 && n > 0
                             {
                                 config.max_table_elements = Some(n);
+                            }
+                        }
+                        "max-kv-entries" => {
+                            if let Ok(n) = value.parse::<usize>()
+                                && n > 0
+                            {
+                                config.max_kv_entries = n;
+                            }
+                        }
+                        "max-key-bytes" => {
+                            if let Ok(n) = value.parse::<usize>()
+                                && n > 0
+                            {
+                                config.max_key_bytes = n;
+                            }
+                        }
+                        "max-value-bytes" => {
+                            if let Ok(n) = value.parse::<usize>()
+                                && n > 0
+                            {
+                                config.max_value_bytes = n;
                             }
                         }
                         _ => {} // ignore unknown params

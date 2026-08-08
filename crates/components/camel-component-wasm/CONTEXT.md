@@ -31,21 +31,17 @@ Authorization-policy and security-policy guests use
 functions. The host gives them only the `http-listener` resource defined by the
 source WIT world.
 
-`set_property` and host-side `StateStore` allocations do not have independent
-size limits. Wasmtime store limits do not account for these host allocations.
-This is the known gap `F-camel-component-wasm-I4`.
+`StateStore` enforces configurable limits on key count (default 256),
+key byte length (default 1024), and value byte length (default 65536).
+`set_property_impl` enforces key and value byte limits. Over-limit calls are
+rejected.
 
 ### WASI surface
 
-The current implementation calls `wasmtime_wasi::p2::add_to_linker_async` for
-all four worlds. `WasiCtxBuilder::new()` denies filesystem preopens,
-environment variables, socket ports, and IP-name lookup at runtime. The linker
-still exposes the full WASI 0.2 interface set. Clocks and random remain usable.
-
-Processor, bean, and policy guests inherit host stderr. Source guests do not.
-This difference is historical, not a policy distinction. ADR-0050 selects
-per-world selective WASI registration as the target posture. Until that change
-lands, the linker surface is broader than the runtime grants.
+The linker registers only `wasi:clocks` and `wasi:random` per ADR-0050.
+Filesystem, sockets, CLI, environment, and stdio are absent from the
+linker. No world inherits host stdio. Guests use `camel_call` for logging
+output per ADR-0050.
 
 ## Resource and lifecycle limits
 

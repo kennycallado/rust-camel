@@ -445,9 +445,7 @@ mod tests {
         let engine = Engine::new(&config).expect("engine");
         let state = WasmHostState {
             table: wasmtime::component::ResourceTable::new(),
-            wasi: wasmtime_wasi::WasiCtxBuilder::new()
-                .inherit_stderr()
-                .build(),
+            wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
             properties: HashMap::new(),
             registry: Arc::new(std::sync::Mutex::new(Registry::new())),
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -565,9 +563,7 @@ mod tests {
         let engine = Engine::new(&config).expect("engine");
         let state = WasmHostState {
             table: wasmtime::component::ResourceTable::new(),
-            wasi: wasmtime_wasi::WasiCtxBuilder::new()
-                .inherit_stderr()
-                .build(),
+            wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
             properties: HashMap::new(),
             registry: Arc::new(std::sync::Mutex::new(Registry::new())),
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

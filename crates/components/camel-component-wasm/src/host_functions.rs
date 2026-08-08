@@ -523,6 +523,12 @@ impl WasmHostState {
     }
 
     pub(crate) fn set_property_impl(&mut self, key: String, value: String) {
+        if key.len() > self.state_store.max_key_bytes() {
+            return;
+        }
+        if value.len() > self.state_store.max_value_bytes() {
+            return;
+        }
         let parsed = serde_json::from_str::<Value>(&value).unwrap_or(Value::String(value));
         self.properties.insert(key, parsed);
     }
@@ -653,9 +659,7 @@ mod tests {
     fn make_state(call_depth: usize) -> WasmHostState {
         WasmHostState {
             table: wasmtime::component::ResourceTable::new(),
-            wasi: wasmtime_wasi::WasiCtxBuilder::new()
-                .inherit_stderr()
-                .build(),
+            wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
             properties: HashMap::new(),
             registry: Arc::new(std::sync::Mutex::new(Registry::new())),
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(call_depth)),
@@ -895,5 +899,44 @@ mod tests {
         assert_eq!(depth.load(std::sync::atomic::Ordering::SeqCst), 1);
         drop(guard);
         assert_eq!(depth.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    // ── set_property_impl size limits (W2) ──────────────────────────────
+
+    #[test]
+    fn test_set_property_rejects_oversized_key() {
+        let mut state = make_state(0);
+        state.state_store = crate::state_store::StateStore::with_limits(256, 5, 65536);
+        state.set_property_impl("very_long_key_name".to_string(), "val".to_string());
+        assert!(
+            !state.properties.contains_key("very_long_key_name"),
+            "must not insert property when key exceeds max_key_bytes"
+        );
+    }
+
+    #[test]
+    fn test_set_property_rejects_oversized_value() {
+        let mut state = make_state(0);
+        state.state_store = crate::state_store::StateStore::with_limits(256, 1024, 5);
+        state.set_property_impl("k".to_string(), "this_value_is_way_too_long".to_string());
+        assert!(
+            !state.properties.contains_key("k"),
+            "must not insert property when value exceeds max_value_bytes"
+        );
+    }
+
+    #[test]
+    fn test_set_property_allows_within_bounds() {
+        let mut state = make_state(0);
+        state.state_store = crate::state_store::StateStore::with_limits(256, 1024, 65536);
+        state.set_property_impl("key".to_string(), "{\"x\":true}".to_string());
+        let val = state.properties.get("key");
+        assert!(
+            val.is_some(),
+            "must insert property when key and value are within limits"
+        );
+        if let Some(v) = val {
+            assert!(v.is_object(), "JSON value must be parsed as object");
+        }
     }
 }

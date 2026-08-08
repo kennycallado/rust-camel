@@ -98,7 +98,7 @@ impl WasmRuntime {
 
         let mut linker: Linker<WasmHostState> = Linker::new(&engine);
 
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        crate::wasi_surface::register_minimal_wasi(&mut linker)
             .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
         crate::host_functions::add_to_linker(&mut linker)
@@ -151,7 +151,7 @@ impl WasmRuntime {
         let limits = builder.build();
         WasmHostState {
             table: ResourceTable::new(),
-            wasi: WasiCtxBuilder::new().inherit_stderr().build(),
+            wasi: WasiCtxBuilder::new().build(),
             properties,
             registry,
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -537,7 +537,7 @@ mod tests {
         let props = HashMap::new();
         let state = WasmHostState {
             table: ResourceTable::new(),
-            wasi: WasiCtxBuilder::new().inherit_stderr().build(),
+            wasi: WasiCtxBuilder::new().build(),
             properties: props,
             registry,
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

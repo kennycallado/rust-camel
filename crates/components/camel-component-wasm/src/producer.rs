@@ -129,12 +129,17 @@ impl WasmProducer {
     ) -> Self {
         let max_concurrent_calls = config.max_concurrent_calls;
         let max_stream_bytes = config.max_stream_bytes;
+        let state_store = crate::state_store::StateStore::with_limits(
+            config.max_kv_entries,
+            config.max_key_bytes,
+            config.max_value_bytes,
+        );
         Self {
             module_path,
             registry,
             runtime: Arc::new(std::sync::Mutex::new(None)),
             config,
-            state_store: crate::state_store::StateStore::new(),
+            state_store,
             init_failed: Arc::new(AtomicBool::new(false)),
             sem: Arc::new(Semaphore::new(max_concurrent_calls)),
             pending_permit: None,

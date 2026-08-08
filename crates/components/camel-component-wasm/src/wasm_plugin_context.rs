@@ -72,7 +72,7 @@ impl WasmPluginContext {
 
         let mut linker: Linker<WasmHostState> = Linker::new(&engine);
 
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        crate::wasi_surface::register_minimal_wasi(&mut linker)
             .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
         setup_linker(&mut linker)?;
@@ -80,7 +80,11 @@ impl WasmPluginContext {
         let epoch_ticker =
             crate::epoch::EpochTicker::start(engine.clone(), wasm_config.epoch_interval());
 
-        let state_store = crate::state_store::StateStore::new();
+        let state_store = crate::state_store::StateStore::with_limits(
+            wasm_config.max_kv_entries,
+            wasm_config.max_key_bytes,
+            wasm_config.max_value_bytes,
+        );
 
         Ok(Self {
             engine,

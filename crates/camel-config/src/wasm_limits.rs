@@ -78,6 +78,25 @@ pub struct WasmLimitsConfig {
     /// Maps to `WasmConfig::max_table_elements` when `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_table_elements: Option<usize>,
+
+    /// Maximum number of key/value entries in the per-producer `StateStore`.
+    /// Maps to `StateStore::max_entries` when `Some`. `None` = runtime default
+    /// (256 entries). Bounds the host-side KV allocation that wasmtime store
+    /// limits do not account for (gap `F-camel-component-wasm-I4`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kv_entries: Option<usize>,
+
+    /// Maximum byte length of a `StateStore` key. Maps to
+    /// `StateStore::max_key_bytes` when `Some`. `None` = runtime default
+    /// (1024 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_key_bytes: Option<usize>,
+
+    /// Maximum byte length of a `StateStore` value. Maps to
+    /// `StateStore::max_value_bytes` when `Some`. `None` = runtime default
+    /// (65 536 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_value_bytes: Option<usize>,
 }
 
 #[cfg(test)]
@@ -96,6 +115,9 @@ mod tests {
         assert_eq!(cfg.max_instances, None);
         assert_eq!(cfg.max_tables, None);
         assert_eq!(cfg.max_table_elements, None);
+        assert_eq!(cfg.max_kv_entries, None);
+        assert_eq!(cfg.max_key_bytes, None);
+        assert_eq!(cfg.max_value_bytes, None);
     }
 
     #[test]
@@ -110,6 +132,9 @@ mod tests {
             max-instances = 100
             max-tables = 50
             max-table-elements = 200
+            max-kv-entries = 256
+            max-key-bytes = 1024
+            max-value-bytes = 65536
         };
         let cfg: WasmLimitsConfig = toml.try_into().expect("deserialize");
         assert_eq!(cfg.timeout_secs, Some(600));
@@ -121,6 +146,9 @@ mod tests {
         assert_eq!(cfg.max_instances, Some(100));
         assert_eq!(cfg.max_tables, Some(50));
         assert_eq!(cfg.max_table_elements, Some(200));
+        assert_eq!(cfg.max_kv_entries, Some(256));
+        assert_eq!(cfg.max_key_bytes, Some(1024));
+        assert_eq!(cfg.max_value_bytes, Some(65_536));
     }
 
     #[test]
