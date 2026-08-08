@@ -567,11 +567,20 @@ impl CamelContext {
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
         use crate::lifecycle::application::ports::RouteRegistrationPort;
+        let route_id = definition.route_id().to_string();
         debug!(
             from = definition.from_uri(),
-            route_id = %definition.route_id(),
+            route_id = %route_id,
             "Adding route definition"
         );
+        if let Ok(camel_api::RuntimeQueryResult::Routes { route_ids }) =
+            self.runtime.ask(camel_api::RuntimeQuery::ListRoutes).await
+            && route_ids.iter().any(|id| id == &route_id)
+        {
+            return Err(CamelError::RouteError(format!(
+                "duplicate route ID '{route_id}'"
+            )));
+        }
         self.runtime
             .register_route(definition)
             .await

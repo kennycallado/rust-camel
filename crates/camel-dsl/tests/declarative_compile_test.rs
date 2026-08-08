@@ -188,6 +188,7 @@ routes:
                         "expected ValueSourceDef::Expression for log with ${{...}}, got Literal"
                     );
                 }
+                _ => panic!("unexpected ValueSourceDef variant"),
             }
         }
         BuilderStep::Processor(_) => {

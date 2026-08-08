@@ -307,6 +307,35 @@ async fn add_route_definition_does_not_require_mut() {
 }
 
 #[tokio::test]
+async fn add_route_definition_rejects_duplicate_route_id() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+
+    let first = RouteDefinition::new("timer:tick", vec![]).with_route_id("dup-route-id");
+    let second = RouteDefinition::new("timer:tick", vec![]).with_route_id("dup-route-id");
+
+    let first_result = ctx.add_route_definition(first).await;
+    assert!(
+        first_result.is_ok(),
+        "first registration should succeed: {first_result:?}"
+    );
+
+    let second_result = ctx.add_route_definition(second).await;
+    assert!(
+        second_result.is_err(),
+        "duplicate route ID should be rejected"
+    );
+    let err_msg = second_result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("duplicate"),
+        "error should mention 'duplicate', got: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("dup-route-id"),
+        "error should mention the conflicting route ID, got: {err_msg}"
+    );
+}
+
+#[tokio::test]
 async fn test_health_check_empty_context() {
     let ctx = CamelContext::builder().build().await.unwrap();
     let report = ctx.health_check().await;
