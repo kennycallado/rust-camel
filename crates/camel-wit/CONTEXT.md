@@ -13,16 +13,35 @@ defines its versioning policy.
 
 | Export | Contract | Current external use |
 |---|---|---|
-| `PLUGIN_WIT` | `types` and `host` interfaces; `plugin` and `authorization-policy` worlds | Consumed by `camel-cli` templates. The WASM host uses a duplicate file. |
-| `BEAN_WIT` | `bean` world over the plugin package interfaces | Consumed by `camel-cli` templates. The WASM host uses a duplicate file. |
-| `SOURCE_WIT` | `source-host` interface and `source` world from ADR-0031 | No Rust consumer outside this crate. The WASM host uses a duplicate file. |
+| `PLUGIN_WIT` | `types` and `host` interfaces; `plugin` and `authorization-policy` worlds | Consumed by `camel-cli` templates. The WASM host keeps a drift-enforced copy (bindgen-forced; see model below). |
+| `BEAN_WIT` | `bean` world over the plugin package interfaces | Consumed by `camel-cli` templates. The WASM host keeps a drift-enforced copy (bindgen-forced; see model below). |
+| `SOURCE_WIT` | `source-host` interface and `source` world from ADR-0031 | No Rust consumer outside this crate. The WASM host keeps a drift-enforced copy (bindgen-forced; see model below). |
 | `FULL_WIT` | Manually merged reference document for all worlds | No consumer outside this crate. `WIT-001` tracks its duplication. |
 
-`camel-wit` is the contract source of truth. The host currently keeps copies
-under `crates/components/camel-component-wasm/wit/` and checks all three
-copies against canonical via a non-skipping cross-crate test
-(`test_host_wit_matches_canonical`). `rc-osj0` tracks replacement of those
-copies with consumption of this crate.
+`camel-wit` is the contract source of truth and the canonical delivery vehicle
+for the WIT contract. The contract has two consumer populations with different
+constraints.
+
+**Guest authors** (Population A: Python, Go, JavaScript, and other guest-side
+wit-bindgen users) consume `camel-wit` directly. `cargo add camel-wit` exposes
+the embedded strings (`PLUGIN_WIT`, `BEAN_WIT`, `SOURCE_WIT`, `FULL_WIT`), and
+the raw `.wit` files ship in the published crate package for languages that read
+them from disk.
+
+**The WASM host** (`camel-component-wasm`, Population B) keeps a physical copy
+of the three per-world `.wit` files under its own `wit/` directory. This copy is
+not duplication debt. `wasmtime::component::bindgen!` requires a literal `path`
+resolved against `CARGO_MANIFEST_DIR`, and the published host crate must be
+self-contained, so an in-package `.wit` copy is structurally mandatory. The
+non-skipping cross-crate test `test_host_wit_matches_canonical` in `src/lib.rs`
+validates that copy against canonical on every CI run, converting a
+compiler-forced build input into a verified projection of the source of truth.
+
+`rc-osj0` originally tracked replacement of the host copies with consumption of
+this crate. That goal is structurally unachievable under the wasmtime
+literal-path constraint and crates.io self-containment. The issue has been
+reframed to guest-delivery discoverability (see bd follow-up: camel-wit README
+section for multi-language guest authors).
 
 ## Dependency posture
 
