@@ -11,7 +11,7 @@ camel-api = { workspace = true }
 camel-component-api = { workspace = true }
 camel-bridge = { workspace = true } # TODO(XJ-002): consider making bridge dep optional via feature flag
 camel-xslt = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt", "time"] }
+tokio = { workspace = true, features = ["sync", "rt", "time", "rt-multi-thread"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros"] }
 tonic = { workspace = true }
 serde_json = { workspace = true }
 rustls = { workspace = true }

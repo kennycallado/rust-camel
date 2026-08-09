@@ -15,8 +15,84 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::RuntimeFlavor;
 use tokio::sync::{Mutex, watch};
 use tonic::Code;
+
+/// An owned multi-thread Tokio runtime (1 worker thread) used to drive async
+/// futures from synchronous contexts where `block_in_place` would panic
+/// (current-thread runtime) or where no ambient runtime exists.
+///
+/// The runtime lives for the Component's lifetime, so tonic Channel dispatch
+/// tasks spawned during bridge startup have a stable host.
+///
+/// The `Option` wrapper is required so the custom `Drop` impl can `take()` the
+/// runtime and move it to a scoped thread for safe teardown inside async
+/// contexts (production shutdown path).
+#[derive(Debug)]
+pub(crate) struct OffloadRuntime {
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl OffloadRuntime {
+    pub(crate) fn new() -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("xj-offload")
+            .build()
+            .expect("xj offload runtime");
+        Self {
+            runtime: Some(runtime),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle(&self) -> &tokio::runtime::Handle {
+        self.runtime
+            .as_ref()
+            .expect("offload runtime dropped")
+            .handle()
+    }
+
+    /// Drives the future to completion on the offload runtime using a scoped
+    /// OS thread. The calling thread blocks on `scope.join()`.
+    ///
+    /// The scoped thread has no ambient Tokio runtime, so
+    /// `Runtime::block_on` does not panic. `Send` bounds are required by
+    /// `std::thread::scope::spawn`.
+    pub(crate) fn block_on<F, T>(&self, fut: F) -> T
+    where
+        F: Future<Output = T> + Send,
+        T: Send,
+    {
+        let rt = self.runtime.as_ref().expect("offload runtime dropped");
+        std::thread::scope(|s| {
+            s.spawn(move || rt.block_on(fut))
+                .join()
+                .expect("xj offload thread panicked")
+        })
+    }
+}
+
+impl Drop for OffloadRuntime {
+    /// Moves the `Runtime` onto a scoped OS thread before dropping it.
+    ///
+    /// Dropping a `tokio::runtime::Runtime` inside an async context panics
+    /// ("Cannot drop a runtime in a context where blocking is not allowed").
+    /// Since `XjComponent` is registered as `Arc<dyn Component>` in the
+    /// context registry and the context drops at the end of `async fn run`,
+    /// production shutdown drops the component inside an async context.
+    /// This `Drop` impl avoids that panic by moving the runtime to a scoped
+    /// OS thread where `block_in_place` is not required.
+    fn drop(&mut self) {
+        if let Some(rt) = self.runtime.take() {
+            std::thread::scope(|s| {
+                s.spawn(|| drop(rt));
+            });
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct XjComponentConfig {
@@ -267,6 +343,7 @@ impl XjBridgeRuntime {
 pub struct XjComponent {
     runtime: Arc<XjBridgeRuntime>,
     client: Arc<XsltBridgeClient>,
+    offload: Arc<OffloadRuntime>,
 }
 
 impl Default for XjComponent {
@@ -286,8 +363,13 @@ impl XjComponent {
             state_tx,
             Arc::clone(&state_rx),
         ));
+        let offload = Arc::new(OffloadRuntime::new());
 
-        Self { runtime, client }
+        Self {
+            runtime,
+            client,
+            offload,
+        }
     }
 
     #[allow(dead_code)]
@@ -303,12 +385,23 @@ impl XjComponent {
             state_tx,
             state_rx,
         ));
+        let offload = Arc::new(OffloadRuntime::new());
 
-        Self { runtime, client }
+        Self {
+            runtime,
+            client,
+            offload,
+        }
     }
 
     pub fn bridge_runtime(&self) -> Arc<XjBridgeRuntime> {
         Arc::clone(&self.runtime)
+    }
+
+    /// Test-only accessor for observing offload runtime lifetime.
+    #[cfg(test)]
+    pub(crate) fn offload_weak(&self) -> std::sync::Weak<OffloadRuntime> {
+        Arc::downgrade(&self.offload)
     }
 
     fn read_stylesheet(
@@ -351,30 +444,29 @@ impl XjComponent {
 
     /// Block on an async future from a synchronous context (`create_endpoint`).
     ///
-    /// This method is intentionally synchronous because `Component::create_endpoint`
-    /// is a sync trait method. When called from within a tokio runtime (the common
-    /// case), it uses `block_in_place` to avoid starving other tasks. When called
-    /// from outside any runtime (e.g. tests), it creates a ephemeral single-threaded
-    /// runtime.
-    ///
-    /// TODO(XJ-014): Consider making `create_endpoint` async upstream so this
-    /// blocking shim can be removed entirely.
+    /// Uses `block_in_place` when the ambient runtime is multi-thread (the
+    /// common production case). When the ambient runtime is current-thread or
+    /// absent, the future is driven by the Component's offload runtime via
+    /// `std::thread::scope` — this avoids the `block_in_place` panic on
+    /// current-thread runtimes and the dead-Channel defect from ephemeral
+    /// runtimes. The offload runtime lives for the Component's lifetime, so
+    /// tonic Channel dispatch tasks spawned during bridge startup have a
+    /// stable host.
     fn block_on_result<F, T>(&self, fut: F) -> Result<T, CamelError>
     where
-        F: Future<Output = Result<T, XjError>>,
+        F: Future<Output = Result<T, XjError>> + Send,
+        T: Send,
     {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if let Ok(handle) = tokio::runtime::Handle::try_current()
+            && handle.runtime_flavor() == RuntimeFlavor::MultiThread
+        {
             tokio::task::block_in_place(|| {
                 handle
                     .block_on(fut)
                     .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))
             })
         } else {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
-            runtime
+            self.offload
                 .block_on(fut)
                 .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))
         }
@@ -525,5 +617,77 @@ mod tests {
             3,
             "max_attempts=3 must yield exactly 3 invocations"
         );
+    }
+
+    // ── OffloadRuntime tests ──
+
+    #[test]
+    fn offload_runtime_runs_simple_future() {
+        let offload = OffloadRuntime::new();
+        let result = offload.block_on(async { 42i32 });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn offload_runtime_spawned_task_survives_after_block_on() {
+        let offload = OffloadRuntime::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Spawn a long-lived task on the offload runtime — models the tonic
+        // Channel dispatch task that must survive past block_on returning.
+        offload.handle().spawn(async move {
+            let _ = tx.send(());
+        });
+
+        // block_on returns on a scoped thread — after it returns, the spawned
+        // task must still be alive.
+        offload.block_on(async {});
+
+        // Receive the value — proves the spawned task survived past block_on.
+        let val = offload.block_on(rx);
+        assert_eq!(val, Ok(()));
+    }
+
+    // ── block_on_result tests ──
+
+    // Verifies the offload path does not panic on current-thread runtime
+    #[tokio::test(flavor = "current_thread")]
+    async fn block_on_result_works_on_current_thread_runtime() {
+        let component = XjComponent::default();
+        let result = component.block_on_result(async { Ok::<i32, XjError>(42) });
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    // Verifies the offload path works without any ambient runtime
+    #[test]
+    fn block_on_result_returns_value_without_ambient_runtime() {
+        let component = XjComponent::default();
+        let result = component.block_on_result(async { Ok::<i32, XjError>(99) });
+        assert_eq!(result.unwrap(), 99);
+    }
+
+    // Verifies the multi-thread path still works (block_in_place branch)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn block_on_result_works_on_multi_thread_runtime() {
+        let component = XjComponent::default();
+        let result = component.block_on_result(async { Ok::<i32, XjError>(7) });
+        assert_eq!(result.unwrap(), 7);
+    }
+
+    // ── Drop tests ──
+
+    #[test]
+    fn offload_runtime_dropped_with_component() {
+        let component = XjComponent::default();
+        let weak = component.offload_weak();
+        drop(component);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offload_runtime_drop_no_panic_in_async() {
+        let component = XjComponent::default();
+        drop(component);
+        // No panic — verifies the Drop impl moves runtime to scoped thread
     }
 }
