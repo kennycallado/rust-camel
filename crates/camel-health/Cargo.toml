@@ -24,6 +24,7 @@ chrono.workspace = true
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 reqwest = { workspace = true, features = ["json"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [lints]
 workspace = true

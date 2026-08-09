@@ -50,7 +50,7 @@ struct CachedPermissionEntry {
 pub struct CachingPermissionEvaluator {
     inner: Arc<dyn PermissionEvaluator>,
     cache: Arc<RwLock<HashMap<String, CachedPermissionEntry>>>,
-    in_flight: Mutex<()>,
+    in_flight: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     options: PermissionCacheOptions,
 }
 
@@ -59,7 +59,7 @@ impl CachingPermissionEvaluator {
         Self {
             inner,
             cache: Arc::new(RwLock::new(HashMap::new())),
-            in_flight: Mutex::new(()),
+            in_flight: Mutex::new(HashMap::new()),
             options,
         }
     }
@@ -155,40 +155,65 @@ impl PermissionEvaluator for CachingPermissionEvaluator {
             }
         }
 
-        // 2. Acquire in-flight lock → double-check → call inner.
-        let _guard = self.in_flight.lock().await;
-
-        {
-            let cache = self.cache.read().await;
-            if let Some(entry) = cache.get(&key) {
-                let ttl = self.ttl_for(&entry.decision);
-                if now.duration_since(entry.inserted_at) < ttl {
-                    tracing::debug!(target: "camel_auth::permission_cache", cache_outcome = "hit_after_wait");
-                    return Ok(entry.decision.clone());
+        // 2. Per-key dedup: only one caller per cache key enters the inner evaluator.
+        //
+        // Duplicated from CachingTokenIntrospector::introspect (introspection.rs).
+        // Two identical call sites — extraction would add indirection without
+        // reducing total LoC. Keep both in sync when modifying.
+        let key_mutex = {
+            let mut in_flight_map = self.in_flight.lock().await;
+            in_flight_map
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let result: Result<PermissionDecision, AuthError> = async {
+            let _guard = key_mutex.lock().await;
+            // Double-check cache after acquiring the per-key lock (hit-after-wait).
+            {
+                let cache = self.cache.read().await;
+                if let Some(entry) = cache.get(&key) {
+                    let ttl = self.ttl_for(&entry.decision);
+                    if now.duration_since(entry.inserted_at) < ttl {
+                        tracing::debug!(target: "camel_auth::permission_cache", cache_outcome = "hit_after_wait");
+                        return Ok(entry.decision.clone());
+                    }
                 }
             }
+
+            tracing::debug!(target: "camel_auth::permission_cache", cache_outcome = "miss");
+
+            let decision = self.inner.evaluate(request).await?;
+
+            // 3. Lazy eviction.
+            self.evict_if_needed().await;
+
+            // 4. Insert.
+            {
+                let mut cache = self.cache.write().await;
+                cache.insert(
+                    key.clone(),
+                    CachedPermissionEntry {
+                        decision: decision.clone(),
+                        inserted_at: Instant::now(),
+                    },
+                );
+            }
+
+            Ok(decision)
         }
-
-        tracing::debug!(target: "camel_auth::permission_cache", cache_outcome = "miss");
-
-        let decision = self.inner.evaluate(request).await?;
-
-        // 3. Lazy eviction.
-        self.evict_if_needed().await;
-
-        // 4. Insert.
+        .await;
+        drop(key_mutex);
+        // Cleanup: remove the per-key mutex from the map when no other task holds a reference.
         {
-            let mut cache = self.cache.write().await;
-            cache.insert(
-                key,
-                CachedPermissionEntry {
-                    decision: decision.clone(),
-                    inserted_at: Instant::now(),
-                },
-            );
+            let mut in_flight_map = self.in_flight.lock().await;
+            if let Some(arc) = in_flight_map.get(&key)
+                && Arc::strong_count(arc) == 1
+            {
+                in_flight_map.remove(&key);
+            }
         }
-
-        Ok(decision)
+        result
     }
 }
 
@@ -252,6 +277,25 @@ mod tests {
             &self,
             _request: PermissionRequest,
         ) -> Result<PermissionDecision, AuthError> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(self.decision.clone())
+        }
+    }
+
+    /// Like [`CountingEvaluator`] but injects a configurable delay before responding.
+    struct SlowCountingEvaluator {
+        count: AtomicUsize,
+        decision: PermissionDecision,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl PermissionEvaluator for SlowCountingEvaluator {
+        async fn evaluate(
+            &self,
+            _request: PermissionRequest,
+        ) -> Result<PermissionDecision, AuthError> {
+            tokio::time::sleep(self.delay).await;
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(self.decision.clone())
         }
@@ -364,5 +408,60 @@ mod tests {
         assert!(debug.contains("CachingPermissionEvaluator"));
         assert!(debug.contains("positive_ttl"));
         assert!(debug.contains("negative_ttl"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_request_dedup_preserved() {
+        let inner = Arc::new(CountingEvaluator {
+            count: AtomicUsize::new(0),
+            decision: PermissionDecision::Granted,
+        });
+        let caching = Arc::new(CachingPermissionEvaluator::new(
+            inner.clone(),
+            default_opts(),
+        ));
+
+        let req = test_request("/orders/123", json!({}));
+        let c1 = caching.clone();
+        let c2 = caching.clone();
+        let req1 = req.clone();
+        let req2 = req;
+
+        let (d1, d2) = tokio::join!(c1.evaluate(req1), c2.evaluate(req2));
+
+        assert_eq!(inner.count.load(Ordering::SeqCst), 1);
+        assert!(d1.is_ok());
+        assert!(d2.is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_different_requests_no_head_of_line_blocking() {
+        let inner = Arc::new(SlowCountingEvaluator {
+            count: AtomicUsize::new(0),
+            decision: PermissionDecision::Granted,
+            delay: Duration::from_millis(500),
+        });
+        let caching = Arc::new(CachingPermissionEvaluator::new(
+            inner.clone(),
+            default_opts(),
+        ));
+
+        let req_a = test_request("/orders/123", json!({}));
+        let req_b = test_request("/orders/456", json!({}));
+
+        let c_a = caching.clone();
+        let c_b = caching.clone();
+
+        let start = tokio::time::Instant::now();
+        let (d1, d2) = tokio::join!(c_a.evaluate(req_a), c_b.evaluate(req_b));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "expected < 800 ms but took {elapsed:?}"
+        );
+        assert_eq!(inner.count.load(Ordering::SeqCst), 2);
+        assert!(d1.is_ok());
+        assert!(d2.is_ok());
     }
 }

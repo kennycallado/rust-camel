@@ -1,6 +1,6 @@
 use camel_api::function::{FunctionDefinition, FunctionId};
 use camel_api::lifecycle::Lifecycle;
-use camel_api::{Exchange, Message};
+use camel_api::{Exchange, Message, ServiceStatus};
 use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
 use camel_function::{FunctionConfig, FunctionRuntimeService};
 use std::sync::Arc;
@@ -260,4 +260,70 @@ async fn invoke_timeout_returns_timeout_error() {
         ),
         "expected Timeout error, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn stop_drains_all_providers_on_partial_failure() {
+    let provider = Arc::new(FakeProvider::new(FakeProviderConfig {
+        fail_on_shutdown: true,
+        ..Default::default()
+    }));
+    let mut service = FunctionRuntimeService::with_fake_provider(
+        FunctionConfig::default(),
+        Arc::clone(&provider),
+    );
+    let inv = service.invoker();
+
+    // Stage 3 functions with different runtimes to create 3 runners.
+    inv.stage_pending(def("a"), Some("r1"), 0);
+    inv.stage_pending(
+        FunctionDefinition {
+            id: FunctionId::compute("deno", "b", 5000),
+            runtime: "deno".into(),
+            source: "b".into(),
+            timeout_ms: 5000,
+            route_id: Some("r1".into()),
+            step_index: Some(1),
+        },
+        Some("r1"),
+        1,
+    );
+    inv.stage_pending(
+        FunctionDefinition {
+            id: FunctionId::compute("python", "c", 5000),
+            runtime: "python".into(),
+            source: "c".into(),
+            timeout_ms: 5000,
+            route_id: Some("r1".into()),
+            step_index: Some(2),
+        },
+        Some("r1"),
+        2,
+    );
+    service.start().await.unwrap();
+
+    let result = service.stop().await;
+    assert!(
+        matches!(&result, Err(camel_api::CamelError::ProcessorError(_))),
+        "expected ProcessorError, got: {result:?}"
+    );
+
+    let shutdowns = provider.shutdowns.lock().expect("shutdowns");
+    assert_eq!(shutdowns.len(), 3, "all 3 runners should be shut down");
+
+    let runtime_names: Vec<&str> = shutdowns.iter().map(|k| k.runtime.as_str()).collect();
+    assert!(
+        runtime_names.contains(&"fake"),
+        "fake runner not in shutdowns"
+    );
+    assert!(
+        runtime_names.contains(&"deno"),
+        "deno runner not in shutdowns"
+    );
+    assert!(
+        runtime_names.contains(&"python"),
+        "python runner not in shutdowns"
+    );
+
+    assert!(matches!(service.status(), ServiceStatus::Stopped));
 }

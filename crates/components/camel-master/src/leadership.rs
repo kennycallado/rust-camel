@@ -92,29 +92,30 @@ pub(crate) async fn stop_delegate(
     } = std::mem::replace(state, DelegateState::Inactive)
     {
         run_token.cancel();
-        match timeout(drain_timeout, &mut handle).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(err))) => {
-                return Err(err);
-            }
-            Ok(Err(e)) if e.is_panic() => {
-                // log-policy: system-broken
-                error!(error = %e, "master delegate task panicked");
-                return Err(CamelError::ProcessorError(format!(
-                    "master delegate task panicked: {e}"
-                )));
-            }
-            Ok(Err(e)) => {
-                warn!(error = %e, "master delegate task cancelled");
-                return Err(CamelError::ProcessorError(format!(
-                    "master delegate task cancelled: {e}"
-                )));
-            }
-            Err(_) => {
-                warn!("master delegate shutdown timed out, aborting");
-                handle.abort();
-            }
-        }
+        let delegate_result: Result<(), CamelError> =
+            match timeout(drain_timeout, &mut handle).await {
+                Ok(Ok(Ok(()))) => Ok(()),
+                Ok(Ok(Err(err))) => Err(err),
+                Ok(Err(e)) if e.is_panic() => {
+                    // log-policy: system-broken
+                    error!(error = %e, "master delegate task panicked");
+                    Err(CamelError::ProcessorError(format!(
+                        "master delegate task panicked: {e}"
+                    )))
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "master delegate task cancelled");
+                    Err(CamelError::ProcessorError(format!(
+                        "master delegate task cancelled: {e}"
+                    )))
+                }
+                Err(_) => {
+                    warn!("master delegate shutdown timed out, aborting");
+                    handle.abort();
+                    let _ = handle.await;
+                    Ok(())
+                }
+            };
 
         // Drain the epoch-stamping bridge. It forwards any envelopes still
         // buffered after the delegate stopped, then exits. On timeout, abort
@@ -132,6 +133,8 @@ pub(crate) async fn stop_delegate(
                 }
             }
         }
+
+        return delegate_result;
     }
     Ok(())
 }
@@ -246,13 +249,14 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::time::Duration;
 
-    use camel_api::{Body, Exchange, Message};
+    use camel_api::{Body, CamelError, Exchange, Message};
     use camel_component_api::ExchangeEnvelope;
     use serde_json::Value;
     use tokio::time::timeout;
     use tokio_util::sync::CancellationToken;
 
-    use super::spawn_epoch_bridge;
+    use super::{spawn_epoch_bridge, stop_delegate};
+    use crate::consumer::DelegateState;
 
     fn make_envelope(text: &str) -> ExchangeEnvelope {
         ExchangeEnvelope {
@@ -448,5 +452,99 @@ mod tests {
         }
 
         // If we reach here, abort worked — bridge is no longer running.
+    }
+
+    /// Verifies that `stop_delegate` drains the epoch-bridge even when the
+    /// delegate task returns an error. Without this fix, the early `return`
+    /// on delegate error skips the bridge drain block, leaking a detached task.
+    #[tokio::test]
+    async fn stop_delegate_drains_bridge_on_delegate_error() {
+        let delegate_handle = tokio::spawn(async {
+            Err::<(), CamelError>(CamelError::ProcessorError("test delegate failure".into()))
+        });
+
+        let cancel = CancellationToken::new();
+        let (pipeline_tx, _pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
+        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel);
+
+        // Keep an AbortHandle to verify completion after stop_delegate.
+        let bridge_abort = bridge_handle.abort_handle();
+        assert!(
+            !bridge_abort.is_finished(),
+            "bridge should not be finished before stop_delegate"
+        );
+
+        // Send an envelope to give the bridge real work, then drop stamp_tx
+        // so the bridge can exit after forwarding — avoids forcing the full
+        // 5 s drain timeout. The drain block in stop_delegate still exercises
+        // its full code path.
+        stamp_tx.send(make_envelope("test")).await.unwrap();
+        drop(stamp_tx);
+
+        let mut state = DelegateState::Active {
+            run_token: CancellationToken::new(),
+            handle: delegate_handle,
+            bridge_handle: Some(bridge_handle),
+        };
+
+        let result = stop_delegate(&mut state, Duration::from_secs(5)).await;
+
+        // (a) result should be Err matching the delegate error.
+        assert!(result.is_err(), "expected Err from delegate failure");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("test delegate failure"),
+            "error should contain delegate message"
+        );
+
+        // (b) bridge handle has exited — drain block ran.
+        assert!(
+            bridge_abort.is_finished(),
+            "bridge should have been drained after delegate error"
+        );
+    }
+
+    /// Verifies that `stop_delegate` drains the epoch-bridge even when the
+    /// delegate times out (abort path). The timeout arm falls through to the
+    /// drain block; this test ensures that remains true after restructuring.
+    #[tokio::test]
+    async fn stop_delegate_drains_bridge_on_delegate_timeout() {
+        let delegate_handle = tokio::spawn(async {
+            // Never completes — forces timeout in stop_delegate.
+            std::future::pending::<Result<(), CamelError>>().await
+        });
+
+        let cancel = CancellationToken::new();
+        let (pipeline_tx, _pipeline_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(10);
+        let (stamp_tx, bridge_handle) = spawn_epoch_bridge(pipeline_tx, 42, cancel);
+
+        let bridge_abort = bridge_handle.abort_handle();
+        assert!(
+            !bridge_abort.is_finished(),
+            "bridge should not be finished before stop_delegate"
+        );
+
+        stamp_tx.send(make_envelope("timeout-test")).await.unwrap();
+
+        let mut state = DelegateState::Active {
+            run_token: CancellationToken::new(),
+            handle: delegate_handle,
+            bridge_handle: Some(bridge_handle),
+        };
+
+        let result = stop_delegate(&mut state, Duration::from_millis(100)).await;
+
+        // (a) timeout path returns Ok(()).
+        assert!(result.is_ok(), "timeout path should return Ok");
+
+        // (b) bridge handle has exited.
+        assert!(
+            bridge_abort.is_finished(),
+            "bridge should have been drained after delegate timeout"
+        );
+
+        drop(stamp_tx);
     }
 }

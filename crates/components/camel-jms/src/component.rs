@@ -832,10 +832,7 @@ impl Service<Exchange> for LazyJmsProducer {
                     ))));
                 }
                 BridgeState::Stopped => {
-                    return Poll::Ready(Err(CamelError::ProcessorError(format!(
-                        "JMS broker '{}' is stopped",
-                        self.broker_name
-                    ))));
+                    return Poll::Ready(Err(CamelError::ConsumerStopping));
                 }
             }
         }
@@ -1583,7 +1580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_ready_returns_error_when_stopped() {
+    async fn lazy_producer_poll_ready_returns_consumer_stopping_on_stopped() {
         use tokio::sync::watch;
         use tower::Service;
 
@@ -1619,8 +1616,8 @@ mod tests {
 
         let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
         assert!(
-            matches!(result, Poll::Ready(Err(_))),
-            "poll_ready must be Err when Stopped; got: {:?}",
+            matches!(result, Poll::Ready(Err(CamelError::ConsumerStopping))),
+            "poll_ready must return ConsumerStopping when Stopped; got: {:?}",
             result
         );
     }

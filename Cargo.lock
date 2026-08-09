@@ -2153,6 +2153,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]

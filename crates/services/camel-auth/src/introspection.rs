@@ -72,7 +72,7 @@ pub struct CachingTokenIntrospector {
     client_secret: Zeroizing<String>,
     http: reqwest::Client,
     pub(crate) cache: Arc<RwLock<HashMap<String, CachedEntry>>>,
-    in_flight: Mutex<()>,
+    in_flight: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     max_cache_size: usize,
     default_ttl: Duration,
     negative_ttl: Duration,
@@ -137,7 +137,7 @@ impl CachingTokenIntrospector {
             client_secret,
             http,
             cache: Arc::new(RwLock::new(HashMap::new())),
-            in_flight: Mutex::new(()),
+            in_flight: Mutex::new(HashMap::new()),
             max_cache_size: options.max_entries,
             default_ttl: options.default_ttl,
             negative_ttl: options.negative_ttl,
@@ -214,73 +214,108 @@ impl TokenIntrospector for CachingTokenIntrospector {
             }
         }
 
-        let _guard = self.in_flight.lock().await;
-
-        {
-            let cache = self.cache.read().await;
-            if let Some(entry) = cache.get(&key)
-                && entry.expires_at > Instant::now()
-            {
-                tracing::debug!(target: "camel_auth::introspection", cache_outcome = "hit_after_wait");
-                return Ok(entry.result.clone());
-            }
-        }
-
-        tracing::debug!(
-            target: "camel_auth::introspection",
-            cache_outcome = "miss"
-        );
-
-        let response = self
-            .http
-            .post(&self.endpoint)
-            .form(&[
-                ("token", token),
-                ("client_id", &self.client_id),
-                ("client_secret", self.client_secret.as_str()),
-            ])
-            .send()
-            .await
-            .map_err(|e| {
-                AuthError::ProviderUnavailable(format!("introspection request failed: {e}"))
-            })?;
-
-        let status = response.status();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Err(AuthError::ProviderUnavailable(
-                "introspection client unauthorized".into(),
-            ));
-        }
-        if status.is_server_error() {
-            return Err(AuthError::ProviderUnavailable(format!(
-                "introspection endpoint returned {}",
-                status
-            )));
-        }
-        if status.is_client_error() {
-            return Err(AuthError::TokenInvalid(format!(
-                "introspection endpoint returned client error {}",
-                status
-            )));
-        }
-
-        let result: IntrospectionResult = response.json().await.map_err(|e| {
-            AuthError::ProviderUnavailable(format!("invalid introspection response: {e}"))
-        })?;
-
-        let ttl = self.compute_ttl(&result);
-        let entry = CachedEntry {
-            result: result.clone(),
-            expires_at: Instant::now() + ttl,
+        // Get-or-insert a per-key mutex so introspection of different tokens runs
+        // in parallel while introspection of the same token is still single-flighted.
+        //
+        // Duplicated from CachingPermissionEvaluator::evaluate (permission_cache.rs).
+        // Two identical call sites — extraction would add indirection without
+        // reducing total LoC. Keep both in sync when modifying.
+        let key_mutex = {
+            let mut in_flight_map = self.in_flight.lock().await;
+            in_flight_map
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
         };
 
-        self.evict_if_needed().await;
-        {
-            let mut cache = self.cache.write().await;
-            cache.insert(key, entry);
-        }
+        // Do the work inside a block that catches all `?` early returns. The
+        // per-key guard drops at the end of the block on both success and error
+        // paths, releasing the single-flight slot before cleanup runs.
+        let result: Result<IntrospectionResult, AuthError> = async {
+            let _guard = key_mutex.lock().await;
+            // double-check cache (hit-after-wait)
+            {
+                let cache = self.cache.read().await;
+                if let Some(entry) = cache.get(&key)
+                    && entry.expires_at > Instant::now()
+                {
+                    tracing::debug!(target: "camel_auth::introspection", cache_outcome = "hit_after_wait");
+                    return Ok(entry.result.clone());
+                }
+            }
 
-        Ok(result)
+            tracing::debug!(
+                target: "camel_auth::introspection",
+                cache_outcome = "miss"
+            );
+
+            let response = self
+                .http
+                .post(&self.endpoint)
+                .form(&[
+                    ("token", token),
+                    ("client_id", &self.client_id),
+                    ("client_secret", self.client_secret.as_str()),
+                ])
+                .send()
+                .await
+                .map_err(|e| {
+                    AuthError::ProviderUnavailable(format!("introspection request failed: {e}"))
+                })?;
+
+            let status = response.status();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(AuthError::ProviderUnavailable(
+                    "introspection client unauthorized".into(),
+                ));
+            }
+            if status.is_server_error() {
+                return Err(AuthError::ProviderUnavailable(format!(
+                    "introspection endpoint returned {}",
+                    status
+                )));
+            }
+            if status.is_client_error() {
+                return Err(AuthError::TokenInvalid(format!(
+                    "introspection endpoint returned client error {}",
+                    status
+                )));
+            }
+
+            let result: IntrospectionResult = response.json().await.map_err(|e| {
+                AuthError::ProviderUnavailable(format!("invalid introspection response: {e}"))
+            })?;
+
+            let ttl = self.compute_ttl(&result);
+            let entry = CachedEntry {
+                result: result.clone(),
+                expires_at: Instant::now() + ttl,
+            };
+
+            self.evict_if_needed().await;
+            {
+                let mut cache = self.cache.write().await;
+                cache.insert(key.clone(), entry);
+            }
+
+            Ok(result)
+        }
+        .await;
+
+        // Release our clone of the Arc before cleanup; then the map entry is the
+        // sole owner (strong_count == 1) iff no other caller is in flight for the
+        // same key. The outer mutex serializes this test-and-remove against the
+        // get-or-insert above, so concurrent callers cannot race the removal.
+        drop(key_mutex);
+        {
+            let mut in_flight_map = self.in_flight.lock().await;
+            if let Some(arc) = in_flight_map.get(&key)
+                && Arc::strong_count(arc) == 1
+            {
+                in_flight_map.remove(&key);
+            }
+        }
+        result
     }
 }
 
@@ -590,5 +625,69 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, AuthError::ProviderUnavailable(ref s) if s.contains("unauthorized")));
+    }
+
+    #[tokio::test]
+    async fn concurrent_different_tokens_no_head_of_line_blocking() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(500))
+                    .set_body_json(serde_json::json!({"active": true})),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let introspector = CachingTokenIntrospector::new_unchecked_for_test(
+            server.uri(),
+            "cid".into(),
+            "cs".into(),
+            test_cache_opts(),
+        );
+
+        let start = Instant::now();
+        let (r1, r2) = tokio::join!(
+            introspector.introspect("token-parallel-a"),
+            introspector.introspect("token-parallel-b"),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(r1.is_ok(), "first introspect failed: {:?}", r1.err());
+        assert!(r2.is_ok(), "second introspect failed: {:?}", r2.err());
+        assert!(r1.unwrap().active);
+        assert!(r2.unwrap().active);
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "expected parallel introspection (<800ms), got {elapsed:?} (serial would be ~1000ms)"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_token_dedup_preserved() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "active": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let introspector = CachingTokenIntrospector::new_unchecked_for_test(
+            server.uri(),
+            "cid".into(),
+            "cs".into(),
+            test_cache_opts(),
+        );
+
+        let (r1, r2) = tokio::join!(
+            introspector.introspect("same-dedup-token"),
+            introspector.introspect("same-dedup-token"),
+        );
+
+        assert!(r1.is_ok(), "first caller failed: {:?}", r1.err());
+        assert!(r2.is_ok(), "second caller failed: {:?}", r2.err());
     }
 }

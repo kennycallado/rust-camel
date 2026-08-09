@@ -66,6 +66,7 @@ pub mod fake {
         pub fail_on_spawn: bool,
         pub fail_on_register: usize,
         pub fail_on_health: bool,
+        pub fail_on_shutdown: bool,
         pub invoke_response: Option<ExchangePatch>,
         pub invoke_delay: Option<std::time::Duration>,
     }
@@ -143,6 +144,12 @@ pub mod fake {
                 .push(RunnerPoolKey {
                     runtime: handle.id.replace("fake-", ""),
                 });
+            if self.config.lock().expect("config").fail_on_shutdown {
+                // allow-unwrap
+                return Err(ProviderError::ShutdownFailed(
+                    "configured shutdown failure".into(),
+                ));
+            }
             Ok(())
         }
 

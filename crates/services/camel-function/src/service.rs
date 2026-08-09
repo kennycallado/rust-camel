@@ -295,15 +295,20 @@ impl Lifecycle for FunctionRuntimeService {
             .lock()
             .expect("function_timeouts") // allow-unwrap
             .clear();
+        let mut first_err: Option<ProviderError> = None;
         for handle in handles {
             handle.cancel.cancel();
-            self.provider
-                .shutdown(handle)
-                .await
-                .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            if let Err(e) = self.provider.shutdown(handle).await
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
         }
         self.invoker.started.store(false, Ordering::SeqCst);
         self.status.store(STATUS_STOPPED, Ordering::SeqCst);
+        if let Some(e) = first_err {
+            return Err(CamelError::ProcessorError(e.to_string()));
+        }
         Ok(())
     }
 

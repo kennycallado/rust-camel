@@ -13,15 +13,17 @@ Each handler wraps its `HealthSource` call in `tokio::time::timeout`. A timeout 
 produces an `Unhealthy` report with a failed `probe-timeout` service entry. The default handler
 timeout is `DEFAULT_HANDLER_TIMEOUT` (6 seconds), and callers can set a different positive value.
 
-## Timeout ordering and detached-drain window
+## Timeout ordering
 
-`DEFAULT_HANDLER_TIMEOUT` is 6 seconds. `HealthServer::stop` waits at most
-`SHUTDOWN_TIMEOUT` (5 seconds) for Axum graceful shutdown. An active default-timeout probe can
-therefore outlive the shutdown wait by up to one second.
+`HealthServer::stop()` computes the shutdown timeout at runtime as
+`handler_timeout + 2 seconds`. It sends the graceful-shutdown signal (a `oneshot`),
+then waits for the spawned task to finish.
 
-When the 5-second wait expires, dropping the `JoinHandle` detaches the server task. `stop()` then
-sets the lifecycle status to `Stopped`, but the task can still drain and keep the port bound. This
-is a known gap, not an intentional lifecycle guarantee. Issue `rc-7wus` tracks the fix.
+- If the task completes normally, `stop()` returns `Ok`.
+- If the task panicked, the `JoinError` is logged at `error!` level and `stop()`
+  returns `Ok`.
+- If the timeout expires, the task is `.abort()`-ed and awaited. This ensures the
+  listener socket is released — no detached-drain window.
 
 ## `HealthServer` lifecycle architecture
 
@@ -34,13 +36,14 @@ the health router when it co-hosts health and metrics endpoints.
 
 ## ADR-0012 log-policy sites
 
-The single site in this crate is category **(c) system-broken** — a health server lifecycle failure
-that occurs outside any route pipeline. The `error!` level is preserved; the call site carries a
-`// log-policy: system-broken` annotation.
+The sites in this crate are category **(c) system-broken** — health server lifecycle
+failures outside any route pipeline. The `error!` level is preserved; each call site
+carries a `// log-policy: system-broken` annotation.
 
 | File | Line | Site | Category | Annotation |
 |------|------|------|----------|------------|
-| `server.rs` | 123 | `Lifecycle::start` Axum serve error | (c) system-broken | `// log-policy: system-broken` |
+| `server.rs` | ~121 | `Lifecycle::start` Axum serve error | (c) system-broken | `// log-policy: system-broken` |
+| `server.rs` | ~143 | `Lifecycle::stop` JoinError handler | (c) system-broken | `// log-policy: system-broken` |
 
 ## Metrics
 

@@ -16,9 +16,11 @@ returns it to `Ready` or moves it to `Stopped`.
 
 `LazyJmsProducer::poll_ready` reflects the slot state. It returns `Ready(Ok)`
 for a ready or unscheduled slot. It returns `Pending` during `Starting` or
-`Restarting` and registers the task waker. It returns `Err` for `Degraded` or
-`Stopped`. The inner `JmsProducer::poll_ready` applies semaphore backpressure.
-It returns `ConsumerStopping` when the semaphore closes, as ADR-0024 specifies.
+`Restarting` and registers the task waker. It returns `CamelError::ConsumerStopping`
+for `Stopped` (matching the inner `JmsProducer::poll_ready` precedent) and
+`CamelError::ProcessorError` for `Degraded`. The inner `JmsProducer::poll_ready`
+applies semaphore backpressure. It returns `ConsumerStopping` when the semaphore
+closes, as ADR-0024 specifies.
 
 ### Consumer shutdown
 

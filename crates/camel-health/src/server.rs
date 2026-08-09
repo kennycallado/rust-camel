@@ -13,8 +13,6 @@ const STATUS_STOPPED: u8 = 0;
 const STATUS_STARTED: u8 = 1;
 const STATUS_FAILED: u8 = 2;
 
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
 pub struct HealthServer {
     addr: SocketAddr,
     server_handle: Option<JoinHandle<()>>,
@@ -131,23 +129,51 @@ impl Lifecycle for HealthServer {
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
+        let shutdown_timeout = self.handler_timeout + Duration::from_secs(2);
         if let Some(handle) = self.server_handle.take() {
             if let Some(tx) = self.shutdown_tx.take() {
                 let _ = tx.send(());
             }
 
-            match tokio::time::timeout(SHUTDOWN_TIMEOUT, handle).await {
-                Ok(_) => {}
+            tokio::pin!(handle);
+            match tokio::time::timeout(shutdown_timeout, &mut handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_err)) => {
+                    // log-policy: system-broken
+                    tracing::error!("Health server task failed during shutdown: {}", join_err);
+                }
                 Err(_) => {
                     tracing::warn!(
                         "Health server did not shut down within {:?}, aborting",
-                        SHUTDOWN_TIMEOUT
+                        shutdown_timeout
                     );
+                    handle.abort();
+                    let _ = handle.await;
                 }
             }
         }
         self.status.store(STATUS_STOPPED, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl HealthServer {
+    /// Replace the server handle with one that has already panicked,
+    /// testing the `Ok(Err(JoinError))` arm in `stop()`.
+    pub fn inject_panicked_handle(&mut self) {
+        let handle = tokio::spawn(async {
+            panic!("injected panic for JoinError test");
+        });
+        let _ = self.server_handle.take();
+        self.server_handle = Some(handle);
+    }
+
+    /// Remove the shutdown sender so `stop()` never signals graceful shutdown.
+    /// The abort path fires when `stop()` times out waiting for a server that
+    /// never receives a shutdown signal.
+    pub fn strip_shutdown_signal(&mut self) {
+        self.shutdown_tx = None;
     }
 }
 
@@ -299,5 +325,88 @@ mod tests {
         let stop_result = server.stop().await;
         assert!(stop_result.is_ok(), "graceful shutdown should succeed");
         assert_eq!(server.status(), ServiceStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_stop_aborts_on_timeout() {
+        let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut server = HealthServer::new(addr);
+        // Small handler_timeout: shutdown_timeout = 100ms + 2s = 2.1s
+        server.set_handler_timeout(Duration::from_millis(100));
+        server.start().await.unwrap();
+        let port = server.port();
+        assert!(port > 0);
+
+        // Strip shutdown signal — server never receives graceful shutdown,
+        // so abort path fires after shutdown_timeout expires.
+        server.strip_shutdown_signal();
+
+        let start = std::time::Instant::now();
+        server.stop().await.unwrap();
+        let elapsed = start.elapsed();
+
+        // Old implementation: 5s const timeout → elapsed ~5s
+        // New implementation: 2.1s timeout → elapsed ~2.1s
+        // Bound at 4s to discriminate between old (5s) and new (2.1s)
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "stop() should abort promptly (2.1s timeout), took {:?}",
+            elapsed
+        );
+        assert_eq!(server.status(), ServiceStatus::Stopped);
+
+        // Port must be bindable — proves task was aborted and awaited,
+        // not detached with the old drop-on-timeout behavior.
+        let mut server2 = HealthServer::new(SocketAddr::from(([127, 0, 0, 1], port)));
+        server2.start().await.unwrap();
+        assert_eq!(server2.port(), port);
+        server2.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_timeout_derives_from_handler_timeout() {
+        let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut server = HealthServer::new(addr);
+        // shutdown_timeout = handler_timeout + 2s
+        server.set_handler_timeout(Duration::from_millis(50));
+        server.start().await.unwrap();
+
+        let start = std::time::Instant::now();
+        server.stop().await.unwrap();
+        let elapsed = start.elapsed();
+
+        // With handler_timeout=50ms, shutdown_timeout=2.05s.
+        // Old code: 5s const → elapsed could reach 5s.
+        // New code: 2.05s → bound at 4s to discriminate.
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "stop() should use derived timeout (50ms+2s), took {:?}",
+            elapsed
+        );
+        assert_eq!(server.status(), ServiceStatus::Stopped);
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn test_stop_logs_panic_on_join_error() {
+        let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut server = HealthServer::new(addr);
+        server.start().await.unwrap();
+
+        // Replace the handle with a panicking one to exercise Ok(Err(JoinError))
+        server.inject_panicked_handle();
+
+        let stop_result = server.stop().await;
+        assert!(
+            stop_result.is_ok(),
+            "stop() should return Ok even on JoinError"
+        );
+        assert_eq!(server.status(), ServiceStatus::Stopped);
+
+        // Verify the error! log was captured
+        assert!(
+            logs_contain("Health server task failed during shutdown"),
+            "expected error-level log for JoinError, but none captured"
+        );
     }
 }
