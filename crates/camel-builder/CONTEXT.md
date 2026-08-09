@@ -89,15 +89,16 @@ without a real typestate machine (see *Child builder* above). This is why `Route
 lives in its own crate distinct from the declarative camel-dsl AST: the imperative and
 declarative authoring forms are separate front ends that converge on `RouteDefinition`.
 
-**panic-vs-`Result` policy (mixed — decision noted, not prescribed here).**
-As of HEAD `7f9d8a03`, the terminal and format methods return `Result<_, CamelError>`
-(`build()`, `build_canonical()`, `marshal()`, `unmarshal()`), but two misuse paths **panic**:
-`DoTryBuilder::do_finally()` on a second call (`fn do_finally`) and
-`DoCatchBuilder::disposition(ExceptionDisposition::Continued)` (`fn disposition`). Both panics
-are intentional, documented, and covered by `#[should_panic]` tests; neither is reachable
-from the `Result`-returning terminal paths. This asymmetry is a recorded finding
-(camel-builder audit I1) whose resolution is deferred to the code stream — this document
-records the **current state**, not the fix direction.
+**panic-vs-`Result` policy (prescribed).**
+Builder public APIs do not panic on user-reachable misuse. Misuse is prevented at the type
+level where cheaply possible, and reported via `Result<_, CamelError>` otherwise. No public
+method panics on user input or state. Two resolved sites: `DoCatchBuilder` exposes only
+`handled()` / `propagate()` sugar — `Continued` is unrepresentable (type-level prevention);
+`DoTryBuilder::do_finally` returns `Result<DoFinallyBuilder, CamelError>` and a second call
+yields `Err(CamelError::RouteError(_))`. Mechanical enforcement: `cargo clippy -p camel-builder
+--lib -- -D clippy::panic` gates the library target; a `compile_fail` doctest guards the
+removed `disposition` method. Origin: camel-builder audit I1 (bd `rc-0lhn`), now resolved by
+this change.
 
 **`RouteBuilder` is `Clone` (rc-8m5o, resolved before v1.0).**
 A partially-built route can be cloned and reused as a template for multiple routes,
@@ -130,6 +131,5 @@ behavioral-parity gate (ADR-0046) does not apply here.
   `RouteDefinition` are camel-core-owned types this crate writes to.
 - **camel-config DP-9** (`0a720767`) / **camel-dsl DP-8** (`98ace84e`) — crate-local
   CONTEXT.md precedents this file follows.
-- **Open finding (does not block this doc):** I1 — unify the panic-vs-`Result` policy on
-  `do_finally` / `disposition`. Tracked in the code stream; this doc records current state
-  either way.
+- **Resolved:** I1 — panic-vs-`Result` policy unified on `do_finally` / `disposition` (see
+  "Architecture notes"). Resolved by the `unify-builder-error-policy` change (bd `rc-0lhn`).

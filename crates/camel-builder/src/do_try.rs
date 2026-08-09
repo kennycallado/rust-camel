@@ -15,7 +15,7 @@
 
 use crate::RouteBuilder;
 use camel_api::error_handler::ExceptionDisposition;
-use camel_api::{BoxProcessor, FilterPredicate, OpaqueProcessor};
+use camel_api::{BoxProcessor, CamelError, FilterPredicate, OpaqueProcessor};
 use camel_core::route::BuilderStep;
 use camel_processor::{CatchClause, CatchMatcher, DoTryService};
 
@@ -99,17 +99,21 @@ impl DoTryBuilder {
 
     /// Open a `doFinally` block.
     ///
-    /// # Panics
-    /// Panics if `do_finally` has already been called on this scope.
-    pub fn do_finally(self) -> DoFinallyBuilder {
+    /// # Errors
+    ///
+    /// Returns `Err(CamelError::RouteError(_))` if `do_finally` has already
+    /// been called on this scope.
+    pub fn do_finally(self) -> Result<DoFinallyBuilder, CamelError> {
         if self.finally_set {
-            panic!("do_finally can only be called once per do_try scope");
+            return Err(CamelError::RouteError(
+                "do_finally can only be called once per do_try scope".into(),
+            ));
         }
-        DoFinallyBuilder {
+        Ok(DoFinallyBuilder {
             parent: self,
             steps: Vec::new(),
             on_when: None,
-        }
+        })
     }
 
     /// Close the `doTry` scope and return the parent `RouteBuilder`.
@@ -143,40 +147,46 @@ impl DoCatchBuilder {
         self
     }
 
-    /// Set the disposition for this catch clause.
+    /// Mark this catch clause as handled: the caught error is absorbed
+    /// and the clause's exchange becomes the final result (no re-throw).
     ///
-    /// # Panics
-    /// Panics if `value` is `ExceptionDisposition::Continued`, which is not
-    /// supported in doTry MVP (spec §3).
-    pub fn disposition(mut self, value: ExceptionDisposition) -> Self {
-        if matches!(value, ExceptionDisposition::Continued) {
-            panic!(
-                "ExceptionDisposition::Continued is not supported in doTry MVP (spec §3); \
-                 use Handled or Propagate"
-            );
-        }
-        self.disposition = value;
+    /// Only `Handled` and `Propagate` are supported. There is intentionally
+    /// no general `disposition(value)` setter, so `Continued` is
+    /// unrepresentable at the type level.
+    ///
+    /// Valid use (compiles):
+    ///
+    /// ```
+    /// # use camel_builder::RouteBuilder;
+    /// let _ = RouteBuilder::from("direct:start").route_id("x").do_try()
+    ///     .do_catch_exception(&["E"])
+    ///     .handled();
+    /// ```
+    ///
+    /// Rejected — does not compile (no `disposition` method exists):
+    ///
+    /// ```compile_fail
+    /// # use camel_builder::RouteBuilder;
+    /// # use camel_api::error_handler::ExceptionDisposition;
+    /// let b = RouteBuilder::from("direct:start").route_id("x").do_try()
+    ///     .do_catch_exception(&["E"]);
+    /// b.disposition(ExceptionDisposition::Continued);
+    /// ```
+    pub fn handled(mut self) -> Self {
+        self.disposition = ExceptionDisposition::Handled;
         self
     }
 
-    /// Sugar for `disposition(ExceptionDisposition::Handled)`.
+    /// Mark this catch clause as propagating: the clause runs for
+    /// side-effects and the original error is re-thrown.
     ///
-    /// The caught error is marked handled and the catch clause's exchange
-    /// becomes the final result (no re-throw).
-    pub fn handled(self) -> Self {
-        self.disposition(ExceptionDisposition::Handled)
-    }
-
-    /// Sugar for `disposition(ExceptionDisposition::Propagate)`.
-    ///
-    /// The catch clause runs for side-effects and the original error is
-    /// re-thrown.
-    ///
-    /// Note: `.continued()` is intentionally NOT provided — Continued is
-    /// rejected at parse time for doTry MVP per spec §3 (semantically
-    /// ambiguous at catch-clause scope).
-    pub fn propagate(self) -> Self {
-        self.disposition(ExceptionDisposition::Propagate)
+    /// Only `Handled` and `Propagate` are supported. There is intentionally
+    /// no general `disposition(value)` setter, so `Continued` is
+    /// unrepresentable at the type level (semantically ambiguous at
+    /// catch-clause scope; `.continued()` is deliberately not provided).
+    pub fn propagate(mut self) -> Self {
+        self.disposition = ExceptionDisposition::Propagate;
+        self
     }
 
     /// Close the catch clause and return the parent `DoTryBuilder`.
@@ -219,7 +229,7 @@ impl DoFinallyBuilder {
 mod tests {
     use crate::RouteBuilder;
     use camel_api::error_handler::ExceptionDisposition;
-    use camel_api::{BoxProcessor, BoxProcessorExt};
+    use camel_api::{BoxProcessor, BoxProcessorExt, CamelError};
     use camel_core::route::BuilderStep;
 
     fn passthrough() -> BoxProcessor {
@@ -233,10 +243,11 @@ mod tests {
             .do_try()
             .process(passthrough())
             .do_catch_exception(&["ProcessorError"])
-            .disposition(ExceptionDisposition::Handled)
+            .handled()
             .process(passthrough())
             .end_do_catch()
             .do_finally()
+            .unwrap()
             .process(passthrough())
             .end_do_finally()
             .end_do_try();
@@ -255,55 +266,46 @@ mod tests {
 
     #[test]
     fn do_try_builder_disposition_sugar_methods() {
-        // .handled() and .propagate() are syntactic sugar for the two supported dispositions.
-        // .continued() is intentionally NOT provided — Continued is rejected at parse time
-        // for doTry MVP per spec §3.
-        let _ = RouteBuilder::from("direct:a")
+        // handled route
+        let catch = RouteBuilder::from("direct:a")
             .route_id("do-try-sugar-a")
             .do_try()
             .process(passthrough())
             .do_catch_exception(&["Io"])
-            .handled()
-            .end_do_catch()
-            .end_do_try()
-            .build()
-            .unwrap();
+            .handled();
+        assert_eq!(catch.disposition, ExceptionDisposition::Handled);
+        let _ = catch.end_do_catch().end_do_try().build().unwrap();
 
-        let _ = RouteBuilder::from("direct:b")
+        // propagate route
+        let catch = RouteBuilder::from("direct:b")
             .route_id("do-try-sugar-b")
             .do_try()
             .process(passthrough())
             .do_catch_exception(&["Io"])
-            .propagate()
-            .end_do_catch()
-            .end_do_try()
-            .build()
-            .unwrap();
+            .propagate();
+        assert_eq!(catch.disposition, ExceptionDisposition::Propagate);
+        let _ = catch.end_do_catch().end_do_try().build().unwrap();
     }
 
     #[test]
-    #[should_panic(expected = "do_finally can only be called once per do_try scope")]
-    fn do_finally_called_twice_panics() {
-        let _ = RouteBuilder::from("direct:start")
+    fn do_finally_called_twice_returns_err() {
+        let result = RouteBuilder::from("direct:start")
             .route_id("do-try-double-finally")
             .do_try()
             .process(passthrough())
             .do_finally()
+            .unwrap()
             .process(passthrough())
             .end_do_finally()
             .do_finally();
-    }
-
-    #[test]
-    #[should_panic(expected = "ExceptionDisposition::Continued is not supported in doTry MVP")]
-    fn disposition_continued_panics() {
-        let _ = RouteBuilder::from("direct:start")
-            .route_id("do-try-continued")
-            .do_try()
-            .process(passthrough())
-            .do_catch_exception(&["ProcessorError"])
-            .disposition(ExceptionDisposition::Continued)
-            .end_do_catch()
-            .end_do_try();
+        match result {
+            Err(CamelError::RouteError(msg)) => {
+                assert!(
+                    msg.contains("do_finally can only be called once"),
+                    "unexpected message: {msg}"
+                );
+            }
+            _ => panic!("expected Err(RouteError)"),
+        }
     }
 }

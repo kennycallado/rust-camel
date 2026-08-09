@@ -100,7 +100,7 @@ async fn main() -> Result<(), CamelError> {
         .propagate()
         .process(log_marker("log:caught-with-finally"))
         .end_do_catch()
-        .do_finally()
+        .do_finally()?
         .process(BoxProcessor::from_fn(move |ex| {
             let c = cleanup_clone.clone();
             Box::pin(async move {

@@ -129,6 +129,7 @@ async fn do_try_finally_runs_after_handled_catch() {
         }))
         .end_do_catch()
         .do_finally()
+        .unwrap()
         .process(BoxProcessor::from_fn(move |ex: Exchange| {
             let c = counter_clone.clone();
             Box::pin(async move {
