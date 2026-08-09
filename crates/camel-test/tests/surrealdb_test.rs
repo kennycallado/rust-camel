@@ -313,7 +313,9 @@ async fn producer_query() {
         .set_body(Value::String(
             "SELECT name, age FROM query_test ORDER BY name".into(),
         ))
-        .to("surrealdb:query?datasource=test")
+        // Producer takes the SQL from the body (dynamic query path). ADR-0032
+        // trust boundary gates this behind allow_dynamic_query=true.
+        .to("surrealdb:query?datasource=test&allow_dynamic_query=true")
         .to("mock:result")
         .route_id("surrealdb-query-test")
         .build()
