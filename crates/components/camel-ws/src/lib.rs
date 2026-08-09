@@ -78,6 +78,11 @@ struct ServerHandle {
     _task: JoinHandle<()>,
     tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
     tls_source: Option<ServerTlsSource>,
+    /// Present for the TLS (wss) path so callers can await
+    /// `axum_server::Handle::listening()` to detect bind success or
+    /// failure. `None` for the plain-ws path, which binds synchronously
+    /// inside `spawn_server`.
+    listening_handle: Option<axum_server::Handle>,
 }
 
 struct ServerRegistryInner {
@@ -104,7 +109,7 @@ impl ServerRegistry {
         tls_config: Option<WsTlsConfig>,
         runtime: Arc<dyn RuntimeObservability>,
         route_id: String,
-    ) -> Result<WsAppState, CamelError> {
+    ) -> Result<(WsAppState, Option<axum_server::Handle>), CamelError> {
         let wants_tls = tls_config.is_some();
         let host_owned = host.to_string();
 
@@ -143,7 +148,25 @@ impl ServerRegistry {
                 }
                 Ok::<ServerHandle, CamelError>(handle)
             })
-            .await?;
+            .await;
+
+        let handle = match handle {
+            Ok(h) => h,
+            Err(e) => {
+                // Decrement ref_count on spawn failure so the entry is
+                // cleaned up when it reaches zero.
+                let mut guard = self.inner.lock().map_err(|_| {
+                    CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
+                })?;
+                if let Some(entry) = guard.get_mut(&port) {
+                    entry.ref_count -= 1;
+                    if entry.ref_count == 0 {
+                        guard.remove(&port);
+                    }
+                }
+                return Err(e);
+            }
+        };
 
         if wants_tls != handle.is_tls {
             // Decrement ref count since we're rejecting this caller
@@ -161,7 +184,7 @@ impl ServerRegistry {
             )));
         }
 
-        Ok(handle.state.clone())
+        Ok((handle.state.clone(), handle.listening_handle.clone()))
     }
 
     /// Release a reference to the server on the given port.
@@ -209,63 +232,76 @@ async fn spawn_server(
         .fallback(dispatch_handler)
         .with_state(state.clone());
 
-    let (task, is_tls, retained_tls_cfg, retained_source) = if let Some(ref tls) = tls_config {
-        let rustls = load_tls_config(&tls.cert_path, &tls.key_path)?;
-        let parsed_addr = addr.parse().map_err(|e| {
-            CamelError::EndpointCreationFailed(format!("Invalid listen address {addr}: {e}"))
-        })?;
-        let tls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls));
-        let tls_source = ServerTlsSource {
-            cert_path: std::path::PathBuf::from(&tls.cert_path),
-            key_path: std::path::PathBuf::from(&tls.key_path),
-            client_ca_path: None,
+    let (task, is_tls, retained_tls_cfg, retained_source, listening_handle) =
+        if let Some(ref tls) = tls_config {
+            let rustls = load_tls_config(&tls.cert_path, &tls.key_path)?;
+            let parsed_addr = addr.parse().map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("Invalid listen address {addr}: {e}"))
+            })?;
+            let tls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls));
+            let tls_source = ServerTlsSource {
+                cert_path: std::path::PathBuf::from(&tls.cert_path),
+                key_path: std::path::PathBuf::from(&tls.key_path),
+                client_ca_path: None,
+            };
+            // Clone for handle retention — the original moves into the spawned task
+            let retained = tls_cfg.clone();
+            // axum_server defers the TCP bind into the spawned serve() future, so
+            // surface bind success/failure via Handle::listening(). The clone here
+            // moves into the task; the original is retained for the caller.
+            let listen_handle = axum_server::Handle::new();
+            let listen_handle_for_task = listen_handle.clone();
+            let error_flag = Arc::clone(&server_error);
+            let rt = Arc::clone(&runtime);
+            let rid = route_id.clone();
+            let task = tokio::spawn(async move {
+                if let Err(e) = axum_server::bind_rustls(parsed_addr, tls_cfg)
+                    .handle(listen_handle_for_task)
+                    .serve(app.into_make_service())
+                    .await
+                {
+                    rt.health()
+                        .force_unhealthy_for_route(&rid, "g:ws:bind-tls", &e.to_string());
+                    // log-policy: outside-contract
+                    tracing::error!(
+                        host = host_owned,
+                        port = port,
+                        error = %e,
+                        "WebSocket server terminated with error"
+                    );
+                    error_flag.store(true, Ordering::Relaxed);
+                }
+            });
+            (
+                task,
+                true,
+                Some(retained),
+                Some(tls_source),
+                Some(listen_handle),
+            )
+        } else {
+            let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
+            })?;
+            let error_flag = Arc::clone(&server_error);
+            let rt = Arc::clone(&runtime);
+            let rid = route_id.clone();
+            let task = tokio::spawn(async move {
+                if let Err(e) = serve(listener, app).await {
+                    rt.health()
+                        .force_unhealthy_for_route(&rid, "g:ws:bind-plain", &e.to_string());
+                    // log-policy: outside-contract
+                    tracing::error!(
+                        host = host_owned,
+                        port = port,
+                        error = %e,
+                        "WebSocket server terminated with error"
+                    );
+                    error_flag.store(true, Ordering::Relaxed);
+                }
+            });
+            (task, false, None, None, None)
         };
-        // Clone for handle retention — the original moves into the spawned task
-        let retained = tls_cfg.clone();
-        let error_flag = Arc::clone(&server_error);
-        let rt = Arc::clone(&runtime);
-        let rid = route_id.clone();
-        let task = tokio::spawn(async move {
-            if let Err(e) = axum_server::bind_rustls(parsed_addr, tls_cfg)
-                .serve(app.into_make_service())
-                .await
-            {
-                rt.health()
-                    .force_unhealthy_for_route(&rid, "g:ws:bind-tls", &e.to_string());
-                // log-policy: outside-contract
-                tracing::error!(
-                    host = host_owned,
-                    port = port,
-                    error = %e,
-                    "WebSocket server terminated with error"
-                );
-                error_flag.store(true, Ordering::Relaxed);
-            }
-        });
-        (task, true, Some(retained), Some(tls_source))
-    } else {
-        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-            CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
-        })?;
-        let error_flag = Arc::clone(&server_error);
-        let rt = Arc::clone(&runtime);
-        let rid = route_id.clone();
-        let task = tokio::spawn(async move {
-            if let Err(e) = serve(listener, app).await {
-                rt.health()
-                    .force_unhealthy_for_route(&rid, "g:ws:bind-plain", &e.to_string());
-                // log-policy: outside-contract
-                tracing::error!(
-                    host = host_owned,
-                    port = port,
-                    error = %e,
-                    "WebSocket server terminated with error"
-                );
-                error_flag.store(true, Ordering::Relaxed);
-            }
-        });
-        (task, false, None, None)
-    };
 
     tracing::info!(host, port, is_tls, "WebSocket server started");
 
@@ -275,6 +311,7 @@ async fn spawn_server(
         _task: task,
         tls_config: retained_tls_cfg,
         tls_source: retained_source,
+        listening_handle,
     })
 }
 
@@ -999,7 +1036,7 @@ impl Consumer for WsConsumer {
             None
         };
 
-        let state = ServerRegistry::global()
+        let (state, listening_handle) = ServerRegistry::global()
             .get_or_spawn(
                 &self.cfg.inner.host,
                 self.cfg.inner.port,
@@ -1009,11 +1046,26 @@ impl Consumer for WsConsumer {
             )
             .await?;
 
-        // TCP listener is bound inside get_or_spawn/spawn_server
-        // (TcpListener::bind before tokio::spawn for plain WS; for TLS the
-        // bind is deferred inside a spawned task). Signal readiness now
-        // that the synchronous bind succeeded.
-        ctx.mark_ready();
+        // Readiness gating:
+        // - Plain ws: `spawn_server` binds the TCP listener synchronously
+        //   before returning, so `get_or_spawn` returning `Ok` means the
+        //   bind already succeeded. Signal readiness immediately.
+        // - wss: `spawn_server` defers the bind into a spawned serve()
+        //   task. The `axum_server::Handle` lets us await the actual bind
+        //   result. `listening()` returns `Some(addr)` once bound, or
+        //   `None` if the bind failed — propagate that failure here so
+        //   the route never marks itself ready on a dead listener.
+        match listening_handle {
+            Some(handle) => match handle.listening().await {
+                Some(_addr) => ctx.mark_ready(),
+                None => {
+                    return Err(CamelError::EndpointCreationFailed(
+                        "TLS listener bind failed".to_string(),
+                    ));
+                }
+            },
+            None => ctx.mark_ready(),
+        }
 
         let (env_tx, mut env_rx) = mpsc::channel::<ExchangeEnvelope>(64);
         {
@@ -1984,11 +2036,11 @@ mod tests {
     async fn server_registry_returns_same_state_for_same_port() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
-        let state1 = ServerRegistry::global()
+        let (state1, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
-        let state2 = ServerRegistry::global()
+        let (state2, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -2002,7 +2054,7 @@ mod tests {
     async fn dispatch_handler_returns_404_for_unregistered_path() {
         let _guard = REGISTRY_TEST_LOCK.lock().await;
         let port = free_port();
-        let state = ServerRegistry::global()
+        let (state, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -2195,7 +2247,7 @@ mod tests {
         );
         consumer.start(ctx).await.unwrap();
 
-        let state = ServerRegistry::global()
+        let (state, _) = ServerRegistry::global()
             .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
             .await
             .unwrap();
@@ -2312,7 +2364,7 @@ mod tests {
         for _ in 0..4 {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
-                let state = ServerRegistry::global()
+                let (state, _) = ServerRegistry::global()
                     .get_or_spawn("127.0.0.1", port, None, test_rt(), "test-route".into())
                     .await
                     .unwrap();
@@ -3115,7 +3167,7 @@ mod tests {
         };
 
         // Spawn a single WSS server.
-        let _state = ServerRegistry::global()
+        let (_state, _) = ServerRegistry::global()
             .get_or_spawn(
                 "127.0.0.1",
                 port,
@@ -3171,7 +3223,7 @@ mod tests {
         };
 
         // Acquire TWO references to the same port.
-        let _s1 = ServerRegistry::global()
+        let (_s1, _) = ServerRegistry::global()
             .get_or_spawn(
                 "127.0.0.1",
                 port,
@@ -3181,7 +3233,7 @@ mod tests {
             )
             .await
             .expect("WSS server should spawn (ref 1)");
-        let _s2 = ServerRegistry::global()
+        let (_s2, _) = ServerRegistry::global()
             .get_or_spawn(
                 "127.0.0.1",
                 port,
@@ -3223,7 +3275,7 @@ mod tests {
         ServerRegistry::reset();
 
         let port = free_port();
-        let _state = ServerRegistry::global()
+        let (_state, _) = ServerRegistry::global()
             .get_or_spawn(
                 "127.0.0.1",
                 port,
@@ -3242,5 +3294,73 @@ mod tests {
 
         // Cleanup.
         ServerRegistry::global().release(port);
+    }
+
+    // WSS readiness: a failed TLS listener bind must NOT signal readiness.
+    #[tokio::test]
+    async fn test_wss_bind_failure_does_not_mark_ready() {
+        use camel_component_api::StartupSignal;
+        use camel_component_api::test_support::{NoopRuntimeObservability, tls};
+
+        let _guard = REGISTRY_TEST_LOCK.lock().await;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Clean global state (process-lifetime servers may leak across tests).
+        ServerRegistry::reset();
+
+        // Generate valid TLS material so we get past cert loading and reach
+        // the actual listener bind.
+        let (cert_pem, key_pem) = {
+            let (_ca, c, k) = tls::gen_server_cert();
+            (c, k)
+        };
+        let cert_path = tls::write_pem_tmp("ws-bindfail-cert.pem", &cert_pem);
+        let key_path = tls::write_pem_tmp("ws-bindfail-key.pem", &key_pem);
+        let cert_str = cert_path.to_str().expect("cert path");
+        let key_str = key_path.to_str().expect("key path");
+
+        // Pre-bind the port so the WSS listener bind fails with EADDRINUSE.
+        let blocker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = blocker.local_addr().unwrap().port();
+
+        let uri = format!("wss://127.0.0.1:{port}/secure?tlsCert={cert_str}&tlsKey={key_str}");
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WssComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+        // NoopRuntimeObservability: the bind-failure path calls
+        // `health().force_unhealthy_for_route`, which must not panic.
+        let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+            std::sync::Arc::new(NoopRuntimeObservability);
+        let mut consumer = endpoint.create_consumer(rt).unwrap();
+
+        // Install our own startup pair so we can observe whether mark_ready
+        // was called.
+        let (signal, receiver) = StartupSignal::pair();
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-bindfail-route".to_string(),
+        )
+        .with_startup(signal);
+
+        let result = consumer.start(ctx).await;
+        assert!(
+            result.is_err(),
+            "start() must return Err when the WSS listener bind fails: {result:?}"
+        );
+
+        // ctx was dropped when start() returned, so the startup signal sender
+        // is gone. await_ready resolves immediately: Err means the consumer
+        // never signalled readiness (good); Ok would mean mark_ready was
+        // called before the bind failure surfaced (bug).
+        let ready_result: Result<(), _> = receiver.await_ready().await;
+        assert!(
+            ready_result.is_err(),
+            "mark_ready() must not be called when the WSS listener bind fails"
+        );
+
+        drop(blocker);
+        let _ = consumer.stop().await;
     }
 }

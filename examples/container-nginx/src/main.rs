@@ -80,7 +80,7 @@ async fn main() -> Result<(), CamelError> {
     println!("Shutting down...");
     ctx.stop().await?;
 
-    cleanup_tracked_containers().await;
+    cleanup_tracked_containers(None).await;
     println!("Done.");
 
     Ok(())

@@ -1,0 +1,7 @@
+error: UriConfig can only be derived for structs
+ --> tests/ui/non_struct_fail.rs:4:10
+  |
+4 | #[derive(UriConfig)]
+  |          ^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `UriConfig` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,5 @@
+error: only one field can be the path field (first field without #[uri_param])
+ --> tests/ui/duplicate_path_field_fail.rs:9:5
+  |
+9 |     second: String,
+  |     ^^^^^^^^^^^^^^

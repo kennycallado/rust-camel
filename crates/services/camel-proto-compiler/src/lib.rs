@@ -135,6 +135,46 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_compiles_do_not_clobber() {
+        let proto = test_proto_path();
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let proto = proto.clone();
+            handles.push(std::thread::spawn(move || {
+                compile_proto(&proto, std::iter::empty::<&Path>())
+            }));
+        }
+        for handle in handles {
+            let result = handle.join().expect("thread panicked");
+            let pool = result.expect("concurrent compile should succeed");
+            assert!(
+                pool.get_message_by_name("helloworld.HelloRequest")
+                    .is_some(),
+                "concurrent compile produced incomplete descriptor",
+            );
+        }
+    }
+
+    #[test]
+    fn test_descriptor_file_cleaned_up() {
+        let _guard = PROTOC_COMPILE_LOCK.lock().unwrap();
+        let proto = test_proto_path();
+        compile_proto(&proto, std::iter::empty::<&Path>()).expect("compile should succeed");
+
+        let entries = std::fs::read_dir(std::env::temp_dir()).expect("read temp dir");
+        for entry in entries {
+            let entry = entry.expect("read entry");
+            let name = entry.file_name();
+            if let Some(name) = name.to_str() {
+                assert!(
+                    !name.starts_with("camel-proto-") || !name.ends_with(".desc"),
+                    "leftover descriptor file: {name}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cache_invalidation_on_content_change() {
         let _guard = PROTOC_COMPILE_LOCK.lock().unwrap();
         let cache = ProtoCache::new();

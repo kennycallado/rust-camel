@@ -2,6 +2,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BeanError {
     #[error("Bean not found: {0}")]
     NotFound(String),

@@ -174,7 +174,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.stop().await?;
 
     // Cleanup any tracked containers that are still running
-    cleanup_tracked_containers().await;
+    cleanup_tracked_containers(None).await;
 
     Ok(())
 }

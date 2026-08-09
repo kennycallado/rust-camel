@@ -23,13 +23,14 @@ Fanout rejects reply-waiting modes because one request has no single valid reply
 `concurrentConsumers=0` is clamped to `1`. Endpoints with the same name must agree on queue size,
 mode, Exchange pattern, and `concurrentConsumers`.
 
-## Concurrency limitation
+## Concurrency
 
-`concurrentConsumers` is reported to the Runtime through `ConcurrencyModel::Concurrent`. Each SEDA
-Consumer currently starts one queue forwarder. That forwarder awaits `send_and_wait` for InOut and
-`waitForTaskToComplete=Always`, so these exchanges remain serial even when
-`concurrentConsumers > 1`. InOnly exchanges without a reply channel do not wait in the forwarder.
-Finding I1 and bd issue `rc-exa2` track this limitation.
+`concurrentConsumers` is reported to the Runtime through `ConcurrencyModel::Concurrent`. The
+Consumer spawns N forwarder tasks, one per configured concurrent consumer.
+
+`background_task_handle()` returns only one handle for Runtime supervision. The remaining N-1
+handles are aborted in `stop()`. ADR-0007 crash supervision covers only the returned handle; the
+others are crash-unsupervised during steady operation. This is accepted for v1.0.
 
 ## Lifecycle
 

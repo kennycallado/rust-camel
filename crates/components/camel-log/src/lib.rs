@@ -352,12 +352,11 @@ impl LogProducer {
                 }
             };
 
-            let mut body_str = body_str;
-            if let Some(limit) = self.config.max_chars
-                && body_str.len() > limit
-            {
-                body_str.truncate(limit);
-            }
+            let body_str = if let Some(limit) = self.config.max_chars {
+                body_str.chars().take(limit).collect()
+            } else {
+                body_str
+            };
 
             parts.push(format!("Body: {body_str}"));
         }
@@ -649,9 +648,61 @@ mod tests {
         // Extract the body part from "[trunc] Body: ..."
         let body_part = formatted.split_once("Body: ").unwrap().1;
         assert!(
-            body_part.len() <= 10,
+            body_part.chars().count() <= 10,
             "expected body <= 10 chars, got {} chars: {body_part:?}",
-            body_part.len()
+            body_part.chars().count()
+        );
+    }
+
+    #[test]
+    fn test_log_truncates_multibyte_body() {
+        let producer = LogProducer::new(LogConfig {
+            category: "mb".to_string(),
+            level: LogLevel::Info,
+            show_headers: false,
+            show_body: true,
+            max_chars: Some(3),
+            log_mask: false,
+            show_stream_info: false,
+            group_size: None,
+        });
+
+        let exchange = Exchange::new(Message::new("日本語测试"));
+        let formatted = producer.format_exchange(&exchange, 1);
+
+        let body_part = formatted.split_once("Body: ").unwrap().1;
+        assert_eq!(
+            body_part.chars().count(),
+            3,
+            "expected 3 chars, got {}: {body_part:?}",
+            body_part.chars().count()
+        );
+        // Must be valid UTF-8 — a char-sliced string is always valid
+        assert!(body_part.is_utf8());
+    }
+
+    #[test]
+    fn test_log_truncates_multibyte_no_panic() {
+        let producer = LogProducer::new(LogConfig {
+            category: "cafe".to_string(),
+            level: LogLevel::Info,
+            show_headers: false,
+            show_body: true,
+            max_chars: Some(4),
+            log_mask: false,
+            show_stream_info: false,
+            group_size: None,
+        });
+
+        let exchange = Exchange::new(Message::new("café"));
+        let formatted = producer.format_exchange(&exchange, 1);
+
+        let body_part = formatted.split_once("Body: ").unwrap().1;
+        assert_eq!(
+            body_part.chars().count(),
+            4,
+            "expected 4 chars, got {}: {body_part:?}",
+            body_part.chars().count()
         );
     }
 

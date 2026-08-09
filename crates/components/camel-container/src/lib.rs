@@ -57,8 +57,51 @@ fn untrack_container(id: &str) {
     }
 }
 
+/// Validates a Docker host string, accepting `unix://`, `npipe://`, or
+/// schemeless paths. Returns the host as-is on success.
+fn validate_docker_host(host: &str) -> Result<&str, CamelError> {
+    if host.starts_with("unix://") || host.starts_with("npipe://") {
+        return Ok(host);
+    }
+    if host.contains("://") {
+        return Err(CamelError::ProcessorError(format!(
+            "Unsupported Docker host scheme: {} (only unix:// and npipe:// are supported)",
+            host
+        )));
+    }
+    Ok(host)
+}
+
+/// Creates a Docker client connection, optionally using a custom host.
+///
+/// When `docker_host` is `Some`, validates the scheme (accepts `unix://`,
+/// `npipe://`, or schemeless paths) and connects via the given socket.  When
+/// `None`, connects using Docker's local-defaults resolution.
+fn connect_docker_from_host(docker_host: Option<&str>) -> Result<Docker, CamelError> {
+    match docker_host {
+        Some(host) => {
+            validate_docker_host(host)?;
+            Docker::connect_with_socket(
+                host,
+                DOCKER_CONNECT_TIMEOUT_SECS,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .map_err(|e| {
+                CamelError::ProcessorError(format!("Failed to connect to docker daemon: {}", e))
+            })
+        }
+        None => Docker::connect_with_local_defaults().map_err(|e| {
+            CamelError::ProcessorError(format!("Failed to connect to docker daemon: {}", e))
+        }),
+    }
+}
+
 /// Cleans up all tracked containers. Call this on application shutdown.
-pub async fn cleanup_tracked_containers() {
+///
+/// `docker_host` allows cleanup to use a non-default Docker socket (e.g. for
+/// hot-reload scenarios where the host was configured).  Pass `None` to use
+/// Docker's local defaults.
+pub async fn cleanup_tracked_containers(docker_host: Option<&str>) {
     let ids: Vec<String> = {
         match CONTAINER_TRACKER.lock() {
             Ok(tracker) => tracker.iter().cloned().collect(),
@@ -72,7 +115,7 @@ pub async fn cleanup_tracked_containers() {
 
     tracing::info!("Cleaning up {} tracked container(s)", ids.len());
 
-    let docker = match Docker::connect_with_local_defaults() {
+    let docker = match connect_docker_from_host(docker_host) {
         Ok(d) => d,
         Err(e) => {
             // log-policy: system-broken
@@ -441,30 +484,11 @@ impl ContainerConfig {
             "unix:///var/run/docker.sock"
         });
 
-        if host.starts_with("unix://") || host.starts_with("npipe://") {
-            return Ok(host);
-        }
-
-        if host.contains("://") {
-            return Err(CamelError::ProcessorError(format!(
-                "Unsupported Docker host scheme: {} (only unix:// and npipe:// are supported)",
-                host
-            )));
-        }
-
-        Ok(host)
+        validate_docker_host(host)
     }
 
     pub fn connect_docker_client(&self) -> Result<Docker, CamelError> {
-        let socket_path = self.docker_socket_path()?;
-        Docker::connect_with_socket(
-            socket_path,
-            DOCKER_CONNECT_TIMEOUT_SECS,
-            bollard::API_DEFAULT_VERSION,
-        )
-        .map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to connect to docker daemon: {}", e))
-        })
+        connect_docker_from_host(self.host.as_deref())
     }
 
     /// Connects to the Docker daemon using the configured host.
@@ -1748,7 +1772,8 @@ fn extract_timestamp(log_line: &str) -> Option<String> {
 /// appropriate producer and consumer endpoints for Docker operations.
 ///
 /// Containers created via `run` operation are tracked globally and can be
-/// cleaned up on shutdown by calling `cleanup_tracked_containers()`.
+/// cleaned up on shutdown by calling
+/// `cleanup_tracked_containers(docker_host: Option<&str>)`.
 pub struct ContainerComponent {
     config: Option<ContainerGlobalConfig>,
 }
@@ -2735,6 +2760,75 @@ mod tests {
         );
         assert_eq!(errors[0].0, "events-test-route");
         assert_eq!(errors[0].1, "e:container:events-connect");
+    }
+
+    #[test]
+    fn test_connect_docker_from_host_rejects_bad_scheme() {
+        let err = connect_docker_from_host(Some("tcp://localhost:2375")).unwrap_err();
+        match &err {
+            CamelError::ProcessorError(msg) => {
+                assert!(msg.contains("tcp"), "expected tcp rejection, got: {}", msg);
+            }
+            _ => panic!("expected ProcessorError, got: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_connect_docker_from_host_accepts_unix_scheme() {
+        // Validation succeeds; connection attempt fails on nonexistent socket
+        let result = connect_docker_from_host(Some("unix:///nonexistent/docker.sock"));
+        match result {
+            Err(CamelError::ProcessorError(msg)) => {
+                // bollard error should mention the socket or connection failure
+                assert!(
+                    msg.contains("nonexistent")
+                        || msg.contains("connect")
+                        || msg.contains("socket"),
+                    "expected error referencing socket, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => {} // Docker daemon is running on this path (unlikely in CI)
+            Err(other) => panic!("unexpected error type: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connect_docker_from_host_accepts_schemeless_path() {
+        // schemeless paths pass through validation
+        let result = connect_docker_from_host(Some("/nonexistent/docker.sock"));
+        match result {
+            Err(CamelError::ProcessorError(msg)) => {
+                assert!(
+                    msg.contains("nonexistent")
+                        || msg.contains("connect")
+                        || msg.contains("socket"),
+                    "expected error referencing socket, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => {} // real daemon on this path (unlikely in CI)
+            Err(other) => panic!("unexpected error type: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_respects_custom_docker_host() {
+        // Track a dummy container ID so cleanup attempts connection
+        track_container("test-custom-host-container".to_string());
+
+        // Must not panic regardless of whether Docker is available.
+        // The function logs errors and returns gracefully.
+        cleanup_tracked_containers(Some("unix:///nonexistent/docker.sock")).await;
+
+        // Clean up: remove the dummy ID from the tracker
+        untrack_container("test-custom-host-container");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_none_uses_defaults() {
+        // Must not panic on empty tracker or connection failure.
+        cleanup_tracked_containers(None).await;
     }
 
     #[test]

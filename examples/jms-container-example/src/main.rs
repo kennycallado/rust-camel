@@ -346,7 +346,7 @@ async fn main() -> Result<(), CamelError> {
     pool.shutdown().await?;
 
     println!("==> Cleaning up broker container...");
-    cleanup_tracked_containers().await;
+    cleanup_tracked_containers(None).await;
 
     println!("==> Done.");
     Ok(())

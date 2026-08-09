@@ -19,7 +19,7 @@ fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
 }
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
@@ -581,6 +581,11 @@ impl SedaConsumer {
             runtime,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn forwarder_count(&self) -> usize {
+        self.forwarder_handles.len()
+    }
 }
 
 #[async_trait]
@@ -610,21 +615,30 @@ impl Consumer for SedaConsumer {
                 })?;
                 drop(rx_guard);
 
-                let cancel = self.cancel_token.clone();
-                let handle = tokio::spawn(async move {
-                    let mut rx = receiver;
-                    loop {
-                        tokio::select! {
-                            envelope = rx.recv() => {
-                                let Some(envelope) = envelope else { break };
-                                forward_envelope(&ctx, envelope).await;
-                            }
-                            _ = cancel.cancelled() => break,
+                let shared_rx = Arc::new(AsyncMutex::new(receiver));
+                let concurrent = self.state.config.concurrent_consumers;
+
+                for _ in 0..concurrent {
+                    let shared_rx = Arc::clone(&shared_rx);
+                    let cancel = self.cancel_token.clone();
+                    let ctx = ctx.clone();
+                    let handle = tokio::spawn(async move {
+                        loop {
+                            let envelope = {
+                                let mut guard = shared_rx.lock().await;
+                                tokio::select! {
+                                    env = guard.recv() => env,
+                                    _ = cancel.cancelled() => return Ok(()),
+                                }
+                            };
+                            let Some(envelope) = envelope else {
+                                return Ok(());
+                            };
+                            forward_envelope(&ctx, envelope).await;
                         }
-                    }
-                    Ok(())
-                });
-                self.forwarder_handles.push(handle);
+                    });
+                    self.forwarder_handles.push(handle);
+                }
             }
             SedaMode::Fanout { subscribers } => {
                 let (tx, rx) = mpsc::channel(self.state.config.size);
@@ -1737,6 +1751,127 @@ mod consumer_producer_tests {
             .oneshot(Exchange::new(Message::new("3")))
             .await
             .unwrap();
+
+        consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_seda_concurrent_forwarders_count() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:cfc?concurrentConsumers=4", &NoOpComponentContext)
+            .unwrap();
+
+        let state = comp
+            .endpoints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("cfc")
+            .cloned()
+            .unwrap();
+        let mut consumer = SedaConsumer::new(state, next_consumer_id(), rt());
+        let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
+        consumer.start(ctx).await.unwrap();
+
+        assert_eq!(consumer.forwarder_count(), 4);
+
+        consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_seda_concurrent_parallel_processing() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint(
+                "seda:cpp?concurrentConsumers=2&size=10",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+
+        // Set up route pipeline: receives envelope, sleeps 100ms, sends reply
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let mut consumer = ep.create_consumer(rt()).unwrap();
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        consumer.start(ctx).await.unwrap();
+
+        // Spawn a concurrent pipeline: each envelope gets its own task so
+        // parallel processing is measurable even with InOut exchanges.
+        tokio::spawn(async move {
+            while let Some(envelope) = route_rx.recv().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if let Some(reply_tx) = envelope.reply_tx {
+                        let _ = reply_tx.send(Ok(envelope.exchange));
+                    }
+                });
+            }
+        });
+
+        // Enqueue 2 InOut envelopes to the SEDA channel (both at once, not awaiting replies)
+        let state = comp
+            .endpoints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("cpp")
+            .cloned()
+            .unwrap();
+        let mut reply_rxs = Vec::new();
+        match &state.mode {
+            SedaMode::Single { tx, .. } => {
+                for i in 0..2u32 {
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    tx.send(ExchangeEnvelope {
+                        exchange: Exchange::new(Message::new(format!("msg-{}", i))),
+                        reply_tx: Some(reply_tx),
+                    })
+                    .await
+                    .unwrap();
+                    reply_rxs.push(reply_rx);
+                }
+            }
+            SedaMode::Fanout { .. } => panic!("expected single mode"),
+        }
+
+        // Await both replies; with 2 concurrent forwarders this completes in ~200ms
+        let result = tokio::time::timeout(Duration::from_millis(300), async {
+            for reply_rx in reply_rxs {
+                let _ = reply_rx.await.unwrap().unwrap();
+            }
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "parallel processing timed out — must complete within 300ms"
+        );
+
+        consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_seda_concurrent_consumers_one_still_single() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:cco?concurrentConsumers=1", &NoOpComponentContext)
+            .unwrap();
+
+        let state = comp
+            .endpoints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("cco")
+            .cloned()
+            .unwrap();
+        let mut consumer = SedaConsumer::new(state, next_consumer_id(), rt());
+        let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "seda-test-route".to_string());
+        consumer.start(ctx).await.unwrap();
+
+        assert_eq!(consumer.forwarder_count(), 1);
 
         consumer.stop().await.unwrap();
     }

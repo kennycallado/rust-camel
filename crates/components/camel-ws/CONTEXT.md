@@ -29,10 +29,14 @@ policy evaluation.
   shutdown removes its path, policy, and connection registry.
 - `WsReloadHandler::matches` matches `wss` servers by port and intentionally ignores host. This
   mirrors the port-keyed `ServerRegistry`.
-- Plain WS binds its TCP listener before `ConsumerContext::mark_ready`. WSS starts its bind in the
-  server task, so readiness can precede a successful TLS bind. This known I2 asymmetry means the
-  health pin and `WsConsumer::stop` error remain the failure signals. ADR-0007 requires such task
-  failures to remain visible to Route supervision.
+- Plain WS binds its TCP listener before `ConsumerContext::mark_ready`. WSS
+  starts its bind in the server task, so `WsConsumer::start` awaits
+  `axum_server::Handle::listening()` before signalling readiness. On bind
+  failure (`listening()` returns `None`) `start` returns `Err`, so the route
+  never marks itself ready on a dead listener. The health pin
+  (`g:ws:bind-tls`) and the `WsConsumer::stop` error remain secondary failure
+  signals for bind errors that surface after readiness. ADR-0007 requires
+  such task failures to remain visible to Route supervision.
 - When a SecurityContext exists, `dispatch_handler` fails closed on missing credentials, denied
   policy decisions, and future `AuthorizationDecision` variants. Query-token values are redacted
   before logging.

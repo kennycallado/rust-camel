@@ -1,0 +1,7 @@
+error: missing #[uri_scheme = "xxx"] attribute on struct
+ --> tests/ui/missing_uri_scheme_fail.rs:4:10
+  |
+4 | #[derive(UriConfig)]
+  |          ^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `UriConfig` (in Nightly builds, run with -Z macro-backtrace for more info)

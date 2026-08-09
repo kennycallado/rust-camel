@@ -1,13 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use prost_reflect::DescriptorPool;
 use tracing::debug;
 
 use crate::ProtoCompileError;
-
-static COMPILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn compile_proto<P, I>(proto_path: P, includes: I) -> Result<DescriptorPool, ProtoCompileError>
 where
@@ -29,10 +26,8 @@ where
         .map(PathBuf::from)
         .unwrap_or(protoc_bin_vendored::protoc_bin_path()?);
 
-    let descriptor_file = std::env::temp_dir().join(format!(
-        "camel-proto-{}.desc",
-        COMPILE_COUNTER.fetch_add(1, Ordering::Relaxed),
-    ));
+    let temp_file = tempfile::Builder::new().suffix(".desc").tempfile()?;
+    let descriptor_file = temp_file.path().to_path_buf();
 
     let mut cmd = Command::new(&protoc);
     cmd.arg(format!(
@@ -61,7 +56,7 @@ where
     }
 
     let bytes = std::fs::read(&descriptor_file)?;
-    let _ = std::fs::remove_file(&descriptor_file);
+    // temp_file is dropped here, auto-cleaning the descriptor file
 
     DescriptorPool::decode(bytes.as_slice())
         .map_err(|e| ProtoCompileError::DescriptorDecode(format!("{}: {e}", proto_path.display())))
