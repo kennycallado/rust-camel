@@ -24,7 +24,22 @@ pub fn redact_db_url(db_url: &str) -> String {
             let _ = parsed.set_password(Some("***"));
             parsed.to_string()
         }
-        Err(_) => db_url.to_string(),
+        Err(_) => {
+            // url::Url rejected the string, so structured redaction is
+            // impossible. Best-effort: if the raw string carries a userinfo
+            // separator (`@` after `://`), redact that segment rather than
+            // risk leaking credentials (rc-7rup). Strings without `@` carry
+            // no userinfo and are returned unchanged.
+            if let Some(scheme_end) = db_url.find("://") {
+                let after_scheme = &db_url[scheme_end + 3..];
+                if let Some(at) = after_scheme.find('@') {
+                    let scheme = &db_url[..scheme_end + 3];
+                    let host_part = &after_scheme[at + 1..];
+                    return format!("{scheme}***@{host_part}");
+                }
+            }
+            db_url.to_string()
+        }
     }
 }
 
@@ -1814,6 +1829,33 @@ mod tests {
     #[test]
     fn redact_db_url_invalid_returns_original() {
         assert_eq!(redact_db_url("not-a-url"), "not-a-url");
+    }
+
+    #[test]
+    fn redact_db_url_invalid_with_credentials_redacts() {
+        // Port out of range (99999) makes url::Url::parse fail, but the raw
+        // string carries userinfo. The Err branch must still redact it rather
+        // than return the credential-bearing string verbatim (rc-7rup).
+        let redacted = redact_db_url("postgres://user:secret@host:99999/db");
+        assert!(
+            !redacted.contains("secret"),
+            "password must be redacted in unparseable URL: {redacted}"
+        );
+        assert!(
+            !redacted.contains("user:secret"),
+            "userinfo must be redacted: {redacted}"
+        );
+        assert!(
+            !redacted.contains("user"),
+            "username must be redacted: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_db_url_at_before_scheme_returns_original() {
+        // `@` preceding `://` is not userinfo in a valid position; the
+        // best-effort redactor leaves it unchanged (no false redaction).
+        assert_eq!(redact_db_url("foo@bar://baz"), "foo@bar://baz");
     }
 
     // SQL-004: usePlaceholder parsing

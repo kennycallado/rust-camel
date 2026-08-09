@@ -15,13 +15,11 @@ default response-body limit.
 ### Credential redaction
 
 `HttpAuth` implements `Debug` manually and redacts passwords and bearer tokens.
-`ServerTlsConfig` also implements `Debug` manually and redacts certificate and
-key paths. Follow these patterns for types that contain credentials or sensitive
-paths.
-
-`TlsConfig` currently derives `Debug` and can expose `client_key_path`. Do not
-log `HttpConfig` or `TlsConfig` with `Debug` formatting until that code finding
-is fixed.
+`ServerTlsConfig` and `TlsConfig` also implement `Debug` manually and redact
+certificate and key paths (`ca_cert_path`, `client_cert_path`, `client_key_path`).
+Follow these patterns for types that contain credentials or sensitive paths.
+`HttpConfig` derives `Debug` but delegates to `TlsConfig`'s redacting impl for
+its `tls` field, so its `Debug` output is safe.
 
 ### Outbound SSRF and TLS defaults
 

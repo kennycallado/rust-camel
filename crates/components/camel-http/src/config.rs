@@ -37,7 +37,7 @@ pub struct HttpConfig {
 }
 
 /// TLS configuration for HTTP/HTTPS client connections.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct TlsConfig {
     /// Enables TLS customization for client connections.
     pub enabled: bool,
@@ -72,6 +72,22 @@ impl Default for TlsConfig {
             client_key_path: None,
             insecure: false,
         }
+    }
+}
+
+// Manual Debug redacts the mTLS path fields (client key, client cert, CA
+// bundle). A derived Debug would expose them and leak credential paths
+// (ADR-0051). Mirrors ServerTlsConfig and HttpAuth redaction patterns.
+impl std::fmt::Debug for TlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsConfig")
+            .field("enabled", &self.enabled)
+            .field("verify_peer", &self.verify_peer)
+            .field("ca_cert_path", &"[REDACTED]")
+            .field("client_cert_path", &"[REDACTED]")
+            .field("client_key_path", &"[REDACTED]")
+            .field("insecure", &self.insecure)
+            .finish()
     }
 }
 
@@ -401,5 +417,27 @@ mod tests {
             "paths must be redacted: {debug}"
         );
         assert!(debug.contains("REDACTED"), "must show REDACTED: {debug}");
+    }
+
+    #[test]
+    fn tls_config_debug_redacts_paths() {
+        let cfg = super::TlsConfig {
+            enabled: true,
+            verify_peer: true,
+            ca_cert_path: Some("/secret/ca.pem".to_string()),
+            client_cert_path: Some("/secret/cert.pem".to_string()),
+            client_key_path: Some("/secret/key.pem".to_string()),
+            insecure: false,
+        };
+        let debug = format!("{:?}", cfg);
+        assert!(
+            !debug.contains("/secret"),
+            "sensitive paths must be redacted: {debug}"
+        );
+        assert!(debug.contains("REDACTED"), "must show REDACTED: {debug}");
+        assert!(
+            debug.contains("enabled: true"),
+            "non-sensitive fields must stay visible: {debug}"
+        );
     }
 }
