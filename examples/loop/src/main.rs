@@ -14,6 +14,7 @@ async fn main() -> Result<(), CamelError> {
 
     // Count-mode loop: runs the sub-pipeline 3 times per exchange.
     // Each iteration appends "!" to the body. After 3 iterations: "hello!!!"
+    // ANCHOR: loop-route
     let loop_route = RouteBuilder::from("timer:tick?period=3000&repeatCount=3")
         .route_id("loop-count-demo")
         .set_body("hello")
@@ -26,6 +27,7 @@ async fn main() -> Result<(), CamelError> {
         .end_loop()
         .to("log:loop-result?level=info&showBody=true")
         .build()?;
+    // ANCHOR_END: loop-route
 
     ctx.add_route_definition(loop_route).await?;
     ctx.start().await?;

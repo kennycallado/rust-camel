@@ -18,6 +18,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: setup
     ctx.register_language("xpath", Box::new(XPathLanguage::new()))
         .expect("xpath not yet registered"); // allow-unwrap
 
@@ -33,6 +34,7 @@ async fn main() -> Result<(), CamelError> {
 
     let title_expr = Arc::new(title_expr);
     let in_stock_pred = Arc::new(in_stock_pred);
+    // ANCHOR_END: setup
 
     let counter = Arc::new(AtomicU64::new(0));
     let counter_clone = Arc::clone(&counter);
@@ -43,6 +45,7 @@ async fn main() -> Result<(), CamelError> {
         ("Rust in Action", "true"),
     ];
 
+    // ANCHOR: route
     let route = RouteBuilder::from("timer:tick?period=800&repeatCount=6")
         .route_id("language-xpath-demo")
         .process(move |mut exchange: camel_api::Exchange| {
@@ -85,6 +88,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:in-stock?showBody=true&showHeaders=true")
         .end_filter()
         .build()?;
+    // ANCHOR_END: route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

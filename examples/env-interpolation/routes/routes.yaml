@@ -1,3 +1,4 @@
+# ANCHOR: env-routes
 # =============================================================================
 # env-interpolation example routes
 #
@@ -34,3 +35,4 @@ routes:
     steps:
       - log: "${env:DEFAULT_LOG_PREFIX:-[defaults]} Using fallback defaults"
       - to: "${env:DEFAULT_TARGET:-log:info}"
+# ANCHOR_END: env-routes

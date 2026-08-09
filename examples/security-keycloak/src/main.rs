@@ -108,12 +108,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         claims_mapper,
     )) as Arc<dyn TokenAuthenticator>;
 
+    // ANCHOR: keycloak-token-issuance
     let alice_token = token_issuer
         .issue_token("alice", "alice-secret", Some("read write"), None)
         .await?;
     let bob_token = token_issuer
         .issue_token("bob", "bob-secret", Some("read"), None)
         .await?;
+    // ANCHOR_END: keycloak-token-issuance
 
     println!("\n=== Keycloak Security Example ===");
     println!("Issuer:  {issuer}");
@@ -121,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Bob:     viewer role      -> JWT issued");
     println!();
 
+    // ANCHOR: keycloak-validation
     println!("--- JWT Validation ---");
 
     let alice_principal = validator
@@ -139,8 +142,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         Err(e) => println!("Bob JWT:   INVALID ({e})"),
     }
+    // ANCHOR_END: keycloak-validation
     println!();
 
+    // ANCHOR: keycloak-role-policy
     println!("--- Role-Based Security Policy ---");
     let admin_policy: Arc<dyn SecurityPolicy> = Arc::new(RolePolicy::new(
         vec!["admin".to_string()],
@@ -209,6 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     ctx.add_route_definition(secured_route).await?;
+    // ANCHOR_END: keycloak-role-policy
     ctx.start().await?;
 
     println!("Route: timer -> [BearerInjectingPolicy -> RolePolicy[admin]] -> log");

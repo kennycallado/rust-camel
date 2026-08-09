@@ -24,6 +24,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(FileComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: file-pipeline-route
     let route = RouteBuilder::from(&format!(
         "file:{}?delete=true&initialDelay=0&delay=500&readTimeout=5000",
         input_path
@@ -50,6 +51,7 @@ async fn main() -> Result<(), CamelError> {
         "log:dead-letter?showBody=true&showHeaders=true&showCorrelationId=true",
     ))
     .build()?;
+    // ANCHOR_END: file-pipeline-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

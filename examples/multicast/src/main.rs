@@ -29,6 +29,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: multicast-route
     let route = RouteBuilder::from("timer:tick?period=2000&repeatCount=3")
         .route_id("multicast-demo")
         // Give the exchange a meaningful body before multicasting
@@ -60,6 +61,7 @@ async fn main() -> Result<(), CamelError> {
                 .build(),
         )
         .build()?;
+    // ANCHOR_END: multicast-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

@@ -36,6 +36,7 @@ async fn main() -> Result<(), CamelError> {
     // Demonstrates a full marshal/unmarshal cycle: a JSON string is first
     // unmarshalled into a structured Json body, then marshalled back to a
     // Text body. This is the classic Text -> Json -> Text round-trip.
+    // ANCHOR: unmarshal-route
     let route_json_roundtrip = RouteBuilder::from("timer:json-roundtrip?period=2000&repeatCount=3")
         .route_id("json-roundtrip")
         .set_body(r#"{"message": "hello", "count": 42}"#)
@@ -53,6 +54,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
+    // ANCHOR_END: unmarshal-route
 
     ctx.add_route_definition(route_json_roundtrip).await?;
 

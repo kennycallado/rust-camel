@@ -24,6 +24,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: load-balancer-route
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=10")
         .route_id("load-balancer-demo")
         // Give the exchange a meaningful body before load balancing
@@ -40,6 +41,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:server-c?showBody=true")
         .end_load_balance()
         .build()?;
+    // ANCHOR_END: load-balancer-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

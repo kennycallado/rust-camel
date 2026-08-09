@@ -46,6 +46,7 @@ async fn main() -> Result<(), CamelError> {
     println!("Loaded routes will substitute these values before YAML parse.");
     println!("Press Ctrl+C to stop.\n");
 
+    // ANCHOR: env-interpolation
     let config =
         CamelConfig::from_file("Camel.toml").map_err(|e| CamelError::Config(e.to_string()))?;
 
@@ -54,6 +55,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     let routes = discover_routes(&config.routes).map_err(|e| CamelError::Config(e.to_string()))?;
+    // ANCHOR_END: env-interpolation
     for route in routes {
         ctx.add_route_definition(route).await?;
     }

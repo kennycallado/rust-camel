@@ -85,6 +85,7 @@ async fn main() -> Result<(), CamelError> {
     // A timer fires once. The processor always fails. The per-route DLC
     // catches the error and logs it to "log:route1-dlc".
     // -----------------------------------------------------------------------
+    // ANCHOR: basic-dlc
     let route1 = RouteBuilder::from("timer:route1?period=2000&repeatCount=1")
         .route_id("basic-dlc")
         .set_header("example", Value::String("basic-dlc".into()))
@@ -93,6 +94,7 @@ async fn main() -> Result<(), CamelError> {
             "log:route1-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
         ))
         .build()?;
+    // ANCHOR_END: basic-dlc
 
     // -----------------------------------------------------------------------
     // Route 2: Retry with exponential backoff
@@ -101,6 +103,7 @@ async fn main() -> Result<(), CamelError> {
     // handler retries up to 3 times with exponential backoff (50ms → 100ms).
     // The DLC is never reached because the retry recovers the exchange.
     // -----------------------------------------------------------------------
+    // ANCHOR: retry-backoff
     let route2 = RouteBuilder::from("timer:route2?period=2000&repeatCount=1")
         .route_id("retry-backoff")
         .set_header("example", Value::String("retry-backoff".into()))
@@ -115,6 +118,7 @@ async fn main() -> Result<(), CamelError> {
             .build(),
         )
         .build()?;
+    // ANCHOR_END: retry-backoff
 
     // -----------------------------------------------------------------------
     // Route 3: onException with handled_by
@@ -270,6 +274,7 @@ async fn main() -> Result<(), CamelError> {
     // `ErrorHandlerConfig::on_exception()`. The shorthand builder's
     // `OnExceptionBuilder` does not yet expose this method.
     // -----------------------------------------------------------------------
+    // ANCHOR: continued-disposition
     let eh_config = ErrorHandlerConfig::dead_letter_channel(
         "log:route10-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
     )
@@ -285,6 +290,7 @@ async fn main() -> Result<(), CamelError> {
         .error_handler(eh_config)
         .to("log:route10-continued?showHeaders=true&showBody=true&showCorrelationId=true")
         .build()?;
+    // ANCHOR_END: continued-disposition
 
     // --- Register all routes ---
     ctx.add_route_definition(subroute_no_handler).await?;

@@ -2743,6 +2743,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "claim-check"
+version = "0.26.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2983,11 +2996,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "content-based-router"
+version = "0.26.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "content-based-routing"
 version = "0.26.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "content-enricher"
+version = "0.26.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
  "camel-component-log",
  "camel-component-timer",
  "camel-core",
@@ -5650,6 +5690,19 @@ name = "id-arena"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
+
+[[package]]
+name = "idempotent-consumer"
+version = "0.26.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "ident_case"
@@ -8732,6 +8785,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "resequencer"
+version = "0.26.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rest-crud"
 version = "0.26.0"
 dependencies = [
@@ -9253,6 +9319,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "sampling"
+version = "0.26.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -10669,6 +10748,20 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sort"
+version = "0.26.0"
+dependencies = [
+ "camel-api",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,0 +1,33 @@
+# Resequencer EIP — reorder exchanges by a sequence number.
+#
+# The timer fires every 100ms. The `set_header` step copies the auto-
+# incrementing `CamelTimerCounter` into a `seq` header and tags every
+# exchange with a `region` correlation key. The `resequence.batch`
+# step buffers per-region, sorts by `seq`, and emits the buffered
+# burst when the size-3 window fills (with a 2s timeout fallback).
+#
+# The post-`resequence` `log` step is the post-continuation: it sees
+# the exchanges in sorted order even when the producer side delivered
+# them concurrently. The resequencer is a continuation boundary
+# (ADR-0029) — the main pipeline ends at the resequencer, and the
+# post-driver drives the `to` step on each sorted emission.
+
+routes:
+  - id: "resequencer-demo"
+    from: "timer:tick?period=100&repeatCount=9"
+    steps:
+      # ANCHOR: resequencer-route
+      - set_header:
+          key: "seq"
+          simple: "${header.CamelTimerCounter}"
+      - set_header:
+          key: "region"
+          value: "default"
+      - resequence:
+          batch:
+            correlation: "${header.region}"
+            sort: "${header.seq}"
+            completion:
+              size_or_timeout: [3, 2000]
+      - to: "log:sorted?showBody=true&showCorrelationId=true"
+      # ANCHOR_END: resequencer-route

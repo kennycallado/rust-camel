@@ -119,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .issue_token("alice", "alice-secret", Some("read write"), None)
         .await?;
 
+    // ANCHOR: wasm-policy-setup
     let fixtures_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
     let wasm_path = fixtures_dir.join("role-check.wasm");
     let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
@@ -133,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let policy =
         AuthenticatedWasmPolicy::new(validator, alice_token.access_token.to_string(), wasm_policy);
+    // ANCHOR_END: wasm-policy-setup
 
     println!("\n=== WASM Security Policy Example ===");
     println!("Plugin:    role-check.wasm (authorization-policy world)");

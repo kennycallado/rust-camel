@@ -1,3 +1,4 @@
+# ANCHOR: shared-components
 # Shared component defaults.
 # This file is included by Camel.toml via `include = ["config/components.toml"]`.
 # It can be reused across multiple deployment configurations without duplication.
@@ -10,3 +11,4 @@ allow_internal = false
 [components.kafka]
 brokers = "localhost:9092"
 group_id = "camel"
+# ANCHOR_END: shared-components

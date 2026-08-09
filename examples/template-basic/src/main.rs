@@ -45,6 +45,7 @@ async fn main() -> Result<(), CamelError> {
         env!("CARGO_MANIFEST_DIR")
     );
 
+    // ANCHOR: template-basic-route
     // Route: timer → set body/headers → render template → log result
     let route = RouteBuilder::from("timer:tick?period=2000")
         .route_id("template-demo")
@@ -53,6 +54,7 @@ async fn main() -> Result<(), CamelError> {
         .to(&template_uri)
         .log("Rendered template", LogLevel::Info)
         .build()?;
+    // ANCHOR_END: template-basic-route
 
     ctx.add_route_definition(route).await?;
 

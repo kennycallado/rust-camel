@@ -15,12 +15,14 @@ async fn main() -> Result<(), CamelError> {
 
     // Fire every minute at second 0.
     // Use `+` as space separator in the cron expression (Apache Camel convention).
+    // ANCHOR: cron-route
     let route = RouteBuilder::from("cron:tick?schedule=*+*+*+*+*")
         .route_id("cron-demo")
         .set_body("cron-fired")
         .set_header("source", Value::String("cron".into()))
         .to("log:cron-result?level=info&showBody=true&showHeaders=true")
         .build()?;
+    // ANCHOR_END: cron-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

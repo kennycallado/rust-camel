@@ -21,6 +21,7 @@ async fn main() -> Result<(), CamelError> {
     let counter = Arc::new(AtomicU64::new(0));
     let counter_clone = Arc::clone(&counter);
 
+    // ANCHOR: filter-route
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=10")
         .route_id("content-based-routing-demo")
         .process(move |mut exchange: camel_api::Exchange| {
@@ -45,6 +46,7 @@ async fn main() -> Result<(), CamelError> {
                 .build(),
         )
         .build()?;
+    // ANCHOR_END: filter-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

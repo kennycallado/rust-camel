@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# ANCHOR: dependencies
 [dependencies]
 camel-api.workspace = true
 camel-core.workspace = true
@@ -13,6 +14,7 @@ camel-component-timer.workspace = true
 camel-component-log.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
+# ANCHOR_END: dependencies
 
 [lints]
 workspace = true

@@ -1,3 +1,4 @@
+# ANCHOR: profile-config
 # Shared component defaults live in a separate file so they can be reused
 # across deployment configs without duplication.
 include = ["config/components.toml"]
@@ -44,3 +45,4 @@ allow_internal = false
 brokers = "prod-kafka:9092"
 group_id = "camel-prod"
 session_timeout_ms = 60000
+# ANCHOR_END: profile-config

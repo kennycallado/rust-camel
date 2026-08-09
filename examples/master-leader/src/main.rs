@@ -115,6 +115,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
     ctx.register_component(ControlBusComponent::new());
 
+    // ANCHOR: master-route
     let route_1 = RouteBuilder::from("master:mylock:timer:tick?period=1000")
         .route_id("master-route")
         .to("log:info")
@@ -128,6 +129,7 @@ async fn main() -> Result<(), CamelError> {
 
     ctx.add_route_definition(route_1).await?;
     ctx.add_route_definition(route_2).await?;
+    // ANCHOR_END: master-route
 
     let platform_task = {
         let leadership = Arc::clone(&leadership);

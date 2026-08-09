@@ -42,11 +42,13 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(WasmComponent::new(registry, fixtures_dir));
 
     // Phase 4 hardening: 5 s timeout, 10 MB memory cap
+    // ANCHOR: wasm-producer-route
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=3")
         .route_id("wasm-example")
         .to("wasm:echo.wasm?timeout=5&max-memory=10485760")
         .to("log:info")
         .build()?;
+    // ANCHOR_END: wasm-producer-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

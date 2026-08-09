@@ -35,6 +35,7 @@ async fn main() -> Result<(), CamelError> {
     // Demonstrates converting a valid JSON string (as Text) into a parsed Json body.
     // This is useful when you receive JSON as a string and need to work with it
     // as structured data.
+    // ANCHOR: convert-body-route
     let route_text_to_json = RouteBuilder::from("timer:text-to-json?period=2000&repeatCount=3")
         .route_id("text-to-json")
         .set_body(r#"{"message": "hello from text", "count": 42}"#)
@@ -50,6 +51,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
+    // ANCHOR_END: convert-body-route
 
     ctx.add_route_definition(route_text_to_json).await?;
 

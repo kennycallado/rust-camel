@@ -48,6 +48,7 @@ async fn main() -> Result<(), CamelError> {
         .expect("rhai not yet registered"); // allow-unwrap
 
     // --- Build language predicates / expressions up-front ---
+    // ANCHOR: setup
 
     let lang = RhaiLanguage::new();
 
@@ -84,6 +85,7 @@ async fn main() -> Result<(), CamelError> {
     let enrich_expr = Arc::new(enrich_expr);
     let tax_expr = Arc::new(tax_expr);
     let high_value_pred = Arc::new(high_value_pred);
+    // ANCHOR_END: setup
 
     // --- Build route ---
 
@@ -93,6 +95,7 @@ async fn main() -> Result<(), CamelError> {
     let priorities = ["high", "normal", "high", "normal", "high", "normal"];
     let amounts = [200_i64, 50, 150, 30, 300, 80];
 
+    // ANCHOR: route
     let route = RouteBuilder::from("timer:tick?period=900&repeatCount=6")
         .route_id("language-rhai-demo")
         // Step 1: assign headers and body
@@ -138,6 +141,7 @@ async fn main() -> Result<(), CamelError> {
                 })
             }
         })
+        // ANCHOR: script-step
         // Step 4: .script() — mutating Rhai expression tags the order and
         //         appends a status suffix. Changes propagate back to the Exchange.
         .script(
@@ -150,6 +154,7 @@ async fn main() -> Result<(), CamelError> {
         )
         // Step 5: log every message (after enrichment)
         .to("log:all-orders?showBody=true&showHeaders=true")
+        // ANCHOR_END: script-step
         // Step 6: filter — only high-value orders (amount > 100) to alert log
         .filter({
             let pred = Arc::clone(&high_value_pred);
@@ -159,6 +164,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:high-value-alert?showBody=true")
         .end_filter()
         .build()?;
+    // ANCHOR_END: route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

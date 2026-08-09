@@ -1,0 +1,27 @@
+# Claim Check EIP — stash a payload in a repository, replace it with a
+# lightweight claim key, then retrieve the original body later.
+#
+# Demonstrates Set (stash body, replace with key) and Get (retrieve the
+# stashed body by key) operations against a memory claim check repository.
+
+routes:
+  - id: "claim-check-demo"
+    from: "timer:tick?period=1000&repeatCount=3"
+    steps:
+      - set_body:
+          value: "large-payload-data"
+      - set_header:
+          key: "claimKey"
+          value: "claim-001"
+      # ANCHOR: claim-check-route
+      - claim_check:
+          repository: vault
+          operation: set
+          key: "${header.claimKey}"
+      - log: "After SET body is the claim key: ${body}"
+      - claim_check:
+          repository: vault
+          operation: get
+          key: "${header.claimKey}"
+      - log: "After GET body restored: ${body}"
+      # ANCHOR_END: claim-check-route

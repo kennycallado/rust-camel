@@ -1,5 +1,7 @@
+# ANCHOR: echo-route
 - route:
     id: echo-demo
     from: timer:tick?period=2000
     steps:
       - to: echo:hello
+# ANCHOR_END: echo-route

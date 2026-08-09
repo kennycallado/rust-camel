@@ -26,6 +26,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: throttler-route
     let route = RouteBuilder::from("timer:tick?period=100&repeatCount=20")
         .route_id("throttler-demo")
         // Throttle: limit to 2 requests per second
@@ -34,6 +35,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:throttled?showBody=true")
         .end_throttle()
         .build()?;
+    // ANCHOR_END: throttler-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

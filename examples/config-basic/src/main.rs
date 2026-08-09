@@ -11,6 +11,7 @@ async fn main() -> Result<(), CamelError> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
+    // ANCHOR: load-config
     // Load configuration from Camel.toml
     let config =
         CamelConfig::from_file("Camel.toml").map_err(|e| CamelError::Config(e.to_string()))?;
@@ -24,6 +25,7 @@ async fn main() -> Result<(), CamelError> {
 
     // Discover and load routes from configuration
     let routes = discover_routes(&config.routes).map_err(|e| CamelError::Config(e.to_string()))?;
+    // ANCHOR_END: load-config
 
     let route_count = routes.len();
     for route in routes {

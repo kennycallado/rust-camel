@@ -34,6 +34,7 @@ async fn main() -> Result<(), CamelError> {
 
     // Each timer fire sets orderId = "A" | "B" | "C" (cycling) and a body.
     // After 3 exchanges with the same orderId, the aggregator emits a batch.
+    // ANCHOR: aggregator-route
     let route = RouteBuilder::from("timer:orders?period=200&repeatCount=12")
         .route_id("aggregator-demo")
         .process(move |mut ex: camel_api::Exchange| {
@@ -87,6 +88,7 @@ async fn main() -> Result<(), CamelError> {
                 .build(),
         )
         .build()?;
+    // ANCHOR_END: aggregator-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

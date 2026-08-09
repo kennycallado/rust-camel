@@ -77,6 +77,7 @@ async fn main() -> Result<(), CamelError> {
 
     // Route 1: Timer → JMS producer (every 3 seconds)
     // Uses explicit destination type: activemq:queue:orders
+    // ANCHOR: jms-producer-route
     let producer_route = RouteBuilder::from("timer:tick?period=3000")
         .route_id("jms-producer")
         .set_body(Value::String(
@@ -84,13 +85,16 @@ async fn main() -> Result<(), CamelError> {
         ))
         .to("activemq:queue:orders")
         .build()?;
+    // ANCHOR_END: jms-producer-route
 
     // Route 2: JMS consumer → Log
     // Uses shorthand: activemq:orders is equivalent to activemq:queue:orders
+    // ANCHOR: jms-consumer-route
     let consumer_route = RouteBuilder::from("activemq:orders")
         .route_id("jms-consumer")
         .to("log:info?showHeaders=true")
         .build()?;
+    // ANCHOR_END: jms-consumer-route
 
     ctx.add_route_definition(producer_route).await?;
     ctx.add_route_definition(consumer_route).await?;

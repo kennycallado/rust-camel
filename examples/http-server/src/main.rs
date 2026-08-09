@@ -63,6 +63,7 @@ fn create_health_route(
     storage: Arc<UserStorage>,
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
+    // ANCHOR: http-health-route
     RouteBuilder::from("http://0.0.0.0:8080/health")
         .route_id("health-check")
         .to("log:health?showHeaders=true&showBody=true&showCorrelationId=true")
@@ -91,6 +92,7 @@ fn create_health_route(
         })
         .build()
 }
+// ANCHOR_END: http-health-route
 
 fn create_list_users_route(
     storage: Arc<UserStorage>,

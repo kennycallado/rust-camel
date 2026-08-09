@@ -1,0 +1,22 @@
+# Sort EIP — order a body array by a simple-language expression.
+#
+# The route injects a small JSON array on every timer tick, then the
+# `sort` step orders it numerically. The `reverse: true` flag toggles
+# descending order. The post-`sort` log step shows the array in the
+# resulting order.
+#
+# Body contract: SortService requires `Body::Json(Value::Array(_))` —
+# a non-array body is rejected with `CamelError::ProcessorError`. The
+# `set_body` step upstream guarantees that contract for this example.
+
+routes:
+  - id: "sort-demo"
+    from: "timer:tick?period=1000&repeatCount=3"
+    steps:
+      # ANCHOR: sort-route
+      - set_body:
+          value: [3, 1, 4, 1, 5, 9, 2, 6]
+      - sort:
+          expression: "${body}"
+      - to: "log:sorted?showBody=true&showCorrelationId=true"
+      # ANCHOR_END: sort-route

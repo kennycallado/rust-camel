@@ -38,6 +38,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
     ctx.register_component(DirectComponent::new());
 
+    // ANCHOR: exchange-lifecycle
     let on_complete = RouteBuilder::from("direct:on-complete")
         .route_id("on-complete")
         .process(|mut exchange| async move {
@@ -89,6 +90,8 @@ async fn main() -> Result<(), CamelError> {
             on_complete: None,
             on_failure: Some("direct:on-failure".to_string()),
         });
+
+    // ANCHOR_END: exchange-lifecycle
 
     // Hook routes must be registered before the routes that reference them as
     // UoW hook URIs. Hook URIs are resolved to producers when `add_route_definition`

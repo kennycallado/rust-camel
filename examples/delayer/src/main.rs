@@ -14,11 +14,13 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: delayer-route
     let fixed_route = RouteBuilder::from("timer:tick?period=2000&repeatCount=5")
         .route_id("delayer-fixed")
         .delay(Duration::from_millis(500))
         .to("log:delayed?showBody=true")
         .build()?;
+    // ANCHOR_END: delayer-route
 
     let dynamic_route = RouteBuilder::from("timer:tick?period=2000&repeatCount=5")
         .route_id("delayer-dynamic")

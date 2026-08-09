@@ -33,6 +33,7 @@ async fn main() -> Result<(), CamelError> {
     let destinations = Arc::new(Mutex::new(vec!["a", "b", "c"].into_iter().cycle()));
     let dest_clone = destinations.clone();
 
+    // ANCHOR: dynamic-router-route
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=10")
         .route_id("dynamic-router-demo")
         // Set a rotating destination header
@@ -61,6 +62,7 @@ async fn main() -> Result<(), CamelError> {
             ))
         }))
         .build()?;
+    // ANCHOR_END: dynamic-router-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

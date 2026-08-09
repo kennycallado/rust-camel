@@ -1,0 +1,25 @@
+# Idempotent Consumer EIP — reject duplicate exchanges by message ID.
+#
+# The timer sets a fixed `messageId` header on every tick, so only the
+# first delivery is processed; subsequent deliveries of the same key are
+# detected as duplicates and skipped.
+#
+# ADR-0025: the segment is outcome-aware — it returns `Completed` for
+# duplicates and skips the child sub-pipeline entirely (rather than
+# mapping a `Stopped` outcome to `Ok`, which would re-process the dup).
+
+routes:
+  - id: "idempotent-consumer-demo"
+    from: "timer:tick?period=1000&repeatCount=5"
+    steps:
+      - set_header:
+          key: "messageId"
+          value: "msg-001"
+      # ANCHOR: idempotent-consumer-route
+      - idempotent_consumer:
+          repository: dedupe
+          expression: "${header.messageId}"
+          steps:
+            - log: "Processing unique message ${header.messageId}"
+            - to: "log:processed?showBody=true&showHeaders=true"
+      # ANCHOR_END: idempotent-consumer-route

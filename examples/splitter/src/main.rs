@@ -26,6 +26,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: splitter-route
     let route = RouteBuilder::from("timer:batch?period=2000&repeatCount=3")
         .route_id("splitter-demo")
         // Simulate incoming CSV data
@@ -61,6 +62,7 @@ async fn main() -> Result<(), CamelError> {
                 .build(),
         )
         .build()?;
+    // ANCHOR_END: splitter-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

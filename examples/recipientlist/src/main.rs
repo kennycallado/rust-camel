@@ -46,6 +46,7 @@ async fn main() -> Result<(), CamelError> {
             .unwrap_or_default()
     });
 
+    // ANCHOR: recipient-list-route
     let route = RouteBuilder::from("timer:tick?period=2000&repeatCount=3")
         .route_id("recipientlist-demo")
         .set_header(
@@ -58,6 +59,7 @@ async fn main() -> Result<(), CamelError> {
         )
         .to("log:summary?showBody=true")
         .build()?;
+    // ANCHOR_END: recipient-list-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

@@ -4,6 +4,8 @@ docs/*
 !docs/adr
 !docs/benchmarks
 !docs/book.toml
+!docs/scripts
+!docs/AGENTS.md
 !docs/src/
 !docs/src/**
 docs/adr/*

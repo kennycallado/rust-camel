@@ -121,6 +121,8 @@
             pkg-config
             libxml2
             libclang
+            mdbook
+            python3
             pkgsUnstable.beads # agents memory
             pkgsUnstable.opencode
             pkgsUnstable.rdkafka

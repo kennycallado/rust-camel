@@ -12,6 +12,7 @@ async fn main() -> Result<(), CamelError> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
+    // ANCHOR: profile-load
     // Get profile from environment or use default
     let profile = env::var("CAMEL_PROFILE").unwrap_or_else(|_| "development".to_string());
     println!("Loading configuration with profile: {}", profile);
@@ -21,6 +22,7 @@ async fn main() -> Result<(), CamelError> {
         .map_err(|e| CamelError::Config(e.to_string()))?;
 
     println!("Log level: {}", config.log_level);
+    // ANCHOR_END: profile-load
 
     // Create context
     let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap

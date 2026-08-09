@@ -2,6 +2,7 @@
 //!
 //! Demonstrates using `camel-language-js` from a route `.script("js", ...)` step.
 
+// ANCHOR: full
 use std::time::Duration;
 
 use camel_api::CamelError;
@@ -44,3 +45,4 @@ async fn main() -> Result<(), CamelError> {
 
     Ok(())
 }
+// ANCHOR_END: full

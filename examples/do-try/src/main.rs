@@ -47,6 +47,7 @@ async fn main() -> Result<(), CamelError> {
     // matches the error by its variant name ("ProcessorError") and marks the
     // error as handled — the exchange is not re-thrown.
     // -----------------------------------------------------------------------
+    // ANCHOR: do-try-route
     let route1 = RouteBuilder::from("direct:catch-by-variant")
         .route_id("catch-by-variant")
         .do_try()
@@ -57,6 +58,7 @@ async fn main() -> Result<(), CamelError> {
         .end_do_catch()
         .end_do_try()
         .build()?;
+    // ANCHOR_END: do-try-route
     ctx.add_route_definition(route1).await?;
 
     // -----------------------------------------------------------------------

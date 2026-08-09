@@ -10,6 +10,7 @@ use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
 
+// ANCHOR: metrics-collector-impl
 /// A simple console-based metrics collector that prints stats on shutdown.
 #[derive(Debug)]
 struct ConsoleMetrics {
@@ -63,6 +64,7 @@ impl MetricsCollector for ConsoleMetrics {
         println!("[METRICS] Circuit breaker: {} -> {}", from, to);
     }
 }
+// ANCHOR_END: metrics-collector-impl
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
@@ -71,6 +73,7 @@ async fn main() -> Result<(), CamelError> {
     let metrics = Arc::new(ConsoleMetrics::new());
     let metrics_for_print = Arc::clone(&metrics);
 
+    // ANCHOR: metrics-context-builder
     // Create context with custom metrics collector
     let mut ctx = CamelContext::builder().metrics(metrics).build().await?;
 
@@ -96,6 +99,7 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
 
     ctx.add_route_definition(route).await?;
+    // ANCHOR_END: metrics-context-builder
     ctx.start().await?;
 
     println!("Metrics demo running.");

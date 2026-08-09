@@ -160,6 +160,7 @@ async fn main() -> Result<(), CamelError> {
     // =========================================================================
     // Route 3: ZipDataFormat in a Camel route (timer-driven)
     // =========================================================================
+    // ANCHOR: zip-splitter-route
     let route = camel_builder::RouteBuilder::from("timer:zip-marshal?period=3000&repeatCount=2")
         .route_id("zip-marshal-route")
         .set_body("payload for ZIP compression")
@@ -174,6 +175,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:zip-result?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
+    // ANCHOR_END: zip-splitter-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

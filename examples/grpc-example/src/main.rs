@@ -18,6 +18,7 @@ async fn main() -> Result<(), CamelError> {
     let proto_path = format!("{}/protos/helloworld.proto", env!("CARGO_MANIFEST_DIR"));
 
     // Consumer route (listens for gRPC requests on port 50051)
+    // ANCHOR: grpc-consumer-route
     let consumer_route = RouteBuilder::from(&format!(
         "grpc://0.0.0.0:50051/helloworld.Greeter/SayHello?protoFile={}",
         proto_path
@@ -27,8 +28,10 @@ async fn main() -> Result<(), CamelError> {
     ))
     .to("log:grpc-consumer?showBody=true")
     .build()?;
+    // ANCHOR_END: grpc-consumer-route
 
     // Producer route (calls the consumer)
+    // ANCHOR: grpc-producer-route
     let producer_route = RouteBuilder::from("timer:grpc-tick?period=3000&repeatCount=3")
         .set_body(Body::Json(serde_json::json!({"name": "World"})))
         .to(format!(
@@ -37,6 +40,7 @@ async fn main() -> Result<(), CamelError> {
         ))
         .to("log:grpc-response?showBody=true")
         .build()?;
+    // ANCHOR_END: grpc-producer-route
 
     ctx.add_route_definition(consumer_route).await?;
     ctx.add_route_definition(producer_route).await?;

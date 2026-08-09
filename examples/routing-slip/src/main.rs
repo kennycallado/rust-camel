@@ -27,6 +27,7 @@ async fn main() -> Result<(), CamelError> {
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter_clone = counter.clone();
 
+    // ANCHOR: routing-slip-route
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=10")
         .route_id("routing-slip-demo")
         .process(move |mut exchange: camel_api::Exchange| {
@@ -52,6 +53,7 @@ async fn main() -> Result<(), CamelError> {
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
         }))
         .build()?;
+    // ANCHOR_END: routing-slip-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

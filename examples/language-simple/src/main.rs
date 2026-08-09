@@ -35,6 +35,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     // --- Build language predicates / expressions up-front ---
+    // ANCHOR: setup
 
     let lang = SimpleLanguage::new();
 
@@ -58,6 +59,8 @@ async fn main() -> Result<(), CamelError> {
         .create_expression("${header.type}")
         .expect("valid expression"); // allow-unwrap
 
+    // ANCHOR_END: setup
+
     // Wrap in Arc so they can be moved into multiple route closures
     let order_pred = Arc::new(order_pred);
     let high_priority_order_pred = Arc::new(high_priority_order_pred);
@@ -66,6 +69,7 @@ async fn main() -> Result<(), CamelError> {
     let type_expr = Arc::new(type_expr);
 
     // --- Build route ---
+    // ANCHOR: route
 
     let counter = Arc::new(AtomicU64::new(0));
     let counter_clone = Arc::clone(&counter);
@@ -150,6 +154,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:approved-orders?showBody=true&showHeaders=true")
         .end_filter()
         .build()?;
+    // ANCHOR_END: route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

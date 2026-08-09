@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_component(LogComponent::new());
 
     // Route: timer → pollEnrich(file:config.json) → log enriched body
+    // ANCHOR: poll-enrich-route
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=3")
         .route_id("pollenrich-demo")
         .poll_enrich(
@@ -40,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .stream_cache_default()
         .to("log:enriched?showBody=true&showHeaders=true&showCorrelationId=true")
         .build()?;
+    // ANCHOR_END: poll-enrich-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

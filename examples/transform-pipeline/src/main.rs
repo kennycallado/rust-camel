@@ -15,6 +15,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: transform-route
     let route = RouteBuilder::from("timer:transform?period=1000&repeatCount=3")
         .route_id("transform-pipeline")
         .process(|mut exchange| async move {
@@ -39,6 +40,7 @@ async fn main() -> Result<(), CamelError> {
                 .build(),
         )
         .build()?;
+    // ANCHOR_END: transform-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

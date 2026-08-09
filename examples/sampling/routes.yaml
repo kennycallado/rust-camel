@@ -1,0 +1,17 @@
+# Sampling EIP — pass 1 of every N exchanges (deterministic, counter-based).
+#
+# The timer fires every 200ms; the `sampling: 3` step lets every third
+# exchange through and drops the rest by setting `CamelStop=true` on them.
+# The post-sampling log step therefore logs roughly once per 600ms (3 ticks).
+#
+# Counter semantics: the counter starts at 0 and is incremented BEFORE the
+# modulo check. Exchange #3 passes (counter=3, 3 % 3 = 0), then #6, #9, etc.
+
+routes:
+  - id: "sampling-demo"
+    from: "timer:tick?period=200&repeatCount=9"
+    steps:
+      # ANCHOR: sampling-route
+      - sampling: 3
+      - to: "log:passed?showBody=true&showCorrelationId=true"
+      # ANCHOR_END: sampling-route

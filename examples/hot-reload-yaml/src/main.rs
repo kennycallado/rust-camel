@@ -61,12 +61,14 @@ async fn main() -> Result<(), CamelError> {
     println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
 
+    // ANCHOR: load-debounce
     // ── 0. Load configuration (watch_debounce_ms etc.) ───────────────────────
     // Falls back to the CamelConfig field default (300 ms) if Camel.toml is absent.
     let debounce_ms = CamelConfig::from_file("Camel.toml")
         .map(|c| c.watch_debounce_ms)
         .unwrap_or(300);
     println!("[0] watch_debounce_ms = {debounce_ms} ms  (set in Camel.toml)");
+    // ANCHOR_END: load-debounce
 
     // ── 1. Resolve the routes directory ──────────────────────────────────────
     //

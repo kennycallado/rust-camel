@@ -25,6 +25,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
     ctx.register_component(MockComponent::new());
 
+    // ANCHOR: wire-tap-route
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=5")
         .route_id("wiretap-demo")
         // Tap: send a clone to monitoring (fire-and-forget)
@@ -32,6 +33,7 @@ async fn main() -> Result<(), CamelError> {
         // Main pipeline continues normally
         .to("log:main?showBody=true&showCorrelationId=true")
         .build()?;
+    // ANCHOR_END: wire-tap-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

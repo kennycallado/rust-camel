@@ -80,17 +80,21 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     // Route 1 (Producer): timer → publish "hello-mqtt" on sensors/temp every 3s, twice.
+    // ANCHOR: mqtt-producer-route
     let producer = RouteBuilder::from("timer:tick?period=3000&repeatCount=2")
         .route_id("mqtt-producer")
         .set_body("hello-mqtt")
         .to("mqtt://test/sensors/temp")
         .build()?;
+    // ANCHOR_END: mqtt-producer-route
 
     // Route 2 (Consumer): subscribe to sensors/# → log.
+    // ANCHOR: mqtt-consumer-route
     let consumer = RouteBuilder::from("mqtt://test/sensors/#")
         .route_id("mqtt-consumer")
         .to("log:info?showHeaders=true")
         .build()?;
+    // ANCHOR_END: mqtt-consumer-route
 
     ctx.add_route_definition(producer).await?;
     ctx.add_route_definition(consumer).await?;

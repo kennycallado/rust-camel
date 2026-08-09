@@ -59,6 +59,7 @@ impl Default for EchoConfig {
 // Component
 // ---------------------------------------------------------------------------
 
+// ANCHOR: echo-component
 pub struct EchoComponent {
     prefix: String,
 }
@@ -87,11 +88,13 @@ impl Component for EchoComponent {
         }))
     }
 }
+// ANCHOR_END: echo-component
 
 // ---------------------------------------------------------------------------
 // Endpoint
 // ---------------------------------------------------------------------------
 
+// ANCHOR: echo-endpoint
 struct EchoEndpoint {
     uri: String,
     prefix: String,
@@ -133,12 +136,14 @@ impl Endpoint for EchoEndpoint {
         }))
     }
 }
+// ANCHOR_END: echo-endpoint
 
 // ---------------------------------------------------------------------------
 // Bundle
 // ---------------------------------------------------------------------------
 
 /// Bundles `EchoComponent` with its TOML config key `"echo"`.
+// ANCHOR: echo-bundle-impl
 pub struct EchoBundle {
     config: EchoConfig,
 }
@@ -159,6 +164,7 @@ impl ComponentBundle for EchoBundle {
         registrar.register_component_dyn(Arc::new(EchoComponent::new(self.config.prefix)));
     }
 }
+// ANCHOR_END: echo-bundle-impl
 
 // ---------------------------------------------------------------------------
 // Main
@@ -190,6 +196,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(camel_component_direct::DirectComponent::new());
 
     // Register EchoBundle — reads [components.echo] from Camel.toml
+    // ANCHOR: echo-bundle-register
     if let Some(raw) = config.components.raw.get(EchoBundle::config_key()).cloned() {
         EchoBundle::from_toml(raw)?.register_all(&mut ctx);
     } else {
@@ -199,6 +206,7 @@ async fn main() -> Result<(), CamelError> {
         }
         .register_all(&mut ctx);
     }
+    // ANCHOR_END: echo-bundle-register
 
     // Demonstrate NoOpComponentContext — useful in tests and standalone checks
     let echo = EchoComponent::new("[standalone] ");

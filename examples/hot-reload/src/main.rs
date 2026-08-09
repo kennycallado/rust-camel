@@ -83,6 +83,7 @@ async fn main() -> Result<(), CamelError> {
     let shutdown = CancellationToken::new();
     let shutdown_watcher = shutdown.clone();
 
+    // ANCHOR: watch-setup
     tokio::spawn(async move {
         let watch_dirs = resolve_watch_dirs(&watch_patterns);
         let result = watch_and_reload(
@@ -97,6 +98,7 @@ async fn main() -> Result<(), CamelError> {
             std::time::Duration::from_millis(300),
         )
         .await;
+        // ANCHOR_END: watch-setup
         if let Err(e) = result {
             // log-policy: system-broken
             tracing::error!("File watcher error: {e}");

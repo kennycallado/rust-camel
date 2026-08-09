@@ -173,7 +173,11 @@ a crate-local term lands in that crate's `CONTEXT.md`. The defining ADR (if any)
 
 - After an **architecture-shaping merge** (new EIP, lifecycle change, contract change): update the
   Contexts and Relationships sections of this map, plus the `CONTEXT.md` of every crate the merge
-  touched, in the same change.
+  touched, in the same change. If the merge changes a *user-visible* contract
+  (a new EIP builder method, a new component scheme, a DSL key rename,
+  a lifecycle-state rename, a public contract enum gaining a variant), also refresh
+  the affected mdBook guide section and its anchored `examples/` include in the same
+  change.
 - When **adding/renaming a domain term**: update CONTEXT-MAP/CONTEXT in the same change.
 - When an **ADR is superseded or amended**: update both the ADR header metadata and this map's ADR
   index in the same change.

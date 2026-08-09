@@ -49,6 +49,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(KafkaComponent::new());
 
     // Route 1: Timer → Kafka producer (every 3 seconds)
+    // ANCHOR: kafka-producer-route
     let producer_route = RouteBuilder::from("timer:tick?period=3000")
         .route_id("kafka-producer")
         .set_body(Value::String(
@@ -60,8 +61,10 @@ async fn main() -> Result<(), CamelError> {
             brokers = brokers
         ))
         .build()?;
+    // ANCHOR_END: kafka-producer-route
 
     // Route 2: Kafka consumer → Log
+    // ANCHOR: kafka-consumer-route
     let consumer_route = RouteBuilder::from(&format!(
         "kafka:{topic}?brokers={brokers}&groupId=example-group&autoOffsetReset=earliest",
         topic = TOPIC,
@@ -70,6 +73,7 @@ async fn main() -> Result<(), CamelError> {
     .route_id("kafka-consumer")
     .to("log:info?showHeaders=true")
     .build()?;
+    // ANCHOR_END: kafka-consumer-route
 
     ctx.add_route_definition(producer_route).await?;
     ctx.add_route_definition(consumer_route).await?;

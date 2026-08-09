@@ -39,6 +39,7 @@ async fn main() -> Result<(), CamelError> {
     // A valid XML order is validated against order.xsd. The body passes
     // through unchanged if valid; otherwise an error is returned.
     let xsd = schema_path("order.xsd");
+    // ANCHOR: validator-route
     let route_xsd = RouteBuilder::from("timer:xsd-valid?period=3000&repeatCount=2")
         .route_id("xsd-valid")
         .set_body("<order><id>A1</id><amount>5</amount></order>")
@@ -47,6 +48,7 @@ async fn main() -> Result<(), CamelError> {
         .log("Route 1: XML is valid!", LogLevel::Info)
         .to("log:info?showBody=true")
         .build()?;
+    // ANCHOR_END: validator-route
 
     ctx.add_route_definition(route_xsd).await?;
 

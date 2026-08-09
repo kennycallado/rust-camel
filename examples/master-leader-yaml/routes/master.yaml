@@ -1,16 +1,18 @@
+# ANCHOR: master-yaml-route
 routes:
   - id: "master-route_1"
     from: "master:mylock:timer:tick?period=1000"
     steps:
-      - log: "DEGUG: 1"
+      - log: "DEBUG: 1"
 
   - id: "master-route_2"
     from: "master:mylock:timer:tick?period=1000"
     steps:
-      - log: "DEGUG: 2"
+      - log: "DEBUG: 2"
 
   - id: "status-route"
     from: "timer:status?period=5000"
     steps:
       - to: "controlbus:route?routeId=master-route_1&action=status"
       - to: "log:info"
+# ANCHOR_END: master-yaml-route

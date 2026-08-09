@@ -1,3 +1,5 @@
+# ANCHOR: env-config
 [default]
 routes = ["routes/**/*.yaml"]
 log_level = "INFO"
+# ANCHOR_END: env-config

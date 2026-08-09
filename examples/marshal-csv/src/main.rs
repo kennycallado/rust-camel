@@ -44,6 +44,7 @@ async fn main() -> Result<(), CamelError> {
     // =========================================================================
     // Demonstrates marshalling a JSON array into CSV text. The JSON objects
     // are converted to CSV rows with headers derived from object keys.
+    // ANCHOR: marshal-route
     let route_csv_marshal = RouteBuilder::from("timer:csv-marshal?period=2000&repeatCount=3")
         .route_id("csv-marshal")
         .set_body(r#"[{"name":"Carol","age":28},{"name":"Dave","age":35}]"#)
@@ -54,6 +55,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
+    // ANCHOR_END: marshal-route
 
     ctx.add_route_definition(route_csv_marshal).await?;
 

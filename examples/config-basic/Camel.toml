@@ -1,6 +1,9 @@
+# ANCHOR: full-config
+# ANCHOR: minimal-config
 [default]
 routes = ["routes/**/*.yaml"]
 log_level = "INFO"
+# ANCHOR_END: minimal-config
 
 # Optional supervision configuration
 [default.supervision]
@@ -61,3 +64,4 @@ log_level = "DEBUG"
 
 [production]
 log_level = "ERROR"
+# ANCHOR_END: full-config

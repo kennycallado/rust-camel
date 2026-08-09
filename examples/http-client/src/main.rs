@@ -16,6 +16,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(HttpComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: http-client-route
     let route = RouteBuilder::from("timer:http-poll?period=5000&repeatCount=3")
         .route_id("http-client")
         .process(|mut exchange| {
@@ -57,6 +58,7 @@ async fn main() -> Result<(), CamelError> {
                 .build(),
         )
         .build()?;
+    // ANCHOR_END: http-client-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

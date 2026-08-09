@@ -1,3 +1,5 @@
+# ANCHOR: config
 [default]
 routes = ["routes/*.yaml"]
 log_level = "INFO"
+# ANCHOR_END: config

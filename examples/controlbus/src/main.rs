@@ -29,6 +29,7 @@ async fn main() -> Result<(), CamelError> {
     // Route that suspends the target after 5 seconds.
     // ADR-0034: routeId AND authorizedRoutes must be declared statically in the URI.
     // The CamelRouteId exchange header cannot override or select the target.
+    // ANCHOR: controlbus-suspend-route
     let suspend_route = RouteBuilder::from("timer:suspend?delay=5000&repeatCount=1")
         .route_id("suspend-controller")
         .process(|exchange| async move {
@@ -38,6 +39,7 @@ async fn main() -> Result<(), CamelError> {
         .to("controlbus:route?routeId=target-route&action=suspend&authorizedRoutes=target-route")
         .to("log:control?showBody=true")
         .build()?;
+    // ANCHOR_END: controlbus-suspend-route
 
     // Route that resumes the target after 10 seconds (ADR-0034 static form).
     let resume_route = RouteBuilder::from("timer:resume?delay=10000&repeatCount=1")

@@ -26,6 +26,7 @@ async fn main() -> Result<(), CamelError> {
         watch_debounce_ms: 300,
         components: Default::default(),
         observability: ObservabilityConfig {
+            // ANCHOR: health-config
             health: Some(HealthCamelConfig {
                 enabled: true,
                 host: "0.0.0.0".to_string(),
@@ -33,7 +34,7 @@ async fn main() -> Result<(), CamelError> {
                 handler_timeout_ms: 6000,
                 forced_ttl_ms: None,
             }),
-            ..Default::default()
+            ..Default::default() // ANCHOR_END: health-config
         },
         supervision: None,
         platform: Default::default(),
@@ -50,10 +51,12 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
+    // ANCHOR: health-route
     let route = RouteBuilder::from("timer:health?period=5000")
         .route_id("health-demo-route")
         .to("log:health?showBody=false")
         .build()?;
+    // ANCHOR_END: health-route
 
     ctx.add_route_definition(route).await?;
     ctx.start().await?;

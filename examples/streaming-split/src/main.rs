@@ -99,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(ex)
     });
 
+    // ANCHOR: streaming-split-route
     let mut splitter = StreamingSplitterService::new(
         expression,
         sub_pipeline,
@@ -125,6 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("Aggregated result body:");
     println!("  {:?}", result.input.body);
+    // ANCHOR_END: streaming-split-route
 
     println!();
     println!("Done. Each NDJSON line was split into a separate exchange,");

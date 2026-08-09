@@ -1,6 +1,8 @@
+# ANCHOR: hello-route
 routes:
   - id: "hello"
     from: "timer:tick?period=2000"
     steps:
       # log: messages are evaluated as Simple Language — ${...} expressions are interpolated
       - log: "Hello from camel-cli! Exchange #${header.CamelTimerCounter}"
+# ANCHOR_END: hello-route

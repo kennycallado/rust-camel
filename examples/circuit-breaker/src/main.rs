@@ -46,6 +46,7 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
 
     // Main route with circuit breaker
+    // ANCHOR: circuit-breaker-route
     let main_route = RouteBuilder::from("timer:cb-test?period=1000&repeatCount=15")
         .route_id("circuit-breaker-demo")
         .process(|mut exchange| async move {
@@ -71,6 +72,7 @@ async fn main() -> Result<(), CamelError> {
             .build(),
         )
         .build()?;
+    // ANCHOR_END: circuit-breaker-route
 
     ctx.add_route_definition(failing_service).await?;
     ctx.add_route_definition(main_route).await?;
