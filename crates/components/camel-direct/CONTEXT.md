@@ -29,6 +29,21 @@ Per ADR-0012.
   `// log-policy: outside-contract`. Regression test:
   `tests::test_send_and_wait_error_increments_errors_metric`.
 
+## Startup handshake
+
+`DirectConsumer` declares `ConsumerStartupMode::Explicit`. Its `start()` calls
+`ConsumerContext::mark_ready()` immediately after inserting into the shared
+`DirectRegistry`, before entering the event loop. The runtime's `start_context`
+starts routes sequentially by `startup_order`; a producer route with a higher
+`startup_order` than the consumer route will not be driven until the consumer's
+`StartRoute` completes (registration visible + `mark_ready` resolved).
+
+**Residual operator window:** if a producer route and its consumer route share
+the same `startup_order` (default 1000), ordering within the tier is by the
+controller's stable list order. Operators who need a strict guarantee set the
+consumer's `startup_order` lower so it starts first. This matches Apache
+Camel's own guidance (start direct consumers before their producers).
+
 ## Example dialogue
 
 > "How is direct different from SEDA?"

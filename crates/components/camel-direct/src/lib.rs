@@ -19,7 +19,8 @@ use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
 use camel_component_api::{
-    Component, ComponentMetadata, Consumer, ConsumerContext, Endpoint, ProducerContext,
+    Component, ComponentMetadata, Consumer, ConsumerContext, ConsumerStartupMode, Endpoint,
+    ProducerContext,
 };
 use tracing::{debug, error, info, warn};
 
@@ -280,6 +281,10 @@ impl DirectConsumer {
 
 #[async_trait]
 impl Consumer for DirectConsumer {
+    fn startup_mode(&self) -> ConsumerStartupMode {
+        ConsumerStartupMode::Explicit
+    }
+
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
         // Create a channel for producers to send exchanges to this consumer.
         let (tx, mut rx) =
@@ -298,6 +303,8 @@ impl Consumer for DirectConsumer {
             }
             reg.insert(self.name.clone(), tx);
         }
+
+        context.mark_ready();
 
         let name = self.name.clone();
         let registry = Arc::clone(&self.registry);
@@ -537,6 +544,7 @@ mod tests {
     use camel_component_api::Message;
     use camel_component_api::NoOpComponentContext;
     use camel_component_api::RuntimeObservability;
+    use camel_component_api::StartupSignal;
     use std::task::RawWakerVTable;
     use tower::ServiceExt;
 
@@ -1274,5 +1282,60 @@ mod tests {
         let component = DirectComponent::new();
         let result = component.create_endpoint("direct:my-endpoint", &NoOpComponentContext);
         assert!(result.is_ok(), "valid endpoint name should be accepted");
+    }
+
+    #[test]
+    fn test_direct_consumer_startup_mode_is_explicit() {
+        let component = DirectComponent::new();
+        let endpoint = component
+            .create_endpoint("direct:ready-check", &NoOpComponentContext)
+            .unwrap();
+        let consumer = endpoint.create_consumer(rt()).unwrap();
+        assert_eq!(
+            consumer.startup_mode(),
+            ConsumerStartupMode::Explicit,
+            "DirectConsumer must opt into Explicit startup"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_direct_consumer_marks_ready_after_registration() {
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+
+        let mut consumer = DirectConsumer {
+            name: "ready-probe-direct".into(),
+            registry: registry.clone(),
+            cancel: None,
+            runtime: rt(),
+        };
+
+        let (tx, _rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "ready-probe-route".to_string());
+
+        let (signal, startup_rx) = StartupSignal::pair();
+        let ctx = ctx.with_startup(signal);
+
+        tokio::spawn(async move {
+            let _ = consumer.start(ctx).await;
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
+            .await
+            .expect("DirectConsumer must call ctx.mark_ready() after registration");
+        assert!(
+            result.is_ok(),
+            "mark_ready must resolve Ok after registration"
+        );
+
+        {
+            let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                reg.contains_key("ready-probe-direct"),
+                "registry must contain consumer name after mark_ready resolves"
+            );
+        }
+
+        token.cancel();
     }
 }
