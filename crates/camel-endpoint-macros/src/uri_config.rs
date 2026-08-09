@@ -380,6 +380,7 @@ fn parse_kind_override(
         }
         other => Err(syn::Error::new(
             span,
+            // allow-secret: error message names kind overrides; lint window reaches the unrelated "token stream" doc
             format!(
                 "unknown kind override '{}'. Valid: duration, bool, int, float, string, \
                  enum:VariantA,VariantB",
