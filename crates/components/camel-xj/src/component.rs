@@ -41,7 +41,7 @@ impl OffloadRuntime {
             .enable_all()
             .thread_name("xj-offload")
             .build()
-            .expect("xj offload runtime");
+            .expect("xj offload runtime"); // allow-unwrap
         Self {
             runtime: Some(runtime),
         }
@@ -66,11 +66,11 @@ impl OffloadRuntime {
         F: Future<Output = T> + Send,
         T: Send,
     {
-        let rt = self.runtime.as_ref().expect("offload runtime dropped");
+        let rt = self.runtime.as_ref().expect("offload runtime dropped"); // allow-unwrap
         std::thread::scope(|s| {
             s.spawn(move || rt.block_on(fut))
                 .join()
-                .expect("xj offload thread panicked")
+                .expect("xj offload thread panicked") // allow-unwrap
         })
     }
 }

@@ -1,4 +1,6 @@
 mod changelog;
+mod lint_context_citations;
+mod lint_single_source;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -85,28 +87,17 @@ enum Commands {
     /// #[non_exhaustive] or carry a `/// exhaustive-by-contract: <rationale>`
     /// rustdoc note. Exits non-zero on violations.
     LintNonExhaustive,
-    /// Advisory: check that bold canonical terms in
-    /// `docs/src/concepts/glossary.md` are registered in
-    /// `CONTEXT-MAP.md`'s `## Key Terms` section. Default exit 0;
-    /// `--deny` exits non-zero on violations.
-    LintGlossary {
-        /// Exit non-zero when any violation is reported.
-        #[arg(long)]
-        deny: bool,
-    },
-    /// Advisory: scan markdown for `ADR-00NN` citations and verify the
-    /// referenced ADR file's status. Reports a violation when an ADR
-    /// is cited but missing, or when the cited ADR is Retired/Superseded.
-    /// Default exit 0; `--deny` exits non-zero on violations.
-    /// If no `paths` are given, walks all of `docs/src/`.
-    LintAdrCite {
-        /// Exit non-zero when any violation is reported.
-        #[arg(long)]
-        deny: bool,
-        /// Files or directories to scan (directories recurse for `*.md`).
-        /// When omitted, all of `docs/src/` is scanned.
-        paths: Vec<PathBuf>,
-    },
+    /// Enforce ADR-0054: every #[ignore] must carry a reason string from a
+    /// closed vocabulary. Exits non-zero on violations.
+    LintIgnore,
+    /// Validate CONTEXT.md and CONTEXT-MAP.md citation hygiene: path
+    /// existence, anchor resolution, and (later) symbol validation against
+    /// the workspace's own crate definitions. Exits non-zero on violations.
+    LintContextCitations,
+    /// Scan component crate source for `UriOption::new` calls outside
+    /// `#[cfg(test)]` modules. Enforces the single-source-of-truth
+    /// invariant: metadata MUST be macro-derived, not hand-written.
+    LintSingleSource,
     /// Compute the correct publish order for workspace crates by performing
     /// a topological sort over normal (non-dev) internal dependencies.
     /// Outputs shell commands suitable for publish-crates.sh.
@@ -251,6 +242,46 @@ fn main() {
                 }
             }
         }
+        Commands::LintContextCitations => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_context_citations::lint_context_citations(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-context-citations: OK (0 violations)");
+                }
+                Ok(violations) => {
+                    println!("CONTEXT-CITATION VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-context-citations: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-context-citations error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintSingleSource => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_single_source::lint_single_source(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-single-source: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("SINGLE-SOURCE VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-single-source: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-single-source error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::LintNonExhaustive => {
             let workspace_root = workspace_root_or_exit();
             match lint_non_exhaustive(&workspace_root) {
@@ -271,23 +302,25 @@ fn main() {
                 }
             }
         }
-        Commands::LintGlossary { deny } => {
+        Commands::LintIgnore => {
             let workspace_root = workspace_root_or_exit();
-            run_advisory(
-                "lint-glossary",
-                "GLOSSARY VIOLATIONS",
-                deny,
-                lint_glossary(&workspace_root),
-            );
-        }
-        Commands::LintAdrCite { deny, paths } => {
-            let workspace_root = workspace_root_or_exit();
-            run_advisory(
-                "lint-adr-cite",
-                "ADR-CITE VIOLATIONS",
-                deny,
-                lint_adr_cite(&workspace_root, &paths),
-            );
+            match lint_ignore(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-ignore: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("IGNORE-POLICY VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-ignore: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-ignore error: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::PublishOrder { shell } => {
             let workspace_root = workspace_root_or_exit();
@@ -315,41 +348,6 @@ fn main() {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
-        }
-    }
-}
-
-/// Shared dispatch helper for the advisory linters
-/// (`lint-glossary`, `lint-adr-cite`).
-///
-/// Behavior mirrors the existing `LintUnwrap`/`LintNonExhaustive` arms:
-///   - empty violations → print OK, return normally (exit 0).
-///   - non-empty violations → print each, then exit 1 if `deny`,
-///     else print an advisory line and return normally (exit 0).
-///   - error → print `{name} error: {e}` and exit 1.
-fn run_advisory(name: &str, banner: &str, deny: bool, result: Result<Vec<Violation>, String>) {
-    match result {
-        Ok(violations) if violations.is_empty() => {
-            println!("{name}: OK (no violations)");
-        }
-        Ok(violations) => {
-            println!("{banner} ({} found):", violations.len());
-            for v in &violations {
-                println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
-            }
-            if deny {
-                eprintln!("\n{name}: FAILED (--deny)");
-                std::process::exit(1);
-            } else {
-                println!(
-                    "{name}: advisory — {} violation(s) reported (exit 0)",
-                    violations.len()
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("{name} error: {e}");
-            std::process::exit(1);
         }
     }
 }
@@ -1606,8 +1604,8 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
 pub fn lint_non_exhaustive_src(src: &str, file_path: &str) -> Vec<Violation> {
     use regex::Regex;
 
-    let enum_re = Regex::new(r"^\s*pub\s+enum\s+(\w+)").expect("valid regex");
-    let note_re = Regex::new(r"^///\s*exhaustive-by-contract:\s*(\S.*)$").expect("valid regex");
+    let enum_re = Regex::new(r"^\s*pub\s+enum\s+(\w+)").expect("valid regex"); // allow-unwrap
+    let note_re = Regex::new(r"^///\s*exhaustive-by-contract:\s*(\S.*)$").expect("valid regex"); // allow-unwrap
 
     let lines: Vec<&str> = src.lines().collect();
     let mut violations = Vec::new();
@@ -1735,6 +1733,310 @@ pub fn lint_non_exhaustive(workspace_root: &Path) -> Result<Vec<Violation>, Stri
                 .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
 
             violations.extend(lint_non_exhaustive_src(&content, &path.to_string_lossy()));
+        }
+    }
+
+    Ok(violations)
+}
+
+/// Read the ignore-policy allowlist from `scripts/xtask/allowlist-ignore.txt`.
+///
+/// Same format as `allowlist-log-levels.txt`: one relative path per line,
+/// `#` for comments, blank lines ignored. Returns an empty set if the file
+/// does not exist (caller treats empty set as "no allowlist entries").
+pub fn load_ignore_allowlist(workspace_root: &Path) -> std::collections::HashSet<String> {
+    let allowlist_path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join("allowlist-ignore.txt");
+    std::fs::read_to_string(&allowlist_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+/// Classified prefix on a `#[ignore = "..."]` reason string. The `Err` arm
+/// carries a short rule code that becomes the prefix of the violation snippet
+/// (e.g. `ignore:invalid-prefix:`, `ignore:empty-detail:`).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum IgnoreReasonKind {
+    PreBuilt,
+    SlowTest,
+}
+
+/// Validate a reason string against the closed vocabulary from ADR-0054.
+///
+/// Returns `Ok(kind)` for a well-formed reason, or `Err(code)` where
+/// `code` is one of `"invalid-prefix"` / `"empty-detail"`. The caller
+/// emits the rule code as `ignore:<code>:` in the Violation snippet.
+fn validate_ignore_reason(reason: &str) -> Result<IgnoreReasonKind, &'static str> {
+    if let Some(detail) = reason.strip_prefix("requires pre-built ") {
+        if detail.trim().is_empty() {
+            return Err("empty-detail");
+        }
+        return Ok(IgnoreReasonKind::PreBuilt);
+    }
+    // `requires live` was removed from the closed vocabulary per ADR-0054 rev.
+    // Emit a migration error instead of a generic invalid-prefix.
+    // Only match when followed by space or colon (not when `live` is part of
+    // a longer word like `livewire`).
+    if reason.starts_with("requires live ") || reason.starts_with("requires live:") {
+        return Err("migration-error");
+    }
+    if let Some(detail) = reason.strip_prefix("slow test: ") {
+        if detail.trim().is_empty() {
+            return Err("empty-detail");
+        }
+        return Ok(IgnoreReasonKind::SlowTest);
+    }
+    Err("invalid-prefix")
+}
+
+/// Sentinel `file` value for allowlist reverse-check violations that have no
+/// single source line (see ADR-0054 allowlist coupling rules).
+const IGNORE_ALLOWLIST_SENTINEL_FILE: &str = "<allowlist>";
+
+/// Prefix path under which allowlist entries must be a direct child.
+const IGNORE_ALLOWLIST_PREFIX: &str = "crates/components/camel-component-wasm/tests/";
+
+/// Scan all workspace `crates/**/*.rs` and `examples/**/*.rs` files for
+/// `#[ignore]` attributes that violate ADR-0054.
+///
+/// Rules enforced:
+///   - Every `#[ignore]` must carry a reason string from the closed
+///     vocabulary: `requires pre-built <detail>` | `slow test: <detail>`.
+///   - Bare `#[ignore]` is rejected.
+///   - The allowlist `scripts/xtask/allowlist-ignore.txt` is checked
+///     bidirectionally (forward + reverse + mixed-reason). See ADR-0054.
+///
+/// Exclusion rules:
+///   - Files under `target/`, `.worktrees/`, `scripts/`, `bridges/` are skipped.
+///   - Files NOT under a `crates/` or `examples/` subdirectory are skipped.
+///   - Test files are NOT skipped (unlike `lint_log_levels`) — `#[ignore]`
+///     semantics in `tests/` are exactly the surface the lint must police.
+pub fn lint_ignore(workspace_root: &Path) -> Result<Vec<Violation>, String> {
+    use regex::Regex;
+    use std::collections::HashMap;
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let allowlist = load_ignore_allowlist(workspace_root);
+    // Use `r#"..."#` (not `r"..."`) because the regex body contains `"`.
+    // The regex itself: `#[ignore]` optionally followed by ` = "..."`.
+    let ignore_re = Regex::new(r#"#\[ignore\s*(?:=\s*"([^"]*)")?\]"#).expect("valid regex"); // allow-unwrap
+
+    // Per-file state: (has_any_pre_built, has_any_non_pre_built)
+    // Drives the forward / mixed-reason checks.
+    let mut file_state: HashMap<String, (bool, bool)> = HashMap::new();
+
+    let mut violations = Vec::new();
+
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+
+        // Compute the path relative to the workspace root so the
+        // component-based filters see the in-workspace layout (e.g. when
+        // the workspace itself lives under `.worktrees/<branch>/`).
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        let rel_components: Vec<_> = rel.components().collect();
+
+        // Skip meta-tooling / build directories.
+        if rel.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+                || c == Component::Normal("scripts".as_ref())
+                || c == Component::Normal("bridges".as_ref())
+        }) {
+            continue;
+        }
+
+        // Only scan files under a `crates/` or `examples/` subdirectory.
+        if rel_components.is_empty() {
+            continue;
+        }
+        let first = rel_components[0];
+        if first != Component::Normal("crates".as_ref())
+            && first != Component::Normal("examples".as_ref())
+        {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+        // Normalize the relative path to forward slashes for consistent
+        // allowlist comparison (Windows paths use `\`).
+        let file_rel = rel.to_string_lossy().replace('\\', "/");
+
+        let mut has_pre_built = false;
+        let mut has_non_pre_built = false;
+
+        for (line_idx, raw_line) in content.lines().enumerate() {
+            let trimmed = raw_line.trim();
+
+            // Skip comment lines (single-line `//` and inner-doc `//!`).
+            // This prevents false positives on lines like
+            // `// REDIS-009: ... (#[ignore] by default)` and
+            // `//! All tests ... #[ignore] ...`.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+
+            // A line may carry multiple `#[ignore]` attributes (unusual but
+            // legal). Find all matches on this line.
+            for cap in ignore_re.captures_iter(raw_line) {
+                let line_no = line_idx + 1;
+                if let Some(reason_match) = cap.get(1) {
+                    let reason = reason_match.as_str();
+                    match validate_ignore_reason(reason) {
+                        Ok(IgnoreReasonKind::PreBuilt) => {
+                            has_pre_built = true;
+                        }
+                        Ok(IgnoreReasonKind::SlowTest) => {
+                            has_non_pre_built = true;
+                        }
+                        Err(code) => {
+                            violations.push(Violation {
+                                file: file_rel.clone(),
+                                line: line_no,
+                                snippet: format!(
+                                    "ignore:{}: reason {:?} must use one of the closed-vocabulary prefixes: \
+                                     `requires pre-built <detail>` | `slow test: <detail>` \
+                                     (see ADR-0054) — {}",
+                                    code, reason, raw_line.trim()
+                                ),
+                            });
+                        }
+                    }
+                } else {
+                    // Bare `#[ignore]` — no reason string supplied.
+                    violations.push(Violation {
+                        file: file_rel.clone(),
+                        line: line_no,
+                        snippet: format!(
+                            "ignore:missing-reason: bare #[ignore] — add a reason string from the \
+                             closed vocabulary (see ADR-0054): {}",
+                            raw_line.trim()
+                        ),
+                    });
+                }
+            }
+        }
+
+        file_state.insert(file_rel, (has_pre_built, has_non_pre_built));
+    }
+
+    // -------- Forward check --------
+    // Every file containing a `requires pre-built` test must be in the
+    // allowlist (which the CI job consumes to run those tests).
+    for (file_rel, (has_pre_built, _)) in &file_state {
+        if *has_pre_built && !allowlist.contains(file_rel) {
+            violations.push(Violation {
+                file: file_rel.clone(),
+                line: 0,
+                snippet: format!(
+                    "ignore:pre-built-not-in-allowlist: file contains `requires pre-built` tests \
+                     but is not listed in scripts/xtask/allowlist-ignore.txt (see ADR-0054): \
+                     {}",
+                    file_rel
+                ),
+            });
+        }
+    }
+
+    // -------- Reverse check --------
+    // For each allowlist entry, verify (a) the path is in-scope, (b) the
+    // file exists, (c) the file contains at least one pre-built test.
+    for entry in &allowlist {
+        // (a) In-scope: direct-child `.rs` file under the WASM tests dir.
+        let after_prefix = match entry.strip_prefix(IGNORE_ALLOWLIST_PREFIX) {
+            Some(s) => s,
+            None => {
+                violations.push(Violation {
+                    file: IGNORE_ALLOWLIST_SENTINEL_FILE.to_string(),
+                    line: 0,
+                    snippet: format!(
+                        "ignore:allowlist-out-of-scope: allowlist entry must be a direct-child \
+                         `.rs` file under `crates/components/camel-component-wasm/tests/` \
+                         (see ADR-0054): {}",
+                        entry
+                    ),
+                });
+                continue;
+            }
+        };
+        if after_prefix.is_empty() || after_prefix.contains('/') || !after_prefix.ends_with(".rs") {
+            violations.push(Violation {
+                file: IGNORE_ALLOWLIST_SENTINEL_FILE.to_string(),
+                line: 0,
+                snippet: format!(
+                    "ignore:allowlist-out-of-scope: allowlist entry must be a direct-child \
+                     `.rs` file under `crates/components/camel-component-wasm/tests/` \
+                     (see ADR-0054): {}",
+                    entry
+                ),
+            });
+            continue;
+        }
+
+        // (b) Exists on disk.
+        let full_path = workspace_root.join(entry);
+        if !full_path.is_file() {
+            violations.push(Violation {
+                file: IGNORE_ALLOWLIST_SENTINEL_FILE.to_string(),
+                line: 0,
+                snippet: format!(
+                    "ignore:allowlist-stale: allowlist entry points to a non-existent file \
+                     (see ADR-0054): {}",
+                    entry
+                ),
+            });
+            continue;
+        }
+
+        // (c) Contains at least one `requires pre-built` test.
+        let has_pre_built = file_state.get(entry).map(|(pb, _)| *pb).unwrap_or(false);
+        if !has_pre_built {
+            violations.push(Violation {
+                file: IGNORE_ALLOWLIST_SENTINEL_FILE.to_string(),
+                line: 0,
+                snippet: format!(
+                    "ignore:allowlist-no-pre-built-test: allowlist entry must contain at least \
+                     one `requires pre-built` test (see ADR-0054): {}",
+                    entry
+                ),
+            });
+        }
+    }
+
+    // -------- Mixed-reason check --------
+    // For each allowlisted file, every `#[ignore]` reason must be
+    // `requires pre-built`. A file with mixed reasons would cause the CI
+    // job to incorrectly execute live-service tests.
+    for entry in &allowlist {
+        if let Some((_, has_non_pre_built)) = file_state.get(entry)
+            && *has_non_pre_built
+        {
+            violations.push(Violation {
+                file: entry.clone(),
+                line: 0,
+                snippet: format!(
+                    "ignore:allowlist-mixed-reasons: allowlisted file must contain ONLY \
+                     `requires pre-built` tests (the wasm-integration CI job would otherwise \
+                     run live-service tests — see ADR-0054): {}",
+                    entry
+                ),
+            });
         }
     }
 
@@ -2411,316 +2713,425 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
     let mut seen = std::collections::HashSet::new();
     violations.retain(|v| seen.insert((v.file.clone(), v.line)));
 
+    // Layer 2: credential-derive lint (ADR-0051). Walks `crates/**/src/**/*.rs`,
+    // parses with `syn`, and flags structs/enums that violate the
+    // classification/derive contract (e.g. manual-redaction + Debug).
+    // Parse failures hard-fail: the caller exits non-zero on Err.
+    violations.extend(lint_credential_derives(workspace_root)?);
+
     Ok(violations)
 }
 
-// ---------------------------------------------------------------------------
-// Advisory linters for prose/docs (glossary, slop, ADR citation).
-// All three are advisory by default (print + exit 0) and gate on `--deny`.
-// ---------------------------------------------------------------------------
-
-/// Recursively walk `dir` and return all regular files ending in `*.md`.
-/// Returns an empty Vec if the directory is missing (used as a no-op by the
-/// `docs/src/` default in [`collect_md_files`]).
-fn walk_md(dir: &Path) -> Vec<PathBuf> {
-    use walkdir::WalkDir;
-
-    if !dir.is_dir() {
-        return Vec::new();
-    }
-    WalkDir::new(dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
-        .map(|e| e.into_path())
-        .collect()
+/// ADR-0051 credential-boundary classification for a struct or enum.
+///
+/// Declared via a rustdoc marker:
+///
+/// ```text
+/// /// ADR-0051 credential boundary: <classification>
+/// ```
+///
+/// where `<classification>` is one of the closed-vocabulary values below.
+/// See `openspec/specs/credential-lint/spec.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Classification {
+    /// Secret-bearing type. `Debug` and `Serialize` must be hand-written to
+    /// redact; deriving either is forbidden.
+    ManualRedaction,
+    /// Type whose derived `Debug` already redacts (e.g. a newtype wrapper).
+    /// `Debug` is safe; `Serialize` is forbidden.
+    RedactingWrapper,
+    /// Wire/protocol data-transfer object. `Serialize` is safe; `Debug` is
+    /// forbidden.
+    ProtocolDto,
 }
 
-/// Resolve the set of `*.md` files to scan for the advisory linters
-/// (`lint_adr_cite`).
-///
-/// - Empty `paths` → walk all of `workspace_root/docs/src/` recursively for
-///   `*.md` files. A missing `docs/src/` is treated as "no files" (not an
-///   error) so the linter can run in a sparse checkout.
-/// - Non-empty `paths`: each entry is either an explicit file (any extension;
-///   scanned as-is) or a directory (recurse for `*.md`).
-/// - Returns an error for paths that are neither files nor directories so the
-///   operator gets an actionable diagnostic instead of a silent no-op.
-fn collect_md_files(workspace_root: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
-    if paths.is_empty() {
-        return Ok(walk_md(&workspace_root.join("docs").join("src")));
-    }
-
-    let mut out = Vec::new();
-    for p in paths {
-        if p.is_file() {
-            out.push(p.clone());
-        } else if p.is_dir() {
-            out.extend(walk_md(p));
-        } else {
-            return Err(format!(
-                "path does not exist or is not a regular file/dir: {}",
-                p.display()
-            ));
+impl Classification {
+    fn from_keyword(kw: &str) -> Option<Classification> {
+        match kw {
+            "manual-redaction" => Some(Classification::ManualRedaction),
+            "redacting-wrapper" => Some(Classification::RedactingWrapper),
+            "protocol-dto" => Some(Classification::ProtocolDto),
+            _ => None,
         }
     }
-    Ok(out)
 }
 
-/// Parse the `Status` of an ADR file. Returns the first status word found,
-/// or `None` if no status line could be located.
+/// Prefix used by every credential-derive violation rule so they group cleanly
+/// in reports and are easy to assert on.
+const CREDENTIAL_RULE_PREFIX: &str = "credential-derive:";
+
+/// The rustdoc marker that declares a credential-boundary classification.
+const CREDENTIAL_BOUNDARY_MARKER: &str = "ADR-0051 credential boundary:";
+
+/// Read the string literal from a `#[doc = "..."]` name-value meta, if any.
+fn doc_literal(expr: &syn::Expr) -> Option<String> {
+    if let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(s),
+        ..
+    }) = expr
+    {
+        Some(s.value())
+    } else {
+        None
+    }
+}
+
+/// Scan a type's doc-comment attributes for the `ADR-0051 credential boundary:`
+/// marker and return the declared classification.
 ///
-/// Recognized forms (checked in order):
-///   1. `^Status:\s*(\w+)`                         — plain `Status:` line
-///   2. `^\*\*Status:\*\*\s*(\w+)`                 — `**Status:**`
-///   3. `^\*\*Status\*\*:\s*(\w+)`                 — `**Status**:` (split colons)
-///   4. `^-\s*\*\*Status:\*\*\s*(\w+)`             — list-item bold form
-///   5. `## Status` heading followed by a status word on a later line
-///      (the next non-blank line after the heading counts).
-fn parse_adr_status(content: &str) -> Option<String> {
-    use regex::Regex;
-
-    let line_patterns: &[&str] = &[
-        r"^Status:\s*(\w+)",
-        r"^\*\*Status:\*\*\s*(\w+)",
-        r"^\*\*Status\*\*:\s*(\w+)",
-        r"^-\s*\*\*Status:\*\*\s*(\w+)",
-    ];
-    for pat in line_patterns {
-        let re = Regex::new(pat).expect("valid status regex"); // allow-unwrap
-        for line in content.lines() {
-            if let Some(cap) = re.captures(line) {
-                return Some(cap[1].to_string());
-            }
+/// - `Ok(None)`: no marker present (classification is opt-in).
+/// - `Ok(Some(cls))`: a single, well-formed, closed-vocabulary value.
+/// - `Err(msg)`: missing value (malformed), an unknown value, or conflicting
+///   duplicate markers. The caller reports `msg` as a violation.
+fn parse_classification(attrs: &[syn::Attribute]) -> Result<Option<Classification>, String> {
+    let mut values: Vec<String> = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        let syn::Meta::NameValue(nv) = &attr.meta else {
+            continue;
+        };
+        let Some(doc) = doc_literal(&nv.value) else {
+            continue;
+        };
+        if let Some(rest) = doc.split(CREDENTIAL_BOUNDARY_MARKER).nth(1) {
+            // The classification keyword runs to the end of the marker's line
+            // (block doc-comments may place trailing prose on later lines).
+            let value = rest.lines().next().unwrap_or("").trim();
+            values.push(value.to_string());
         }
     }
 
-    // Heading form: `## Status` on its own line, status word on a later line.
-    let heading_re = Regex::new(r"^##\s+Status\s*$").expect("valid status heading regex"); // allow-unwrap
-    let mut in_heading = false;
-    for line in content.lines() {
-        if in_heading {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                let word = trimmed.split_whitespace().next().unwrap_or("").to_string(); // allow-unwrap
-                if !word.is_empty() {
-                    return Some(word);
-                }
-            }
-        }
-        if heading_re.is_match(line) {
-            in_heading = true;
-        }
+    if values.is_empty() {
+        return Ok(None);
     }
 
+    // Any marker with no value after the colon is malformed.
+    if values.iter().any(String::is_empty) {
+        return Err("malformed classification (missing value)".to_string());
+    }
+
+    // Conflicting duplicates: more than one distinct value across markers.
+    let mut distinct: Vec<&String> = Vec::new();
+    for v in &values {
+        if !distinct.contains(&v) {
+            distinct.push(v);
+        }
+    }
+    if distinct.len() > 1 {
+        return Err("conflicting duplicate classifications".to_string());
+    }
+
+    let value = distinct[0].as_str();
+    match Classification::from_keyword(value) {
+        Some(cls) => Ok(Some(cls)),
+        None => Err(format!("unknown classification '{value}'")),
+    }
+}
+
+/// True when `ty` is (or ends in) a `Zeroizing` path segment, matching both
+/// `Zeroizing<T>` and `zeroize::Zeroizing<T>`.
+fn type_is_zeroizing(ty: &syn::Type) -> bool {
+    matches!(
+        ty,
+        syn::Type::Path(tp)
+            if tp.path.segments.iter().any(|seg| seg.ident == "Zeroizing")
+    )
+}
+
+/// True when a struct or enum has at least one field whose type is `Zeroizing`.
+fn has_zeroizing_field(item: &syn::Item) -> bool {
+    match item {
+        syn::Item::Struct(s) => s.fields.iter().any(|f| type_is_zeroizing(&f.ty)),
+        syn::Item::Enum(e) => e
+            .variants
+            .iter()
+            .any(|v| v.fields.iter().any(|f| type_is_zeroizing(&f.ty))),
+        _ => false,
+    }
+}
+
+/// Extract every trait name mentioned in `#[derive(...)]` attributes, across
+/// single-line and multi-line derives. Uses the last path segment so qualified
+/// forms like `#[derive(serde::Serialize)]` are detected, not just
+/// `#[derive(Serialize)]`.
+fn extract_derive_names(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut names = Vec::new();
+    for attr in attrs {
+        // Skip non-derive attributes so e.g. `#[serde(rename = "x")]` does
+        // not pollute the derive list with `rename`.
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if let Some(last) = meta.path.segments.last() {
+                names.push(last.ident.to_string());
+            }
+            Ok(())
+        });
+    }
+    names
+}
+
+/// True when `attrs` contains `#[cfg(test)]` (also `#[cfg(all(test, ...))]`).
+fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let Ok(list) = attr.meta.require_list() else {
+            return false;
+        };
+        let tokens = list.tokens.to_string();
+        // Match the standalone identifier `test` (not e.g. `testing`).
+        tokens == "test"
+            || tokens
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|tok| tok == "test")
+    })
+}
+
+/// True when `byte` may continue a Rust identifier (alnum or `_`).
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// True when `line` contains the `keyword` token (`struct`/`enum`) immediately
+/// followed by the `ident` token, with proper word boundaries (so `mystruct`
+/// does not match `struct`).
+fn line_has_decl(line: &str, keyword: &str, ident: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut search = 0usize;
+    while let Some(rel) = line[search..].find(keyword) {
+        let abs = search + rel;
+        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
+        let rest = &line[abs + keyword.len()..];
+        if before_ok && rest.starts_with(|c: char| c.is_whitespace()) {
+            let next = rest.trim_start();
+            if next.starts_with(ident)
+                && next[ident.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+            {
+                return true;
+            }
+        }
+        search = abs + 1;
+    }
+    false
+}
+
+/// Line number of a struct/enum item's declaration in `src`. Because
+/// `proc_macro2::Span` does not expose line numbers without the unstable
+/// semver-exempt cfg, the declaration is located lexically by matching the
+/// `struct`/`enum` keyword followed by the item's identifier, skipping comment
+/// lines. Returns `None` if the declaration cannot be located; callers skip
+/// the item rather than misreport line 1.
+fn declaration_line(src: &str, item: &syn::Item) -> Option<usize> {
+    let (keyword, ident): (&'static str, String) = match item {
+        syn::Item::Struct(s) => ("struct", s.ident.to_string()),
+        syn::Item::Enum(e) => ("enum", e.ident.to_string()),
+        _ => return None,
+    };
+    for (i, line) in src.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') {
+            continue;
+        }
+        if line_has_decl(line, keyword, &ident) {
+            return Some(i + 1);
+        }
+    }
     None
 }
 
-/// Verify that every bold canonical term in
-/// `docs/src/concepts/glossary.md` is registered as the first component of a
-/// `## Key Terms` entry in `CONTEXT-MAP.md`.
-///
-/// - The glossary regex is line-anchored: `^\s*(?:-\s*)?\*\*([A-Z][A-Za-z]+)\*\*`.
-///   This rejects prose-internal labels like `Some **Authority**: role` (the
-///   line doesn't start with the bold term) but still matches the
-///   `**Term** — def` glossary-entry shape.
-/// - The CONTEXT-MAP extraction is bounded to the `## Key Terms` section
-///   (from the `## Key Terms` heading up to the next `## ` level-2 heading).
-///   A bold term in a later section (e.g. `## Relationships`) is NOT
-///   considered registered, and remains a violation.
-/// - A term like `**ErrorHandler / ErrorHandlerConfig / ExceptionPolicy**` is
-///   one Key Term; the first component (`ErrorHandler`) is the only value
-///   the glossary needs to match against.
-pub fn lint_glossary(workspace_root: &Path) -> Result<Vec<Violation>, String> {
-    use regex::Regex;
-    use std::collections::HashSet;
-
-    let glossary_path = workspace_root
-        .join("docs")
-        .join("src")
-        .join("concepts")
-        .join("glossary.md");
-    let context_map_path = workspace_root.join("CONTEXT-MAP.md");
-
-    if !glossary_path.exists() {
-        // Missing glossary is advisory, not a hard failure — Task 1.4 will
-        // create the file. Sibling linter (`lint_adr_cite`) tolerates a
-        // missing `docs/src/` advisorially; mirror that contract.
-        eprintln!(
-            "lint-glossary: note: glossary not found at {}, skipping",
-            glossary_path.display()
-        );
-        return Ok(Vec::new());
+/// True when a struct/enum item itself carries `#[cfg(test)]`.
+fn item_has_cfg_test(item: &syn::Item) -> bool {
+    match item {
+        syn::Item::Struct(s) => has_cfg_test(&s.attrs),
+        syn::Item::Enum(e) => has_cfg_test(&e.attrs),
+        _ => false,
     }
-    if !context_map_path.exists() {
-        return Err(format!(
-            "CONTEXT-MAP.md not found at {}",
-            context_map_path.display()
-        ));
-    }
+}
 
-    let glossary = std::fs::read_to_string(&glossary_path)
-        .map_err(|e| format!("Cannot read {}: {e}", glossary_path.display()))?;
-    let context_map = std::fs::read_to_string(&context_map_path)
-        .map_err(|e| format!("Cannot read {}: {e}", context_map_path.display()))?;
+/// Push a single credential-derive violation built from the declaration line.
+fn push_credential_violation(
+    violations: &mut Vec<SecretViolation>,
+    file_path: &str,
+    line: usize,
+    src: &str,
+    rule_tail: &str,
+) {
+    let snippet = src
+        .lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    violations.push(SecretViolation {
+        file: file_path.to_string(),
+        line,
+        snippet,
+        rule: format!("{CREDENTIAL_RULE_PREFIX} {rule_tail}"),
+    });
+}
 
-    // Extract just the `## Key Terms` section (bounded by next `## ` heading).
-    let mut in_key_terms = false;
-    let mut key_terms_text = String::new();
-    for line in context_map.lines() {
-        if line.starts_with("## Key Terms") {
-            in_key_terms = true;
-            continue;
-        }
-        if in_key_terms {
-            if line.starts_with("## ") {
-                break;
+/// Check one struct/enum item for credential-derive consistency, appending any
+/// violations to `violations`.
+fn check_credential_item(
+    item: &syn::Item,
+    violations: &mut Vec<SecretViolation>,
+    file_path: &str,
+    src: &str,
+) {
+    let attrs: &[syn::Attribute] = match item {
+        syn::Item::Struct(s) => &s.attrs,
+        syn::Item::Enum(e) => &e.attrs,
+        _ => return,
+    };
+    // If the lexical matcher fails, report with line 0 rather than
+    // silently skip — a credential lint's dangerous failure mode is
+    // the false negative.
+    let line = declaration_line(src, item).unwrap_or(0);
+
+    let derives = extract_derive_names(attrs);
+    match parse_classification(attrs) {
+        Ok(Some(cls)) => {
+            let has_debug = derives.iter().any(|d| d == "Debug");
+            let has_serialize = derives.iter().any(|d| d == "Serialize");
+            let forbidden: Vec<&str> = match cls {
+                Classification::ManualRedaction => {
+                    let mut v = Vec::new();
+                    if has_debug {
+                        v.push("manual-redaction forbids Debug");
+                    }
+                    if has_serialize {
+                        v.push("manual-redaction forbids Serialize");
+                    }
+                    v
+                }
+                Classification::RedactingWrapper => {
+                    if has_serialize {
+                        vec!["redacting-wrapper forbids Serialize"]
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Classification::ProtocolDto => {
+                    if has_debug {
+                        vec!["protocol-dto forbids Debug"]
+                    } else {
+                        Vec::new()
+                    }
+                }
+            };
+            for tail in forbidden {
+                push_credential_violation(violations, file_path, line, src, tail);
             }
-            key_terms_text.push_str(line);
-            key_terms_text.push('\n');
+        }
+        Ok(None) => {
+            if has_zeroizing_field(item) {
+                push_credential_violation(
+                    violations,
+                    file_path,
+                    line,
+                    src,
+                    "Zeroizing field requires manual-redaction classification",
+                );
+            }
+        }
+        Err(msg) => {
+            push_credential_violation(violations, file_path, line, src, &msg);
         }
     }
+}
 
-    // First-component extraction: `- **TermName / Alias / ...**` captures `TermName`.
-    // The `(?m)` flag is required: extraction runs over the multi-line section
-    // string, so `^` must match the start of EVERY line, not just position 0.
-    // (Without it, a leading blank line or any term after the first is missed.)
-    let first_component_re =
-        Regex::new(r"(?m)^- \*\*([^*/]+?)[ */]").map_err(|e| format!("Invalid regex: {e}"))?;
-    let mut known: HashSet<String> = HashSet::new();
-    for cap in first_component_re.captures_iter(&key_terms_text) {
-        known.insert(cap[1].to_string());
+/// Recursively visit items, skipping `#[cfg(test)]` modules and `#[cfg(test)]`
+/// items, checking each struct/enum for credential-derive consistency.
+fn collect_credential_violations(
+    items: &[syn::Item],
+    violations: &mut Vec<SecretViolation>,
+    file_path: &str,
+    src: &str,
+) {
+    for item in items {
+        match item {
+            syn::Item::Mod(m) => {
+                if has_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    collect_credential_violations(inner, violations, file_path, src);
+                }
+            }
+            syn::Item::Struct(_) | syn::Item::Enum(_) => {
+                if item_has_cfg_test(item) {
+                    continue;
+                }
+                check_credential_item(item, violations, file_path, src);
+            }
+            _ => {}
+        }
     }
+}
 
-    // Glossary entry extraction: line-anchored bold term at the start of an
-    // entry line. Letters only (A-Z then a-z) — aliases / slash forms are
-    // written on the CONTEXT-MAP side, not the glossary side.
-    let glossary_term_re = Regex::new(r"^\s*(?:-\s*)?\*\*([A-Z][A-Za-z]+)\*\*")
-        .map_err(|e| format!("Invalid regex: {e}"))?;
-
+/// Core scanner: parse a single `.rs` source file with `syn` and return every
+/// credential-derive violation. On `syn::parse_file` failure, returns `Err`
+/// (hard-fail — parse failures must not silently skip enforcement).
+fn lint_credential_derives_src(src: &str, file_path: &str) -> Result<Vec<SecretViolation>, String> {
+    let file = syn::parse_file(src).map_err(|e| format!("{file_path}: {e}"))?;
     let mut violations = Vec::new();
-    for (idx, line) in glossary.lines().enumerate() {
-        let Some(cap) = glossary_term_re.captures(line) else {
-            continue;
-        };
-        let term = cap[1].to_string();
-        if known.contains(&term) {
-            continue;
-        }
-        violations.push(Violation {
-            file: glossary_path.to_string_lossy().to_string(),
-            line: idx + 1,
-            snippet: format!(
-                "{}  (term '{}' not found in CONTEXT-MAP.md ## Key Terms)",
-                line.trim(),
-                term
-            ),
-        });
-    }
-
+    collect_credential_violations(&file.items, &mut violations, file_path, src);
     Ok(violations)
 }
 
-/// Advisory linter for `ADR-00NN` citations in markdown.
-///
-/// For each distinct `ADR-00NN` token found in the scanned markdown:
-///   - glob `docs/adr/00NN-*.md`. If no file exists → emit an `unresolved`
-///     violation for every line that cites it.
-///   - if the file exists, parse its `Status` line (see [`parse_adr_status`]).
-///     A status of `Retired` or `Superseded` (case-insensitive) → emit a
-///     violation per citation. A missing status line is treated as active
-///     (no violation) with a note logged to stderr.
-pub fn lint_adr_cite(workspace_root: &Path, paths: &[PathBuf]) -> Result<Vec<Violation>, String> {
-    use regex::Regex;
-    use std::collections::HashMap;
-
-    let cite_re = Regex::new(r"ADR-(00\d\d)").expect("valid cite regex"); // allow-unwrap
-    let files = collect_md_files(workspace_root, paths)?;
-
-    // Map: ADR number -> list of (citing file, 1-based line).
-    let mut cited: HashMap<String, Vec<(PathBuf, usize)>> = HashMap::new();
-    for file_path in &files {
-        let content = std::fs::read_to_string(file_path)
-            .map_err(|e| format!("Cannot read {}: {e}", file_path.display()))?;
-        for (idx, line) in content.lines().enumerate() {
-            for cap in cite_re.captures_iter(line) {
-                let num = cap[1].to_string();
-                cited
-                    .entry(num)
-                    .or_default()
-                    .push((file_path.clone(), idx + 1));
-            }
-        }
-    }
+/// Walk `crates/**/src/**/*.rs` under `workspace_root` and collect every
+/// credential-derive violation. Test files (`is_test_file`) are skipped at the
+/// file level; `#[cfg(test)]` modules are skipped at the item level. Any parse
+/// failure returns `Err`.
+pub fn lint_credential_derives(workspace_root: &Path) -> Result<Vec<SecretViolation>, String> {
+    use std::path::Component;
+    use walkdir::WalkDir;
 
     let mut violations = Vec::new();
-    let adr_dir = workspace_root.join("docs").join("adr");
 
-    for (num, locations) in &cited {
-        let adr_id = format!("ADR-{num}");
-        let pattern = format!("{num}-");
-        let mut found: Option<PathBuf> = None;
-        if adr_dir.is_dir() {
-            for entry in std::fs::read_dir(&adr_dir)
-                .map_err(|e| format!("Cannot read {}: {e}", adr_dir.display()))?
-            {
-                let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
-                let name_str = entry.file_name().to_string_lossy().to_string();
-                if name_str.starts_with(&pattern) && name_str.ends_with(".md") {
-                    found = Some(entry.path());
-                    break;
-                }
-            }
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if is_test_file(path) {
+            continue;
         }
 
-        match found {
-            Some(adr_file) => {
-                let content = std::fs::read_to_string(&adr_file)
-                    .map_err(|e| format!("Cannot read {}: {e}", adr_file.display()))?;
-                match parse_adr_status(&content) {
-                    Some(status)
-                        if status.eq_ignore_ascii_case("retired")
-                            || status.eq_ignore_ascii_case("superseded") =>
-                    {
-                        for (file, line) in locations {
-                            violations.push(Violation {
-                                file: file.to_string_lossy().to_string(),
-                                line: *line,
-                                snippet: format!(
-                                    "{adr_id} is {status} (per {}); cited here",
-                                    adr_file
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_default()
-                                ),
-                            });
-                        }
-                    }
-                    Some(_) => {
-                        // active: no violation
-                    }
-                    None => {
-                        eprintln!(
-                            "lint-adr-cite: note: {adr_id} has no status line in {}; treating as active",
-                            adr_file.display()
-                        );
-                    }
-                }
-            }
-            None => {
-                for (file, line) in locations {
-                    violations.push(Violation {
-                        file: file.to_string_lossy().to_string(),
-                        line: *line,
-                        snippet: format!(
-                            "cites {adr_id} but no ADR file matches docs/adr/{num}-*.md — unresolved"
-                        ),
-                    });
-                }
-            }
+        let comps: Vec<_> = path.components().collect();
+        let under_crates = comps
+            .iter()
+            .any(|c| *c == Component::Normal("crates".as_ref()));
+        let under_src = comps
+            .iter()
+            .any(|c| *c == Component::Normal("src".as_ref()));
+        let blocked = comps
+            .iter()
+            .any(|c| *c == Component::Normal("target".as_ref()))
+            || path.starts_with(workspace_root.join(".worktrees"));
+        if !under_crates || !under_src || blocked {
+            continue;
         }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        violations.extend(lint_credential_derives_src(
+            &content,
+            &path.to_string_lossy(),
+        )?);
     }
 
     Ok(violations)
@@ -3642,6 +4053,285 @@ mod tests {
             );
             fs::remove_dir_all(&ws).unwrap();
         }
+
+        #[test]
+        fn test_lint_secrets_combines_sink_and_derive() {
+            // One sink-pattern violation (format! password) in crates/foo/src/sink.rs
+            // plus one credential-derive violation (manual-redaction struct + Debug)
+            // in crates/bar/src/cred.rs. lint_secrets must surface BOTH.
+            let ws = tmp_workspace_secrets(&[
+                (
+                    "crates/foo/src/sink.rs",
+                    r#"fn log() { let msg = format!("password {}", self.password); }"#, // allow-secret
+                ),
+                (
+                    "crates/bar/src/cred.rs",
+                    "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub struct Cred { x: u32 }\n",
+                ),
+            ]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                2,
+                "expected sink+derive = 2 violations, got: {violations:?}"
+            );
+            let rules: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
+            assert!(
+                rules.iter().any(|r| r.contains("format macro")),
+                "missing format-macro sink violation: {rules:?}"
+            );
+            assert!(
+                rules
+                    .iter()
+                    .any(|r| r.contains("manual-redaction forbids Debug")),
+                "missing credential-derive violation: {rules:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn test_lint_secrets_parse_failure_returns_err() {
+            // A syntactically invalid .rs file under crates/**/src/ makes
+            // lint_credential_derives return Err; lint_secrets must propagate
+            // it as Err (hard-fail, not silently swallowed).
+            let ws = tmp_workspace_secrets(&[("crates/foo/src/lib.rs", "struct Broken {\n")]);
+            let res = lint_secrets(&ws);
+            assert!(
+                res.is_err(),
+                "expected parse-failure Err, got Ok({:?})",
+                res.as_ref().map(|v| v.len())
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod lint_credential_derives_tests {
+        use super::*;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn tmp_workspace_cred(files: &[(&str, &str)]) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-cred-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap() // allow-unwrap
+                    .subsec_nanos()
+            ));
+            for (rel_path, content) in files {
+                let full = dir.join(rel_path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap(); // allow-unwrap
+                fs::write(&full, content).unwrap(); // allow-unwrap
+            }
+            fs::create_dir_all(dir.join("bridges")).unwrap(); // allow-unwrap
+            fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap(); // allow-unwrap
+            dir
+        }
+
+        #[test]
+        fn test_manual_redaction_debug_violation() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert_eq!(
+                v[0].rule,
+                "credential-derive: manual-redaction forbids Debug"
+            );
+        }
+
+        #[test]
+        fn test_enum_manual_redaction_debug_violation() {
+            // Exercises the Item::Enum arm of has_zeroizing_field,
+            // check_credential_item, and item_has_cfg_test.
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub enum Foo { A, B }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("manual-redaction forbids Debug"));
+        }
+
+        #[test]
+        fn test_enum_zeroizing_without_classification() {
+            // Exercises the Item::Enum arm of has_zeroizing_field by giving an
+            // enum variant a Zeroizing field and no classification marker.
+            let src = "pub enum Cred { Plain(String), Secret(Zeroizing<String>) }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(
+                v[0].rule
+                    .contains("Zeroizing field requires manual-redaction classification")
+            );
+        }
+
+        #[test]
+        fn test_qualified_derive_serialize_violation() {
+            // Regression: `serde::Serialize` is a multi-segment path; the old
+            // `meta.path.get_ident()` extraction silently dropped it.
+            let src = "/// ADR-0051 credential boundary: redacting-wrapper\n#[derive(serde::Serialize)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("redacting-wrapper forbids Serialize"));
+        }
+
+        #[test]
+        fn test_manual_redaction_serialize_violation() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Serialize)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("manual-redaction forbids Serialize"));
+        }
+
+        #[test]
+        fn test_manual_redaction_clean() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Clone)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_manual_redaction_with_manual_impl_debug() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\npub struct Foo { x: u32 }\nimpl std::fmt::Debug for Foo {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, \"redacted\") }\n}\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_redacting_wrapper_debug_ok() {
+            let src = "/// ADR-0051 credential boundary: redacting-wrapper\n#[derive(Debug)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_redacting_wrapper_serialize_violation() {
+            let src = "/// ADR-0051 credential boundary: redacting-wrapper\n#[derive(Serialize)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("redacting-wrapper forbids Serialize"));
+        }
+
+        #[test]
+        fn test_protocol_dto_serialize_ok() {
+            let src = "/// ADR-0051 credential boundary: protocol-dto\n#[derive(Serialize)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_protocol_dto_debug_violation() {
+            let src = "/// ADR-0051 credential boundary: protocol-dto\n#[derive(Debug)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("protocol-dto forbids Debug"));
+        }
+
+        #[test]
+        fn test_zeroizing_without_classification() {
+            let src = "pub struct Foo { value: Zeroizing<String> }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(
+                v[0].rule
+                    .contains("Zeroizing field requires manual-redaction classification")
+            );
+        }
+
+        #[test]
+        fn test_qualified_zeroizing_without_classification() {
+            let src = "pub struct Foo { value: zeroize::Zeroizing<String> }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(
+                v[0].rule
+                    .contains("Zeroizing field requires manual-redaction classification")
+            );
+        }
+
+        #[test]
+        fn test_zeroizing_with_classification() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\npub struct Foo { value: Zeroizing<String> }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_unannotated_no_zeroizing() {
+            let src = "pub struct Foo { path: String }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_credential_suggesting_name_no_violation() {
+            let src = "pub struct Foo { client_key_path: String }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert!(v.is_empty(), "{v:?}");
+        }
+
+        #[test]
+        fn test_multiline_derive() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(\n    Debug,\n    Clone,\n)]\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("manual-redaction forbids Debug"));
+        }
+
+        #[test]
+        fn test_unknown_classification() {
+            let src =
+                "/// ADR-0051 credential boundary: unknown-value\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("unknown classification"));
+        }
+
+        #[test]
+        fn test_malformed_classification() {
+            let src = "/// ADR-0051 credential boundary:\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("malformed classification"));
+        }
+
+        #[test]
+        fn test_conflicting_duplicate() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n/// ADR-0051 credential boundary: protocol-dto\npub struct Foo { x: u32 }\n";
+            let v = lint_credential_derives_src(src, "t.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert!(v[0].rule.contains("conflicting duplicate classifications"));
+        }
+
+        #[test]
+        fn test_parse_failure_returns_error() {
+            let src = "struct Broken {";
+            let res = lint_credential_derives_src(src, "t.rs");
+            assert!(res.is_err(), "expected parse error, got: {res:?}");
+        }
+
+        #[test]
+        fn test_violation_includes_file_and_line() {
+            let src = "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub struct Foo {\n    x: u32,\n}\n";
+            let v = lint_credential_derives_src(src, "my_file.rs").unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            assert_eq!(v[0].file, "my_file.rs");
+            let expected_line = src
+                .lines()
+                .position(|l| l.contains("pub struct Foo"))
+                .map(|i| i + 1)
+                .unwrap(); // allow-unwrap
+            assert_eq!(v[0].line, expected_line);
+        }
+
+        #[test]
+        fn test_violations_present_exit_nonzero() {
+            let ws = tmp_workspace_cred(&[(
+                "crates/foo/src/lib.rs",
+                "/// ADR-0051 credential boundary: manual-redaction\n#[derive(Debug)]\npub struct Foo { x: u32 }\n",
+            )]);
+            let v = lint_credential_derives(&ws).unwrap(); // allow-unwrap
+            assert_eq!(v.len(), 1, "{v:?}");
+            fs::remove_dir_all(&ws).unwrap(); // allow-unwrap
+        }
     }
 
     #[cfg(test)]
@@ -4148,228 +4838,500 @@ camel-core = { workspace = true }
         }
     }
 
-    mod lint_glossary_tests {
-        use super::*;
-        use std::fs;
-
-        /// Build a tempdir workspace with the two files `lint_glossary`
-        /// needs: `docs/src/concepts/glossary.md` and `CONTEXT-MAP.md`.
-        /// Returns the workspace root.
-        fn tmp_glossary_workspace(glossary: &str, context_map: &str) -> PathBuf {
-            let dir = tempfile::tempdir().expect("tempdir").into_path();
-            let glossary_dir = dir.join("docs").join("src").join("concepts");
-            fs::create_dir_all(&glossary_dir).unwrap();
-            fs::write(glossary_dir.join("glossary.md"), glossary).unwrap();
-            fs::write(dir.join("CONTEXT-MAP.md"), context_map).unwrap();
-            dir
-        }
-
-        #[test]
-        fn lint_glossary_compound_alias_matches() {
-            let ws = tmp_glossary_workspace(
-                "- **ErrorHandler** — error handling definition\n",
-                "## Key Terms\n\
-                 - **ErrorHandler / ErrorHandlerConfig / ExceptionPolicy** — wraps error policy\n\
-                 \n\
-                 ## Other Section\n\
-                 - **Foo** — unrelated\n",
-            );
-            let v = lint_glossary(&ws).unwrap();
-            assert!(v.is_empty(), "expected 0 violations, got {v:?}");
-        }
-
-        #[test]
-        fn lint_glossary_inline_label_not_matched() {
-            // The **Authority** token is embedded in a prose sentence — the
-            // line-anchored regex must NOT extract it.
-            let ws = tmp_glossary_workspace(
-                "Prose discussion. The **Authority** role handles auth.\n\
-                 \n\
-                 - **ErrorHandler** — error handling\n",
-                "## Key Terms\n\
-                 - **ErrorHandler** — def\n",
-            );
-            let v = lint_glossary(&ws).unwrap();
-            assert!(
-                v.is_empty(),
-                "inline label must not be extracted, got {v:?}"
-            );
-        }
-
-        #[test]
-        fn lint_glossary_non_matching_violates() {
-            let ws = tmp_glossary_workspace(
-                "- **FooBar** — def\n",
-                "## Key Terms\n\
-                 - **SomeOther** — def\n",
-            );
-            let v = lint_glossary(&ws).unwrap();
-            assert_eq!(v.len(), 1, "expected 1 violation, got {v:?}");
-            assert!(v[0].snippet.contains("FooBar"));
-        }
-
-        #[test]
-        fn lint_glossary_section_bounded() {
-            // FooBar appears under `## Relationships` only, not `## Key Terms`.
-            // Extraction must not cross the section boundary.
-            let ws = tmp_glossary_workspace(
-                "- **FooBar** — def\n",
-                "## Key Terms\n\
-                 - **Other** — def\n\
-                 \n\
-                 ## Relationships\n\
-                 - **FooBar** — relates to X\n",
-            );
-            let v = lint_glossary(&ws).unwrap();
-            assert_eq!(
-                v.len(),
-                1,
-                "term under Relationships must not satisfy, got {v:?}"
-            );
-            assert!(v[0].snippet.contains("FooBar"));
-        }
-
-        #[test]
-        fn lint_glossary_multiline_second_term_with_blank_line() {
-            // Regression: real CONTEXT-MAP has a blank line after the
-            // `## Key Terms` heading and multiple terms. The first-component
-            // regex runs over the multi-line section string, so it needs the
-            // `(?m)` flag to match every line start (not just position 0).
-            // This fixture references the SECOND term; without `(?m)` only the
-            // first term at position 0 would be captured (and a leading blank
-            // line defeats even that).
-            let ws = tmp_glossary_workspace(
-                "- **SecondTerm** — def\n",
-                "## Key Terms\n\
-                 \n\
-                 - **FirstTerm** — def\n\
-                 - **SecondTerm** — def\n",
-            );
-            let v = lint_glossary(&ws).unwrap();
-            assert!(
-                v.is_empty(),
-                "second term must be found via multiline match, got {v:?}"
-            );
-        }
-    }
-
-    mod lint_adr_cite_tests {
+    #[cfg(test)]
+    mod lint_ignore_tests {
         use super::*;
         use std::fs;
         use std::path::PathBuf;
 
-        /// Build a tempdir with `docs/adr/<num>-<slug>.md` and a single
-        /// page file at `docs/src/page.md` whose body is the given content.
-        fn tmp_adr_workspace(adr_num: &str, adr_body: &str, page_body: &str) -> PathBuf {
-            let dir = tempfile::tempdir().unwrap().into_path();
-            let adr_dir = dir.join("docs/adr");
-            fs::create_dir_all(&adr_dir).unwrap();
-            fs::write(adr_dir.join(format!("{adr_num}-test.md")), adr_body).unwrap();
-            let src = dir.join("docs/src");
-            fs::create_dir_all(&src).unwrap();
-            fs::write(src.join("page.md"), page_body).unwrap();
+        /// Build a temp workspace containing the given relative-path files and
+        /// seed `scripts/xtask/allowlist-ignore.txt` (empty) so the lint does
+        /// not error on the missing path. Returns the workspace root.
+        fn tmp_workspace_ignore(files: &[(&str, &str)], allowlist: &[&str]) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-ignore-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            for (rel_path, content) in files {
+                let full = dir.join(rel_path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap();
+                fs::write(&full, content).unwrap();
+            }
+            fs::create_dir_all(dir.join("bridges")).unwrap();
+            fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+            let xtask = dir.join("scripts").join("xtask");
+            fs::create_dir_all(&xtask).unwrap();
+            let mut allowlist_contents =
+                String::from("# allowlist for ignore-test lint (see ADR-0054)\n");
+            for entry in allowlist {
+                allowlist_contents.push_str(entry);
+                allowlist_contents.push('\n');
+            }
+            fs::write(xtask.join("allowlist-ignore.txt"), allowlist_contents).unwrap();
             dir
         }
 
-        #[test]
-        fn lint_adr_cite_active_each_format() {
-            // Five status-line formats all parse to "Accepted" (active).
-            for status_block in &[
-                "Status: Accepted",
-                "**Status:** Accepted",
-                "**Status**: Accepted",
-                "- **Status:** Accepted",
-                "## Status\n\nAccepted\n",
-            ] {
-                let ws = tmp_adr_workspace(
-                    "0050",
-                    &format!("# ADR-0050: test\n\n{status_block}\n"),
-                    "See ADR-0050 for context.\n",
-                );
-                let page = ws.join("docs/src/page.md");
-                let v = lint_adr_cite(&ws, std::slice::from_ref(&page)).unwrap();
-                assert!(
-                    v.is_empty(),
-                    "format {status_block:?}: expected 0 violations, got {v:?}"
-                );
-            }
-        }
+        // ----- per-attribute validation -----
 
         #[test]
-        fn lint_adr_cite_retired() {
-            let ws = tmp_adr_workspace(
-                "0048",
-                "# ADR-0048: test\n\n**Status**: Retired (2026-07-26)\n",
-                "Cites ADR-0048 here.\n",
+        fn bare_ignore_is_violation() {
+            let ws = tmp_workspace_ignore(
+                &[("crates/foo/src/lib.rs", "#[ignore]\n#[test]\nfn foo() {}\n")],
+                &[],
             );
-            let page = ws.join("docs/src/page.md");
-            let v = lint_adr_cite(&ws, std::slice::from_ref(&page)).unwrap();
-            assert_eq!(v.len(), 1, "expected 1 violation, got {v:?}");
-            assert!(v[0].snippet.contains("Retired"));
-        }
-
-        #[test]
-        fn lint_adr_cite_statusless() {
-            let ws = tmp_adr_workspace(
-                "0051",
-                "# ADR-0051: test\n\nNo status line in this fixture.\n",
-                "Cites ADR-0051 here.\n",
-            );
-            let page = ws.join("docs/src/page.md");
-            let v = lint_adr_cite(&ws, std::slice::from_ref(&page)).unwrap();
-            assert!(
-                v.is_empty(),
-                "statusless ADR must be treated as active, got {v:?}"
-            );
-        }
-
-        #[test]
-        fn lint_adr_cite_missing() {
-            // ADR-0099 has no matching file in docs/adr/.
-            let ws = tmp_adr_workspace(
-                "0050",
-                "# ADR-0050: anchor only\n\nStatus: Accepted\n",
-                "Cites ADR-0099 here.\n",
-            );
-            let page = ws.join("docs/src/page.md");
-            let v = lint_adr_cite(&ws, std::slice::from_ref(&page)).unwrap();
-            assert_eq!(v.len(), 1, "expected 1 violation, got {v:?}");
-            assert!(v[0].snippet.contains("unresolved"));
-        }
-
-        #[test]
-        fn lint_adr_cite_path_filter() {
-            let dir = tempfile::tempdir().unwrap().into_path();
-            // ADR-0048 is retired.
-            let adr_dir = dir.join("docs/adr");
-            fs::create_dir_all(&adr_dir).unwrap();
-            fs::write(
-                adr_dir.join("0048-test.md"),
-                "# ADR-0048\n\n**Status**: Retired\n",
-            )
-            .unwrap();
-            let pages = dir.join("pages");
-            fs::create_dir_all(&pages).unwrap();
-            let clean = pages.join("clean.md");
-            let dirty = pages.join("dirty.md");
-            fs::write(&clean, "No citations here.\n").unwrap();
-            fs::write(&dirty, "Cites ADR-0048 in this paragraph.\n").unwrap();
-
-            // Select only the clean page → 0 violations.
-            let v_clean = lint_adr_cite(&dir, std::slice::from_ref(&clean)).unwrap();
-            assert!(v_clean.is_empty(), "clean-only: got {v_clean:?}");
-
-            // Select only the dirty page → 1 violation.
-            let v_dirty = lint_adr_cite(&dir, std::slice::from_ref(&dirty)).unwrap();
-            assert_eq!(v_dirty.len(), 1, "dirty-only: got {v_dirty:?}");
-
-            // Select the parent directory → recurses *.md, finds both, reports dirty.
-            let v_dir = lint_adr_cite(&dir, std::slice::from_ref(&pages)).unwrap();
+            let violations = lint_ignore(&ws).unwrap();
             assert_eq!(
-                v_dir.len(),
+                violations.len(),
                 1,
-                "parent-dir scan must recurse *.md and find dirty, got {v_dir:?}"
+                "expected 1 violation, got {violations:?}"
             );
+            assert!(
+                violations[0].snippet.contains("ignore:missing-reason"),
+                "expected `ignore:missing-reason` in snippet, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn valid_requires_pre_built_passes() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/components/camel-component-wasm/tests/foo.rs",
+                    r#"#[ignore = "requires pre-built guest wasm"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &["crates/components/camel-component-wasm/tests/foo.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "valid allowlisted `requires pre-built` must pass, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn valid_slow_test_passes() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "slow test: file polling"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "valid `slow test:` must pass, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn invalid_prefix_is_violation() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "because reasons"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "expected 1 violation, got {violations:?}"
+            );
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "expected `ignore:invalid-prefix` in snippet, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn near_prefix_typo_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires livewire foo"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "near-prefix typo `requires livewire` must be rejected, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn case_sensitive_prefix() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "Requires live Redis"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "capitalized prefix `Requires live` must be rejected, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn empty_detail_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "slow test: "]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:empty-detail"),
+                "empty detail after delimiter must be rejected, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn prefix_without_detail_no_space() {
+            // `requires live` with no trailing space — does not match the
+            // closed-vocabulary prefix, so it must be flagged as
+            // `invalid-prefix` (no delimiter present at all).
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires live"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "missing delimiter must be `invalid-prefix`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn slow_test_wrong_delimiter_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "slow test file polling"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "missing colon in `slow test` must be `invalid-prefix`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn requires_live_wrong_delimiter_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires live: Kafka"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:migration-error"),
+                "colon instead of space in `requires live:` must be `migration-error`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn requires_live_is_migration_error() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires live Kafka"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:migration-error"),
+                "`requires live` must emit migration-error, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn requires_pre_built_wrong_delimiter_rejected() {
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    r#"#[ignore = "requires pre-built: wasm"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:invalid-prefix"),
+                "colon instead of space in `requires pre-built:` must be `invalid-prefix`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // ----- comment-line / scope handling -----
+
+        #[test]
+        fn ignore_in_comment_not_violation() {
+            // Both `//` and `//!` lines must be skipped before regex matching,
+            // so `#[ignore]` inside a comment is never flagged.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/src/lib.rs",
+                    "// REDIS-009: ... (#[ignore] by default)\n\
+                     //! All tests here are #[ignore] by default.\n",
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "comment lines must be skipped, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn scripts_dir_excluded() {
+            // `scripts/` is in the path-component skip list — file is not
+            // scanned at all, so the bare `#[ignore]` is never seen.
+            let ws = tmp_workspace_ignore(
+                &[("scripts/foo.rs", "#[ignore]\n#[test]\nfn foo() {}\n")],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "scripts/ must be excluded, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn tests_dir_scanned() {
+            // Unlike `lint_log_levels`, test files under `crates/.../tests/`
+            // ARE scanned for `#[ignore]` policy violations. `requires live`
+            // is now a migration error (ADR-0054 rev).
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/tests/bar.rs",
+                    r#"#[ignore = "requires live Foo"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got {violations:?}");
+            assert!(
+                violations[0].snippet.contains("ignore:migration-error"),
+                "tests/ must be scanned; `requires live` should be migration-error, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // ----- allowlist coupling -----
+
+        #[test]
+        fn pre_built_not_in_allowlist() {
+            // File has a `requires pre-built` test but is not in the
+            // allowlist → forward check violation.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/foo/tests/bar.rs",
+                    r#"#[ignore = "requires pre-built wasm"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &[],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "expected 1 forward-check violation, got: {violations:?}"
+            );
+            assert!(
+                violations[0]
+                    .snippet
+                    .contains("ignore:pre-built-not-in-allowlist"),
+                "expected `ignore:pre-built-not-in-allowlist`, got: {}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_out_of_scope() {
+            // Allowlist entry is under `crates/other/tests/...` not the WASM
+            // tests dir → reverse-check (a) violation.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/other/tests/foo.rs",
+                    r#"#[ignore = "requires pre-built guest wasm"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &["crates/other/tests/foo.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.snippet.contains("ignore:allowlist-out-of-scope")),
+                "expected `ignore:allowlist-out-of-scope`, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_stale() {
+            // Allowlist entry points to a file that does not exist on disk
+            // → reverse-check (b) violation. Line is the sentinel 0.
+            let ws = tmp_workspace_ignore(
+                &[],
+                &["crates/components/camel-component-wasm/tests/nonexistent.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.snippet.contains("ignore:allowlist-stale") && v.line == 0),
+                "expected `ignore:allowlist-stale` with line 0, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_no_pre_built_test() {
+            // Real WASM test file exists, is in the allowlist, but only has
+            // `requires live` tests (no `requires pre-built`) → reverse-check
+            // (c) violation.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/components/camel-component-wasm/tests/only_live.rs",
+                    r#"#[ignore = "requires live Foo"]
+#[test]
+fn foo() {}
+"#,
+                )],
+                &["crates/components/camel-component-wasm/tests/only_live.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.snippet.contains("ignore:allowlist-no-pre-built-test")),
+                "expected `ignore:allowlist-no-pre-built-test`, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_mixed_reasons() {
+            // Allowlisted file contains BOTH `requires pre-built` AND
+            // `requires live` → `requires live` is now a migration error
+            // (ADR-0054 rev), so the mixed-reasons check does NOT fire.
+            // Instead, the `requires live` line produces a migration-error
+            // violation.
+            let ws = tmp_workspace_ignore(
+                &[(
+                    "crates/components/camel-component-wasm/tests/mixed.rs",
+                    r#"#[ignore = "requires pre-built guest wasm"]
+#[test]
+fn a() {}
+
+#[ignore = "requires live Foo"]
+#[test]
+fn b() {}
+"#,
+                )],
+                &["crates/components/camel-component-wasm/tests/mixed.rs"],
+            );
+            let violations = lint_ignore(&ws).unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| v.snippet.contains("ignore:migration-error")),
+                "expected `ignore:migration-error`, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
         }
     }
 }
