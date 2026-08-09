@@ -208,6 +208,7 @@ async fn master_route_uses_kubernetes_platform_from_config() {
         languages: Default::default(),
         security: SecurityConfig::default(),
         datasources: Default::default(),
+        idempotent_repo: None,
         _extra: Default::default(),
     };
 
