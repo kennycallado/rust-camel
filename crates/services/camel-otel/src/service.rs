@@ -66,6 +66,10 @@ pub struct OtelService {
     logger_provider: Option<SdkLoggerProvider>,
     metrics: Option<Arc<OtelMetrics>>,
     status: AtomicU8,
+    #[cfg(test)]
+    test_span_exporter: Option<opentelemetry_sdk::trace::InMemorySpanExporter>,
+    #[cfg(test)]
+    test_log_exporter: Option<opentelemetry_sdk::logs::InMemoryLogExporter>,
 }
 
 impl OtelService {
@@ -78,6 +82,10 @@ impl OtelService {
             logger_provider: None,
             metrics: Some(metrics),
             status: AtomicU8::new(STATUS_STOPPED),
+            #[cfg(test)]
+            test_span_exporter: None,
+            #[cfg(test)]
+            test_log_exporter: None,
         }
     }
 
@@ -149,6 +157,71 @@ impl OtelService {
             .build();
 
         Ok(provider)
+    }
+
+    /// Build the TracerProvider from configuration.
+    ///
+    /// In test builds, prefer an in-memory exporter wrapped in a synchronous
+    /// `SimpleSpanProcessor` when the test has injected one; otherwise fall
+    /// through to the production OTLP path. The non-test build always takes
+    /// the production path.
+    #[cfg(test)]
+    fn build_tracer_provider(
+        &self,
+        sampler: Sampler,
+        resource: Resource,
+    ) -> Result<SdkTracerProvider, CamelError> {
+        use opentelemetry_sdk::trace::SimpleSpanProcessor;
+        if let Some(exporter) = &self.test_span_exporter {
+            return Ok(SdkTracerProvider::builder()
+                .with_sampler(sampler)
+                .with_resource(resource)
+                .with_span_processor(SimpleSpanProcessor::new(exporter.clone()))
+                .build());
+        }
+        let span_exporter = self.build_span_exporter()?;
+        Ok(SdkTracerProvider::builder()
+            .with_sampler(sampler)
+            .with_resource(resource)
+            .with_batch_exporter(span_exporter)
+            .build())
+    }
+
+    #[cfg(not(test))]
+    fn build_tracer_provider(
+        &self,
+        sampler: Sampler,
+        resource: Resource,
+    ) -> Result<SdkTracerProvider, CamelError> {
+        let span_exporter = self.build_span_exporter()?;
+        Ok(SdkTracerProvider::builder()
+            .with_sampler(sampler)
+            .with_resource(resource)
+            .with_batch_exporter(span_exporter)
+            .build())
+    }
+
+    /// Build the LoggerProvider from configuration.
+    ///
+    /// In test builds, prefer an in-memory exporter wrapped in a synchronous
+    /// `SimpleLogProcessor` when the test has injected one; otherwise fall
+    /// through to the production OTLP path. The non-test build delegates
+    /// directly to `build_logger_provider_internal`.
+    #[cfg(test)]
+    fn build_logger_provider(&self) -> Result<SdkLoggerProvider, CamelError> {
+        use opentelemetry_sdk::logs::SimpleLogProcessor;
+        if let Some(exporter) = &self.test_log_exporter {
+            return Ok(SdkLoggerProvider::builder()
+                .with_resource(self.build_resource())
+                .with_log_processor(SimpleLogProcessor::new(exporter.clone()))
+                .build());
+        }
+        self.build_logger_provider_internal()
+    }
+
+    #[cfg(not(test))]
+    fn build_logger_provider(&self) -> Result<SdkLoggerProvider, CamelError> {
+        self.build_logger_provider_internal()
     }
 
     /// Initializes and returns the `SdkLoggerProvider`.
@@ -294,20 +367,15 @@ impl Lifecycle for OtelService {
 
         // Build and install TracerProvider (if not already initialized early)
         if self.tracer_provider.is_none() {
-            let span_exporter = match self.build_span_exporter() {
-                Ok(exporter) => exporter,
+            let sampler = Self::to_sdk_sampler(&self.config.sampler);
+
+            let tracer_provider = match self.build_tracer_provider(sampler, resource.clone()) {
+                Ok(tp) => tp,
                 Err(e) => {
                     self.status.store(STATUS_FAILED, Ordering::SeqCst);
                     return Err(e);
                 }
             };
-            let sampler = Self::to_sdk_sampler(&self.config.sampler);
-
-            let tracer_provider = SdkTracerProvider::builder()
-                .with_sampler(sampler)
-                .with_resource(resource.clone())
-                .with_batch_exporter(span_exporter)
-                .build();
 
             global::set_tracer_provider(tracer_provider.clone());
             self.tracer_provider = Some(tracer_provider);
@@ -346,13 +414,14 @@ impl Lifecycle for OtelService {
 
         // Initialize logger provider if not already initialized
         if self.logger_provider.is_none() {
-            let logger_provider = match self.build_logger_provider_internal() {
+            let logger_provider = match self.build_logger_provider() {
                 Ok(p) => p,
                 Err(e) => {
                     self.status.store(STATUS_FAILED, Ordering::SeqCst);
                     return Err(e);
                 }
             };
+
             self.logger_provider = Some(logger_provider);
         }
 
@@ -842,5 +911,88 @@ mod tests {
             !warns.is_empty(),
             "Drop without stop MUST emit at least one WARN (proves capture works)"
         );
+    }
+
+    /// Proves that `start()` wires the span exporter correctly: a span
+    /// emitted through the global tracer reaches the in-memory exporter
+    /// that `start()` connected via `SimpleSpanProcessor`.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn start_binds_real_span_exporter() {
+        use opentelemetry::global;
+        use opentelemetry::trace::{Span, Tracer, TracerProvider};
+        use opentelemetry_sdk::trace::InMemorySpanExporter;
+
+        let exporter = InMemorySpanExporter::default();
+        let config = OtelConfig::new("http://localhost:4317", "span-binding-test");
+        let mut service = OtelService::new(config);
+        service.test_span_exporter = Some(exporter.clone());
+
+        service.start().await.unwrap();
+
+        // Emit a span through the global tracer set by start()
+        let tracer = global::tracer_provider().tracer("start-binding-test");
+        tracer.start("test-op").end();
+
+        // Force flush so the span reaches the in-memory exporter
+        service
+            .tracer_provider
+            .as_ref()
+            .unwrap()
+            .force_flush()
+            .unwrap();
+
+        let spans = exporter.get_finished_spans().unwrap();
+        assert!(
+            !spans.is_empty(),
+            "span exporter must receive at least one span after start()"
+        );
+
+        // Clean up
+        let _ = service.tracer_provider.take().map(|p| p.shutdown());
+    }
+
+    /// Proves that `start()` wires the log exporter correctly: a log
+    /// record emitted through the `SdkLoggerProvider` that `start()`
+    /// built and stored reaches the in-memory log exporter.
+    ///
+    /// Log-path investigation: `start()` (L348–357) builds an
+    /// `SdkLoggerProvider` via `build_logger_provider_internal()` and
+    /// stores it in `self.logger_provider`. No `global::set_logger_provider`
+    /// or tracing-bridge installation occurs in `start()`; the log
+    /// provider is accessed through the stored field. This test emits
+    /// a `LogRecord` directly through that provider, confirming the
+    /// exporter-to-provider path that `start()` wired.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn start_binds_real_log_exporter() {
+        use opentelemetry::logs::{LogRecord, Logger, LoggerProvider};
+        use opentelemetry_sdk::logs::InMemoryLogExporter;
+
+        let exporter = InMemoryLogExporter::default();
+        let config = OtelConfig::new("http://localhost:4317", "log-binding-test");
+        let mut service = OtelService::new(config);
+        service.test_log_exporter = Some(exporter.clone());
+
+        service.start().await.unwrap();
+
+        // Emit a log record through the provider that start() built and stored
+        let logger_provider = service.logger_provider.as_ref().unwrap();
+        let logger = logger_provider.logger("test-logger");
+        let mut record = logger.create_log_record();
+        record.set_body("test log message".into());
+        logger.emit(record);
+
+        // Force flush so the record reaches the in-memory exporter
+        logger_provider.force_flush().unwrap();
+
+        let logs = exporter.get_emitted_logs().unwrap();
+        assert!(
+            !logs.is_empty(),
+            "log exporter must receive at least one record after start()"
+        );
+
+        // Clean up
+        let _ = service.logger_provider.take().map(|p| p.shutdown());
     }
 }
