@@ -105,4 +105,4 @@ Per ADR-0012. This is the complete non-test inventory of 29 `error!` and
 > "You don't need to — the mode is auto-detected from the proto method descriptor. The same GrpcConsumer handles unary, server-streaming, client-streaming, and bidi based on the proto definition."
 
 > "What happens when the gRPC server's accept loop fails?"
-> "It calls `increment_errors` with label `e:grpc:accept` using the stable route_id `grpc-server:{addr}` (since the failure affects all routes sharing that listener), logs at `error!` with `// log-policy: outside-contract`, and continues accepting."
+> "It calls `increment_errors` with label `e:grpc:accept` using the stable route_id `grpc-server:{addr}` (since the failure affects all routes sharing that listener), logs at `error!` with `// log-policy: outside-contract`, then sleeps with capped exponential backoff (`BackoffState`, 10ms to 5s) before continuing. Resets on successful accept."

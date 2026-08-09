@@ -2,6 +2,8 @@
 
 #[path = "producer_chat_tests.rs"]
 mod producer_chat_tests;
+#[path = "producer_dos_hardening_tests.rs"]
+mod producer_dos_hardening_tests;
 #[path = "producer_retry_tests.rs"]
 mod producer_retry_tests;
 #[path = "producer_semaphore_tests.rs"]

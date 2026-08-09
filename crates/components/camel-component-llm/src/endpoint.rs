@@ -163,6 +163,7 @@ impl Endpoint for LlmEndpoint {
         .with_pricing(pricing)
         .with_cache(cache)
         .with_observability(Some(rt))
+        .with_max_header_json_bytes(self.global_config.max_header_json_bytes)
         .build();
         Ok(BoxProcessor::new(producer))
     }

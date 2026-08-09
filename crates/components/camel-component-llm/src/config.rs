@@ -10,6 +10,10 @@ fn default_max_prompt_bytes() -> usize {
     32768
 }
 
+pub(crate) fn default_max_header_json_bytes() -> usize {
+    65_536
+}
+
 fn default_mock_response() -> String {
     "echo".into()
 }
@@ -33,6 +37,13 @@ pub struct LlmGlobalConfig {
     #[serde(default = "default_max_prompt_bytes")]
     pub max_prompt_bytes: usize,
 
+    /// Maximum serialized size (in bytes) of any JSON-bearing exchange
+    /// header (`CamelLlmMessages`, `CamelLlmTools`, `CamelLlmToolChoice`).
+    /// The producer rejects headers above this threshold before
+    /// deserializing, guarding against DoS via oversized payloads.
+    #[serde(default = "default_max_header_json_bytes")]
+    pub max_header_json_bytes: usize,
+
     /// Map of provider name to provider configuration.
     #[serde(default)]
     pub providers: HashMap<String, LlmProviderConfig>,
@@ -48,6 +59,7 @@ impl Default for LlmGlobalConfig {
             default_provider: None,
             timeout_secs: None,
             max_prompt_bytes: default_max_prompt_bytes(),
+            max_header_json_bytes: default_max_header_json_bytes(),
             providers: HashMap::new(),
             allow_internal: false,
         }
@@ -428,6 +440,7 @@ mod tests {
             default_provider: None,
             timeout_secs: Some(0), // Some(0) is invalid; None is valid
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers: HashMap::new(),
             allow_internal: false,
         };
@@ -443,6 +456,7 @@ mod tests {
             default_provider: None,
             timeout_secs: None, // None = no timeout, valid
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers: HashMap::new(),
             allow_internal: false,
         };
@@ -473,6 +487,7 @@ mod tests {
             default_provider: None,
             timeout_secs: None,
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers,
             allow_internal: false,
         };
@@ -503,6 +518,7 @@ mod tests {
             default_provider: None,
             timeout_secs: None,
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers,
             allow_internal: false,
         };
@@ -532,6 +548,7 @@ mod tests {
             default_provider: None,
             timeout_secs: None,
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers,
             allow_internal: false,
         };
@@ -565,6 +582,7 @@ mod tests {
             default_provider: None,
             timeout_secs: None,
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers,
             allow_internal: false,
         };
@@ -595,6 +613,7 @@ mod tests {
             default_provider: None,
             timeout_secs: None,
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers,
             allow_internal: false,
         };
@@ -625,6 +644,7 @@ mod tests {
             default_provider: None,
             timeout_secs: None,
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers,
             allow_internal: false,
         };
@@ -655,6 +675,7 @@ mod tests {
             default_provider: None,
             timeout_secs: Some(60),
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers,
             allow_internal: false,
         };
@@ -685,6 +706,7 @@ mod tests {
             default_provider: None,
             timeout_secs: None,
             max_prompt_bytes: 32768,
+            max_header_json_bytes: 65_536,
             providers,
             allow_internal: false,
         };
@@ -736,6 +758,7 @@ default_model = "mock-model"
         assert!(cfg.providers.is_empty());
         assert_eq!(cfg.timeout_secs, None);
         assert_eq!(cfg.max_prompt_bytes, 32768);
+        assert_eq!(cfg.max_header_json_bytes, 65_536);
     }
 
     #[test]

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use camel_api::CamelError;
+use camel_api::backoff::{BackoffConfig, BackoffState};
 use camel_component_api::tls_source::ServerTlsSource;
 use futures::StreamExt;
 use hyper::server::conn::http2;
@@ -327,6 +328,16 @@ where
     }
 }
 
+/// Capped exponential backoff config for the gRPC accept loop.
+/// Starts at 10ms, doubles each failure, caps at 5s.
+fn accept_backoff_config() -> BackoffConfig {
+    BackoffConfig {
+        initial_delay: Duration::from_millis(10),
+        multiplier: 2.0,
+        max_delay: Duration::from_secs(5),
+    }
+}
+
 async fn run_grpc_server(
     listener: tokio::net::TcpListener,
     dispatch: GrpcDispatchTable,
@@ -343,15 +354,22 @@ async fn run_grpc_server(
         .map(|addr| format!("grpc-server:{addr}"))
         .unwrap_or_else(|_| "grpc-server:unknown".to_string());
 
+    let mut backoff = BackoffState::new(accept_backoff_config());
+
     loop {
         let (stream, _) = match listener.accept().await {
-            Ok(s) => s,
+            Ok(s) => {
+                backoff.reset();
+                s
+            }
             Err(e) => {
                 runtime
                     .metrics()
                     .increment_errors(&route_id, "e:grpc:accept");
                 // log-policy: outside-contract
                 error!(error = %e, "gRPC server accept error");
+                let delay = backoff.next_delay();
+                tokio::time::sleep(delay).await;
                 continue;
             }
         };
@@ -1930,5 +1948,13 @@ mod tests {
                 "entry should remain in registry — server kept alive for restart"
             );
         }
+    }
+
+    #[test]
+    fn test_accept_backoff_config_values() {
+        let cfg = accept_backoff_config();
+        assert_eq!(cfg.initial_delay, Duration::from_millis(10));
+        assert_eq!(cfg.multiplier, 2.0);
+        assert_eq!(cfg.max_delay, Duration::from_secs(5));
     }
 }

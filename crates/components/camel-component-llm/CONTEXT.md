@@ -66,7 +66,7 @@ _Avoid_: billing, accounting
 
 - `LlmGlobalConfig.timeout_secs`: `u64` → `Option<u64>` (use `None` for no timeout)
 - `OpenaiProviderConfig`/`OllamaProviderConfig`: new `network_retry` field (`Option<NetworkRetryPolicy>`)
-- `LlmProducer::new`: now takes 4 positional args (`config`, `provider`, `max_prompt_bytes`, `route_id`) + fluent builder `.with_semaphore/.with_timeout/.with_retry/.with_pricing/.with_cache/.with_observability().build()` (was 9 positional params pre-0.16)
+- `LlmProducer::new`: now takes 4 positional args (`config`, `provider`, `max_prompt_bytes`, `route_id`) + fluent builder `.with_semaphore/.with_timeout/.with_retry/.with_pricing/.with_cache/.with_observability/.with_max_header_json_bytes().build()` (was 9 positional params pre-0.16)
 - `ProducerCache::new`: signature changed to `(ttl, max_entries)` (was `ttl` only; `max_entries` adds LRU cap)
 - `ChatRole`: dropped `Copy` (Tool variant holds a `String`); added `#[non_exhaustive]`
 - `ChatEvent`: added `#[non_exhaustive]`; new `ToolCall` variant

@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tower::Service;
 
-use crate::config::{LlmEndpointConfig, LlmOperation};
+use crate::config::{LlmEndpointConfig, LlmOperation, default_max_header_json_bytes};
 use crate::cost::PricingTable;
 use crate::error::LlmError;
 use crate::error::is_retryable;
@@ -30,6 +30,10 @@ pub struct LlmProducer {
     config: LlmEndpointConfig,
     provider: Arc<dyn LlmProvider>,
     max_prompt_bytes: usize,
+    /// Max serialized size of any JSON-bearing exchange header
+    /// (`CamelLlmMessages`, `CamelLlmTools`, `CamelLlmToolChoice`) before
+    /// the producer rejects it as oversized (DoS hardening).
+    max_header_json_bytes: usize,
     route_id: String,
     /// Semaphore to bound concurrency to the provider. If `None`, unbounded.
     /// For streaming, the permit lives inside the returned `Body::Stream` so
@@ -81,6 +85,22 @@ fn emit_cost_metric(
     }
 }
 
+/// Reject a JSON-bearing exchange header whose serialized size exceeds
+/// `max`. Run BEFORE `serde_json::from_value` so an oversized payload
+/// cannot force expensive deserialization. The size check is on the
+/// serialized form (the exact bytes that would be parsed), not the
+/// in-memory `Value` size, so the cost is `O(serialized_size)` instead
+/// of `O(value_size)` plus the parse work we are trying to avoid.
+fn check_header_json_size(name: &str, value: &Value, max: usize) -> Result<(), LlmError> {
+    let size = value.to_string().len();
+    if size > max {
+        return Err(LlmError::InvalidRequest(format!(
+            "{name} header exceeds max_header_json_bytes ({size} > {max})"
+        )));
+    }
+    Ok(())
+}
+
 impl LlmProducer {
     pub fn new(
         config: LlmEndpointConfig,
@@ -92,6 +112,7 @@ impl LlmProducer {
             config,
             provider,
             max_prompt_bytes,
+            max_header_json_bytes: default_max_header_json_bytes(),
             route_id,
             semaphore: None,
             timeout: None,
@@ -132,6 +153,15 @@ impl LlmProducer {
         self
     }
 
+    /// Override the max serialized size (in bytes) of any JSON-bearing
+    /// exchange header (`CamelLlmMessages`, `CamelLlmTools`,
+    /// `CamelLlmToolChoice`). Headers above this threshold are rejected
+    /// before deserialization to prevent DoS via oversized payloads.
+    pub fn with_max_header_json_bytes(mut self, max: usize) -> Self {
+        self.max_header_json_bytes = max;
+        self
+    }
+
     pub fn build(self) -> Self {
         self
     }
@@ -168,6 +198,7 @@ impl LlmProducer {
             .or_else(|| self.config.system_prompt.clone());
 
         let messages = if let Some(msgs_val) = headers.get(CAMEL_LLM_MESSAGES) {
+            check_header_json_size("CamelLlmMessages", msgs_val, self.max_header_json_bytes)?;
             let msgs: Vec<ChatMessage> = serde_json::from_value(msgs_val.clone()).map_err(|e| {
                 LlmError::InvalidRequest(format!("CamelLlmMessages header is malformed: {e}"))
             })?;
@@ -188,6 +219,7 @@ impl LlmProducer {
         let tools: Vec<ToolDefinition> = headers
             .get(CAMEL_LLM_TOOLS)
             .map(|v| {
+                check_header_json_size("CamelLlmTools", v, self.max_header_json_bytes)?;
                 serde_json::from_value(v.clone()).map_err(|e| {
                     LlmError::InvalidRequest(format!("CamelLlmTools header is malformed: {e}"))
                 })
@@ -206,6 +238,7 @@ impl LlmProducer {
         let tool_choice: Option<ToolChoice> = headers
             .get(CAMEL_LLM_TOOL_CHOICE)
             .map(|v| {
+                check_header_json_size("CamelLlmToolChoice", v, self.max_header_json_bytes)?;
                 serde_json::from_value(v.clone()).map_err(|e| {
                     LlmError::InvalidRequest(format!("CamelLlmToolChoice header is malformed: {e}"))
                 })
