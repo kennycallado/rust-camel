@@ -44,9 +44,9 @@ The timeout wraps synchronous evaluation in `spawn_blocking`. It returns control
 to the route after five seconds by default, but it does not cancel the blocking
 task. The operation limit eventually stops a CPU-bound task.
 
-`max_call_levels` is not exposed in `RhaiLimitsConfig`. Rhai therefore uses the
-`Engine::new_raw()` default: 8 levels in debug builds and 64 in release builds.
-Finding I1 and bd rc-dip6 track this configuration gap.
+`max_call_levels` is exposed in `RhaiLimitsConfig` (default 64). This pins a
+single value and removes the upstream `Engine::new_raw()` asymmetry (8 levels
+in debug, 64 in release) — rc-dip6.
 
 ## Mutation model
 

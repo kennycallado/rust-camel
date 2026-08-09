@@ -43,25 +43,27 @@ pub fn find_handler_methods(items: &[ImplItem]) -> Result<Vec<HandlerMethod>> {
     Ok(handlers)
 }
 
-/// Check if method has #[handler] or #[camel_bean::handler] attribute
+/// Check if method has the `#[handler]` attribute (simple form, or the
+/// canonical qualified forms `#[camel_bean::handler]` / `#[camel_bean_macros::handler]`).
 fn has_handler_attribute(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         let path = attr.path();
 
-        // Check if path is just "handler"
+        // Simple form: `#[handler]` (imported/renamed use).
         if path.is_ident("handler") {
             return true;
         }
 
-        // Check if path ends with "::handler" (e.g., camel_bean::handler)
-        let segments = &path.segments;
-        if let Some(last) = segments.last()
-            && last.ident == "handler"
-        {
-            return true;
-        }
-
-        false
+        // Qualified form: accept only the canonical camel_bean re-export
+        // paths, not any path ending in `::handler`. A foreign attribute
+        // like `#[my_crate::handler]` must not collide (rc-2nds).
+        let full = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        full == "camel_bean::handler" || full == "camel_bean_macros::handler"
     })
 }
 
@@ -170,6 +172,30 @@ mod tests {
             pub async fn process(&self) {}
         };
         assert!(has_handler_attribute(&method.attrs));
+    }
+
+    #[test]
+    fn test_has_handler_attribute_macros_path() {
+        // The defining-crate path `camel_bean_macros::handler` is also canonical.
+        let method: ImplItemFn = parse_quote! {
+            #[camel_bean_macros::handler]
+            pub async fn process(&self) {}
+        };
+        assert!(has_handler_attribute(&method.attrs));
+    }
+
+    #[test]
+    fn test_has_handler_attribute_foreign_does_not_match() {
+        // A user's own `#[foreign::handler]` must NOT be treated as a bean
+        // handler (collision risk — rc-2nds).
+        let method: ImplItemFn = parse_quote! {
+            #[foreign::handler]
+            pub async fn process(&self) {}
+        };
+        assert!(
+            !has_handler_attribute(&method.attrs),
+            "foreign ::handler path must not collide"
+        );
     }
 
     #[test]

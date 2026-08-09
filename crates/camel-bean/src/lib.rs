@@ -12,4 +12,8 @@ pub use registry::BeanRegistry;
 
 // Re-export for macro users
 pub use async_trait::async_trait;
-pub use camel_bean_macros::{Bean, bean_impl, handler};
+// `Bean` is a non-functional derive stub (emits a compile_error pointing at
+// `bean_impl`). Hidden so it does not pollute the public docs surface (rc-x2gy).
+#[doc(hidden)]
+pub use camel_bean_macros::Bean;
+pub use camel_bean_macros::{bean_impl, handler};

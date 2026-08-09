@@ -404,9 +404,7 @@ impl Service<Exchange> for LogProducer {
         let count = self.exchange_count.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Group logging: only emit every group_size exchanges
-        if let Some(group_size) = self.config.group_size
-            && !count.is_multiple_of(group_size)
-        {
+        if !Self::should_emit(count, self.config.group_size) {
             return Box::pin(async move { Ok(exchange) });
         }
 
@@ -424,6 +422,19 @@ impl Service<Exchange> for LogProducer {
 
             Ok(exchange)
         })
+    }
+}
+
+impl LogProducer {
+    /// Decide whether the `count`-th exchange should emit a log line.
+    /// Without grouping every exchange emits; with grouping only multiples of
+    /// `group_size` emit (counts in between pass through silently). Extracted
+    /// from `call()` so the gating is unit-testable (rc-h0bv).
+    fn should_emit(count: usize, group_size: Option<usize>) -> bool {
+        match group_size {
+            None => true,
+            Some(gs) => count.is_multiple_of(gs),
+        }
     }
 }
 
@@ -677,8 +688,8 @@ mod tests {
             "expected 3 chars, got {}: {body_part:?}",
             body_part.chars().count()
         );
-        // Must be valid UTF-8 — a char-sliced string is always valid
-        assert!(body_part.is_utf8());
+        // body_part is &str (from split_once), so UTF-8 validity is guaranteed
+        // by the type — no runtime check needed.
     }
 
     #[test]
@@ -945,6 +956,24 @@ mod tests {
             formatted1.contains("Body: first"),
             "group log must include body: {formatted1}"
         );
+    }
+
+    #[test]
+    fn test_group_size_gating_skips_non_multiples() {
+        // group_size=3: counts 1,2,4,5 are skipped; 3 and 6 emit. Exercises the
+        // `call()` early-return path that the format_exchange-only test misses.
+        assert!(!LogProducer::should_emit(1, Some(3)));
+        assert!(!LogProducer::should_emit(2, Some(3)));
+        assert!(LogProducer::should_emit(3, Some(3)));
+        assert!(!LogProducer::should_emit(4, Some(3)));
+        assert!(!LogProducer::should_emit(5, Some(3)));
+        assert!(LogProducer::should_emit(6, Some(3)));
+    }
+
+    #[test]
+    fn test_group_size_gating_none_emits_all() {
+        assert!(LogProducer::should_emit(1, None));
+        assert!(LogProducer::should_emit(100, None));
     }
 
     #[test]

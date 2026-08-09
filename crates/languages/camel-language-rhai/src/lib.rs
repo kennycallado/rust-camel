@@ -122,6 +122,7 @@ struct ResolvedRhaiLimits {
     max_map_size: usize,
     max_expression_depth: u32,
     max_function_expression_depth: u32,
+    max_call_levels: u32,
     execution_timeout_ms: u64,
 }
 
@@ -136,6 +137,7 @@ fn resolve_rhai_limits(limits: &RhaiLimitsConfig) -> ResolvedRhaiLimits {
         max_map_size: limits.max_map_size.unwrap_or(10_000),
         max_expression_depth: limits.max_expression_depth.unwrap_or(64),
         max_function_expression_depth: limits.max_function_expression_depth.unwrap_or(32),
+        max_call_levels: limits.max_call_levels.unwrap_or(64),
         execution_timeout_ms: limits.execution_timeout_ms.unwrap_or(5_000),
     }
 }
@@ -202,6 +204,7 @@ impl RhaiLanguage {
         engine.set_max_string_size(r.max_string_size);
         engine.set_max_array_size(r.max_array_size);
         engine.set_max_map_size(r.max_map_size);
+        engine.set_max_call_levels(r.max_call_levels as usize);
         // Defense in depth — no-op safe if symbols already absent under no_module.
         engine.disable_symbol("eval");
         engine.disable_symbol("import");
@@ -1276,5 +1279,18 @@ mod tests {
             "mutating evaluate must not re-compile (delta={})",
             after_evals - after_create
         );
+    }
+
+    #[test]
+    fn resolve_rhai_limits_threads_max_call_levels() {
+        // Default pins 64, removing the upstream 8-debug/64-release asymmetry (rc-dip6).
+        let default = super::resolve_rhai_limits(&super::RhaiLimitsConfig::default());
+        assert_eq!(default.max_call_levels, 64);
+        // A custom override flows through resolve.
+        let custom = super::resolve_rhai_limits(&super::RhaiLimitsConfig {
+            max_call_levels: Some(16),
+            ..Default::default()
+        });
+        assert_eq!(custom.max_call_levels, 16);
     }
 }

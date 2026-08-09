@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 /// max-map-size = 100000
 /// max-expression-depth = 10
 /// max-function-expression-depth = 5
+/// max-call-levels = 64
 /// execution-timeout-ms = 5000
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -57,6 +58,12 @@ pub struct RhaiLimitsConfig {
     /// (rhai: `max_function_expression_depth`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_function_expression_depth: Option<u32>,
+
+    /// Maximum call-stack depth (rhai: `max_call_levels`). Default 64 — pins a
+    /// single value and removes the upstream `Engine::new_raw()` debug/release
+    /// asymmetry (8 in debug, 64 in release). rc-dip6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_call_levels: Option<u32>,
 
     /// Maximum execution wall-clock time in milliseconds.
     /// Rhai has no built-in timeout; the consuming code enforces this via

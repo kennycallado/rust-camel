@@ -30,7 +30,6 @@ percent-encoding = { workspace = true }
 default = []
 tls = ["redis/tls-rustls-webpki-roots", "redis/tokio-rustls-comp"]
 cluster = []
-sentinel = []
 
 [lints]
 workspace = true
