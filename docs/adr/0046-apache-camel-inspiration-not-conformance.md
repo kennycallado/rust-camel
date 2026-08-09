@@ -1,112 +1,112 @@
-# ADR-0046: Apache Camel como corpus de inspiración, no autoridad de conformance
+# ADR-0046: Apache Camel as design-inspiration corpus, not conformance authority
 
 **Date:** 2026-07-17
 **Status:** Accepted
 **Amends:** none
-**Cross-refs:** epic rc-ca8z (positioning decision que este ADR codifica a nivel arquitectural), ADR-0019 (ExceptionDisposition — base de divergencias tipo D2), ADR-0024 (PipelineOutcome — reemplaza CamelError::Stopped), ADR-0025 (outcome-aware structural EIPs), ADR-0032 (Exchange-data trust boundary), ADR-0033 (security defaults — policy-ADR precedent)
+**Cross-refs:** epic rc-ca8z (the positioning decision this ADR codifies at the architectural level), ADR-0019 (ExceptionDisposition — basis for D2 divergences), ADR-0024 (PipelineOutcome — replaces CamelError::Stopped), ADR-0025 (outcome-aware structural EIPs), ADR-0032 (Exchange-data trust boundary), ADR-0033 (security defaults — policy-ADR precedent)
 
 ## Decision
 
-Apache Camel es **corpus de inspiración de diseño**, NO autoridad de conformance. Las decisiones sobre qué debe hacer un EIP se diseñan contra los ADRs del proyecto, no contra el comportamiento observado en Camel. Camel sigue siendo valioso porque codifica 20 años de edge cases reales de producción — pero como **input al diseño**, no como spec de aceptación.
+Apache Camel is a **design-inspiration corpus**, NOT a conformance authority. Decisions about what an EIP should do are designed against the project ADRs, not against the behavior observed in Camel. Camel stays valuable because it encodes 20 years of real production edge cases. But it is **input to design**, not an acceptance spec.
 
-### Protocolo de consulta (obligatorio para EIPs nuevos o rediseños mayores)
+### Consultation protocol (mandatory for new EIPs or major redesigns)
 
-Cuando se diseñe/implemente un EIP nuevo o se rediseñe uno existente sustantivamente:
+When you design or implement a new EIP, or substantially redesign an existing one:
 
-1. **Disparo por densidad de divergencia.** Aplicar el protocolo completo **solo si** el EIP toca ≥1 ADR que rompe conformance con Camel. Marcadores operativos:
-   - EIP stateful (agregación, correlación, repositorios)
-   - Temporización con completion/timeout (aggregate completion, resequencer)
-   - Control-flow divergente (ADR-0019 ExceptionDisposition, ADR-0024/0025 PipelineOutcome, Stop EIP)
-   - Trust-boundary impact (ADR-0032 — datos no confiables en sinks/numeric decisions)
-   - Backpressure/admission (ADR-0044 — Camel no tiene `poll_ready`)
+1. **Trigger by divergence density.** Apply the full protocol **only if** the EIP touches at least one ADR that breaks conformance with Camel. Operational markers:
+   - Stateful EIP (aggregation, correlation, repositories)
+   - Timing with completion or timeout (aggregate completion, resequencer)
+   - Divergent control-flow (ADR-0019 ExceptionDisposition, ADR-0024/0025 PipelineOutcome, Stop EIP)
+   - Trust-boundary impact (ADR-0032 — untrusted data in sinks or numeric decisions)
+   - Backpressure or admission (ADR-0044 — Camel has no `poll_ready`)
 
-   Para EIPs stateless casi idénticos a Camel (Filter, Content-Based Router, Throttle, SetBody/SetHeader), basta un **audit de coverage puro** — no se requiere leer Camel.
+   For stateless EIPs that are nearly identical to Camel (Filter, Content-Based Router, Throttle, SetBody/SetHeader), a pure **coverage audit** is enough. You do not need to read Camel.
 
-2. **Dosis: 3 tests, no 5.** Leer 3 tests representativos de `apache/camel/<comp>/src/test/java/...`. Parar cuando 2 consecutivos no aporten escenario nuevo. La tabulación completa (5+ tests) tiene valor marginal plano.
+2. **Dose: 3 tests, not 5.** Read 3 representative tests from `apache/camel/<comp>/src/test/java/...`. Stop when 2 consecutive tests add no new scenario. A full table of 5 or more tests gives flat marginal value.
 
-3. **Clasifica mientras lees.** Sin fase separada de tabulación. Por cada test: extrae (a) escenario, (b) invariante del EIP ejercitada, (c) decisión: igual/diverge. Las divergencias se documentan inline en el ADR del EIP (si existe) o en el `CONTEXT.md` del crate (si es cross-EIP).
+3. **Classify while you read.** No separate tabulation phase. For each test, extract (a) the scenario, (b) the EIP invariant exercised, and (c) the decision: same or diverges. Document divergences inline in the EIP ADR (if one exists), or in the crate `CONTEXT.md` (if it is cross-EIP).
 
-4. **Tests nativos, no traducciones.** Escribir tests con el harness del proyecto (`CamelTestContext`, `MockEndpoint`, etc.) aseverando **nuestra** semántica. Nunca traducir asserts literalmente — la traducción produce verde inválido o rojo espurio.
+4. **Native tests, not translations.** Write tests with the project harness (`CamelTestContext`, `MockEndpoint`, etc.) that assert **our** semantics. Never translate asserts literally. Literal translation produces invalid green or spurious red.
 
-5. **KPI: divergencias-documentadas/EIP**, no bugs/hora. Los bugs encontrados por este protocolo son bugs que un audit de coverage habría encontrado igual. El valor irreemplazable son las **divergencias forzadas a documentarse** — esas solo se revelan al leer el espacio de features de Camel que deliberadamente no implementamos.
+5. **KPI: divergences-documented/EIP, not bugs/hour.** Bugs found by this protocol are bugs a coverage audit would also find. The irreplaceable value is the **divergences forced into documentation**. Those appear only when you read the feature space of Camel that we deliberately do not implement.
 
 ## Context
 
-El epic `rc-ca8z` fija el posicionamiento: "cloud-native runtime distinto con EIP vocab compat ONLY, no drop-in replacement". La consecuencia operacional — "qué hace un dev cuando se pregunta si un EIP debe comportarse como en Camel" — no estaba codificada. Sin codificación, dos riesgos:
+Epic `rc-ca8z` fixes the positioning: "a distinct cloud-native runtime with EIP vocab compat ONLY, not a drop-in replacement". The operational consequence — "what does a dev do when they ask whether an EIP should behave like Camel" — was not codified. Without codification, two risks:
 
-1. **Deriva por inercia:** dev porta tests por costumbre, generando verde inválido (test pasa por la razón equivocada) o rojo espurio (test falla sobre comportamiento que nuestros ADRs declaran correcto).
-2. **Pérdida de memoria:** las decisiones de divergencia se toman implícitamente y se pierden en compactación de contexto, dejando deuda cognitiva al próximo contribuidor.
+1. **Drift by inertia:** a dev ports tests by habit. This produces invalid green (the test passes for the wrong reason) or spurious red (the test fails on behavior our ADRs declare correct).
+2. **Memory loss:** divergence decisions are made implicitly and lost in context compaction. They leave cognitive debt for the next contributor.
 
-El spike `rc-spt-camel-splitter-spike` (rama `spike/rc-spt-camel-splitter-spike`, commit `8d31e74a`) produjo evidence concreta:
+The spike `rc-spt-camel-splitter-spike` (branch `spike/rc-spt-camel-splitter-spike`, commit `8d31e74a`) produced concrete evidence:
 
-- **2 divergencias forzadas a documentarse** (D1 `parallelAggregate()` no aplica arquitectónicamente — `join_all` secuencial; D2 agregación recibe `Err(e)` en `Vec`, no Exchange con excepción adjunta — ADR-0019). Ambas son decisiones que **solo leer Camel revela**.
-- **1 bug real** (G3 `CAMEL_SPLIT_SIZE` nunca seteado en último fragment streaming). Este es un hueco de coverage que un audit habría encontrado.
-- **3 pineos de invariantes preexistentes** (G1 IDs únicos por fragmento, G2 split JSON Array, semántica streaming). Coverage pero no bugs.
+- **2 divergences forced into documentation** (D1 `parallelAggregate()` does not apply architecturally — `join_all` is sequential; D2 aggregation receives `Err(e)` in a `Vec`, not an Exchange with an attached exception — ADR-0019). Both are decisions that **only reading Camel reveals**.
+- **1 real bug** (G3 `CAMEL_SPLIT_SIZE` never set on the last streaming fragment). This is a coverage gap a coverage audit would find.
+- **3 pinned pre-existing invariants** (G1 unique IDs per fragment, G2 split JSON array, streaming semantics). Coverage, not bugs.
 
-El spike también confirma que un `cargo xtask port-camel-test` automático habría: producido verde inválido en `parallelAggregate()` (semántica inexistente en rust-camel); producido rojo espurio en `testSplitterWithException` (Camel pasa exchange fallido a la estrategia, nosotros `Err` en Vec); perdido G1 y G3 (asserts sin traducción directa). **El porteo automático institucionaliza el error de confundir "Camel hace X" con "X es correcto".**
+The spike also confirms that an automatic `cargo xtask port-camel-test` would: produce invalid green on `parallelAggregate()` (semantics that do not exist in rust-camel); produce spurious red on `testSplitterWithException` (Camel passes the failed exchange to the strategy; we return `Err` in the Vec); and lose G1 and G3 (asserts with no direct translation). **Automatic porting institutionalizes the error of confusing "Camel does X" with "X is correct".**
 
 ## Consequences
 
-### Positivas
+### Positive
 
-- Las decisiones de divergencia sobreviven a compactación de contexto al aterrizar en ADRs/CONTEXT.md tracked.
-- Un nuevo dev no pregunta "¿por qué rust-camel no tiene `parallelAggregate()`?" — la respuesta vive en el ADR/CONTEXT del EIP.
-- Costo de diseño predecible: 3 tests por EIP divergente, no más.
-- KPI medible y honesto: divergencias-documentadas, no falsos positivos de coverage.
+- Divergence decisions survive context compaction once they land in tracked ADRs or `CONTEXT.md`.
+- A new dev does not ask "why does rust-camel not have `parallelAggregate()`?". The answer lives in the EIP ADR or CONTEXT.
+- Predictable design cost: 3 tests per divergent EIP, no more.
+- Measurable and honest KPI: divergences-documented, not false coverage positives.
 
-### Negativas
+### Negative
 
-- Inversión de tiempo de diseño por EIP divergente (lectura + clasificación + documentación). Asumido como costo de ser una reinvención, no un port.
-- Riesgo de sobre-aplicar el protocolo a EIPs stateless donde un audit bastaba. El disparo por densidad mitiga, pero requiere juicio.
+- Design time per divergent EIP (reading, classification, documentation). Accepted as the cost of being a reinvention, not a port.
+- Risk of over-applying the protocol to stateless EIPs where an audit was enough. The density trigger mitigates this, but it needs judgment.
 
-## Scope (no retroactivo)
+## Scope (not retrospective)
 
-El protocolo aplica a **EIPs nuevos o rediseños mayores posteriores a este ADR**. No obliga a aplicar retroactivamente a ADRs estables (p.ej. ADR-0006 Script EIP, ADR-0019 error handling). Para EIPs existentes, la consulta de Camel es opcional y solo cuando emerge una pregunta de diseño concreta.
+The protocol applies to **new EIPs or major redesigns after this ADR**. It does not apply retrospectively to stable ADRs (for example ADR-0006 Script EIP, ADR-0019 error handling). For existing EIPs, consulting Camel is optional, and only when a concrete design question emerges.
 
-## Anti-patrones
+## Anti-patterns
 
-1. **"Camel hace X ⟹ X es correcto".** Nuestros ADRs prueban lo contrario: ADR-0024 llama al modelo `CamelError::Stopped`/HTTP-204 un **bug** que Camel-el-diseño induce; ADR-0032 llama al trust model de Camel un riesgo de seguridad rechazado. Camel es punto de partida, no oráculo.
-2. **Traducir asserts literalmente.** `expectedBodiesReceived(...)` de un test de error handling asume el modelo Processor-chain. El assert equivalente en rust-camel depende del `ExceptionDisposition` aplicado — no es traducción, es re-derivación.
-3. **Tratar verde-portado como coverage.** Un test porteado que pasa por acoplamiento accidental a semántica que no compartimos NO valida la invariante correcta.
-4. **Automatizar el porteo "para escalar".** Escalar el error no lo corrige. La disciplina de decidir divergencia-por-EIP no es paralelizable ni automatizable; es el trabajo de diseño que hace de rust-camel una reinvención y no un port.
-5. **Documentar divergencias en docs efímeros.** Los spike docs viven bajo `docs/*` (gitignored por policy). Las divergencias documentadas deben aterrizar en **tracked docs** (ADRs, `CONTEXT.md`, o como `notes` en bd referenciando el ADR/CONTEXT), no en gitignored artifacts.
+1. **"Camel does X, therefore X is correct."** Our ADRs prove otherwise. ADR-0024 calls the `CamelError::Stopped`/HTTP-204 model a **bug** that Camel-the-design induces. ADR-0032 calls the Camel trust model a rejected security risk. Camel is a starting point, not an oracle.
+2. **Translate asserts literally.** `expectedBodiesReceived(...)` in an error-handling test assumes the Processor-chain model. The equivalent assert in rust-camel depends on the applied `ExceptionDisposition`. It is not a translation; it is a re-derivation.
+3. **Treat ported green as coverage.** A ported test that passes through accidental coupling to semantics we do not share does not validate the correct invariant.
+4. **Automate porting "to scale".** Scaling the error does not correct it. The discipline of deciding divergence per EIP is not parallelizable or automatable. It is the design work that makes rust-camel a reinvention and not a port.
+5. **Document divergences in ephemeral docs.** Spike docs live under `docs/*` (gitignored by policy). Documented divergences must land in **tracked docs** (ADRs, `CONTEXT.md`, or as `notes` in bd referencing the ADR or CONTEXT), not in gitignored artifacts.
 
 ## Rejected alternatives
 
-- **`cargo xtask port-camel-test`**: descartado por evidence del spike Splitter (ver Context). Habría producido verde inválido + rojo espurio + pérdida de invariantes no traducibles.
-- **Conformance TCK unificado**: no existe para Apache Camel y rompería el positioning decision del epic rc-ca8z.
-- **Prohibir leer Camel**: excesivo. Pierde el valor real (edge cases de 20 años de producción). El protocolo captura ese valor sin convertirse en spec de aceptación.
-- **Política ad-hoc sin ADR**: cada dev decide por sí mismo. Reproduce los dos riesgos del Context (deriva + pérdida de memoria).
+- **`cargo xtask port-camel-test`:** rejected on the Splitter spike evidence (see Context). It would produce invalid green, spurious red, and loss of non-translatable invariants.
+- **Unified conformance TCK:** none exists for Apache Camel, and it would break the positioning decision of epic rc-ca8z.
+- **Forbid reading Camel:** excessive. It loses the real value (20 years of production edge cases). The protocol captures that value without becoming an acceptance spec.
+- **Ad-hoc policy without an ADR:** each dev decides alone. This reproduces the two Context risks (drift and memory loss).
 
 ## Measurement
 
-El KPI `divergencias-documentadas/EIP` se aplica:
+The KPI `divergences-documented/EIP` applies as follows:
 
-- Por cada EIP sujeto al protocolo, registrar en bd `discovered-from: <EIP-issue>` los hallazgos con label `divergence` o `gap-coverage` o `pin-invariant`.
-- Cerrar el bd al aterrizar la divergencia en tracked doc (ADRs nuevos/amendments, `CONTEXT.md` updates).
-- Métrica de salud del protocolo: ratio `divergences / (divergences + gaps)` por EIP. Si tiende a 0, el EIP no divergía y el protocolo sobre-invirtió → próxima vez aplicar audit de coverage.
+- For each EIP under the protocol, register findings in bd with `discovered-from: <EIP-issue>` and label them `divergence`, `gap-coverage`, or `pin-invariant`.
+- Close the bd once the divergence lands in a tracked doc (new ADRs, amendments, or `CONTEXT.md` updates).
+- Protocol health metric: ratio `divergences / (divergences + gaps)` per EIP. If it tends to 0, the EIP did not diverge and the protocol over-invested. Next time, apply a coverage audit.
 
 ## Evidence
 
-- **Spike Splitter**: rama `spike/rc-spt-camel-splitter-spike`, commit `8d31e74a`. Spike doc (gitignored): `docs/spikes/camel-splitter-conformance-spike.md`.
-- **Consulta al oráculo (e_opus)**: 2 pasadas, sesión `ses_08fc0fd19ffei7uuZcFoOrbnyq`. Veredicto: protocolo validado por divergencias (D1/D2), no por bugs (G3 — coverage).
-- **bd follow-ups**: `rc-0dgq` (D2 doc en `crates/camel-processor/CONTEXT.md`).
+- **Splitter spike:** branch `spike/rc-spt-camel-splitter-spike`, commit `8d31e74a`. Spike doc (gitignored): `docs/spikes/camel-splitter-conformance-spike.md`.
+- **Oracle consultation (e_opus):** 2 passes, session `ses_08fc0fd19ffei7uuZcFoOrbnyq`. Verdict: the protocol is validated by divergences (D1/D2), not by bugs (G3 — coverage).
+- **bd follow-ups:** `rc-0dgq` (D2 doc in `crates/camel-processor/CONTEXT.md`).
 
 ## Self-grill record
 
 **Questions generated:**
 
-1. [glossary] ¿"Camel corpus de inspiración" usa términos que chocan con entradas de CONTEXT-MAP?
-2. [sharpen] ¿Cómo operacionalizar "densidad de divergencia" para que no sea subjetiva?
-3. [scenario] ¿El protocolo aplica retroactivamente a ADRs estables (p.ej. Script EIP ADR-0006)?
-4. [cross-ref] ¿La evidence del spike es rastreable o efímera?
+1. [glossary] Does "Camel inspiration corpus" use terms that collide with CONTEXT-MAP entries?
+2. [sharpen] How do we operationalize "divergence density" so it is not subjective?
+3. [scenario] Does the protocol apply retrospectively to stable ADRs (for example Script EIP ADR-0006)?
+4. [cross-ref] Is the spike evidence traceable or ephemeral?
 
 **Answers (with citations):**
 
-1. [glossary] No hay entrada en CONTEXT-MAP sobre Camel como autoridad. La "Documentation Authority & Refresh" (`CONTEXT-MAP.md:127-152`) lista source code → ARCHITECT.md → CONTEXT-MAP → README — Camel fuera de la lista. El ADR es consistente: codifica que Camel queda fuera del orden de autoridad.
-2. [sharpen] Operacionalizado con 5 marcadores: stateful, temporización/completion, control-flow divergente (ADR-0019/0024/0025), trust-boundary (ADR-0032), backpressure (ADR-0044). ≥1 marcador → protocolo completo; 0 → audit puro. Reflejado en sección Decision §1.
-3. [scenario] No retroactivo — aclarado en sección "Scope". ADR-0006 no requiere re-aplicar el protocolo. Aplica a EIPs nuevos o rediseños mayores posteriores a este ADR.
-4. [cross-ref] Spike doc está gitignored (`docs/*` policy, verificado en `.gitignore:3`). Drift detectado: las divergencias documentadas en spike docs se perderían. Solución: sección "Anti-patrones §5" obliga a aterrizar divergencias en tracked docs. rc-0dgq ya abierto para D2.
+1. [glossary] No CONTEXT-MAP entry covers Camel as authority. "Documentation Authority & Refresh" (`CONTEXT-MAP.md:127-152`) lists source code, then ARCHITECT.md, then CONTEXT-MAP, then README. Camel is outside the list. The ADR is consistent: it codifies that Camel stays outside the authority order.
+2. [sharpen] Operationalized with 5 markers: stateful, timing/completion, divergent control-flow (ADR-0019/0024/0025), trust-boundary (ADR-0032), backpressure (ADR-0044). At least 1 marker triggers the full protocol; 0 markers triggers a pure audit. Reflected in Decision section 1.
+3. [scenario] Not retrospective. Clarified in the "Scope" section. ADR-0006 does not require re-applying the protocol. The protocol applies to new EIPs or major redesigns after this ADR.
+4. [cross-ref] The spike doc is gitignored (`docs/*` policy, verified at `.gitignore:3`). Detected drift: divergences documented in spike docs would be lost. Fix: "Anti-patterns 5" forces divergences to land in tracked docs. rc-0dgq is already open for D2.
 
-**Outcome:** refine (aplicado)
+**Outcome:** refine (applied)
 **Self-grill mode:** self-grill-proposals skill

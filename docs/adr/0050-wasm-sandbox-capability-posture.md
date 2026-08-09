@@ -1,137 +1,85 @@
-# ADR-0050: Postura de capacidades del sandbox WASM
+# ADR-0050: WASM sandbox capability posture
 
-**Fecha:** 2026-08-06
-**Estado:** Aceptado; implementación pendiente
-**Decisión:** Opción B, registro selectivo de WASI por mundo
-**Referencias:** ADR-0011, ADR-0014, ADR-0031, ADR-0032, ADR-0033
-**Origen:** auditoría de `camel-component-wasm`, hallazgos
-`F-camel-component-wasm-I1` y `F-camel-component-wasm-I2`
+**Date:** 2026-08-06
+**Status:** Accepted; implementation pending
+**Decision:** Option B, selective WASI registration per world
+**References:** ADR-0011, ADR-0014, ADR-0031, ADR-0032, ADR-0033
+**Origin:** audit of `camel-component-wasm`, findings `F-camel-component-wasm-I1` and `F-camel-component-wasm-I2`
 
-## Contexto
+## Context
 
-El host WASM expone dos superficies de capacidades. La primera contiene las
-funciones Camel de `wit/camel-plugin.wit`. La segunda contiene las interfaces
-WASI 0.2 que registra Wasmtime.
+The WASM host exposes two capability surfaces. The first contains the Camel functions from `wit/camel-plugin.wit`. The second contains the WASI 0.2 interfaces that Wasmtime registers.
 
-`WasmCapabilities` controla la primera superficie. Las llamadas
-`camel_call` y `camel_poll` usan una lista de esquemas permitidos. Una lista
-vacía deniega todos los esquemas. Los mundos de política usan
-`WasmCapabilities::denied()`. Los mundos de processor y bean permiten el
-almacén del host de forma explícita.
+`WasmCapabilities` controls the first surface. The `camel_call` and `camel_poll` calls use an allowed-scheme list. An empty list denies all schemes. Policy worlds use `WasmCapabilities::denied()`. Processor and bean worlds enable the host store explicitly.
 
-La segunda superficie no sigue esa postura. El código actual llama a
-`wasmtime_wasi::p2::add_to_linker_async` en los cuatro mundos. El contexto WASI
-no concede preopens, variables de entorno, puertos de socket ni resolución de
-nombres. Sin embargo, el linker anuncia la superficie WASI completa. Además,
-los mundos de processor, bean y política heredan stderr. El mundo source no lo
-hereda. Esta diferencia no responde a una política de seguridad.
+The second surface does not follow that posture. The current code calls `wasmtime_wasi::p2::add_to_linker_async` in all four worlds. The WASI context grants no preopens, environment variables, socket ports, or name resolution. However, the linker advertises the full WASI surface. In addition, the processor, bean, and policy worlds inherit stderr. The source world does not. This difference does not reflect a security policy.
 
-El modelo de confianza acepta plugins instalados por el operador. El sandbox
-limita defectos del huésped. No obstante, una capacidad que el host no necesita
-no debe aparecer en el linker. Una actualización de Wasmtime o un cambio en
-`WasiCtxBuilder` no debe ampliar capacidades por accidente.
+The trust model accepts plugins installed by the operator. The sandbox limits guest defects. However, a capability the host does not need must not appear in the linker. A Wasmtime upgrade or a change to `WasiCtxBuilder` must not extend capabilities by accident.
 
-## Decisión
+## Decision
 
-Adoptamos la **Opción B: registro selectivo de WASI por mundo**.
+We adopt **Option B: selective WASI registration per world**.
 
-El host aplicará estas reglas:
+The host applies these rules:
 
-1. Cada mundo tendrá una lista explícita de interfaces WASI.
-2. Los cuatro mundos podrán registrar `wasi:clocks` y `wasi:random` cuando sus
-   componentes las importen.
-3. Ningún mundo registrará filesystem, sockets, CLI, environment ni stdio por
-   defecto.
-4. El mundo source conservará su interfaz `http-listener`. Esta interfaz no
-   concede acceso general a sockets.
-5. Los mundos que tienen funciones Camel usarán `camel_call` para logging.
-   El host no llamará a `inherit_stderr()`.
-6. Una nueva interfaz WASI requiere una concesión por mundo, una prueba
-   negativa para los demás mundos y documentación en el contexto del crate.
+1. Each world has an explicit list of WASI interfaces.
+2. All four worlds may register `wasi:clocks` and `wasi:random` when their components import them.
+3. No world registers filesystem, sockets, CLI, environment, or stdio by default.
+4. The source world keeps its `http-listener` interface. This interface grants no general socket access.
+5. Worlds that have Camel functions use `camel_call` for logging. The host does not call `inherit_stderr()`.
+6. A new WASI interface requires a per-world grant, a negative test for the other worlds, and documentation in the crate context.
 
-La postura de funciones Camel sigue el mismo principio. Los esquemas de
-`camel_call` y `camel_poll` usan una lista permitida. Los mundos de política no
-reciben operaciones de llamada ni almacén. Las concesiones de processor y bean
-permanecen explícitas en `WasmCapabilities`.
+The Camel-function posture follows the same principle. The `camel_call` and `camel_poll` schemes use an allowlist. Policy worlds receive no call or store operations. Processor and bean grants stay explicit in `WasmCapabilities`.
 
-Esta decisión describe el estado objetivo. El código actual todavía registra
-WASI completo y mantiene la herencia desigual de stderr. Los hallazgos de la
-auditoría cubren esa migración en el flujo de código.
+This decision describes the target state. The current code still registers full WASI and keeps the unequal stderr inheritance. The audit findings cover that migration in the code stream.
 
-## Consecuencias
+## Consequences
 
-### Positivas
+### Positive
 
-- El linker y el contexto expresan la misma política de capacidades.
-- Filesystem, sockets y variables de entorno no dependen de valores por defecto
-  de Wasmtime para quedar denegados.
-- Cada ampliación futura deja una concesión revisable por mundo.
-- Los mundos de política conservan una superficie menor que los mundos de
-  processor y bean.
+- The linker and the context express the same capability policy.
+- Filesystem, sockets, and environment variables do not depend on Wasmtime defaults to stay denied.
+- Each future extension leaves a reviewable per-world grant.
+- Policy worlds keep a smaller surface than processor and bean worlds.
 
-### Negativas
+### Negative
 
-- El registro selectivo acopla el host a APIs de submódulos de
-  `wasmtime-wasi`.
-- Las actualizaciones de Wasmtime pueden exigir cambios en varios registradores.
-- Los huéspedes que usan `eprintln!` dejan de funcionar hasta que migren al
-  canal de logging Camel. Los huéspedes source no tendrán salida stderr.
+- Selective registration couples the host to submodule APIs of `wasmtime-wasi`.
+- Wasmtime updates may require changes across several registrars.
+- Guests that use `eprintln!` stop working until they migrate to the Camel logging channel. Source guests will have no stderr output.
 
-### Neutrales
+### Neutral
 
-- Los límites de memoria, instancias, tablas y epoch de ADR-0014 no cambian.
-- La interfaz `http-listener` del mundo source sigue bajo ADR-0031.
-- La configuración del operador sigue siendo confiable. Los datos del Exchange
-  siguen siendo no confiables según ADR-0032.
+- The memory, instance, table, and epoch limits from ADR-0014 do not change.
+- The `http-listener` interface of the source world stays under ADR-0031.
+- Operator configuration stays trusted. Exchange data stays untrusted per ADR-0032.
 
-## Opciones consideradas
+## Options considered
 
-### Opción A: WASI completo con denegación en el contexto
+### Option A: full WASI with denial in the context
 
-Rechazada. Tiene menor coste inmediato, pero el linker anuncia capacidades que
-el host no pretende conceder. La seguridad depende de valores por defecto y de
-que ningún cambio futuro amplíe el contexto.
+Rejected. It has lower immediate cost, but the linker advertises capabilities the host does not intend to grant. Security depends on defaults and on no future change extending the context.
 
-### Opción B: registro selectivo por mundo
+### Option B: selective registration per world
 
-Elegida. Mantiene compatibilidad con clocks y random, y elimina interfaces que
-los huéspedes no necesitan. El coste de integración con Wasmtime es aceptable
-para obtener una superficie verificable.
+Chosen. It keeps compatibility with clocks and random, and removes interfaces guests do not need. The Wasmtime integration cost is acceptable for a verifiable surface.
 
-### Opción C: eliminar WASI
+### Option C: remove WASI
 
-Rechazada. Es la superficie mínima, pero rompe huéspedes compilados con imports
-comunes de clocks o random. La opción B obtiene la mayor parte del beneficio sin
-imponer esa incompatibilidad general.
+Rejected. It is the minimum surface, but it breaks guests compiled with common clocks or random imports. Option B captures most of the benefit without that broad incompatibility.
 
-## Relación con otras decisiones
+## Relation to other decisions
 
-ADR-0014 unifica configuración y límites de recursos del runtime WASM. No
-define qué interfaces puede importar un huésped. Esta ADR decide una clase
-distinta: la superficie de capacidades del sandbox. Por eso no modifica
-ADR-0014.
+ADR-0014 unifies configuration and resource limits for the WASM runtime. It does not define which interfaces a guest may import. This ADR decides a different class: the sandbox capability surface. It therefore does not amend ADR-0014.
 
-ADR-0031 define el ciclo de vida del mundo source y su recurso
-`http-listener`. ADR-0032 define la dirección de confianza de los datos del
-Exchange. ADR-0033 exige valores seguros y concesiones específicas. Esta
-decisión aplica esas reglas al linker WASI.
+ADR-0031 defines the source-world lifecycle and its `http-listener` resource. ADR-0032 defines the trust direction of Exchange data. ADR-0033 requires safe defaults and specific grants. This decision applies those rules to the WASI linker.
 
-## Registro de self-grill
+## Self-grill record
 
-1. **Glosario:** "postura de capacidades del sandbox WASM" no reemplaza
-   Component, Endpoint ni SecurityPolicy. Nombra la unión de dos superficies:
-   funciones Camel y WASI. `CONTEXT-MAP.md` registra el término transversal.
-2. **Precisión:** la decisión no afirma que todas las funciones Camel estén
-   denegadas por defecto. `from_scheme_list()` habilita el almacén para
-   processor y bean. La lista vacía solo deniega esquemas de llamada.
-3. **Escenario:** un huésped que importa filesystem no podrá instanciarse. Ese
-   fallo es intencional. Un huésped que solo importa clocks y random conserva
-   compatibilidad.
-4. **Código:** `runtime.rs`, `wasm_plugin_context.rs` y `source_host.rs` aún
-   llaman a `add_to_linker_async`. `runtime.rs` aún usa `inherit_stderr()`.
-   Por tanto, la ADR declara estado objetivo y no describe el código actual
-   como ya conforme.
+1. **Glossary:** "WASM sandbox capability posture" does not replace Component, Endpoint, or SecurityPolicy. It names the union of two surfaces: Camel functions and WASI. `CONTEXT-MAP.md` records the cross-cutting term.
+2. **Precision:** The decision does not claim all Camel functions are denied by default. `from_scheme_list()` enables the store for processor and bean. The empty list denies only call schemes.
+3. **Scenario:** A guest that imports filesystem will fail to instantiate. That failure is intentional. A guest that imports only clocks and random keeps compatibility.
+4. **Code:** `runtime.rs`, `wasm_plugin_context.rs`, and `source_host.rs` still call `add_to_linker_async`. `runtime.rs` still uses `inherit_stderr()`. The ADR therefore declares a target state. It does not describe the current code as already conformant.
 
-**Resultado:** aprobar la Opción B como decisión workspace-wide. La decisión es
-costosa de revertir, sorprendente sin contexto y resuelve un trade-off real.
-**Modo:** `self-grill-proposals`.
+**Outcome:** approve Option B as a workspace-wide decision. The decision is costly to reverse, surprising without context, and resolves a real trade-off.
+**Mode:** `self-grill-proposals`.

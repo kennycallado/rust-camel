@@ -1,162 +1,74 @@
-# ADR-0052: Postura de exposición de endpoints de diagnóstico
+# ADR-0052: Diagnostic endpoint exposure posture
 
-**Fecha:** 2026-08-06
-**Estado:** Aceptado
+**Date:** 2026-08-06
+**Status:** Accepted
 **Amends:** none
-**Referencias:** ADR-0009 (co-hosting HTTP de rutas API y estáticas — plano de datos),
-ADR-0032 (frontera de confianza de datos de exchange), ADR-0033 (defaults seguros y
-validación fail-closed en arranque), ADR-0051 (redacción de credenciales en fronteras de
-diagnóstico)
-**Origen:** auditoría de `camel-prometheus`, hallazgo `F-camel-prometheus-I1`
-(`FC-METRICS-EXPOSURE`, bd `rc-asm9`); superficie compartida con `camel-health`.
+**References:** ADR-0009 (HTTP co-hosting of API and static routes — data plane), ADR-0032 (exchange data trust boundary), ADR-0033 (safe defaults and fail-closed validation at startup), ADR-0051 (credential redaction at diagnostic boundaries)
+**Origin:** audit of `camel-prometheus`, finding `F-camel-prometheus-I1` (`FC-METRICS-EXPOSURE`, bd `rc-asm9`); shared surface with `camel-health`.
 
-## Decisión
+## Decision
 
-Los **endpoints de diagnóstico** —`/metrics` de `camel-prometheus` y
-`/healthz`, `/readyz`, `/startupz`, `/health` de `camel-health`— siguen el modelo de
-scrape de Prometheus: **no autenticados por defecto**, con TLS y autenticación como
-**hooks opcionales**, y con **bind a loopback preferido** por defecto. El aislamiento de
-red (NetworkPolicy, firewall) es responsabilidad del operador.
+**Diagnostic endpoints** — `/metrics` from `camel-prometheus` and `/healthz`, `/readyz`, `/startupz`, `/health` from `camel-health` — follow the Prometheus scrape model: **unauthenticated by default**, with TLS and authentication as **optional hooks**, and with **loopback bind preferred** by default. Network isolation (NetworkPolicy, firewall) is the operator's responsibility.
 
-Un endpoint de diagnóstico es un endpoint HTTP que expone metadata operacional
-(nombres de ruta, tipos de error, volúmenes de tráfico, profundidad de cola, estado de
-circuit breaker, señales de liveness/readiness) para su consumo por sistemas de
-observabilidad. **No es** plano de datos: no procesa mensajes de negocio ni cruza la
-frontera de confianza de ADR-0032.
+A diagnostic endpoint is an HTTP endpoint that exposes operational metadata (route names, error types, traffic volumes, queue depth, circuit-breaker state, liveness and readiness signals) for consumption by observability systems. It is **not** data plane: it does not process business messages and does not cross the ADR-0032 trust boundary.
 
-### Reglas
+### Rules
 
-1. **No autenticado por convención.** El endpoint no monta capa de autenticación por
-   defecto. Esto sigue el modelo de scrape de Prometheus, donde la protección canónica
-   es la política de red, no la autorización a nivel de aplicación. No es una brecha de
-   authz de negocio: la metadata operacional no es la superficie que ADR-0010 protege
-   (autorización pre-pipeline de rutas).
+1. **Unauthenticated by convention.** The endpoint mounts no authentication layer by default. This follows the Prometheus scrape model, where the canonical protection is network policy, not application-level authorization. It is not a business-authz gap: operational metadata is not the surface ADR-0010 protects (pre-pipeline route authorization).
 
-2. **TLS y autenticación son hooks opt-in.** El crate expone un punto de extensión para
-   envolver el router con TLS (patrón `axum_server::tls_rustls`, como en
-   `camel-http`/`camel-grpc`/`camel-ws`) y/o un middleware de bearer-token
-   (`axum::middleware::from_fn`). Ninguno se activa por defecto. Un operador que corre en
-   una red no confiable los habilita explícitamente.
+2. **TLS and authentication are opt-in hooks.** The crate exposes an extension point to wrap the router with TLS (the `axum_server::tls_rustls` pattern, as in `camel-http`, `camel-grpc`, `camel-ws`) and/or a bearer-token middleware (`axum::middleware::from_fn`). Neither is active by default. An operator who runs on an untrusted network enables them explicitly.
 
-3. **Bind a loopback preferido.** El default de bind debe favorecer `127.0.0.1`. Un bind
-   a una interfaz no-loopback (`0.0.0.0`) es una decisión explícita del operador y DEBE
-   emitir un `warn!` en el arranque señalando que el endpoint queda alcanzable desde
-   todas las interfaces sin capa de aplicación que lo restrinja.
+3. **Loopback bind preferred.** The bind default should favor `127.0.0.1`. A bind to a non-loopback interface (`0.0.0.0`) is an explicit operator decision and MUST emit a `warn!` at startup. The warning states that the endpoint is reachable from all interfaces with no application layer restricting it.
 
-4. **La metadata de diagnóstico no lleva bytes de credencial.** Por ADR-0051, cuerpos y
-   labels de métricas y de health nunca filtran secretos. Este ADR no relaja esa regla:
-   la exposición no autenticada del endpoint es aceptable **precisamente porque** su
-   contenido es metadata operacional, no material de credencial.
+4. **Diagnostic metadata carries no credential bytes.** Per ADR-0051, metric bodies and labels and health bodies never leak secrets. This ADR does not relax that rule. Unauthenticated endpoint exposure is acceptable **precisely because** its content is operational metadata, not credential material.
 
-### Alcance
+### Scope
 
-Esta postura vincula a los crates de servicio que exponen endpoints de diagnóstico
-(`camel-prometheus`, `camel-health`). **No** aplica a componentes de plano de datos
-(`camel-http`, `camel-grpc`, `camel-ws`), que son inbound de negocio y SÍ montan TLS con
-hot-reload de certificado (ver CONTEXT-MAP "TLS cert hot-reload"). La distinción es
-deliberada: el plano de datos porta payload de negocio y cruza la frontera de confianza;
-el plano de diagnóstico porta metadata operacional y no la cruza.
+This posture binds the service crates that expose diagnostic endpoints (`camel-prometheus`, `camel-health`). It does **not** apply to data-plane components (`camel-http`, `camel-grpc`, `camel-ws`). Those are business inbound and DO mount TLS with certificate hot-reload (see CONTEXT-MAP "TLS cert hot-reload"). The distinction is deliberate: the data plane carries business payload and crosses the trust boundary; the diagnostic plane carries operational metadata and does not.
 
-## Contexto
+## Context
 
-`camel-prometheus` construye su router axum sin ninguna capa de auth ni TLS, con
-default de host `0.0.0.0:9090` (`crates/camel-config/src/config.rs`
-`default_prometheus_host`). `camel-health` comparte esa superficie: su `health_router`
-monta `/healthz`, `/readyz`, `/startupz`, `/health` sin auth, sin TLS, sin middleware.
-La ruta config-driven exige `enabled = true` (default `false`), pero la ruta
-programática (`PrometheusService::new`, como muestra el README Quick Start) no hereda ese
-guard.
+`camel-prometheus` builds its axum router with no auth or TLS layer. Its default host is `0.0.0.0:9090` (`crates/camel-config/src/config.rs`, `default_prometheus_host`). `camel-health` shares that surface: its `health_router` mounts `/healthz`, `/readyz`, `/startupz`, `/health` with no auth, no TLS, and no middleware. The config-driven path requires `enabled = true` (default `false`), but the programmatic path (`PrometheusService::new`, as the README Quick Start shows) does not inherit that guard.
 
-Ningún ADR previo gobierna **cómo** se exponen los endpoints de diagnóstico. Antes de
-congelar v1.0 necesitamos una decisión registrada para no shippear una superficie de
-información sin postura declarada. La convención Prometheus (no autenticado,
-network-isolation propiedad del operador) es legítima y ampliamente adoptada, pero
-legítima no es lo mismo que documentada: sin este ADR, un revisor no puede distinguir
-"exposición no autenticada por diseño" de "olvido de autenticar".
+No prior ADR governs **how** diagnostic endpoints are exposed. Before we freeze v1.0 we need a recorded decision. Otherwise we ship an information surface with no declared posture. The Prometheus convention (unauthenticated, network isolation owned by the operator) is legitimate and widely adopted. But legitimate is not the same as documented. Without this ADR, a reviewer cannot tell "unauthenticated exposure by design" from "forgot to authenticate".
 
-## Opciones consideradas
+## Options considered
 
-### Autenticación a nivel de aplicación por defecto
+### Application-level authentication by default
 
-Rechazada. Rompe el modelo de scrape de Prometheus: los scrapers estándar
-(Prometheus server, agentes) esperan `/metrics` no autenticado o con un esquema de auth
-configurado del lado del scraper, no impuesto por el target. Forzar auth por defecto
-crea fricción operacional sin beneficio de seguridad real cuando el aislamiento de red ya
-está presente.
+Rejected. It breaks the Prometheus scrape model. Standard scrapers (Prometheus server, agents) expect `/metrics` unauthenticated, or with an auth scheme configured on the scraper side, not imposed by the target. Default auth creates operational friction with no real security benefit when network isolation is already present.
 
-### TLS obligatorio en los endpoints de diagnóstico
+### Mandatory TLS on diagnostic endpoints
 
-Rechazada. Impone overhead de terminación TLS y gestión de certificado a despliegues
-single-node y de desarrollo, donde el endpoint está detrás de loopback o de una malla de
-servicio que ya termina TLS. El caso de red no confiable se cubre con el hook opt-in
-(regla 2), no con un mandato global.
+Rejected. It imposes TLS termination overhead and certificate management on single-node and development deployments, where the endpoint sits behind loopback or behind a service mesh that already terminates TLS. The untrusted-network case is covered by the opt-in hook (rule 2), not by a global mandate.
 
-### Postura documentada con hooks opt-in (elegida)
+### Documented posture with opt-in hooks (chosen)
 
-Elegida. Registra la decisión (no autenticado por convención de scrape), provee los
-puntos de extensión para los despliegues que sí necesitan TLS/auth, y prefiere el bind a
-loopback con warning en el opt-out. Hace la postura legible en revisión y deja al operador
-la elección por despliegue, sin re-arquitectura.
+Chosen. It records the decision (unauthenticated by scrape convention), provides extension points for deployments that need TLS or auth, and prefers loopback bind with a warning on the opt-out. It makes the posture readable in review and leaves the choice to the operator per deployment, with no re-architecture.
 
-## Consecuencias
+## Consequences
 
-- Los endpoints de diagnóstico de `camel-prometheus` y `camel-health` documentan su
-  postura no autenticada como decisión registrada, no como omisión.
-- El default de bind debe moverse hacia `127.0.0.1`; el bind a no-loopback requiere
-  opt-in explícito y emite `warn!` de arranque (trabajo de código, stream de corrección,
-  bd `rc-asm9`).
-- Los crates que expongan endpoints de diagnóstico en el futuro heredan esta postura por
-  defecto y declaran cualquier hook de TLS/auth que provean.
-- La distinción diagnóstico-vs-plano-de-datos queda fijada: el plano de datos monta TLS
-  con hot-reload (componentes inbound); el plano de diagnóstico no autentica por
-  convención y ofrece TLS opcional.
-- La regla de redacción de ADR-0051 sigue en pie: la exposición no autenticada es
-  aceptable solo mientras el contenido sea metadata operacional sin bytes de credencial.
+- The diagnostic endpoints of `camel-prometheus` and `camel-health` document their unauthenticated posture as a recorded decision, not as an omission.
+- The bind default should move to `127.0.0.1`. A non-loopback bind requires explicit opt-in and emits a startup `warn!` (code work, correction stream, bd `rc-asm9`).
+- Crates that expose diagnostic endpoints in the future inherit this posture by default and declare any TLS/auth hooks they provide.
+- The diagnostic-versus-data-plane distinction is fixed. The data plane mounts TLS with hot-reload (inbound components). The diagnostic plane does not authenticate by convention and offers optional TLS.
+- The ADR-0051 redaction rule stays in force. Unauthenticated exposure is acceptable only while the content is operational metadata with no credential bytes.
 
-## Registro de self-grill
+## Self-grill record
 
-**Preguntas generadas:**
+**Questions generated:**
 
-1. [glossary] ¿"endpoint de diagnóstico" colisiona con el "co-hosting HTTP" de ADR-0009 o
-   con la frontera de confianza de ADR-0032?
-2. [sharpen] ¿"no autenticado por defecto" contradice ADR-0033 (defaults fail-closed)?
-3. [scenario] Si un operador hace bind a `0.0.0.0` en una red no confiable, ¿qué lo
-   protege bajo esta postura?
-4. [cross-ref] ¿Algún ADR existente ya cubre la exposición de endpoints de diagnóstico,
-   de modo que esto debería ser amendment y no ADR nuevo?
+1. [glossary] Does "diagnostic endpoint" collide with the "HTTP co-hosting" of ADR-0009 or with the trust boundary of ADR-0032?
+2. [sharpen] Does "unauthenticated by default" contradict ADR-0033 (fail-closed defaults)?
+3. [scenario] If an operator binds to `0.0.0.0` on an untrusted network, what protects them under this posture?
+4. [cross-ref] Does any existing ADR already cover diagnostic endpoint exposure, so this should be an amendment rather than a new ADR?
 
-**Respuestas:**
+**Answers:**
 
-1. [glossary] No colisiona. ADR-0009 gobierna el plano de datos (rutas API `http:` +
-   mounts estáticos `http-static:` que portan payload de negocio y precedencia de
-   dispatch). ADR-0032 gobierna datos de exchange no confiables cruzando a decisiones de
-   control/recurso. Un endpoint de diagnóstico no procesa payload de negocio ni datos de
-   exchange: expone metadata operacional read-only. Es una tercera categoría distinta.
-2. [sharpen] No contradice. ADR-0033 hace fail-closed en las elecciones de seguridad que
-   el operador DEBE declarar explícitamente (query dinámica SQL, capacidad WASM por
-   mundo, TLS gRPC). La exposición no autenticada de metadata operacional no es una de
-   esas elecciones: la protección canónica del modelo de scrape es la red, no la auth de
-   aplicación. Lo que este ADR sí adopta del espíritu de ADR-0033 es el bind-loopback
-   preferido con warning explícito en el opt-out a no-loopback: el operador elige exponer
-   más ampliamente de forma visible.
-3. [scenario] Bajo esta postura lo protege: (a) el default preferido de bind a loopback,
-   que exige opt-in explícito para `0.0.0.0`; (b) el `warn!` de arranque que señala la
-   exposición ampliada; (c) el hook opt-in de TLS/bearer-token que el operador habilita
-   para ese caso. La postura no autentica por defecto, pero da los mecanismos y la
-   señal para el despliegue en red no confiable. La red (NetworkPolicy/firewall) sigue
-   siendo la defensa primaria por convención de scrape.
-4. [cross-ref] Ninguno cubre esto. ADR-0009 es plano de datos (rutas API + estáticos).
-   ADR-0033 es validación de arranque de opt-ins de config, no exposición de superficie de
-   diagnóstico. ADR-0051 es redacción de credenciales en representación, y afirma
-   explícitamente que las métricas no portan credenciales. La decisión es genuinamente
-   nueva: irreversible (v1.0 shippea la superficie), sorprendente (un endpoint no
-   autenticado en un framework de seguridad merece registro) y con trade-off real
-   (modelo de scrape vs auth de aplicación). Es ADR nuevo, no amendment.
+1. [glossary] No collision. ADR-0009 governs the data plane (API routes `http:` plus static mounts `http-static:` that carry business payload and dispatch precedence). ADR-0032 governs untrusted exchange data crossing into control or resource decisions. A diagnostic endpoint processes no business payload and no exchange data. It exposes read-only operational metadata. It is a distinct third category.
+2. [sharpen] No contradiction. ADR-0033 fails closed on the security choices the operator MUST declare explicitly (dynamic SQL query, per-world WASM capability, gRPC TLS). Unauthenticated exposure of operational metadata is not one of those choices. The canonical protection of the scrape model is the network, not application auth. What this ADR does adopt from the spirit of ADR-0033 is the preferred loopback bind with an explicit warning on the opt-out to non-loopback: the operator chooses to expose more widely, visibly.
+3. [scenario] Under this posture, they are protected by: (a) the preferred loopback bind default, which requires explicit opt-in for `0.0.0.0`; (b) the startup `warn!` that flags the wider exposure; (c) the opt-in TLS or bearer-token hook the operator enables for that case. The posture does not authenticate by default, but it provides the mechanisms and the signal for untrusted-network deployment. The network (NetworkPolicy or firewall) stays the primary defense by scrape convention.
+4. [cross-ref] None covers this. ADR-0009 is data plane (API routes plus statics). ADR-0033 is startup validation of config opt-ins, not diagnostic surface exposure. ADR-0051 is credential redaction in representation, and it states explicitly that metrics carry no credentials. The decision is genuinely new: irreversible (v1.0 ships the surface), surprising (an unauthenticated endpoint in a security framework deserves a record), and with a real trade-off (scrape model versus application auth). It is a new ADR, not an amendment.
 
-**Outcome:** approve como ADR nuevo (0052). Postura no autenticada por convención de
-scrape, TLS/auth como hooks opt-in, bind-loopback preferido con warning en opt-out.
-Ejecución de código (bind default, warning, hooks) delegada al stream de corrección
-(bd `rc-asm9`).
-**Self-grill mode:** manual (4 principios L6: consistencia con CONTEXT-MAP, conflicto con
-ADRs existentes, redundancia con ADRs implícitos, numeración correcta — 0052 siguiente
-libre tras 0051).
+**Outcome:** approve as new ADR (0052). Unauthenticated posture by scrape convention, TLS/auth as opt-in hooks, loopback bind preferred with a warning on opt-out. Code execution (bind default, warning, hooks) is delegated to the correction stream (bd `rc-asm9`).
+**Self-grill mode:** manual (4 L6 principles: consistency with CONTEXT-MAP, conflict with existing ADRs, redundancy with implicit ADRs, correct numbering — 0052 is the next free after 0051).
