@@ -192,8 +192,6 @@ derived from `T`.
 - **WHEN** the macro generates the `UriOption`
 - **THEN** the option `kind` is `OptionKind::List` with inner kind `String`
 
-## MODIFIED Requirements
-
 ### Requirement: Catalog visibility for all macro-derived components
 
 Every component that derives `UriConfig` and opts into metadata generation SHALL have its
