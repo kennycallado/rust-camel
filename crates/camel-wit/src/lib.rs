@@ -1,3 +1,12 @@
+//! Canonical WIT contracts for rust-camel WASM guests.
+//!
+//! This crate publishes the `camel:plugin` WIT package as embedded strings
+//! ([`PLUGIN_WIT`], [`BEAN_WIT`], [`SOURCE_WIT`], [`FULL_WIT`]) and includes
+//! the raw `.wit` files in the published crate package, so non-Rust guest
+//! authors can consume the contract with their own WIT toolchain. See the crate
+//! README for the multi-language guest quickstart. Package versioning follows
+//! ADR-0053 (`camel:plugin@1.0.0`).
+
 /// WIT source for the `plugin` world (standalone file).
 pub const PLUGIN_WIT: &str = include_str!("../wit/camel-plugin.wit");
 
