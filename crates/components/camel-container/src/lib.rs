@@ -477,6 +477,7 @@ impl ContainerConfig {
         self.reconnect = global.reconnect.clone();
     }
 
+    #[cfg(test)]
     fn docker_socket_path(&self) -> Result<&str, CamelError> {
         let host = self.host.as_deref().unwrap_or(if cfg!(windows) {
             "npipe:////./pipe/docker_engine"
@@ -2689,7 +2690,7 @@ mod tests {
 
     /// Regression: events-connect error path calls increment_errors with
     /// correct route_id and label. Uses an unsupported tcp:// host to trigger
-    /// the error path WITHOUT needing a real Docker daemon (docker_socket_path
+    /// the error path WITHOUT needing a real Docker daemon (connect_docker_from_host
     /// returns Err on non-unix/npipe schemes).
     #[tokio::test]
     async fn events_connect_error_increments_metrics() {
@@ -2733,7 +2734,7 @@ mod tests {
             metrics: recording.clone(),
         });
 
-        // Use unsupported tcp:// host so docker_socket_path() fails fast
+        // Use unsupported tcp:// host so connect_docker_from_host() fails fast
         // without any real I/O. Disable retry so the first failure propagates
         // immediately to the Err(e) arm.
         let mut config = ContainerConfig::from_uri("container:events").unwrap();
