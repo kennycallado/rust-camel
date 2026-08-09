@@ -98,7 +98,7 @@ impl WasmRuntime {
 
         let mut linker: Linker<WasmHostState> = Linker::new(&engine);
 
-        crate::wasi_surface::register_minimal_wasi(&mut linker)
+        crate::wasi_surface::register_command_adapter_wasi(&mut linker)
             .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
         crate::host_functions::add_to_linker(&mut linker)

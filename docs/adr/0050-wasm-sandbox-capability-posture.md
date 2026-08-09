@@ -1,7 +1,7 @@
 # ADR-0050: WASM sandbox capability posture
 
 **Date:** 2026-08-06
-**Status:** Accepted; implementation pending
+**Status:** Accepted; amended 2026-08-09 (command-adapter exception); implemented
 **Decision:** Option B, selective WASI registration per world
 **References:** ADR-0011, ADR-0014, ADR-0031, ADR-0032, ADR-0033
 **Origin:** audit of `camel-component-wasm`, findings `F-camel-component-wasm-I1` and `F-camel-component-wasm-I2`
@@ -32,6 +32,24 @@ The host applies these rules:
 The Camel-function posture follows the same principle. The `camel_call` and `camel_poll` schemes use an allowlist. Policy worlds receive no call or store operations. Processor and bean grants stay explicit in `WasmCapabilities`.
 
 This decision describes the target state. The current code still registers full WASI and keeps the unequal stderr inheritance. The audit findings cover that migration in the code stream.
+
+## Amendment 2026-08-09 — command-adapter exception
+
+Commit `8ce1e455` implemented rule 3 by reducing the linker to `wasi:clocks` + `wasi:random`. That broke instantiation of every `wasm32-wasip2` fixture, because the Rust `wasm32-wasip2` target emits a WASI `command`-adapter component. The command adapter imports the full `wasi:cli/*` and `wasi:io/*` surface (environment, exit, stdin/stdout/stderr, terminal handles, and the IO streams/poll/error that back stdio) whether or not the guest uses it. The camel `stream<u8>` body is a component-model builtin (`camel-plugin.wit` `%stream: stream<u8>`); it does not require `wasi:io/streams`. The `wasi:io/*` imports come solely from the command adapter.
+
+The toolchain is fixed at `wasm32-wasip2`. Building pure components that import only the camel host interfaces would require `wasm32-unknown-unknown` plus `wasm-tools`, which the project does not use. The owner rejected that path.
+
+The host therefore registers the command-adapter surface that every fixture imports:
+
+- `wasi:clocks` (wall + monotonic), `wasi:random` (random + insecure + insecure_seed)
+- `wasi:io/{error, poll, streams}`
+- `wasi:cli/{environment, exit, stdin, stdout, stderr, terminal-input, terminal-output, terminal-stdin, terminal-stdout, terminal-stderr}`
+
+This surface is registered identically in all four worlds, because every fixture imports the same command-adapter set and per-world denial of an imported instance breaks instantiation before the guest runs. Rule 3 is amended: **filesystem and sockets stay unregistered**; they are the testable denial boundary. CLI, environment, and stdio interfaces are registered because the command adapter imports them, but the `WasiCtx` and the `WasiCliCtx` inside it back them with no resources — empty environment and arguments, closed stdin, sink stdout/stderr, no preopens, no network, no name lookup.
+
+A guest that imports `wasi:filesystem/*` or `wasi:sockets/*` still fails to instantiate, because those host implementations are absent from the linker. The regression guard `test_no_filesystem_or_sockets_registration` keeps that boundary. The `WasiCtxBuilder` never calls `inherit_stderr`, `inherit_env`, `preopened_dir`, or any network-allow method.
+
+Rule 6 (per-world grant + negative test) remains valid for non-mandatory interfaces. The command-adapter imports are mandatory for the current toolchain; the denial that matters (filesystem, sockets) keeps its negative coverage.
 
 ## Consequences
 

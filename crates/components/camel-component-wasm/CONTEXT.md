@@ -38,10 +38,31 @@ rejected.
 
 ### WASI surface
 
-The linker registers only `wasi:clocks` and `wasi:random` per ADR-0050.
-Filesystem, sockets, CLI, environment, and stdio are absent from the
-linker. No world inherits host stdio. Guests use `camel_call` for logging
-output per ADR-0050.
+Every guest fixture is built with `cargo build --target wasm32-wasip2`, which
+produces a WASI `command`-adapter component. Such a component imports the full
+`wasi:cli/*` and `wasi:io/*` surface (environment, exit, stdin/stdout/stderr,
+terminal handles, and the IO streams/poll that back stdio) regardless of
+whether the guest uses it. Per ADR-0050's command-adapter exception, the host
+therefore registers that imported surface so fixtures instantiate:
+
+- `wasi:clocks` (wall + monotonic), `wasi:random` (random + insecure + seed)
+- `wasi:io/{error, poll, streams}`
+- `wasi:cli/{environment, exit, stdin, stdout, stderr, terminal-*}`
+
+The registration is the same for all four worlds because every fixture imports
+the same command-adapter surface; per-world denial of these imported instances
+would break instantiation before the guest runs.
+
+The `WasiCtx` (and the `WasiCliCtx` it contains) backs these interfaces with
+**no resources**: empty environment and arguments, closed stdin, sink
+stdout/stderr, no preopens, no network, no name lookup. A guest can import and
+call the interfaces, but filesystem paths resolve against zero preopens,
+sockets have no network, environment is empty, and stdio is discarded.
+
+`wasi:filesystem/*`, `wasi:sockets/*`, and name lookup are deliberately **not**
+registered; they are the testable denial boundary. No world inherits host
+stdio and no `WasiCtxBuilder` call grants preopens, environment, or network.
+Guests use `camel_call` for logging output per ADR-0050.
 
 ## Resource and lifecycle limits
 

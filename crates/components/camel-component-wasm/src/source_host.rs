@@ -455,8 +455,10 @@ fn source_body_to_native(body: WasmBody) -> Body {
 /// [`crate::source_consumer`]). Its async host imports (`accept-http`,
 /// `submit-exchange`) receive an `&Accessor` and use async channel ops.
 pub fn add_to_linker(linker: &mut Linker<SourceHostState>) -> Result<(), wasmtime::Error> {
-    // WASI p2 preview — async variant required for the async source world.
-    crate::wasi_surface::register_minimal_wasi(linker)?;
+    // WASI p2 preview — register the command-adapter surface that the
+    // `wasm32-wasip2` source fixture imports (hardened ctx backs it with no
+    // resources). Filesystem and sockets stay unregistered (ADR-0050).
+    crate::wasi_surface::register_command_adapter_wasi(linker)?;
 
     // Source-host interface (accept-http, submit-exchange, is-cancelled).
     crate::source_bindings::camel::plugin::source_host::add_to_linker::<_, HasSelf<_>>(
