@@ -1,0 +1,5 @@
+error: unknown kind override 'duraton'. Valid: duration, bool, int, float, string, enum:VariantA,VariantB
+ --> tests/ui/kind_typo_fail.rs:9:24
+  |
+9 |     #[uri_param(kind = "duraton")]
+  |                        ^^^^^^^^^

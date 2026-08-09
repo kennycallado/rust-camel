@@ -1,5 +1,6 @@
 mod changelog;
 mod lint_context_citations;
+mod lint_single_source;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -93,6 +94,10 @@ enum Commands {
     /// existence, anchor resolution, and (later) symbol validation against
     /// the workspace's own crate definitions. Exits non-zero on violations.
     LintContextCitations,
+    /// Scan component crate source for `UriOption::new` calls outside
+    /// `#[cfg(test)]` modules. Enforces the single-source-of-truth
+    /// invariant: metadata MUST be macro-derived, not hand-written.
+    LintSingleSource,
     /// Compute the correct publish order for workspace crates by performing
     /// a topological sort over normal (non-dev) internal dependencies.
     /// Outputs shell commands suitable for publish-crates.sh.
@@ -253,6 +258,26 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-context-citations error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintSingleSource => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_single_source::lint_single_source(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-single-source: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("SINGLE-SOURCE VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-single-source: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-single-source error: {e}");
                     std::process::exit(1);
                 }
             }

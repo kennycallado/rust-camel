@@ -54,3 +54,108 @@ at query time.
   Rust types.
 - SDK, catalog, OpenAPI, and IDE tooling have a stable contract to consume.
 - `metadata()` default is non-breaking for all existing components.
+
+## Amendment: Macro-Derived URI Options via `#[derive(UriConfig)]`
+
+**Rationale:** Hand-written `UriOption::new` lists in component production
+code duplicate the URI parameter information already present in config struct
+fields and `#[uri_param]` attributes. The `#[derive(UriConfig)]` macro is now
+the single source of truth for URI parameter metadata.
+
+### `fn uri_options()` Generation
+
+`#[derive(UriConfig)]` generates an inherent `pub fn uri_options() -> Vec<UriOption>`
+on the config struct. The method iterates over `#[uri_param]`-annotated fields
+and produces one `UriOption` per field, using builder methods (`.required()`,
+`.secret()`, `.with_default(v)`, `.deprecated(reason)`, `.with_alias(a)`) to
+encode the semantic attributes.
+
+### OptionKind Inference Rules
+
+The macro infers `OptionKind` from the Rust type of each `#[uri_param]` field:
+
+| Rust Type | OptionKind |
+|-----------|------------|
+| `Duration` | `Duration` |
+| `bool` | `Bool` |
+| `u8`..`u64`, `usize`, `i8`..`i64`, `isize` | `Int` |
+| `f32`, `f64` | `Float` |
+| `String`, `&str` | `String` |
+| `Vec<T>` | `List(Box::new(infer_option_kind(inner)))` |
+| Anything else | `String` (NEVER `Enum`) |
+
+`Enum` variant requires an explicit `kind = "enum:A,B,C"` override on the
+`#[uri_param]` attribute. Inference never produces `Enum`.
+
+`Option<T>` fields are unwrapped to their inner `T` before inference, and
+their default `required` flag is `false`.
+
+### Semantic Attributes via `#[uri_param]`
+
+The `#[uri_param]` attribute accepts these keys:
+
+| Key | Type | Semantics |
+|-----|------|-----------|
+| `desc = "text"` | `Lit::Str` | Human-readable description |
+| `required` | flag or `Lit::Bool` | Marks the option as mandatory |
+| `secret` | flag or `Lit::Bool` | Credential-bearing field; must not appear in diagnostics |
+| `deprecated = "reason"` | `Lit::Str` | Deprecation notice shown in tooling |
+| `aliases = ["a", "b"]` | `ExprArray` | Alternative parameter names |
+| `kind = "string"` | `Lit::Str` | Explicit kind override (`"duration"`, `"bool"`, `"int"`, `"string"`, `"float"`, `"enum:A,B"`) |
+
+If `secret` is `true` and `default` is non-empty, the macro emits a compile
+error — a secret with a hardcoded default is a security hazard.
+
+### `metadata()` Generation via Opt-in
+
+`#[uri_config(metadata(scheme = "x", description = "d", producer, consumer, polling_consumer, streaming))]`
+generates an inherent `fn metadata() -> ComponentMetadata` on the config
+struct. The method returns `ComponentMetadata::minimal(scheme).with_description(desc).with_capabilities(ComponentCapabilities { ... }).with_uri_options(Self::uri_options())`.
+
+Without `metadata(..)`, no `metadata()` method is generated — only `uri_options()`.
+
+### `skip_impl` Path
+
+Structs with bespoke URI parsing logic (e.g., `HttpEndpointConfig`: custom
+`impl UriConfig` with multi-segment path handling and legacy compatibility)
+use `#[uri_config(skip_impl, metadata(..))]`. This retains the manual
+`impl UriConfig` (including `from_uri`) while deriving `uri_options()` and
+(if opted in) `metadata()` from the field annotations.
+
+### Component-to-Config Delegation Convention
+
+The `Component` trait's `metadata()` default returns `ComponentMetadata::minimal(scheme)`.
+Each migrated component MUST override `metadata()` to delegate:
+
+```rust
+fn metadata(&self) -> ComponentMetadata {
+    ConfigType::metadata()
+}
+```
+
+Or, when the config has no `metadata(..)` opt-in but does have `uri_options()`:
+
+```rust
+fn metadata(&self) -> ComponentMetadata {
+    ComponentMetadata::minimal(scheme).with_uri_options(ConfigType::uri_options())
+}
+```
+
+### Single-Source-of-Truth Invariant
+
+`cargo xtask lint-single-source` scans component crate source for
+`UriOption::new` calls outside `#[cfg(test)]` modules. A violation means
+metadata is being hand-written instead of macro-derived. The lint enforces
+that the macro is always the single source of truth for URI parameter metadata.
+
+### Inner-Config-Struct Mirror Pattern
+
+Components with bespoke URI parsing (manual `impl UriConfig` on the public
+config struct) use the inner-config-struct mirror pattern via `skip_impl`.
+The mirror struct (e.g., `HttpEndpointUriConfig`, `SedaUriConfig`) is a
+metadata-only anchor — its `#[uri_param]` fields must stay synchronized with
+the bespoke parser's recognized params. Each component using this pattern
+includes a parity test (`uri_options_count_parity`) that asserts the mirror
+struct's `uri_options().len()` equals the expected param count. This catches
+silent drift when a param is added to or removed from the manual parser but
+the mirror is not updated.

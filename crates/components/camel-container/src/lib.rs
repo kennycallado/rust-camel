@@ -26,12 +26,15 @@ use bollard::query_parameters::{
     StartContainerOptions,
 };
 use bollard::service::{HostConfig, PortBinding};
-use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::parse_uri;
 use camel_component_api::retry_async_cancelable;
-use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, Message};
+use camel_component_api::{
+    Body, BoxProcessor, CamelError, ComponentMetadata, Exchange, Message, NetworkRetryPolicy,
+    UriOption,
+};
 use camel_component_api::{
     Component, Consumer, ConsumerContext, Endpoint, ProducerContext, RuntimeObservability,
+    UriConfig,
 };
 use tower::Service;
 
@@ -247,6 +250,94 @@ pub struct ContainerConfig {
     pub reconnect: NetworkRetryPolicy,
 }
 
+/// Private container for macro-derived `uri_options()` and `metadata()`.
+///
+/// Mirrors `ContainerConfig`'s URI-parsed fields exactly. `ContainerConfig`
+/// holds the public struct with non-URI fields (`reconnect`) appended;
+/// metadata delegation targets this inner type.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "container"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "container",
+        description = "Container lifecycle management endpoint",
+        producer,
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
+struct ContainerUriConfig {
+    /// The operation to perform (e.g., "list", "run", "start", "stop", "remove", "events").
+    pub operation: String,
+    /// The container image to use for "run" operations (can be overridden via header).
+    #[uri_param(desc = "Container image to use for run operations")]
+    pub image: Option<String>,
+    /// The container name to use for "run" operations (can be overridden via header).
+    #[uri_param(desc = "Container name for run operations")]
+    pub name: Option<String>,
+    /// The Docker host URL (defaults to "unix:///var/run/docker.sock").
+    #[uri_param(desc = "Docker host URL")]
+    pub host: Option<String>,
+    /// Command to run in the container (e.g., "sleep 30").
+    #[uri_param(desc = "Command to run in the container")]
+    pub cmd: Option<String>,
+    /// Port mappings in format "hostPort:containerPort" (e.g., "8080:80,8443:443").
+    #[uri_param(desc = "Port mappings in hostPort:containerPort format")]
+    pub ports: Option<String>,
+    /// Environment variables in format "KEY=value,KEY2=value2".
+    #[uri_param(desc = "Environment variables in KEY=value format")]
+    pub env: Option<String>,
+    /// Network mode (e.g., "bridge", "host", "none"). Default: "bridge".
+    #[uri_param(default = "bridge", desc = "Network mode (bridge, host, none)")]
+    pub network: Option<String>,
+    /// Container ID or name for logs consumer.
+    #[uri_param(name = "containerId", desc = "Container ID or name for logs consumer")]
+    pub container_id: Option<String>,
+    /// Follow log output (default: true for consumer).
+    #[uri_param(default = "true", desc = "Follow log output")]
+    pub follow: bool,
+    /// Include timestamps in logs (default: false).
+    #[uri_param(default = "false", desc = "Include timestamps in logs")]
+    pub timestamps: bool,
+    /// Number of lines to show from the end of logs (default: all).
+    #[uri_param(desc = "Number of lines to show from end of logs")]
+    pub tail: Option<String>,
+    /// Automatically pull the image if not present (default: true).
+    #[uri_param(
+        name = "autoPull",
+        default = "true",
+        desc = "Automatically pull the image if not present"
+    )]
+    pub auto_pull: bool,
+    /// Automatically remove the container when it exits (default: true).
+    #[uri_param(
+        name = "autoRemove",
+        default = "true",
+        desc = "Automatically remove container when it exits"
+    )]
+    pub auto_remove: bool,
+    /// Volume mounts in format "host:container:ro" (e.g., "./html:/usr/share/nginx/html:ro").
+    #[uri_param(desc = "Volume mounts in host:container:ro format")]
+    pub volumes: Option<String>,
+    /// User to run the container or exec command as (e.g., "root").
+    #[uri_param(desc = "User to run the container or exec command as")]
+    pub user: Option<String>,
+    /// Working directory inside the container.
+    #[uri_param(desc = "Working directory inside the container")]
+    pub workdir: Option<String>,
+    /// Whether to detach from the exec process (default: false).
+    #[uri_param(default = "false", desc = "Whether to detach from the exec process")]
+    pub detach: bool,
+    /// Network driver for network-create (e.g., "bridge", "overlay").
+    #[uri_param(desc = "Network driver for network-create")]
+    pub driver: Option<String>,
+    /// Whether to force the operation (default: false).
+    #[uri_param(default = "false", desc = "Whether to force the operation")]
+    pub force: bool,
+}
+
 impl ContainerConfig {
     /// Parses a container URI into a `ContainerConfig`.
     ///
@@ -460,6 +551,18 @@ impl ContainerConfig {
     #[allow(clippy::type_complexity)]
     fn parse_volumes(&self) -> Option<(Vec<String>, Vec<String>)> {
         self.volumes.as_deref().and_then(parse_volume_str)
+    }
+
+    /// Component metadata for the container scheme, generated by the
+    /// `#[derive(UriConfig)]` macro on the private `ContainerUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        ContainerUriConfig::metadata()
+    }
+
+    /// Generated URI option definitions for the container scheme, derived
+    /// from `#[uri_param]` annotations on `ContainerUriConfig`.
+    pub fn uri_options() -> Vec<UriOption> {
+        ContainerUriConfig::uri_options()
     }
 }
 
@@ -1680,6 +1783,10 @@ impl Component for ContainerComponent {
         "container"
     }
 
+    fn metadata(&self) -> ComponentMetadata {
+        ContainerConfig::metadata()
+    }
+
     fn create_endpoint(
         &self,
         uri: &str,
@@ -2628,5 +2735,14 @@ mod tests {
         );
         assert_eq!(errors[0].0, "events-test-route");
         assert_eq!(errors[0].1, "e:container:events-connect");
+    }
+
+    #[test]
+    fn uri_options_count_parity() {
+        assert_eq!(
+            ContainerConfig::uri_options().len(),
+            19,
+            "ContainerUriConfig #[uri_param] count drifted from parser"
+        );
     }
 }

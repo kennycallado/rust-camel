@@ -1,0 +1,18 @@
+error[E0599]: no associated function or constant named `metadata` found for struct `NoMetaConfig` in the current scope
+  --> tests/ui/no_optin_no_metadata_fn_fail.rs:15:31
+   |
+ 8 | struct NoMetaConfig {
+   | ------------------- associated function or constant `metadata` not found for this struct
+...
+15 |     let _meta = NoMetaConfig::metadata();
+   |                               ^^^^^^^^ associated function or constant not found in `NoMetaConfig`
+   |
+note: if you're trying to build a new `NoMetaConfig`, consider using `NoMetaConfig::parse_uri_components` which returns `Result<NoMetaConfig, CamelError>`
+  --> tests/ui/no_optin_no_metadata_fn_fail.rs:5:10
+   |
+ 5 | #[derive(UriConfig)]
+   |          ^^^^^^^^^
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `metadata`, perhaps you need to implement it:
+           candidate #1: `tracing_core::callsite::Callsite`
+   = note: this error originates in the derive macro `UriConfig` (in Nightly builds, run with -Z macro-backtrace for more info)

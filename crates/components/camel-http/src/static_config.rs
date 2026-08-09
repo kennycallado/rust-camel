@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
+use camel_api::component_metadata::ComponentMetadata;
 use camel_component_api::{CamelError, UriComponents, UriConfig, parse_uri};
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
@@ -289,6 +290,64 @@ impl HttpStaticConfig {
         }
 
         Ok(config)
+    }
+}
+
+/// Private container for macro-derived `uri_options()` and `metadata()`.
+///
+/// Mirrors the URI query parameters parsed by `HttpStaticConfig::from_components`.
+/// `HttpStaticConfig` holds typed fields (`PathBuf`, `HashMap`) that the derive
+/// cannot represent, so metadata derivation targets this inner type.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "http-static"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "http-static",
+        description = "Static file server component",
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
+struct HttpStaticUriConfig {
+    #[allow(dead_code)]
+    _mount_path: String,
+
+    #[uri_param(name = "dir", desc = "Root directory to serve files from")]
+    dir: String,
+
+    #[uri_param(name = "port", default = "8080", desc = "TCP listen port")]
+    port: u16,
+
+    #[uri_param(name = "host", default = "0.0.0.0", desc = "Bind address")]
+    host: String,
+
+    #[uri_param(
+        name = "spaFallback",
+        default = "false",
+        desc = "Serve index.html for unmatched paths"
+    )]
+    spa_fallback: bool,
+
+    #[uri_param(
+        name = "cacheControl",
+        default = "public, max-age=0",
+        desc = "Cache-Control header value"
+    )]
+    cache_control: String,
+}
+
+impl HttpStaticConfig {
+    /// Component metadata for the http-static scheme, derived from the
+    /// `#[uri_param]` fields on `HttpStaticUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        HttpStaticUriConfig::metadata()
+    }
+
+    /// URI option definitions, derived from `#[uri_param]` fields.
+    pub fn uri_options() -> Vec<camel_api::component_metadata::UriOption> {
+        HttpStaticUriConfig::uri_options()
     }
 }
 
@@ -662,5 +721,14 @@ mod tests {
             PathBuf::from("/nonexistent/path/that/does/not/exist")
         );
         // Validation happens at consumer start, not config parse time.
+    }
+
+    #[test]
+    fn uri_options_count_parity() {
+        assert_eq!(
+            HttpStaticConfig::uri_options().len(),
+            5,
+            "HttpStaticUriConfig #[uri_param] count drifted from parser"
+        );
     }
 }

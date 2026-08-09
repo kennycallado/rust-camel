@@ -33,7 +33,8 @@ use std::task::{Context, Poll};
 use tokio::sync::{Mutex, Notify};
 use tower::Service;
 
-use camel_api::component_metadata::{ComponentCapabilities, ComponentMetadata};
+use camel_api::component_metadata::ComponentMetadata;
+use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
@@ -84,6 +85,27 @@ pub struct MockConfig {
     pub any_order: bool,
 }
 
+/// Private container for macro-derived `metadata()`.
+///
+/// Mock has zero real URI params — empty `uri_options` is legitimate.
+/// This inner struct exists solely to anchor the metadata derivation.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "mock"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "mock",
+        description = "Records exchanges for test assertions",
+        producer
+    ),
+    crate = "camel_component_api"
+)]
+struct MockUriConfig {
+    #[allow(dead_code)]
+    _name: String,
+}
+
 impl Default for MockConfig {
     fn default() -> Self {
         Self {
@@ -103,6 +125,12 @@ impl MockConfig {
             max_retained,
             ..Self::default()
         }
+    }
+
+    /// Component metadata for the mock scheme, derived from
+    /// `#[uri_config(metadata(..))]` on `MockUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        MockUriConfig::metadata()
     }
 }
 
@@ -210,17 +238,7 @@ impl Component for MockComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        ComponentMetadata {
-            scheme: "mock".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "Records exchanges for test assertions".to_string(),
-            uri_syntax: "mock:name".to_string(),
-            capabilities: ComponentCapabilities {
-                supports_producer: true,
-                ..Default::default()
-            },
-            ..ComponentMetadata::minimal("mock")
-        }
+        MockConfig::metadata()
     }
 
     fn create_endpoint(

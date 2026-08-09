@@ -15,12 +15,12 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
-use camel_api::component_metadata::{
-    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
-};
+use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
-use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
+use camel_component_api::{
+    Component, ComponentMetadata, Consumer, ConsumerContext, Endpoint, ProducerContext,
+};
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -63,13 +63,34 @@ fn validate_name(name: &str) -> Result<(), CamelError> {
 /// URI format: `direct:name[?timeout_ms=30000]`
 ///
 /// Example: `direct:foo` creates an endpoint named "foo"
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, UriConfig)]
+#[uri_scheme = "direct"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "direct",
+        description = "Synchronous in-memory direct invocation between routes",
+        producer,
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
 pub struct DirectConfig {
     /// Endpoint name (path portion).
     pub name: String,
     /// Timeout in milliseconds for producer `call()`. Defaults to 30 000 ms.
+    #[uri_param(
+        name = "timeout_ms",
+        default = "30000",
+        desc = "Producer call timeout in milliseconds"
+    )]
     pub timeout_ms: Option<u64>,
     /// When false, skip readiness error if no consumer registered.
+    #[uri_param(
+        name = "failIfNoConsumers",
+        default = "true",
+        desc = "Fail if no consumer registered for the name"
+    )]
     pub fail_if_no_consumers: Option<bool>,
 }
 
@@ -166,32 +187,7 @@ impl Component for DirectComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        ComponentMetadata {
-            scheme: "direct".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "Synchronous in-memory direct invocation between routes".to_string(),
-            uri_syntax: "direct:name".to_string(),
-            capabilities: ComponentCapabilities {
-                supports_consumer: true,
-                supports_producer: true,
-                ..Default::default()
-            },
-            uri_options: vec![
-                UriOption::new(
-                    "timeout_ms",
-                    "Producer call timeout in milliseconds",
-                    OptionKind::Int,
-                )
-                .with_default("30000"),
-                UriOption::new(
-                    "failIfNoConsumers",
-                    "Fail if no consumer registered for the name",
-                    OptionKind::Bool,
-                )
-                .with_default("true"),
-            ],
-            ..ComponentMetadata::minimal("direct")
-        }
+        DirectConfig::metadata()
     }
 
     fn create_endpoint(

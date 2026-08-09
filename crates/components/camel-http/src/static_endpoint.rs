@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use camel_api::component_metadata::{
-    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
-};
+use camel_api::component_metadata::ComponentMetadata;
 use camel_component_api::{
     CamelError, Component, Consumer, Endpoint, ProducerContext, RuntimeObservability,
 };
@@ -47,39 +45,7 @@ impl Component for HttpStaticComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        ComponentMetadata {
-            scheme: "http-static".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "Static file server component".to_string(),
-            uri_syntax: "http-static:/path?dir=/var/www&port=8080".to_string(),
-            capabilities: ComponentCapabilities {
-                supports_consumer: true,
-                ..Default::default()
-            },
-            uri_options: vec![
-                UriOption::new(
-                    "dir",
-                    "Root directory to serve files from",
-                    OptionKind::String,
-                )
-                .required(),
-                UriOption::new("port", "TCP listen port", OptionKind::Int).with_default("8080"),
-                UriOption::new("host", "Bind address", OptionKind::String).with_default("0.0.0.0"),
-                UriOption::new(
-                    "spaFallback",
-                    "Serve index.html for unmatched paths",
-                    OptionKind::Bool,
-                )
-                .with_default("false"),
-                UriOption::new(
-                    "cacheControl",
-                    "Cache-Control header value",
-                    OptionKind::String,
-                )
-                .with_default("public, max-age=0"),
-            ],
-            ..ComponentMetadata::minimal("http-static")
-        }
+        HttpStaticConfig::metadata()
     }
 
     fn create_endpoint(

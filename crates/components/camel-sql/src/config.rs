@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
+use camel_api::component_metadata::{ComponentMetadata, UriOption};
 use camel_component_api::CamelError;
 use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
@@ -458,7 +459,221 @@ impl std::fmt::Debug for SqlEndpointConfig {
     }
 }
 
+/// Private container for macro-derived `uri_options()` and `metadata()`.
+///
+/// Mirrors `SqlEndpointConfig`'s URI-parsed params exactly. `SqlEndpointConfig`
+/// holds extra non-URI fields (`retry`, `retry_set_from_uri`) and custom
+/// `from_uri` logic; metadata delegation targets this inner type.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "sql"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "sql",
+        description = "Execute SQL against a configured datasource",
+        producer,
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
+struct SqlUriConfig {
+    // ── Connection ──
+    #[uri_param(name = "db_url", desc = "Database connection URL", secret)]
+    pub db_url: Option<String>,
+    #[uri_param(
+        name = "datasource",
+        desc = "Named datasource reference (from CamelConfig.datasources)"
+    )]
+    pub datasource: Option<String>,
+    #[uri_param(name = "maxConnections", desc = "Maximum connections in the pool")]
+    pub max_connections: Option<u64>,
+    #[uri_param(name = "minConnections", desc = "Minimum connections in the pool")]
+    pub min_connections: Option<u64>,
+    #[uri_param(name = "idleTimeoutSecs", desc = "Idle timeout in seconds")]
+    pub idle_timeout_secs: Option<u64>,
+    #[uri_param(
+        name = "maxLifetimeSecs",
+        desc = "Maximum connection lifetime in seconds"
+    )]
+    pub max_lifetime_secs: Option<u64>,
+
+    // ── Query ──
+    #[uri_param(
+        name = "outputType",
+        kind = "enum:SelectList,SelectOne,StreamList",
+        default = "SelectList",
+        desc = "Output type for query results"
+    )]
+    pub output_type: Option<String>,
+    #[uri_param(
+        name = "placeholder",
+        default = "#",
+        desc = "Placeholder character for parameters"
+    )]
+    pub placeholder: Option<String>,
+    #[uri_param(
+        name = "usePlaceholder",
+        default = "true",
+        desc = "Process parameter placeholders in queries"
+    )]
+    pub use_placeholder: Option<bool>,
+    #[uri_param(
+        name = "noop",
+        default = "false",
+        desc = "Dry-run mode (don't execute the query)"
+    )]
+    pub noop: Option<bool>,
+    #[uri_param(
+        name = "inSeparator",
+        default = ", ",
+        desc = "Separator for IN clause expansion"
+    )]
+    pub in_separator: Option<String>,
+    #[uri_param(
+        name = "alwaysPopulateStatement",
+        default = "false",
+        desc = "Always bind parameters even if the exchange body is null or empty"
+    )]
+    pub always_populate_statement: Option<bool>,
+    #[uri_param(
+        name = "allowNamedParameters",
+        default = "true",
+        desc = "Recognize :name style placeholders from headers or body"
+    )]
+    pub allow_named_parameters: Option<bool>,
+    #[uri_param(name = "fetchSize", desc = "Fetch size hint for query results")]
+    pub fetch_size: Option<u64>,
+    #[uri_param(
+        name = "transactionMode",
+        kind = "enum:Auto,Managed",
+        default = "Auto",
+        desc = "Transaction mode for SQL operations"
+    )]
+    pub transaction_mode: Option<String>,
+
+    // ── Consumer ──
+    #[uri_param(
+        name = "delay",
+        default = "500",
+        desc = "Delay between polls in milliseconds"
+    )]
+    pub delay: Option<u64>,
+    #[uri_param(
+        name = "initialDelay",
+        default = "1000",
+        desc = "Initial delay before first poll in milliseconds"
+    )]
+    pub initial_delay: Option<u64>,
+    #[uri_param(name = "maxMessagesPerPoll", desc = "Maximum messages per poll")]
+    pub max_messages_per_poll: Option<u64>,
+    #[uri_param(
+        name = "onConsume",
+        desc = "SQL to execute after consuming each message"
+    )]
+    pub on_consume: Option<String>,
+    #[uri_param(name = "onConsumeFailed", desc = "SQL to execute if consumption fails")]
+    pub on_consume_failed: Option<String>,
+    #[uri_param(
+        name = "onConsumeBatchComplete",
+        desc = "SQL to execute after consuming a batch"
+    )]
+    pub on_consume_batch_complete: Option<String>,
+    #[uri_param(
+        name = "routeEmptyResultSet",
+        default = "false",
+        desc = "Route empty result sets"
+    )]
+    pub route_empty_result_set: Option<bool>,
+    #[uri_param(
+        name = "useIterator",
+        default = "true",
+        desc = "Use iterator for results"
+    )]
+    pub use_iterator: Option<bool>,
+    #[uri_param(
+        name = "expectedUpdateCount",
+        desc = "Expected number of rows affected"
+    )]
+    pub expected_update_count: Option<u64>,
+    #[uri_param(
+        name = "breakBatchOnConsumeFail",
+        default = "false",
+        desc = "Break batch on consume failure"
+    )]
+    pub break_batch_on_consume_fail: Option<bool>,
+    #[uri_param(
+        name = "bridgeErrorHandler",
+        default = "false",
+        desc = "Bridge poll errors into route error handling"
+    )]
+    pub bridge_error_handler: Option<bool>,
+    #[uri_param(
+        name = "repeatCount",
+        desc = "Maximum number of polls before the consumer stops"
+    )]
+    pub repeat_count: Option<u64>,
+    #[uri_param(
+        name = "breakOnEmpty",
+        default = "false",
+        desc = "Stop the consumer after a poll that returns zero rows"
+    )]
+    pub break_on_empty: Option<bool>,
+    #[uri_param(
+        name = "processingStrategy",
+        kind = "enum:Direct,Scheduled",
+        default = "Direct",
+        desc = "Processing strategy for the consumer"
+    )]
+    pub processing_strategy: Option<String>,
+    #[uri_param(
+        name = "pollStrategy",
+        kind = "enum:Sequential,Burst",
+        default = "Sequential",
+        desc = "Poll strategy for the consumer"
+    )]
+    pub poll_strategy: Option<String>,
+
+    // ── Producer ──
+    #[uri_param(name = "batch", default = "false", desc = "Enable batch mode")]
+    pub batch: Option<bool>,
+    #[uri_param(
+        name = "useMessageBodyForSql",
+        default = "false",
+        desc = "Use message body for SQL"
+    )]
+    pub use_message_body_for_sql: Option<bool>,
+    #[uri_param(
+        name = "allowDynamicQuery",
+        default = "false",
+        desc = "Allow queries to be sourced from exchange headers or body"
+    )]
+    pub allow_dynamic_query: Option<bool>,
+
+    // ── SSL ──
+    #[uri_param(name = "sslMode", desc = "SSL mode for the connection")]
+    pub ssl_mode: Option<String>,
+    #[uri_param(name = "sslRootCert", desc = "Path to SSL root certificate")]
+    pub ssl_root_cert: Option<String>,
+    #[uri_param(name = "sslCert", desc = "Path to SSL client certificate")]
+    pub ssl_cert: Option<String>,
+    #[uri_param(name = "sslKey", desc = "Path to SSL client key", secret)]
+    pub ssl_key: Option<String>,
+}
+
 impl SqlEndpointConfig {
+    /// Component metadata for the sql scheme, derived from
+    /// `#[uri_param]` annotations on `SqlUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        SqlUriConfig::metadata()
+    }
+
+    /// Generated URI option definitions for the sql scheme,
+    /// derived from `#[uri_param]` annotations on `SqlUriConfig`.
+    pub fn uri_options() -> Vec<UriOption> {
+        SqlUriConfig::uri_options()
+    }
+
     /// Apply defaults from global config, filling None fields without overriding.
     pub fn apply_defaults(&mut self, defaults: &SqlGlobalConfig) {
         if self.max_connections.is_none() {

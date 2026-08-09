@@ -25,13 +25,11 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use camel_api::BoxProcessorExt;
-use camel_api::component_metadata::{
-    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
-};
+use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{
-    BoxProcessor, CamelError, Component, ComponentContext, ConcurrencyModel, Consumer,
-    ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, ProducerContext,
+    BoxProcessor, CamelError, Component, ComponentContext, ComponentMetadata, ConcurrencyModel,
+    Consumer, ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, ProducerContext,
 };
 use tracing::{info, warn};
 
@@ -78,6 +76,79 @@ pub struct SedaConfig {
     pub timeout_ms: u64,
     pub wait_for_task_to_complete: WaitForTaskToComplete,
     pub exchange_pattern: ExchangePattern,
+}
+
+/// Private container for macro-derived `uri_options()` and `metadata()`.
+///
+/// Mirrors `SedaConfig`'s URI-parsed fields with `String` for enum types.
+/// `SedaConfig` holds the typed enum variants; metadata delegation targets
+/// this inner type.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "seda"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "seda",
+        description = "Asynchronous staged event-driven architecture with bounded queue",
+        producer,
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
+struct SedaUriConfig {
+    #[allow(dead_code)]
+    _name: String,
+    #[uri_param(
+        name = "size",
+        default = "1000",
+        desc = "Bounded queue capacity. Must be > 0"
+    )]
+    size: usize,
+    #[uri_param(
+        name = "concurrentConsumers",
+        default = "1",
+        desc = "Consumer concurrency. Clamped to 1 minimum"
+    )]
+    concurrent_consumers: usize,
+    #[uri_param(
+        name = "multipleConsumers",
+        default = "false",
+        desc = "Fanout mode — clone to all subscribers"
+    )]
+    multiple_consumers: bool,
+    #[uri_param(
+        name = "blockWhenFull",
+        default = "false",
+        desc = "Block producer when queue full vs fail fast"
+    )]
+    block_when_full: bool,
+    #[uri_param(
+        name = "discardIfNoConsumers",
+        default = "false",
+        desc = "Silently drop if no consumers vs error"
+    )]
+    discard_if_no_consumers: bool,
+    #[uri_param(
+        name = "timeout",
+        default = "30000",
+        desc = "Timeout for enqueue and reply wait in milliseconds"
+    )]
+    timeout_ms: u64,
+    #[uri_param(
+        name = "waitForTaskToComplete",
+        kind = "enum:Never,IfReplyExpected,Always",
+        default = "IfReplyExpected",
+        desc = "When to wait for task completion"
+    )]
+    wait_for_task_to_complete: String,
+    #[uri_param(
+        name = "exchangePattern",
+        kind = "enum:InOnly,InOut",
+        default = "InOnly",
+        desc = "Exchange pattern"
+    )]
+    exchange_pattern: String,
 }
 
 impl SedaConfig {
@@ -225,6 +296,18 @@ impl SedaConfig {
                 diffs.join(", ")
             ))
         }
+    }
+
+    /// Component metadata for the seda scheme, derived from `#[uri_param]`
+    /// annotations on `SedaUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        SedaUriConfig::metadata()
+    }
+
+    /// Generated URI option definitions for the seda scheme, derived from
+    /// `#[uri_param]` annotations on `SedaUriConfig`.
+    pub fn uri_options() -> Vec<camel_api::component_metadata::UriOption> {
+        SedaUriConfig::uri_options()
     }
 }
 
@@ -384,73 +467,7 @@ impl Component for SedaComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        ComponentMetadata {
-            scheme: "seda".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "Asynchronous staged event-driven architecture with bounded queue"
-                .to_string(),
-            uri_syntax: "seda:name?size=1000&concurrentConsumers=1".to_string(),
-            capabilities: ComponentCapabilities {
-                supports_consumer: true,
-                supports_producer: true,
-                ..Default::default()
-            },
-            uri_options: vec![
-                UriOption::new(
-                    "size",
-                    "Bounded queue capacity. Must be > 0",
-                    OptionKind::Int,
-                )
-                .with_default("1000"),
-                UriOption::new(
-                    "concurrentConsumers",
-                    "Consumer concurrency. Clamped to 1 minimum",
-                    OptionKind::Int,
-                )
-                .with_default("1"),
-                UriOption::new(
-                    "multipleConsumers",
-                    "Fanout mode — clone to all subscribers",
-                    OptionKind::Bool,
-                )
-                .with_default("false"),
-                UriOption::new(
-                    "blockWhenFull",
-                    "Block producer when queue full vs fail fast",
-                    OptionKind::Bool,
-                )
-                .with_default("false"),
-                UriOption::new(
-                    "discardIfNoConsumers",
-                    "Silently drop if no consumers vs error",
-                    OptionKind::Bool,
-                )
-                .with_default("false"),
-                UriOption::new(
-                    "timeout",
-                    "Timeout for enqueue and reply wait in milliseconds",
-                    OptionKind::Int,
-                )
-                .with_default("30000"),
-                UriOption::new(
-                    "waitForTaskToComplete",
-                    "When to wait for task completion",
-                    OptionKind::Enum(vec![
-                        "Never".to_string(),
-                        "IfReplyExpected".to_string(),
-                        "Always".to_string(),
-                    ]),
-                )
-                .with_default("IfReplyExpected"),
-                UriOption::new(
-                    "exchangePattern",
-                    "Exchange pattern",
-                    OptionKind::Enum(vec!["InOnly".to_string(), "InOut".to_string()]),
-                )
-                .with_default("InOnly"),
-            ],
-            ..ComponentMetadata::minimal("seda")
-        }
+        SedaConfig::metadata()
     }
 
     fn create_endpoint(
@@ -975,6 +992,15 @@ mod config_tests {
     fn test_seda_config_invalid_enum() {
         let err = SedaConfig::from_uri("seda:foo?exchangePattern=invalid").unwrap_err();
         assert!(err.to_string().contains("invalid exchangePattern"));
+    }
+
+    #[test]
+    fn uri_options_count_parity() {
+        assert_eq!(
+            SedaConfig::uri_options().len(),
+            8,
+            "SedaUriConfig #[uri_param] count drifted from parser"
+        );
     }
 }
 

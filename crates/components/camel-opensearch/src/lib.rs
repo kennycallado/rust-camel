@@ -12,7 +12,7 @@ pub mod producer;
 
 use std::sync::Arc;
 
-use camel_component_api::{BoxProcessor, CamelError};
+use camel_component_api::{BoxProcessor, CamelError, ComponentMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
 pub use bundle::OpenSearchBundle;
@@ -59,6 +59,10 @@ impl Default for OpenSearchComponent {
 impl Component for OpenSearchComponent {
     fn scheme(&self) -> &str {
         "opensearch"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        OpenSearchEndpointConfig::metadata()
     }
 
     fn create_endpoint(
@@ -112,6 +116,10 @@ impl Default for OpenSearchsComponent {
 impl Component for OpenSearchsComponent {
     fn scheme(&self) -> &str {
         "opensearchs"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        OpenSearchEndpointConfig::metadata()
     }
 
     fn create_endpoint(

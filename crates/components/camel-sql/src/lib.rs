@@ -11,6 +11,7 @@ pub(crate) mod utils;
 
 use std::sync::Arc;
 
+use camel_api::component_metadata::ComponentMetadata;
 use camel_api::datasource::DatasourceCatalog;
 use camel_component_api::CamelError;
 use camel_component_api::UriConfig;
@@ -80,6 +81,10 @@ impl Component for SqlComponent {
         "sql"
     }
 
+    fn metadata(&self) -> ComponentMetadata {
+        SqlEndpointConfig::metadata()
+    }
+
     fn create_endpoint(
         &self,
         uri: &str,
@@ -143,6 +148,53 @@ mod tests {
     fn test_component_scheme() {
         let c = SqlComponent::new();
         assert_eq!(c.scheme(), "sql");
+    }
+
+    #[test]
+    fn test_component_metadata_nonempty() {
+        let c = SqlComponent::new();
+        let meta = c.metadata();
+        assert_eq!(meta.scheme, "sql");
+        assert!(!meta.description.is_empty());
+        assert!(
+            !meta.uri_options.is_empty(),
+            "uri_options must be non-empty"
+        );
+        let names: Vec<&str> = meta.uri_options.iter().map(|o| o.name.as_str()).collect();
+        assert!(
+            names.contains(&"db_url"),
+            "expected db_url in uri_options, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"outputType"),
+            "expected outputType in uri_options, got: {names:?}"
+        );
+        // Verify secret field
+        let db_url_opt = meta
+            .uri_options
+            .iter()
+            .find(|o| o.name == "db_url")
+            .unwrap();
+        assert!(db_url_opt.secret, "db_url must be marked secret");
+    }
+
+    #[test]
+    fn test_config_uri_options_nonempty() {
+        let opts = SqlEndpointConfig::uri_options();
+        assert!(!opts.is_empty(), "uri_options() must be non-empty");
+        let names: Vec<&str> = opts.iter().map(|o| o.name.as_str()).collect();
+        assert!(names.contains(&"db_url"));
+        assert!(names.contains(&"delay"));
+        assert!(names.contains(&"batch"));
+    }
+
+    #[test]
+    fn test_config_metadata_capabilities() {
+        let meta = SqlEndpointConfig::metadata();
+        assert!(meta.capabilities.supports_producer);
+        assert!(meta.capabilities.supports_consumer);
+        assert!(!meta.capabilities.supports_polling_consumer);
+        assert!(!meta.capabilities.supports_streaming);
     }
 
     #[test]

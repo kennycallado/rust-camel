@@ -1,0 +1,5 @@
+error: unknown attribute key: bogus
+ --> tests/ui/unknown_key_fail.rs:9:17
+  |
+9 |     #[uri_param(bogus = 1)]
+  |                 ^^^^^

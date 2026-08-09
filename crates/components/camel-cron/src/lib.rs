@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::debug;
 
 use camel_component_api::{
-    BoxProcessor, CamelError, Component, ComponentContext, Consumer, ConsumerContext, CronCallback,
-    CronFire, CronSchedule, CronService, Endpoint, ProducerContext, RuntimeObservability,
-    UriConfig,
+    BoxProcessor, CamelError, Component, ComponentContext, ComponentMetadata, Consumer,
+    ConsumerContext, CronCallback, CronFire, CronSchedule, CronService, Endpoint, ProducerContext,
+    RuntimeObservability, UriConfig,
 };
 use camel_component_api::{Exchange, Message};
 use chrono_tz::Tz;
@@ -36,7 +36,15 @@ use chrono_tz::Tz;
 /// Format: `cron:name?schedule=0 2 * * *&timeZone=UTC&includeMetadata=true`
 #[derive(Debug, Clone, UriConfig)]
 #[uri_scheme = "cron"]
-#[uri_config(skip_impl, crate = "camel_component_api")]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "cron",
+        description = "Schedule route execution via cron expressions",
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
 pub struct CronConfig {
     /// Cron trigger name (the path portion of the URI).
     pub name: String,
@@ -322,6 +330,10 @@ impl CronComponent {
 impl Component for CronComponent {
     fn scheme(&self) -> &str {
         "cron"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        CronConfig::metadata()
     }
 
     fn create_endpoint(

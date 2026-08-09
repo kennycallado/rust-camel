@@ -181,6 +181,27 @@ impl ComponentMetadata {
         }
     }
 
+    /// Set the human-readable `description` field.
+    #[must_use]
+    pub fn with_description(mut self, description: &str) -> Self {
+        self.description = description.to_string();
+        self
+    }
+
+    /// Replace the `capabilities` block.
+    #[must_use]
+    pub fn with_capabilities(mut self, caps: ComponentCapabilities) -> Self {
+        self.capabilities = caps;
+        self
+    }
+
+    /// Append to the `uri_options` list.
+    #[must_use]
+    pub fn with_uri_options(mut self, opts: Vec<UriOption>) -> Self {
+        self.uri_options.extend(opts);
+        self
+    }
+
     /// Validate that this metadata's `scheme` matches the given
     /// `component_scheme`.  Returns `Err` with a descriptive message on
     /// mismatch.
@@ -283,6 +304,33 @@ mod tests {
         assert!(meta.uri_syntax.is_empty());
         assert!(meta.uri_options.is_empty());
         assert!(meta.version.is_empty());
+    }
+
+    #[test]
+    fn with_description_sets() {
+        let meta = ComponentMetadata::minimal("sql").with_description("test");
+        assert_eq!(meta.description, "test");
+    }
+
+    #[test]
+    fn with_capabilities_sets_flags() {
+        let meta = ComponentMetadata::minimal("x").with_capabilities(ComponentCapabilities {
+            supports_producer: true,
+            ..Default::default()
+        });
+        assert!(meta.capabilities.supports_producer);
+        assert!(!meta.capabilities.supports_consumer);
+    }
+
+    #[test]
+    fn with_uri_options_appends() {
+        let meta = ComponentMetadata::minimal("x").with_uri_options(vec![UriOption::new(
+            "p",
+            "d",
+            OptionKind::String,
+        )]);
+        assert_eq!(meta.uri_options.len(), 1);
+        assert_eq!(meta.uri_options[0].name, "p");
     }
 
     #[test]

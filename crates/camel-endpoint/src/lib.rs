@@ -11,5 +11,11 @@ pub use uri::{UriComponents, parse_uri};
 // Re-export CamelError for macro-generated code
 pub use camel_api::CamelError;
 
+// Re-export component-metadata types so macro-generated `uri_options()` and
+// `metadata()` resolve through the configured crate path (`#endpoint_crate`).
+pub use camel_api::component_metadata::{
+    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
+};
+
 // Re-export proc-macro derive - same name as trait is allowed (different namespaces)
 pub use camel_endpoint_macros::UriConfig;

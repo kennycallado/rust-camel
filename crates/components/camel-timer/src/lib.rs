@@ -17,12 +17,9 @@ use chrono::Utc;
 use tokio::time;
 use tracing::debug;
 
-use camel_api::component_metadata::{
-    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
-};
-use camel_component_api::UriConfig;
 use camel_component_api::{BoxProcessor, CamelError, Exchange, Message};
 use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
+use camel_component_api::{ComponentMetadata, UriConfig};
 
 // ---------------------------------------------------------------------------
 // TimerConfig
@@ -33,7 +30,15 @@ use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, Produc
 /// Format: `timer:name?period=1000&delay=0&repeatCount=0&fixedRate=false&includeMetadata=true`
 #[derive(Debug, Clone, UriConfig)]
 #[uri_scheme = "timer"]
-#[uri_config(skip_impl, crate = "camel_component_api")]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "timer",
+        description = "Generate timer-based events",
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
 pub struct TimerConfig {
     /// Timer name (the path portion of the URI).
     pub name: String,
@@ -136,48 +141,7 @@ impl Component for TimerComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        ComponentMetadata {
-            scheme: "timer".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "Generates timer events at fixed intervals".to_string(),
-            uri_syntax: "timer:name?period=1000&delay=0&repeatCount=0".to_string(),
-            capabilities: ComponentCapabilities {
-                supports_consumer: true,
-                ..Default::default()
-            },
-            uri_options: vec![
-                UriOption::new(
-                    "period",
-                    "Interval between ticks in milliseconds",
-                    OptionKind::Int,
-                )
-                .with_default("1000"),
-                UriOption::new(
-                    "delay",
-                    "Initial delay before first tick in milliseconds",
-                    OptionKind::Int,
-                )
-                .with_default("0"),
-                UriOption::new(
-                    "repeatCount",
-                    "Maximum number of ticks; omit for infinite. 0 = never fires.",
-                    OptionKind::Int,
-                ),
-                UriOption::new(
-                    "fixedRate",
-                    "true=skip missed ticks, false=fire all missed",
-                    OptionKind::Bool,
-                )
-                .with_default("false"),
-                UriOption::new(
-                    "includeMetadata",
-                    "Include CamelTimer* headers in exchanges",
-                    OptionKind::Bool,
-                )
-                .with_default("true"),
-            ],
-            ..ComponentMetadata::minimal("timer")
-        }
+        TimerConfig::metadata()
     }
 
     fn create_endpoint(

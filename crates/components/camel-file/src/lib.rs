@@ -37,7 +37,8 @@ use tracing::{debug, warn};
 
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange};
 use camel_component_api::{
-    Component, Consumer, ConsumerContext, Endpoint, PollingConsumer, ProducerContext,
+    Component, ComponentMetadata, Consumer, ConsumerContext, Endpoint, PollingConsumer,
+    ProducerContext, UriOption,
 };
 use camel_component_api::{UriConfig, parse_uri};
 use camel_language_api::Language;
@@ -363,6 +364,168 @@ impl FromStr for SortSpec {
 // ---------------------------------------------------------------------------
 // FileConfig
 // ---------------------------------------------------------------------------
+
+/// Private container for macro-derived `uri_options()` and `metadata()`.
+///
+/// Mirrors `FileConfig`'s URI-parsed fields using `FromStr`-compatible types
+/// (`u64` companion fields for Duration). `FileConfig` holds non-URI fields
+/// (the `Duration` fields derived from `_ms` fields, `directory` as path);
+/// metadata delegation targets this inner type.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "file"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "file",
+        description = "Read/write files from a directory",
+        producer,
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
+struct FileUriConfig {
+    #[allow(dead_code)]
+    _path: String,
+    #[uri_param(
+        name = "delay",
+        default = "500",
+        desc = "Delay between polls in milliseconds"
+    )]
+    delay_ms: u64,
+    #[uri_param(
+        name = "initialDelay",
+        default = "1000",
+        desc = "Initial delay before first poll in milliseconds"
+    )]
+    initial_delay_ms: u64,
+    #[uri_param(
+        default = "false",
+        desc = "Do not delete or move files after processing"
+    )]
+    noop: bool,
+    #[uri_param(default = "false", desc = "Delete files after processing")]
+    delete: bool,
+    #[uri_param(name = "move", desc = "Directory to move processed files to")]
+    move_to: Option<String>,
+    #[uri_param(name = "fileName", desc = "Fixed filename for producer")]
+    file_name: Option<String>,
+    #[uri_param(desc = "Regex pattern for including files")]
+    include: Option<String>,
+    #[uri_param(desc = "Regex pattern for excluding files")]
+    exclude: Option<String>,
+    #[uri_param(default = "false", desc = "Scan directories recursively")]
+    recursive: bool,
+    #[uri_param(
+        name = "fileExist",
+        kind = "enum:Override,Append,Fail,Ignore,TryRename",
+        default = "Override",
+        desc = "Strategy for handling existing files when writing"
+    )]
+    file_exist: FileExistStrategy,
+    #[uri_param(
+        name = "readLock",
+        kind = "enum:None,InProcess,Rename",
+        default = "None",
+        desc = "Read lock strategy for concurrent consumers"
+    )]
+    read_lock_strategy: ReadLockStrategy,
+    #[uri_param(
+        name = "idempotentKey",
+        kind = "enum:None,FileName,FilePath,FileSize,Digest",
+        default = "None",
+        desc = "In-memory idempotent key selector"
+    )]
+    idempotent_key: IdempotentKey,
+    #[uri_param(name = "doneFileName", desc = "Done marker filename pattern")]
+    done_file_name: Option<String>,
+    #[uri_param(desc = "Charset for string body encoding")]
+    charset: Option<String>,
+    #[uri_param(
+        name = "tempPrefix",
+        desc = "Prefix for temporary files during atomic writes"
+    )]
+    temp_prefix: Option<String>,
+    #[uri_param(
+        default = "false",
+        desc = "If true, fsync temp file and parent directory after atomic write"
+    )]
+    durable: bool,
+    #[uri_param(
+        name = "autoCreate",
+        default = "true",
+        desc = "Automatically create directories"
+    )]
+    auto_create: bool,
+    #[uri_param(
+        name = "startingDirectoryMustExist",
+        default = "false",
+        desc = "Verify the starting directory exists at startup"
+    )]
+    starting_directory_must_exist: bool,
+    #[uri_param(
+        name = "readTimeout",
+        default = "30000",
+        desc = "Read timeout in milliseconds"
+    )]
+    read_timeout_ms: u64,
+    #[uri_param(
+        name = "writeTimeout",
+        default = "30000",
+        desc = "Write timeout in milliseconds"
+    )]
+    write_timeout_ms: u64,
+    #[uri_param(name = "maxDepth", desc = "Maximum recursion depth for scanning")]
+    max_depth: usize,
+    #[uri_param(
+        name = "minDepth",
+        default = "0",
+        desc = "Minimum recursion depth for scanning"
+    )]
+    min_depth: usize,
+    #[uri_param(
+        name = "maxMessagesPerPoll",
+        default = "0",
+        desc = "Maximum messages per poll"
+    )]
+    max_messages_per_poll: i64,
+    #[uri_param(
+        name = "eagerMaxMessagesPerPoll",
+        default = "true",
+        desc = "Eagerly enforce maxMessagesPerPoll"
+    )]
+    eager_max_messages_per_poll: bool,
+    #[uri_param(
+        name = "antInclude",
+        desc = "Ant-style include pattern (comma-separated)"
+    )]
+    ant_include: Option<String>,
+    #[uri_param(
+        name = "antExclude",
+        desc = "Ant-style exclude pattern (comma-separated)"
+    )]
+    ant_exclude: Option<String>,
+    #[uri_param(
+        name = "includeExt",
+        desc = "File extensions to include (comma-separated)"
+    )]
+    include_ext: Option<String>,
+    #[uri_param(
+        name = "excludeExt",
+        desc = "File extensions to exclude (comma-separated)"
+    )]
+    exclude_ext: Option<String>,
+    #[uri_param(default = "false", desc = "Shuffle files before processing")]
+    shuffle: bool,
+    #[uri_param(name = "sortBy", desc = "Sort specification for file ordering")]
+    sort_spec: Option<SortSpec>,
+    #[uri_param(
+        name = "cleanupStaleTemps",
+        default = "true",
+        desc = "Sweep stale temp files at consumer startup"
+    )]
+    cleanup_stale_temps: bool,
+}
 
 /// Configuration for file component endpoints.
 ///
@@ -709,6 +872,18 @@ impl UriConfig for FileConfig {
 }
 
 impl FileConfig {
+    /// Component metadata for the file scheme, derived from `#[uri_param]`
+    /// annotations on `FileUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        FileUriConfig::metadata()
+    }
+
+    /// Generated URI option definitions for the file scheme, derived from
+    /// `#[uri_param]` annotations on `FileUriConfig`.
+    pub fn uri_options() -> Vec<UriOption> {
+        FileUriConfig::uri_options()
+    }
+
     /// Apply global config defaults. Since FileConfig uses a proc macro that bakes in
     /// defaults, we compare Duration values against the known macro defaults to detect
     /// "not explicitly set by user". Only overrides when current value == macro default.
@@ -765,6 +940,10 @@ impl Default for FileComponent {
 impl Component for FileComponent {
     fn scheme(&self) -> &str {
         "file"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        FileConfig::metadata()
     }
 
     fn create_endpoint(
@@ -3738,5 +3917,14 @@ mod tests {
 
         assert!(rx.try_recv().is_ok());
         assert!(!base.join("data.txt.done").exists());
+    }
+
+    #[test]
+    fn uri_options_count_parity() {
+        assert_eq!(
+            FileConfig::uri_options().len(),
+            31,
+            "FileUriConfig #[uri_param] count drifted from parser"
+        );
     }
 }

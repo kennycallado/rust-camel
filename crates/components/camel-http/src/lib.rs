@@ -32,9 +32,7 @@ use tower::Service;
 use tracing::debug;
 
 use axum::body::BodyDataStream;
-use camel_api::component_metadata::{
-    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
-};
+use camel_api::component_metadata::ComponentMetadata;
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
 use camel_component_api::tls_source::ServerTlsSource;
@@ -348,6 +346,145 @@ impl UriConfig for HttpEndpointConfig {
             follow_redirects,
             max_redirects,
         })
+    }
+}
+
+/// Private container for macro-derived `uri_options()` and `metadata()`.
+///
+/// Mirrors the URI query parameters parsed by `HttpEndpointConfig::from_components`.
+/// `HttpEndpointConfig` holds typed fields (tuples, `Duration`, `HttpAuth`,
+/// `Arc<dyn TokenProvider>`) that the derive cannot represent, so metadata
+/// derivation targets this inner type whose fields are all URI-param-compatible.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "http"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "http",
+        description = "HTTP client and server component",
+        producer,
+        consumer,
+        streaming
+    ),
+    crate = "camel_component_api"
+)]
+struct HttpEndpointUriConfig {
+    #[allow(dead_code)]
+    _base_url: String,
+
+    #[uri_param(
+        name = "httpMethod",
+        desc = "HTTP method. Defaults to CamelHttpMethod header or POST/GET"
+    )]
+    http_method: Option<String>,
+
+    #[uri_param(
+        name = "throwExceptionOnFailure",
+        default = "true",
+        desc = "Throw on non-2xx status"
+    )]
+    throw_exception_on_failure: bool,
+
+    #[uri_param(
+        name = "okStatusCodeRange",
+        default = "200-299",
+        desc = "Success status code range"
+    )]
+    ok_status_code_range: String,
+
+    #[uri_param(name = "responseTimeout", desc = "Response timeout in milliseconds")]
+    response_timeout: Option<u64>,
+
+    #[uri_param(
+        name = "allowInternal",
+        default = "false",
+        desc = "Allow private/internal network destinations (SSRF)"
+    )]
+    allow_internal: bool,
+
+    #[uri_param(name = "blockedHosts", desc = "Comma-separated blocked host list")]
+    blocked_hosts: Option<String>,
+
+    #[uri_param(
+        name = "maxBodySize",
+        default = "10485760",
+        desc = "Max request/response body bytes"
+    )]
+    max_body_size: u64,
+
+    #[uri_param(name = "readTimeout", desc = "Socket read timeout in milliseconds")]
+    read_timeout: Option<u64>,
+
+    #[uri_param(name = "maxResponseBytes", desc = "Max response body bytes")]
+    max_response_bytes: Option<u64>,
+
+    #[uri_param(
+        name = "authMethod",
+        kind = "enum:Basic,Bearer",
+        desc = "Authentication method"
+    )]
+    auth_method: Option<String>,
+
+    #[uri_param(name = "authUsername", secret, desc = "Basic auth username")]
+    auth_username: Option<String>,
+
+    #[uri_param(name = "authPassword", secret, desc = "Basic auth password")]
+    auth_password: Option<String>,
+
+    #[uri_param(name = "authBearerToken", secret, desc = "Bearer auth token")]
+    auth_bearer_token: Option<String>,
+
+    #[uri_param(name = "userAgent", desc = "User-Agent header")]
+    user_agent: Option<String>,
+
+    #[uri_param(
+        name = "bridgeEndpoint",
+        default = "false",
+        desc = "Bridge endpoint mode"
+    )]
+    bridge_endpoint: bool,
+
+    #[uri_param(
+        name = "connectionClose",
+        default = "false",
+        desc = "Send Connection: close"
+    )]
+    connection_close: bool,
+
+    #[uri_param(
+        name = "skipRequestHeaders",
+        desc = "Comma-separated request headers to skip"
+    )]
+    skip_request_headers: Option<String>,
+
+    #[uri_param(
+        name = "skipResponseHeaders",
+        desc = "Comma-separated response headers to skip"
+    )]
+    skip_response_headers: Option<String>,
+
+    #[uri_param(
+        name = "followRedirects",
+        default = "false",
+        desc = "Follow HTTP redirects"
+    )]
+    follow_redirects: bool,
+
+    #[uri_param(name = "maxRedirects", default = "10", desc = "Max redirect hops")]
+    max_redirects: u64,
+}
+
+impl HttpEndpointConfig {
+    /// Component metadata for the http/https scheme, derived from the
+    /// `#[uri_param]` fields on `HttpEndpointUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        HttpEndpointUriConfig::metadata()
+    }
+
+    /// URI option definitions, derived from `#[uri_param]` fields.
+    pub fn uri_options() -> Vec<camel_api::component_metadata::UriOption> {
+        HttpEndpointUriConfig::uri_options()
     }
 }
 
@@ -1652,62 +1789,7 @@ impl Component for HttpComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        ComponentMetadata {
-            scheme: "http".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "HTTP client and server component".to_string(),
-            uri_syntax: "http://host:port/path?options".to_string(),
-            capabilities: ComponentCapabilities {
-                supports_consumer: true,
-                supports_producer: true,
-                supports_streaming: true,
-                ..Default::default()
-            },
-            uri_options: vec![
-                UriOption::new(
-                    "httpMethod",
-                    "HTTP method. Defaults to CamelHttpMethod header or POST/GET",
-                    OptionKind::String,
-                ),
-                UriOption::new(
-                    "throwExceptionOnFailure",
-                    "Throw on non-2xx status",
-                    OptionKind::Bool,
-                )
-                .with_default("true"),
-                UriOption::new(
-                    "okStatusCodeRange",
-                    "Success status code range",
-                    OptionKind::String,
-                )
-                .with_default("200-299"),
-                UriOption::new(
-                    "responseTimeout",
-                    "Response timeout in milliseconds",
-                    OptionKind::Int,
-                ),
-                UriOption::new(
-                    "maxBodySize",
-                    "Max request/response body bytes",
-                    OptionKind::Int,
-                )
-                .with_default("10485760"),
-                UriOption::new(
-                    "authMethod",
-                    "Authentication method",
-                    OptionKind::Enum(vec!["Basic".to_string(), "Bearer".to_string()]),
-                ),
-                UriOption::new("authUsername", "Basic auth username", OptionKind::String).secret(),
-                UriOption::new("authPassword", "Basic auth password", OptionKind::String).secret(),
-                UriOption::new("authBearerToken", "Bearer auth token", OptionKind::String).secret(),
-                UriOption::new("userAgent", "User-Agent header", OptionKind::String),
-                UriOption::new("followRedirects", "Follow HTTP redirects", OptionKind::Bool)
-                    .with_default("false"),
-                UriOption::new("maxRedirects", "Max redirect hops", OptionKind::Int)
-                    .with_default("10"),
-            ],
-            ..ComponentMetadata::minimal("http")
-        }
+        HttpEndpointConfig::metadata()
     }
 
     fn create_endpoint(
@@ -1767,65 +1849,12 @@ impl Component for HttpsComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        // HTTPS shares the same URI option surface as HTTP.  Only the scheme
-        // differs; the metadata for `https` simply reuses the HTTP option list
-        // and capability declaration.
-        ComponentMetadata {
-            scheme: "https".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "HTTPS client and server component (TLS over HTTP)".to_string(),
-            uri_syntax: "https://host:port/path?options".to_string(),
-            capabilities: ComponentCapabilities {
-                supports_consumer: true,
-                supports_producer: true,
-                supports_streaming: true,
-                ..Default::default()
-            },
-            uri_options: vec![
-                UriOption::new(
-                    "httpMethod",
-                    "HTTP method. Defaults to CamelHttpMethod header or POST/GET",
-                    OptionKind::String,
-                ),
-                UriOption::new(
-                    "throwExceptionOnFailure",
-                    "Throw on non-2xx status",
-                    OptionKind::Bool,
-                )
-                .with_default("true"),
-                UriOption::new(
-                    "okStatusCodeRange",
-                    "Success status code range",
-                    OptionKind::String,
-                )
-                .with_default("200-299"),
-                UriOption::new(
-                    "responseTimeout",
-                    "Response timeout in milliseconds",
-                    OptionKind::Int,
-                ),
-                UriOption::new(
-                    "maxBodySize",
-                    "Max request/response body bytes",
-                    OptionKind::Int,
-                )
-                .with_default("10485760"),
-                UriOption::new(
-                    "authMethod",
-                    "Authentication method",
-                    OptionKind::Enum(vec!["Basic".to_string(), "Bearer".to_string()]),
-                ),
-                UriOption::new("authUsername", "Basic auth username", OptionKind::String).secret(),
-                UriOption::new("authPassword", "Basic auth password", OptionKind::String).secret(),
-                UriOption::new("authBearerToken", "Bearer auth token", OptionKind::String).secret(),
-                UriOption::new("userAgent", "User-Agent header", OptionKind::String),
-                UriOption::new("followRedirects", "Follow HTTP redirects", OptionKind::Bool)
-                    .with_default("false"),
-                UriOption::new("maxRedirects", "Max redirect hops", OptionKind::Int)
-                    .with_default("10"),
-            ],
-            ..ComponentMetadata::minimal("https")
-        }
+        // HTTPS shares the same URI option surface and capabilities as HTTP.
+        // Only the scheme and description differ.
+        let mut meta = HttpEndpointConfig::metadata();
+        meta.scheme = "https".to_string();
+        meta.description = "HTTPS client and server component (TLS over HTTP)".to_string();
+        meta
     }
 
     fn create_endpoint(
@@ -6652,5 +6681,15 @@ mod tests {
         let cfg = HttpServerConfig::from_uri("https://0.0.0.0:8443/api?tlsCert=/x.pem").unwrap();
         // Partial params → tls_config must be None
         assert!(cfg.tls_config.is_none());
+    }
+
+    #[test]
+    fn endpoint_uri_options_count_parity() {
+        // Mirror struct must stay in sync with bespoke from_components parser.
+        assert_eq!(
+            HttpEndpointConfig::uri_options().len(),
+            20,
+            "HttpEndpointUriConfig #[uri_param] count drifted from parser"
+        );
     }
 }

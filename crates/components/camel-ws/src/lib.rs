@@ -25,8 +25,8 @@ use axum::{Router, serve};
 use camel_api::security_policy::AuthorizationDecision;
 use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{
-    Body as CamelBody, BoxProcessor, CamelError, Component, ConcurrencyModel, Consumer,
-    ConsumerContext, ConsumerStartupMode, Endpoint, Exchange, ExchangeEnvelope,
+    Body as CamelBody, BoxProcessor, CamelError, Component, ComponentMetadata, ConcurrencyModel,
+    Consumer, ConsumerContext, ConsumerStartupMode, Endpoint, Exchange, ExchangeEnvelope,
     Message as CamelMessage, NetworkRetryPolicy, ProducerContext, RuntimeObservability,
     retry_async,
 };
@@ -791,6 +791,10 @@ impl Component for WsComponent {
         "ws"
     }
 
+    fn metadata(&self) -> ComponentMetadata {
+        WsEndpointConfig::metadata()
+    }
+
     fn create_endpoint(
         &self,
         uri: &str,
@@ -859,6 +863,10 @@ impl Default for WssComponent {
 impl Component for WssComponent {
     fn scheme(&self) -> &str {
         "wss"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        WsEndpointConfig::metadata()
     }
 
     fn create_endpoint(

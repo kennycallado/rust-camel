@@ -1,6 +1,7 @@
 use camel_component_api::CamelError;
-use camel_component_api::NetworkRetryPolicy;
+use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
+use camel_component_api::{ComponentMetadata, NetworkRetryPolicy, UriOption};
 use std::convert::TryFrom;
 use std::fmt;
 use std::str::FromStr;
@@ -215,6 +216,61 @@ impl fmt::Debug for OpenSearchConfig {
 }
 
 // --- OpenSearchEndpointConfig (parsed from URI) ---
+
+/// Private container for macro-derived `uri_options()` and `metadata()`.
+///
+/// Mirrors `OpenSearchEndpointConfig`'s URI-parsed fields exactly.
+/// `OpenSearchEndpointConfig` holds non-URI fields (`is_tls`, `retry`,
+/// `retry_set_from_uri`) appended; metadata delegation targets this inner type.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "opensearch"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "opensearch",
+        description = "Interact with OpenSearch clusters",
+        producer,
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
+struct OpenSearchUriConfig {
+    /// OpenSearch server hostname.
+    #[uri_param(desc = "OpenSearch server hostname")]
+    pub host: Option<String>,
+    /// OpenSearch server port.
+    #[uri_param(desc = "OpenSearch server port", default = "9200")]
+    pub port: Option<u16>,
+    /// Username for authentication.
+    #[uri_param(desc = "Username for authentication", secret)]
+    pub username: Option<String>,
+    /// Password for authentication.
+    #[uri_param(desc = "Password for authentication", secret)]
+    pub password: Option<String>,
+    /// Target index name.
+    #[uri_param(name = "indexName", desc = "Target index name")]
+    pub index_name: String,
+    /// OpenSearch operation to perform.
+    #[uri_param(
+        kind = "enum:INDEX,SEARCH,GET,DELETE,EXISTS,UPDATE,BULK,MULTIGET,DELETE_INDEX,MULTI_SEARCH,PING",
+        default = "SEARCH",
+        desc = "OpenSearch operation to perform"
+    )]
+    pub operation: OpenSearchOperation,
+    /// Request timeout in milliseconds.
+    #[uri_param(desc = "Request timeout in milliseconds", default = "30000")]
+    pub timeout_ms: Option<u64>,
+    /// Maximum serialized bulk payload size in bytes.
+    #[uri_param(desc = "Maximum serialized bulk payload size in bytes")]
+    pub max_bulk_bytes: Option<usize>,
+    /// Search result size (pagination page size).
+    #[uri_param(desc = "Search result size (pagination page size)")]
+    pub size: Option<u32>,
+    /// Search result offset (pagination start).
+    #[uri_param(desc = "Search result offset (pagination start)")]
+    pub from: Option<u32>,
+}
 
 /// Configuration parsed from an OpenSearch URI.
 ///
@@ -574,6 +630,18 @@ impl OpenSearchEndpointConfig {
         let host = self.host.as_deref().unwrap_or("localhost");
         let port = self.port.unwrap_or(9200);
         format!("{}://{}:{}", scheme, host, port)
+    }
+
+    /// Component metadata for the opensearch scheme, derived from
+    /// `#[uri_param]` annotations on `OpenSearchUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        OpenSearchUriConfig::metadata()
+    }
+
+    /// Generated URI option definitions for the opensearch scheme,
+    /// derived from `#[uri_param]` annotations on `OpenSearchUriConfig`.
+    pub fn uri_options() -> Vec<UriOption> {
+        OpenSearchUriConfig::uri_options()
     }
 }
 
@@ -1108,5 +1176,14 @@ mod tests {
             OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/i").expect("parse");
         let merged = ep.merge_with_global(&global);
         assert_eq!(merged.retry.max_attempts, 7);
+    }
+
+    #[test]
+    fn uri_options_count_parity() {
+        assert_eq!(
+            super::OpenSearchUriConfig::uri_options().len(),
+            10,
+            "OpenSearchUriConfig #[uri_param] count drifted from parser"
+        );
     }
 }

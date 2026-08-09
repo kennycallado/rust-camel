@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use camel_component_api::{CamelError, NetworkRetryPolicy};
+use camel_component_api::{
+    CamelError, ComponentMetadata, NetworkRetryPolicy, UriConfig, UriOption,
+};
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct WsConfig {
@@ -13,6 +15,114 @@ pub struct WsConfig {
     pub send_timeout_ms: Option<u64>,
     pub binary_payload: Option<bool>,
     pub subprotocols: Option<Vec<String>>,
+}
+
+/// Private container for macro-derived `uri_options()` and `metadata()`.
+///
+/// Mirrors `WsEndpointConfig`'s URI-parsed fields using `FromStr`-compatible
+/// types (`u64` for Duration fields, `String` for `Vec<String>`).
+/// `WsEndpointConfig` holds non-URI fields (`scheme`, `host`, `port`, `path`,
+/// `reconnect_policy`) appended; metadata delegation targets this inner type.
+#[derive(Debug, Clone, UriConfig)]
+#[allow(dead_code)]
+#[uri_scheme = "ws"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "ws",
+        description = "WebSocket client/server endpoint",
+        producer,
+        consumer
+    ),
+    crate = "camel_component_api"
+)]
+struct WsUriConfig {
+    #[allow(dead_code)]
+    _path: String,
+    #[uri_param(
+        name = "maxConnections",
+        default = "100",
+        desc = "Maximum concurrent WebSocket connections"
+    )]
+    max_connections: u32,
+    #[uri_param(
+        name = "maxMessageSize",
+        default = "65536",
+        desc = "Maximum WebSocket message size in bytes"
+    )]
+    max_message_size: u32,
+    #[uri_param(
+        name = "sendToAll",
+        default = "false",
+        desc = "Broadcast messages to all connected clients"
+    )]
+    send_to_all: bool,
+    #[uri_param(
+        name = "heartbeatIntervalMs",
+        default = "0",
+        desc = "Heartbeat ping interval in milliseconds"
+    )]
+    heartbeat_interval_ms: u64,
+    #[uri_param(
+        name = "idleTimeoutMs",
+        default = "0",
+        desc = "Connection idle timeout in milliseconds"
+    )]
+    idle_timeout_ms: u64,
+    #[uri_param(
+        name = "connectTimeoutMs",
+        default = "10000",
+        desc = "Connection timeout in milliseconds"
+    )]
+    connect_timeout_ms: u64,
+    #[uri_param(
+        name = "responseTimeoutMs",
+        default = "30000",
+        desc = "Response timeout in milliseconds"
+    )]
+    response_timeout_ms: u64,
+    #[uri_param(
+        name = "allowOrigin",
+        default = "*",
+        desc = "CORS origin allowed for WebSocket upgrade"
+    )]
+    allow_origin: String,
+    #[uri_param(name = "tlsCert", desc = "Path to TLS certificate file")]
+    tls_cert: Option<String>,
+    #[uri_param(name = "tlsKey", desc = "Path to TLS private key file")]
+    tls_key: Option<String>,
+    #[uri_param(
+        name = "reconnect",
+        default = "true",
+        desc = "Enable reconnection for client producer"
+    )]
+    reconnect: bool,
+    #[uri_param(
+        name = "reconnectMaxAttempts",
+        default = "5",
+        desc = "Maximum reconnection attempts"
+    )]
+    reconnect_max_attempts: u32,
+    #[uri_param(
+        name = "reconnectDelayMs",
+        default = "1000",
+        desc = "Delay between reconnection attempts"
+    )]
+    reconnect_delay_ms: u64,
+    #[uri_param(
+        name = "sendTimeoutMs",
+        default = "30000",
+        desc = "Send timeout in milliseconds"
+    )]
+    send_timeout_ms: u64,
+    #[uri_param(
+        name = "binaryPayload",
+        default = "false",
+        desc = "Use binary payload mode"
+    )]
+    binary_payload: bool,
+    #[uri_param(name = "subprotocols", desc = "Comma-separated WebSocket subprotocols")]
+    subprotocols_str: String,
 }
 
 #[derive(Clone)]
@@ -357,6 +467,18 @@ impl WsEndpointConfig {
             h => h.to_string(),
         }
     }
+
+    /// Component metadata for the ws scheme, derived from `#[uri_param]`
+    /// annotations on `WsUriConfig`.
+    pub fn metadata() -> ComponentMetadata {
+        WsUriConfig::metadata()
+    }
+
+    /// Generated URI option definitions for the ws scheme, derived from
+    /// `#[uri_param]` annotations on `WsUriConfig`.
+    pub fn uri_options() -> Vec<UriOption> {
+        WsUriConfig::uri_options()
+    }
 }
 
 #[cfg(test)]
@@ -669,5 +791,17 @@ mod config_validation_tests {
         assert!((policy.multiplier - 3.0).abs() < f64::EPSILON);
         assert_eq!(policy.max_delay, std::time::Duration::from_millis(60_000));
         assert!((policy.jitter_factor - 0.1).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod uri_parity_tests {
+    #[test]
+    fn uri_options_count_parity() {
+        assert_eq!(
+            super::WsUriConfig::uri_options().len(),
+            16,
+            "WsUriConfig #[uri_param] count drifted from parser"
+        );
     }
 }

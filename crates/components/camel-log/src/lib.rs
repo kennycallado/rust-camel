@@ -13,13 +13,12 @@ use std::task::{Context, Poll};
 use tower::Service;
 use tracing::{debug, error, info, trace, warn};
 
-use camel_api::component_metadata::{
-    ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
-};
 use camel_component_api::UriConfig;
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
-use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
+use camel_component_api::{
+    Component, ComponentMetadata, Consumer, Endpoint, ProducerContext, RuntimeObservability,
+};
 
 // ---------------------------------------------------------------------------
 // LogLevel
@@ -65,27 +64,70 @@ fn parse_log_level(s: &str) -> Result<LogLevel, CamelError> {
 /// Configuration parsed from a log URI.
 ///
 /// Format: `log:category?level=info&showHeaders=true&showBody=true&logMask=false&showStreamInfo=false&groupSize=10`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, UriConfig)]
+#[uri_scheme = "log"]
+#[uri_config(
+    skip_impl,
+    metadata(
+        scheme = "log",
+        description = "Logs exchanges at a configurable level",
+        producer
+    ),
+    crate = "camel_component_api"
+)]
 pub struct LogConfig {
     /// Log category (the path portion of the URI).
     pub category: String,
     /// Log level. Default: Info.
+    #[uri_param(
+        kind = "enum:TRACE,DEBUG,INFO,WARN,ERROR",
+        default = "INFO",
+        desc = "Log level"
+    )]
     pub level: LogLevel,
     /// Whether to include headers in the log output.
+    #[uri_param(
+        name = "showHeaders",
+        default = "false",
+        desc = "Include headers in log output"
+    )]
     pub show_headers: bool,
     /// Whether to include the body in the log output.
+    #[uri_param(
+        name = "showBody",
+        default = "true",
+        desc = "Include body in log output"
+    )]
     pub show_body: bool,
     /// Maximum number of characters for the body in log output.
     /// Bodies longer than this are truncated. `None` means no limit.
+    #[uri_param(
+        name = "maxChars",
+        desc = "Truncate body to N characters. Omit for no limit"
+    )]
     pub max_chars: Option<usize>,
     /// When true, redact sensitive headers and body in log output.
     /// Headers matching `/(?i)(password|secret|token|key|auth|credential)/` → `[REDACTED]`.
     /// Body → `[Body redacted by logMask]`.
+    #[uri_param(
+        name = "logMask",
+        default = "false",
+        desc = "Redact sensitive headers and body"
+    )]
     pub log_mask: bool,
     /// When true, show stream origin metadata. When false (default), show `[Stream]`.
+    #[uri_param(
+        name = "showStreamInfo",
+        default = "false",
+        desc = "Show stream origin info"
+    )]
     pub show_stream_info: bool,
     /// When set, only emit a log every `n` exchanges (group logging).
     /// The log message includes the exchange count.
+    #[uri_param(
+        name = "groupSize",
+        desc = "Emit log every N exchanges for group logging"
+    )]
     pub group_size: Option<usize>,
 }
 
@@ -193,61 +235,7 @@ impl Component for LogComponent {
     }
 
     fn metadata(&self) -> ComponentMetadata {
-        ComponentMetadata {
-            scheme: "log".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "Logs exchanges at a configurable level".to_string(),
-            uri_syntax: "log:category?level=info&showHeaders=false".to_string(),
-            capabilities: ComponentCapabilities {
-                supports_producer: true,
-                ..Default::default()
-            },
-            uri_options: vec![
-                UriOption::new(
-                    "level",
-                    "Log level",
-                    OptionKind::Enum(vec![
-                        "trace".to_string(),
-                        "debug".to_string(),
-                        "info".to_string(),
-                        "warn".to_string(),
-                        "error".to_string(),
-                    ]),
-                )
-                .with_default("info"),
-                UriOption::new(
-                    "showHeaders",
-                    "Include headers in log output",
-                    OptionKind::Bool,
-                )
-                .with_default("false"),
-                UriOption::new("showBody", "Include body in log output", OptionKind::Bool)
-                    .with_default("true"),
-                UriOption::new(
-                    "maxChars",
-                    "Truncate body to N characters. Omit for no limit",
-                    OptionKind::Int,
-                ),
-                UriOption::new(
-                    "logMask",
-                    "Redact sensitive headers and body",
-                    OptionKind::Bool,
-                )
-                .with_default("false"),
-                UriOption::new(
-                    "showStreamInfo",
-                    "Show stream origin info",
-                    OptionKind::Bool,
-                )
-                .with_default("false"),
-                UriOption::new(
-                    "groupSize",
-                    "Emit log every N exchanges for group logging",
-                    OptionKind::Int,
-                ),
-            ],
-            ..ComponentMetadata::minimal("log")
-        }
+        LogConfig::metadata()
     }
 
     fn create_endpoint(
