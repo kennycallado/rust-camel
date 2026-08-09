@@ -34,6 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_instances: None,
         max_tables: None,
         max_table_elements: None,
+        max_kv_entries: None,
+        max_key_bytes: None,
+        max_value_bytes: None,
     };
     let wasm_config = camel_component_wasm::WasmConfig::from_limits(&limits);
     let wasm_bean = WasmBean::new(&wasm_path, wasm_config, registry_arc, bean_config).await?;
