@@ -15,7 +15,7 @@ The `IdempotentRepository` trait lives in `camel-api` (`crates/camel-api/src/ide
 
 **Key-only:** The trait stores keys (`String`), not full messages. Motivation: an idempotent repository tracks which messages have been seen, not what they contained. Storing full messages would blow memory/backing-store and is the job of a different pattern (Claim Check, Phase 2). Future: a `key_fn: Arc<dyn Fn(&Exchange) -> String>` on the Idempotent Consumer step derives the key from the exchange (e.g. `exchange.message_id()`, header-based, body-hash).
 
-```rust
+```rust,ignore
 // File: crates/camel-api/src/idempotent.rs:14-46
 #[async_trait]
 pub trait IdempotentRepository: Send + Sync + Debug + 'static {

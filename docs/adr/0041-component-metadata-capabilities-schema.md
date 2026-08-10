@@ -127,7 +127,7 @@ use `#[uri_config(skip_impl, metadata(..))]`. This retains the manual
 The `Component` trait's `metadata()` default returns `ComponentMetadata::minimal(scheme)`.
 Each migrated component MUST override `metadata()` to delegate:
 
-```rust
+```rust,ignore
 fn metadata(&self) -> ComponentMetadata {
     ConfigType::metadata()
 }
@@ -135,7 +135,7 @@ fn metadata(&self) -> ComponentMetadata {
 
 Or, when the config has no `metadata(..)` opt-in but does have `uri_options()`:
 
-```rust
+```rust,ignore
 fn metadata(&self) -> ComponentMetadata {
     ComponentMetadata::minimal(scheme).with_uri_options(ConfigType::uri_options())
 }

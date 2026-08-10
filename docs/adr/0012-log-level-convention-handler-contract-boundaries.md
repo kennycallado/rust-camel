@@ -57,7 +57,7 @@ A regression test at `crates/camel-processor/src/error_handler.rs` (or sibling) 
 
 Every `error!(...)` in non-test code MUST be preceded by exactly one of:
 
-```rust
+```rust,ignore
 // log-policy: system-broken
 error!(...);          // categories (c)(d)(f)(h) — no further requirement
 

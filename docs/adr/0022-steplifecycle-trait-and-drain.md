@@ -12,7 +12,7 @@ Stateful pipeline steps (aggregators, idempotent repositories, resequencers, gap
 
 File: `crates/camel-api/src/step_lifecycle.rs:31`
 
-```rust
+```rust,ignore
 #[async_trait]
 pub trait StepLifecycle: std::fmt::Debug + Send + Sync + 'static {
     fn name(&self) -> &'static str;
@@ -34,7 +34,7 @@ Documented in doc comment at `crates/camel-api/src/step_lifecycle.rs:20-24`.
 
 Two variants:
 
-```rust
+```rust,ignore
 pub enum StepShutdownReason {
     RouteStop,   // stop_route is draining the pipeline
     HotSwap,     // pipeline being replaced via hot reload (Restart path)
@@ -83,7 +83,7 @@ Shutdown `Err` is best-effort: `tracing::warn!` and continue (does NOT fail `sto
 
 `DefaultRouteController::swap_pipeline` (`route_controller.rs:659`) checks:
 
-```rust
+```rust,ignore
 let assembly = managed.pipeline.load();
 let has_lifecycle = !assembly.lifecycle.is_empty();
 if has_lifecycle || managed.agg_service.is_some() {
@@ -110,7 +110,7 @@ Dual-phase shutdown:
 2. **Post-join**: `shutdown(RouteStop)` on the `Arc<AggregatorService>` (lines 225-240) — drains remaining timeout tasks that the pipeline task's select loop may have spawned.
 
 `aggregator.rs:186-190`:
-```rust
+```rust,ignore
 async fn shutdown(&self, reason: StepShutdownReason) -> Result<(), CamelError> {
     tracing::debug!(reason = ?reason, "Aggregator shutdown via StepLifecycle");
     self.shutdown_inner().await;
@@ -153,7 +153,7 @@ Old pipeline assembly retires via Arc refcounting. After `ArcSwap::store()`, the
 
 Implementation at `consumer_management.rs:208-218`:
 
-```rust
+```rust,ignore
 if let Err(e) = step.shutdown(StepShutdownReason::RouteStop).await {
     tracing::warn!(step = step.name(), error = %e,
         "StepLifecycle shutdown failed during stop_route for route {}", route_id);

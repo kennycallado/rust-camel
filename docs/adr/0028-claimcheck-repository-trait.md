@@ -12,7 +12,7 @@ Claim Check EIP stashes large message payloads by key so the Exchange carries on
 
 File: `crates/camel-api/src/claim_check.rs:16-52`
 
-```rust
+```rust,ignore
 #[async_trait]
 pub trait ClaimCheckRepository: Send + Sync + std::fmt::Debug + 'static {
     fn name(&self) -> &str;

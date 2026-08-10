@@ -138,7 +138,7 @@ drain tasks finish and partial output is collected.
 
 All exec errors surface as:
 
-```
+```rust,ignore
 CamelError::ProcessorErrorWithSource(msg, Arc<ExecError>)
 ```
 
@@ -191,7 +191,7 @@ recorded here as authoritative corrections:
 
 The `MetricsCollector` trait in `camel-api` gained a new default method:
 
-```rust
+```rust,ignore
 fn record_counter(&self, name: &str, value: f64, labels: &[(&str, &str)]) { }
 ```
 

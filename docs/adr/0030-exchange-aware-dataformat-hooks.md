@@ -10,7 +10,7 @@
 
 The `DataFormat` trait in `crates/camel-api/src/data_format.rs` exposes only:
 
-```rust
+```rust,ignore
 fn marshal(&self, body: Body) -> Result<Body, CamelError>;
 fn unmarshal(&self, body: Body) -> Result<Body, CamelError>;
 ```
@@ -24,7 +24,7 @@ content-type negotiation).
 
 Add default methods to `DataFormat` that receive `&mut Exchange`:
 
-```rust
+```rust,ignore
 fn marshal_in_exchange(&self, exchange: &mut Exchange, body: Body) -> Result<Body, CamelError> {
     let _ = exchange;
     self.marshal(body)

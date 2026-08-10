@@ -8,7 +8,7 @@
 
 Introduce `PipelineOutcome` as the return type of the **route pipeline executor** (`run_steps`), NOT as the `Response` type of every `Service<Exchange>`. The Tower data plane (`BoxProcessor = BoxCloneService<Exchange, Exchange, CamelError>`) is unchanged.
 
-```rust
+```rust,ignore
 /// Result of executing a full route pipeline (multiple steps).
 /// Produced by `run_steps`; consumed by the route controller and the
 /// consumer reply-channel adapter. Individual processors keep returning
@@ -73,7 +73,7 @@ Rejected. `StopService::call` currently returns `Box::pin(async { Err(CamelError
 
 **Breaking change** (acceptable pre-release per README "APIs will change"). The return type of `run_steps` changes from `Result<Exchange, CamelError>` to `PipelineOutcome`. Every call site within `camel-core` that matches on the return of `run_steps` is updated. `RouteChannelService::call` and `SequentialPipeline::call` / `TracedPipeline::call` gain a trivial translation shim:
 
-```rust
+```rust,ignore
 fn outcome_to_reply(outcome: PipelineOutcome) -> Result<Exchange, ReplyError> {
     match outcome {
         PipelineOutcome::Completed(ex) | PipelineOutcome::Stopped(ex) => Ok(ex),

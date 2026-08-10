@@ -51,11 +51,11 @@ def main():
         return
 
     # Find Architecture chapter and its number
-    items = book.get("items", [])
+    sections = book.get("sections", [])
     arch_number = None
     arch_index = None
 
-    for i, item in enumerate(items):
+    for i, item in enumerate(sections):
         if "Chapter" not in item:
             continue
         ch = item["Chapter"]
@@ -66,7 +66,7 @@ def main():
 
     if arch_index is None:
         # No Architecture chapter — fall back to appending at end
-        arch_number = [len(items)]
+        arch_number = [len(sections)]
 
     # Build ADR child chapters with proper numbering
     adr_children = []
@@ -115,13 +115,13 @@ def main():
 
     # Append hub to Architecture's sub_items (NOT to top-level items)
     if arch_index is not None:
-        existing_subs = items[arch_index]["Chapter"].get("sub_items", [])
-        items[arch_index]["Chapter"]["sub_items"] = existing_subs + [adr_hub]
+        existing_subs = sections[arch_index]["Chapter"].get("sub_items", [])
+        sections[arch_index]["Chapter"]["sub_items"] = existing_subs + [adr_hub]
     else:
         # No Architecture found — add as top-level
-        items.append(adr_hub)
+        sections.append(adr_hub)
 
-    book["items"] = items
+    book["sections"] = sections
     print(json.dumps(book))
 
 

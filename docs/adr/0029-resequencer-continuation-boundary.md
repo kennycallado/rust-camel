@@ -20,7 +20,7 @@ The fundamental architectural challenge: a Resequencer receives ONE input exchan
 
 The route compiler splits the flat step list at the top-level `Resequence` boundary into three partitions:
 
-```
+```text
 pre_steps  →  ResequencerService  →  [post-steps compiled as a BoxProcessor continuation]
 ```
 
@@ -30,7 +30,7 @@ pre_steps  →  ResequencerService  →  [post-steps compiled as a BoxProcessor 
 
 `ResequencerService::call(input)` sends the exchange into a bounded actor channel and returns an **ack** (`Body::Empty` + property `CAMEL_RESEQUENCER_ACCEPTED=true`). The actual reordered payloads flow asynchronously through a **post-driver** task that drives the continuation:
 
-```
+```text
 input → actor channel → policy.accept() → ready exchanges → post-driver → continuation.call(ex)
 ```
 
@@ -88,7 +88,7 @@ A `continuation.call(ex)` failure happens AFTER `call()` returned the ack, so th
 
 ### Policy trait
 
-```rust
+```rust,ignore
 #[async_trait]
 pub trait ResequencePolicy: Send + Sync + 'static {
     async fn accept(&self, input: Exchange) -> Vec<Exchange>;

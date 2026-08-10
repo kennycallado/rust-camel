@@ -12,7 +12,7 @@ CanonicalRouteSpec v2 adds lifecycle metadata fields with strict rejection for u
 
 ## v2 Schema
 
-```rust
+```rust,ignore
 pub const CANONICAL_CONTRACT_VERSION: u32 = 2;
 
 pub struct CanonicalRouteSpec {
@@ -80,7 +80,7 @@ No silent loss.
 
 `allow_loss: bool` parameter (default `false`) permits explicit field dropping with structured diagnostics via `CanonicalLossReport`:
 
-```rust
+```rust,ignore
 pub struct CanonicalLossReport {
     pub dropped_fields: Vec<CanonicalFieldLoss>,
 }

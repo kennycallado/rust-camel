@@ -20,7 +20,7 @@ In the Concurrent model, restructure so the Semaphore permit is acquired BEFORE
 are exhausted — the consumer cannot buffer unbounded in-flight work.
 
 Implementation: acquire permit (owned) with cancel-awareness, then dequeue:
-```rust
+```rust,ignore
 // Concurrent model — fixed admission (ADR-0044):
 loop {
     // B2: acquire permit BEFORE dequeue, with cancel-awareness.
