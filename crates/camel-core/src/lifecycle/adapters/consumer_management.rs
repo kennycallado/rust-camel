@@ -118,6 +118,12 @@ pub(crate) fn spawn_consumer_task(
             // consumers don't call mark_ready), but we still install a
             // fresh pair so the context has something valid to carry.
             let (signal, _drop_rx) = StartupSignal::pair();
+            // Pre-resolve to Ready so the defensive fallback below
+            // (mark_ready on Pending -> true -> "contract violation" warn)
+            // is a genuine no-op. Without this, every Immediate consumer
+            // whose start() returns Ok (timer, cron, file, sql, …) would
+            // log a spurious warning on natural completion.
+            signal.mark_ready();
             let _ = _drop_rx;
             (signal, immediate)
         }
@@ -182,8 +188,9 @@ pub(crate) fn spawn_consumer_task(
         // returned Ok without ever calling `mark_ready` would otherwise hang
         // the route controller on the startup receiver. If the consumer is
         // done (Ok returned), it is definitionally ready — surface that to
-        // any pending awaiter. No-op for Immediate consumers (already Ready)
-        // and for Explicit consumers that correctly called mark_ready.
+        // any pending awaiter. No-op for Immediate consumers (their signal
+        // is pre-resolved to Ready above) and for Explicit consumers that
+        // correctly called mark_ready.
         //
         // mark_ready returns true ONLY when the state was still Pending —
         // i.e. the consumer violated the Explicit contract. Warn loudly so
@@ -1002,6 +1009,67 @@ mod tests {
             warn_seen.load(std::sync::atomic::Ordering::SeqCst),
             "expected warn! log when CrashNotification send fails on closed channel — \
              D-L7: let _ = silently drops send error, no restart triggered"
+        );
+    }
+
+    // ── Immediate consumer returning Ok must NOT log "contract violation" ──
+
+    #[tokio::test]
+    async fn immediate_consumer_returning_ok_emits_no_contract_violation_warn() {
+        // Regression: an Immediate consumer (timer, cron, file, …) whose
+        // start() returns Ok must not trip the defensive fallback. The
+        // fallback's mark_ready() must be a no-op because the Immediate
+        // signal is pre-resolved to Ready. Before the fix the Pending seed
+        // made mark_ready return true and logged a spurious warning on every
+        // natural completion.
+        use tracing_subscriber::prelude::*;
+        let warn_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let warn_seen_clone = warn_seen.clone();
+
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+                if meta.level() == &tracing::Level::WARN {
+                    warn_seen_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                true
+            }));
+
+        let _guard = tracing_subscriber::registry().with(layer).set_default();
+
+        struct ImmediateOkConsumer;
+        #[async_trait]
+        impl Consumer for ImmediateOkConsumer {
+            async fn start(&mut self, _context: ConsumerContext) -> Result<(), CamelError> {
+                Ok(())
+            }
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+        }
+
+        let (exchange_tx, _exchange_rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(
+            exchange_tx,
+            CancellationToken::new(),
+            "immediate-ok-test".to_string(),
+        );
+
+        let (handle, _startup_rx) = spawn_consumer_task(
+            "route-immediate".to_string(),
+            Box::new(ImmediateOkConsumer),
+            ctx,
+            None,
+            None,
+            false,
+        );
+
+        handle.await.expect("consumer task should join cleanly");
+
+        assert!(
+            !warn_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "Immediate consumer returning Ok must not emit a WARN — \
+             the defensive fallback should be a no-op (signal pre-resolved)"
         );
     }
 
