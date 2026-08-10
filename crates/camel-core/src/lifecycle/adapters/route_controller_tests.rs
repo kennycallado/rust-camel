@@ -2390,6 +2390,10 @@ async fn start_route_awaits_start_in_order() {
         .swap_pipeline_raw("start-order", BoxProcessor::new(IdentityProcessor), handles)
         .expect("swap_pipeline_raw");
 
+    // Discard setup events (add_route auto-spawn) so only start_route's own
+    // events are asserted below.
+    log.lock().expect("log").clear();
+
     controller.start_route("start-order").await.unwrap();
     set_start_route_event_hook(None);
     controller.stop_route("start-order").await.unwrap();
