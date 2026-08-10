@@ -1,0 +1,329 @@
+# route-lint Specification
+
+## Purpose
+TBD - created by archiving change add-camel-lint. Update Purpose after archive.
+## Requirements
+### Requirement: Lint engine is runtime-free and produces span-exact diagnostics
+
+The `camel-lint` crate SHALL expose a `LintEngine` that parses YAML/JSON source itself via
+the `noyalib` CST (it SHALL NOT depend on `camel-dsl`, `camel-core`, or `camel-cli`),
+constructs a span-carrying `LintRoute` view, and runs `Rule` implementations over it. Each
+emitted `Diagnostic` SHALL carry a stable `DiagnosticCode`, a `Severity`, a byte-exact
+`Span` (start/end offsets into the source text), a human message, and an optional `Fix`. The
+engine SHALL accept the component catalog as `Arc<dyn ComponentMetadataCatalog>` and SHALL
+expose no catalog constructor and no dependency on `Registry`. The engine SHALL tolerate
+partial/malformed input: a document that fails syntax parsing SHALL still be reported without
+panicking, and later tiers SHALL be skipped for the unparseable document. The workspace
+hexagonal-architecture test SHALL be extended to assert that `camel-lint` does not depend on
+`camel-core` or `camel-dsl`.
+
+#### Scenario: Valid document yields no diagnostics
+
+- **GIVEN** a syntactically valid, schema-valid route file whose URIs and options are all known to the catalog
+- **WHEN** the engine runs all five rules over the document
+- **THEN** the engine returns an empty diagnostic list
+
+#### Scenario: Diagnostic span is byte-exact, not a line range
+
+- **GIVEN** a route file with a step `timer:foo?bogus=1` where the unknown option key `bogus` starts at byte offset 42, and a catalog that knows `timer` (so the option is validated, not the scheme)
+- **WHEN** R-URI-known runs over the document
+- **THEN** the emitted `RUriKnown(UnknownOption)` diagnostic's `Span` start offset equals 42 and its end offset equals the byte after the last byte of `bogus` (not the start of the line, not the whole URI, not the whole file)
+
+#### Scenario: Partial input does not crash the engine
+
+- **GIVEN** a route file with a YAML syntax error that prevents construction of the route view
+- **WHEN** the engine runs over the document
+- **THEN** R-SYN emits a syntax diagnostic and the engine returns without panicking; R-SCHEMA and the semantic rules are skipped for the unparseable document
+
+#### Scenario: Engine does not depend on camel-core or camel-dsl
+
+- **GIVEN** the workspace hexagonal-architecture test is run
+- **WHEN** the test checks `camel-lint`'s dependency edges
+- **THEN** neither `camel-core` nor `camel-dsl` appears as a dependency of `camel-lint`
+
+### Requirement: LintRoute captures every URI-bearing location with spans
+
+The engine SHALL construct `LintRoute` by walking the CST (or using noyalib's span-preserving
+deserialization) and SHALL capture, each with a byte-exact `Spanned<T>`: the route-level
+`from` URI; each endpoint URI (`to` / `uri` leaves); and every URI option key and value
+(parsed out of the URI query string or the step option map). Structural containers that hold
+children but carry no URI themselves (`choice` with `when`/`otherwise` branches, `multicast`,
+`scatter_gather.endpoints` — the containers present in `route-schema.json`; `pipeline` does
+not exist in the schema) SHALL be traversed recursively so that endpoint URIs nested at any
+depth are captured. The traversal SHALL be driven by the schema: lint resolves which node
+types may contain `to`/`from`/`uri` or nested children by reading the `route-schema.json`
+definition, so adding a new step container in the schema requires no lint code change beyond
+re-syncing the embedded copy. Capturing a location SHALL NOT require `camel-dsl`.
+
+#### Scenario: Route-level from URI is captured with a span
+
+- **GIVEN** a route file with `from: direct:start` where `direct:start` starts at byte offset 12
+- **WHEN** the engine builds `LintRoute`
+- **THEN** the captured `from` value has a span whose start offset is 12
+
+#### Scenario: Nested child step URIs are captured with spans
+
+- **GIVEN** a route file with a `choice`/`when` branch (or a `multicast`) containing a child step `to: log:nested`
+- **WHEN** the engine builds `LintRoute`
+- **THEN** the child step's `to` value is present in the captured steps with its own byte-exact span, distinct from the parent step's span
+
+#### Scenario: scatter_gather endpoint URIs are captured with spans
+
+- **GIVEN** a route file with a `scatter_gather` step whose `endpoints` array contains `direct:a` and `direct:b`
+- **WHEN** the engine builds `LintRoute`
+- **THEN** both endpoint URIs are captured as URI-bearing locations, each with its own byte-exact span
+
+#### Scenario: Option keys and values are captured with spans
+
+- **GIVEN** a step `timer:foo?period=1s` where `period` starts at byte offset 30 and `1s` at 37
+- **WHEN** the engine builds `LintRoute`
+- **THEN** the captured option key `period` has start offset 30 and the option value `1s` has start offset 37
+
+### Requirement: Schema asset is embedded and kept byte-equal
+
+`camel-lint` SHALL embed the route schema as a checked-in copy at
+`camel-lint/schema/route-schema.json`, included via `include_str!("../schema/route-schema.json")`
+from `src/lib.rs`, and SHALL NOT read the
+workspace-root schema at runtime. The `cargo xtask schema --check` gate SHALL be extended to
+assert that `camel-lint/schema/route-schema.json` is byte-equal to the generated
+`schemas/dsl/route-schema.json`; a mismatch fails the gate.
+
+#### Scenario: Embedded schema matches the generated schema
+
+- **GIVEN** the `schema --check` xtask gate runs
+- **WHEN** it compares `camel-lint/schema/route-schema.json` against `schemas/dsl/route-schema.json`
+- **THEN** the two files are byte-equal and the gate passes
+
+#### Scenario: A drift in the embedded copy fails the gate
+
+- **GIVEN** the embedded copy diverges from the generated schema
+- **WHEN** `schema --check` runs
+- **THEN** the gate fails, naming the two paths that diverged
+
+### Requirement: Catalog coverage is authoritative-for-known and silent-for-unknown
+
+The engine SHALL treat the catalog as authoritative for the schemes it contains and silent
+for schemes it does not contain. "Present in the catalog" includes schemes whose registered
+component yields only `minimal` metadata (no `uri_options`) — these are *known* schemes, and
+R-URI-known SHALL emit no `unverified-scheme` note and no option diagnostics for them (it has
+no `uri_options` to check against, so option rules stay silent rather than false-positive). For
+a scheme genuinely absent from the catalog (a scheme with no registered component, e.g.
+feature-gated-out or third-party/future schemes), R-URI-known SHALL emit a single informational
+`unverified-scheme` note on the scheme token and SHALL emit no option diagnostics. There SHALL
+be no "unknown scheme = error" diagnostic, because the absence of a registered component cannot
+distinguish a typo from an unverified-but-valid scheme.
+
+#### Scenario: Catalog entry absent emits an informational note, not option errors
+
+- **GIVEN** a route using scheme `kafka` and a catalog that has no entry for `kafka`
+- **WHEN** R-URI-known runs
+- **THEN** it emits exactly one `unverified-scheme` diagnostic at severity info on the `kafka` token, and zero `unknown-option` diagnostics for the kafka step
+
+#### Scenario: Registered-but-minimal scheme is known, not unverified
+
+- **GIVEN** a route using scheme `redis` and a catalog whose `redis` entry is `minimal` (registered component, no `uri_options`)
+- **WHEN** R-URI-known runs
+- **THEN** it emits no `unverified-scheme` note and no option diagnostics (redis is a known scheme; there is simply nothing to validate)
+
+#### Scenario: Catalog entry present with options validates options
+
+- **GIVEN** a route using scheme `timer` and a catalog that has an entry for `timer` with `uri_options`
+- **WHEN** R-URI-known runs
+- **THEN** it emits no `unverified-scheme` note and validates the step's options against `timer`'s `uri_options`
+
+### Requirement: Production lint catalog is non-empty and populated via lint-specific registration
+
+The `camel lint` subcommand SHALL populate its production catalog by calling a NEW lint-specific
+`pub fn register_builtin_components_for_lint(ctx: &mut CamelContext)` in `camel-cli`'s lib. This
+function is NOT shared with `run` (whose registration is lifecycle-entangled with bridge/pool/
+datasource/path handles that lint has no use for); it registers each builtin with empty/default
+config, passes no-op runtime deps, and drops every handle. Because `Component::metadata()` has a
+trait default returning `ComponentMetadata::minimal(scheme)` and `Registry::register()` harvests
+it unconditionally, registering the builtins makes every registered scheme queryable — rich
+metadata for components whose config opted into `#[uri_config(metadata(..))]`, and a
+minimal-but-present entry for the rest. The `lint` command then obtains the catalog via
+`ctx.metadata_catalog()` (a `RuntimeComponentMetadataCatalog`) and injects it. The production
+catalog SHALL be non-empty for the built-in schemes (at least `timer`, `log`, `direct`). A test
+SHALL assert that the production catalog reports an invalid `timer` option (proving the catalog
+is populated and semantic validation is active, not inert). The drift between this lint list and
+`run`'s list is an accepted, bounded cost (caught by the corpus baseline) and unified by a bd
+follow-up.
+
+#### Scenario: Production catalog reports an invalid timer option
+
+- **GIVEN** a route file with a step `timer:tick?bogusOption=1` and the production catalog built by `camel lint`
+- **WHEN** R-URI-known runs with the production catalog
+- **THEN** an `unknown-option` diagnostic is emitted on `bogusOption` (proving `timer` metadata is present and consulted)
+
+#### Scenario: Lint registration is lint-specific, not run's lifecycle-entangled list
+
+- **GIVEN** the `camel-cli` source
+- **WHEN** inspected
+- **THEN** the `lint` command obtains its builtin component set from `register_builtin_components_for_lint`, a function that does NOT capture or return bridge/pool/datasource/path handles (those belong to `run` alone)
+
+### Requirement: R-SYN reports syntax errors with byte-exact location
+
+The engine SHALL detect YAML/JSON syntax errors via the `noyalib` parser and report each with
+a byte-exact span derived from the parser's error location.
+
+#### Scenario: Malformed YAML mapping reports the offending position
+
+- **GIVEN** a route file containing a YAML sequence with an unclosed flow bracket `[`
+- **WHEN** R-SYN runs over the document
+- **THEN** a diagnostic with code `R-SYN` and severity error is emitted, and its span is a single byte at the parser-reported error location (the start of the offending construct), not line 1 and not the whole file
+
+### Requirement: R-SCHEMA reports schema violations with per-keyword anchoring
+
+The engine SHALL validate the document against the embedded `route-schema.json` using
+`jsonschema` and map each violation to a byte-exact span using keyword-specific anchoring:
+`type`/`enum`/`pattern`/`const`/`format` violations span the offending value;
+`minimum`/`exclusiveMinimum` span the offending numeric value; `anyOf`/`oneOf` (where a value
+fails all subschemas) span the value; `required` (a missing property) spans the parent object
+node; `minItems`/`maxItems` span the array; `additionalProperties` spans the offending
+additional key. The jsonschema violation message SHALL be carried in the diagnostic body.
+
+#### Scenario: Wrong type for a field reports the field value
+
+- **GIVEN** a route file where `steps` is a string instead of an array
+- **WHEN** R-SCHEMA runs
+- **THEN** a diagnostic with code `R-SCHEMA` is emitted whose span covers the offending string value, with the jsonschema `type` violation message in the body
+
+#### Scenario: Missing required property reports the parent object
+
+- **GIVEN** a route mapping that omits a property declared `required` in the schema
+- **WHEN** R-SCHEMA runs
+- **THEN** a diagnostic with code `R-SCHEMA` is emitted whose span covers the parent mapping node (because no offending leaf exists), with the jsonschema `required` violation message in the body
+
+#### Scenario: minimum violation reports the numeric value
+
+- **GIVEN** a numeric field whose value is below the schema's `minimum`, where the value starts at byte offset 50
+- **WHEN** R-SCHEMA runs
+- **THEN** a diagnostic with code `R-SCHEMA` is emitted whose span start offset is 50 (the numeric value), with the `minimum` violation message in the body
+
+#### Scenario: anyOf failure reports the value
+
+- **GIVEN** a field constrained by `anyOf` whose value matches none of the subschemas
+- **WHEN** R-SCHEMA runs
+- **THEN** a diagnostic with code `R-SCHEMA` is emitted whose span covers the value, with the `anyOf` violation message in the body
+
+### Requirement: R-URI-known validates options against catalog metadata for known schemes
+
+For each step URI whose scheme is present in the catalog, R-URI-known SHALL resolve each URI
+option against `uri_options`: an option not matching any `name` or `alias` emits an
+`unknown-option` error on the option key; a `required` option that is absent emits a
+`missing-required-option` error on the step URI; an option whose value type does not match
+its declared `OptionKind` (e.g. an `OptionKind::Bool` option given a non-boolean string)
+emits a `kind-mismatch` error. Options matching a declared `alias` SHALL be accepted without
+a diagnostic and normalized to the canonical option name for kind checking.
+
+#### Scenario: Unknown option for a known scheme reported
+
+- **GIVEN** a step `timer:foo?frequency=1s` and a catalog whose `timer` metadata lists option `period` but neither an option nor alias named `frequency`
+- **WHEN** R-URI-known runs
+- **THEN** a diagnostic with code `R-URI-known`, sub-code `unknown-option`, severity error, is emitted on the `frequency` option key
+
+#### Scenario: Missing required option reported
+
+- **GIVEN** a step `timer:foo` and a catalog whose `timer` metadata declares option `period` as `required = true`
+- **WHEN** R-URI-known runs
+- **THEN** a diagnostic with code `R-URI-known`, sub-code `missing-required-option`, severity error, is emitted on the `timer:foo` URI
+
+#### Scenario: Accepted alias is not reported
+
+- **GIVEN** a step using an option key that is a declared `alias` of a catalog option, with a value matching the option's kind
+- **WHEN** R-URI-known runs
+- **THEN** no diagnostic is emitted for that option
+
+#### Scenario: Kind mismatch reported
+
+- **GIVEN** a step using a catalog option declared `OptionKind::Bool` with a string value `maybe`
+- **WHEN** R-URI-known runs
+- **THEN** a diagnostic with code `R-URI-known`, sub-code `kind-mismatch`, severity error, is emitted on the option value
+
+### Requirement: R-SECRET flags secret options set to literal values
+
+For each option flagged `secret = true` in the catalog, R-SECRET SHALL examine the provided
+value. A value that does not match an interpolation/reference pattern recognized by the DSL
+(`${...}` environment interpolation, or `{{...}}` placeholder interpolation) SHALL be treated
+as a literal and emit a `literal-secret` warning on the value. R-SECRET SHALL NOT emit an
+error merely because a secret option is absent (absence is a `missing-required-option`
+concern owned by R-URI-known when the option is also `required`).
+
+#### Scenario: Secret option provided as literal string warned
+
+- **GIVEN** a step whose `password` option is `secret = true` in the catalog and the route sets `password=hunter2` (no interpolation markers)
+- **WHEN** R-SECRET runs
+- **THEN** a diagnostic with code `R-SECRET`, sub-code `literal-secret`, severity warning, is emitted on the value `hunter2`
+
+#### Scenario: Secret option provided as interpolation is not warned
+
+- **GIVEN** a step whose `password` option is `secret = true` and the route sets `password={{ secrets.db.password }}`
+- **WHEN** R-SECRET runs
+- **THEN** no `R-SECRET` diagnostic is emitted for that option
+
+### Requirement: R-DEPRECATED flags deprecated options
+
+For each option whose catalog `UriOption.deprecated` field is set (an `Option<String>`
+carrying a deprecation message), R-DEPRECATED SHALL emit a warning on the option key naming
+the deprecation message. Scheme-level deprecation is out of scope (no field exists on
+`ComponentMetadata` today) and is deferred to a bd follow-up that first extends the metadata.
+
+#### Scenario: Deprecated option reported with its deprecation message
+
+- **GIVEN** a catalog where option `oldFreq` has `deprecated = Some("use \`period\` instead")` and a route using `oldFreq`
+- **WHEN** R-DEPRECATED runs
+- **THEN** a diagnostic with code `R-DEPRECATED`, severity warning, is emitted on the `oldFreq` key, carrying the deprecation message in its body
+
+### Requirement: `camel lint` CLI runs the engine and exits by severity
+
+The `camel lint` CLI subcommand (in `camel-cli`) SHALL construct the production catalog via
+`register_builtin_components_for_lint` (obtained from `ctx.metadata_catalog()` as a
+`RuntimeComponentMetadataCatalog`), inject it into
+`LintEngine::new(...)`, run the engine over the given file(s), render diagnostics with
+`ariadne`, and exit 0 when clean, 1 when any error-severity diagnostic is present, and 2 on
+engine or CLI misuse (e.g. an unreadable or missing file).
+
+#### Scenario: Clean route exits zero
+
+- **GIVEN** a valid route file with no diagnostics
+- **WHEN** `camel lint route.yaml` runs
+- **THEN** the process exits 0 and prints nothing
+
+#### Scenario: Route with an error exits one
+
+- **GIVEN** a route file that produces an error-severity diagnostic
+- **WHEN** `camel lint route.yaml` runs
+- **THEN** the process prints an ariadne-rendered diagnostic and exits 1
+
+#### Scenario: Unreadable file exits two
+
+- **GIVEN** a path that does not exist
+- **WHEN** `camel lint missing.yaml` runs
+- **THEN** the process exits 2 with a CLI-error message
+
+### Requirement: Zero false positives over a discovered in-tree corpus
+
+The `camel-cli` integration test `tests/lint_corpus.rs` SHALL discover every route file in the
+repository by a glob rule (covering `examples/**/*.{yaml,json}` and
+`crates/**/tests/fixtures/**/*.{yaml,json}`, plus any route fixtures referenced by the
+schema-validation corpus), run the engine with the production catalog over each, and compare
+the emitted diagnostics against a checked-in baseline file
+`tests/fixtures/lint-corpus-baseline.ron` (parsed with the `ron` crate, a `camel-cli`
+dev-dependency). The test SHALL fail if any emitted diagnostic is absent from the baseline (a
+false positive) or any baseline diagnostic is missing (a regression). Baseline updates are
+reviewed diffs. The corpus file count is discovered at test-run time (not hardcoded). This is
+the merge gate: a rule that cannot meet zero false positives on the corpus SHALL be gated (the
+`unverified-scheme` guard) or cut before merge.
+
+#### Scenario: Corpus run matches the checked-in baseline
+
+- **GIVEN** the engine built with the production catalog and all five rules active, and the checked-in baseline
+- **WHEN** `tests/lint_corpus.rs` runs over the discovered corpus
+- **THEN** the set of emitted diagnostics equals the baseline set exactly; the test passes
+
+#### Scenario: A new false positive fails the gate
+
+- **GIVEN** a change to the engine that emits a diagnostic against a corpus file not present in the baseline
+- **WHEN** `tests/lint_corpus.rs` runs
+- **THEN** the test fails, naming the file and diagnostic code that is outside the baseline
+
