@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use tokio::sync::Semaphore;
@@ -29,21 +29,24 @@ impl WireTapConfig {
 pub struct WireTapService {
     tap_endpoint: camel_api::BoxProcessor,
     semaphore: Option<std::sync::Arc<Semaphore>>,
-    in_flight: Mutex<JoinSet<()>>,
+    in_flight: Arc<Mutex<JoinSet<()>>>,
 }
 
-// Manual Clone impl: `JoinSet` is not `Clone` (it has an owned background
-// driver task), so the derive cannot be used. We hand out a brand-new
-// JoinSet per clone — the original's spawned tasks are aborted on the
-// original's Drop, not the clone's. This restores the pre-D-L1 Clone
-// contract that `camel-core`'s step compiler relies on via
-// `BoxProcessor::new`.
+// `JoinSet` is not `Clone`, so the derive cannot be used. The JoinSet is
+// shared across all clones via `Arc`: each clone gets a new ref to the SAME
+// JoinSet. This is required because the route pipeline clones the
+// `BoxProcessor` per request (`BoxCloneService` contract) and drops the
+// clone once the immediate-return `call()` future resolves. With a
+// per-clone JoinSet, that drop would abort the fire-and-forget tap task
+// before it completes. Sharing the JoinSet keeps spawned tap tasks alive
+// until the LAST ref drops — i.e. route teardown — at which point
+// `JoinSet::drop` aborts any still-running taps.
 impl Clone for WireTapService {
     fn clone(&self) -> Self {
         Self {
             tap_endpoint: self.tap_endpoint.clone(),
             semaphore: self.semaphore.clone(),
-            in_flight: Mutex::new(JoinSet::new()),
+            in_flight: Arc::clone(&self.in_flight),
         }
     }
 }
@@ -54,7 +57,7 @@ impl WireTapService {
         Self {
             tap_endpoint,
             semaphore: None,
-            in_flight: Mutex::new(JoinSet::new()),
+            in_flight: Arc::new(Mutex::new(JoinSet::new())),
         }
     }
 
@@ -66,7 +69,7 @@ impl WireTapService {
         Self {
             tap_endpoint,
             semaphore,
-            in_flight: Mutex::new(JoinSet::new()),
+            in_flight: Arc::new(Mutex::new(JoinSet::new())),
         }
     }
 }
@@ -271,6 +274,60 @@ mod tests {
         assert!(
             observed_max <= 2,
             "max concurrency was {observed_max}, expected <= 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wire_tap_survives_per_request_clone_drop() {
+        // Regression for the clone-abort bug: the route pipeline clones the
+        // BoxProcessor per request and drops the clone once call()'s
+        // immediate-return future resolves. With a per-clone JoinSet, that
+        // drop aborts the fire-and-forget tap task before it completes.
+        // Sharing the JoinSet via Arc keeps the task alive across clone drops.
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed_clone = completed.clone();
+
+        let tap_processor = BoxProcessor::from_fn(move |ex| {
+            let c = completed_clone.clone();
+            Box::pin(async move {
+                // Slow tap: long enough that the per-request clone is dropped
+                // well before this completes.
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+
+        // Canonical service held for the "route" lifetime (mirrors the
+        // compiled pipeline stored in the route).
+        let canonical = WireTapService::new(tap_processor);
+
+        // Simulate N requests: clone, call, drop clone.
+        for _ in 0..3 {
+            let mut clone = canonical.clone();
+            let _ = clone
+                .ready()
+                .await
+                .unwrap()
+                .call(Exchange::new(Message::new("req")))
+                .await
+                .unwrap();
+            // clone dropped here — pre-fix this aborted the tap task.
+        }
+
+        // Slow taps must all complete despite the per-request clone drops.
+        // Poll with a generous deadline instead of a fixed sleep so a loaded
+        // CI runner cannot make this flaky.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while completed.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            3,
+            "all tap tasks must complete despite per-request clone drops"
         );
     }
 
