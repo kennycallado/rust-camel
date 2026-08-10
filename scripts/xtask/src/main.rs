@@ -3166,7 +3166,9 @@ enum EdgeKind {
 }
 
 /// Discover workspace crates and compute topological publish order.
-fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, String> {
+fn resolve_publish_order(
+    workspace_root: &Path,
+) -> Result<(Vec<WorkspaceCrate>, std::collections::HashSet<String>), String> {
     let mut crates: Vec<WorkspaceCrate> = Vec::new();
 
     let crates_dir = workspace_root.join("crates");
@@ -3364,26 +3366,27 @@ fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, S
         return Err("Cannot compute publish order due to dependency cycles".to_string());
     }
 
+    let no_verify: std::collections::HashSet<String> =
+        broken_weak_edges.iter().map(|(_, to)| to.clone()).collect();
+
     if !broken_weak_edges.is_empty() {
         eprintln!(
             "⚠️  Broke {} weak (dev/build) dependency edge(s) to resolve cycles:",
             broken_weak_edges.len()
         );
         for (from, to) in &broken_weak_edges {
-            eprintln!(
-                "  {from} --dev/build-dep--> {to} (publish {to} first; verify it does not need {from} at publish time)"
-            );
+            eprintln!("  {from} --dev/build-dep--> {to} (will publish {to} with --no-verify)");
         }
-        eprintln!(
-            "  If `cargo publish` fails for any of these, publish the affected crate manually with --no-verify."
-        );
     }
 
-    Ok(sorted.into_iter().map(|i| crates[i].clone()).collect())
+    Ok((
+        sorted.into_iter().map(|i| crates[i].clone()).collect(),
+        no_verify,
+    ))
 }
 
 fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
-    let sorted = resolve_publish_order(workspace_root)?;
+    let (sorted, _no_verify) = resolve_publish_order(workspace_root)?;
 
     if shell {
         for c in &sorted {
@@ -3468,11 +3471,17 @@ fn wait_for_crate_index(name: &str, version: &str) -> Result<(), String> {
 
 /// Publish all workspace crates to crates.io in topological order.
 fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
-    let sorted = resolve_publish_order(workspace_root)?;
+    let (sorted, no_verify) = resolve_publish_order(workspace_root)?;
     let version = workspace_version(workspace_root)?;
 
     println!("📦 Publishing rust-camel crates v{version} to crates.io");
     println!("=============================================");
+    if !no_verify.is_empty() {
+        println!(
+            "⚠️  {} crate(s) will publish with camel-* dev/build-deps stripped + --no-verify (dev-dep cycle participants)",
+            no_verify.len()
+        );
+    }
 
     let mut published = 0;
     let mut skipped = 0;
@@ -3509,10 +3518,60 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
             continue;
         }
 
-        let output = std::process::Command::new("cargo")
-            .args(["publish", "--allow-dirty"])
-            .current_dir(workspace_root.join(&c.path))
-            .output()
+        let needs_strip = no_verify.contains(&c.name);
+        let manifest_path = workspace_root.join(&c.path).join("Cargo.toml");
+
+        // A cyclic crate carries camel-* dev/build-deps that close a cycle.
+        // `cargo publish` resolves those against the registry index *during
+        // packaging* (before any --no-verify step), so they must be absent
+        // from the manifest at publish time. We comment them out just before
+        // publishing and restore the original bytes immediately afterwards —
+        // in a way that survives errors — so the packaged tarball omits the
+        // dev-deps (which crates.io ignores anyway) while the working tree is
+        // left untouched. `--no-verify` still skips the post-package compile,
+        // since a stripped crate cannot run its own integration tests.
+        let restore: Option<String> = if needs_strip {
+            let original = std::fs::read_to_string(&manifest_path).map_err(|e| {
+                format!(
+                    "Failed to read {} for stripping: {e}",
+                    manifest_path.display()
+                )
+            })?;
+            let stripped = comment_out_camel_dev_deps(&original);
+            std::fs::write(&manifest_path, &stripped).map_err(|e| {
+                format!(
+                    "Failed to strip dev-deps in {}: {e}",
+                    manifest_path.display()
+                )
+            })?;
+            println!(
+                "⚠️  Publishing {name} with camel-* dev/build-deps stripped + --no-verify (dev-dep cycle)",
+                name = c.name
+            );
+            Some(original)
+        } else {
+            None
+        };
+
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.arg("publish").arg("--allow-dirty");
+        if needs_strip {
+            cmd.arg("--no-verify");
+        }
+        let publish_result = cmd.current_dir(workspace_root.join(&c.path)).output();
+
+        // Restore the original manifest before doing anything else, so a
+        // publish failure never leaves the working tree mutated.
+        if let Some(original) = restore {
+            std::fs::write(&manifest_path, original).map_err(|e| {
+                format!(
+                    "CRITICAL: failed to restore {}: {e}",
+                    manifest_path.display()
+                )
+            })?;
+        }
+
+        let output = publish_result
             .map_err(|e| format!("Failed to run cargo publish for {}: {e}", c.name))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -3608,6 +3667,43 @@ fn extract_normal_camel_deps(content: &str) -> Vec<String> {
 /// their target-specific variants) — cargo still resolves them during
 /// `cargo publish`, but cycles closed only by weak edges can be broken
 /// by publishing one member first.
+/// Comment out every `camel-*` dependency line that appears under a weak
+/// dependency section (`[dev-dependencies]`, `[build-dependencies]`, and their
+/// target-specific variants). Used just before `cargo publish` for crates that
+/// participate in a dev/build-dep cycle: cargo resolves these lines against the
+/// registry index during packaging, but crates.io never uses a published
+/// crate's dev-dependencies, so removing them from the packaged manifest is
+/// safe. All other bytes — including camel-* lines in `[dependencies]` — are
+/// preserved exactly, and the caller restores the original file afterwards.
+fn comment_out_camel_dev_deps(content: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 64);
+    let mut section = "";
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            section = trimmed;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if is_weak_dependency_section(section)
+            && !trimmed.starts_with('#')
+            && extract_camel_dep_name(trimmed).is_some()
+        {
+            out.push_str("# xtask-publish-stripped: ");
+            out.push_str(line);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    // Preserve absence of a trailing newline if the original lacked one.
+    if !content.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 fn extract_camel_deps_grouped(content: &str) -> (Vec<String>, Vec<String>) {
     let mut normal = Vec::new();
     let mut weak = Vec::new();
@@ -4741,6 +4837,42 @@ camel-core = { workspace = true }
             let deps = extract_normal_camel_deps(cargo_toml);
             assert_eq!(deps.len(), 1);
             assert_eq!(deps[0], "camel-core");
+        }
+
+        #[test]
+        fn strip_comments_only_weak_camel_deps() {
+            let cargo_toml = "[package]\nname = \"camel-platform-kubernetes\"\n\n[dependencies]\ncamel-api = { workspace = true }\ntokio = { workspace = true }\n\n[dev-dependencies]\ncamel-core = { workspace = true }\ntokio = { workspace = true, features = [\"macros\"] }\n";
+            let stripped = comment_out_camel_dev_deps(cargo_toml);
+            // camel-core under [dev-dependencies] is commented out.
+            assert!(
+                stripped.contains("# xtask-publish-stripped: camel-core = { workspace = true }"),
+                "camel-core dev-dep must be commented: {stripped}"
+            );
+            // camel-api under [dependencies] is untouched.
+            assert!(stripped.contains("\ncamel-api = { workspace = true }"));
+            assert!(!stripped.contains("stripped: camel-api"));
+            // Non-camel dev-deps (tokio) are untouched.
+            assert!(stripped.contains("\ntokio = { workspace = true, features = [\"macros\"] }"));
+            // Result stays valid: cargo would resolve zero camel-* dev-deps.
+            let (_, weak) = extract_camel_deps_grouped(&stripped);
+            assert!(weak.is_empty(), "no camel dev-deps should remain: {weak:?}");
+        }
+
+        #[test]
+        fn strip_preserves_target_specific_dev_deps() {
+            let cargo_toml = "[package]\nname = \"camel-foo\"\n\n[target.'cfg(unix)'.dev-dependencies]\ncamel-core = { workspace = true }\n";
+            let stripped = comment_out_camel_dev_deps(cargo_toml);
+            assert!(
+                stripped.contains("# xtask-publish-stripped: camel-core = { workspace = true }")
+            );
+            let (_, weak) = extract_camel_deps_grouped(&stripped);
+            assert!(weak.is_empty());
+        }
+
+        #[test]
+        fn strip_is_noop_without_weak_camel_deps() {
+            let cargo_toml = "[package]\nname = \"camel-foo\"\n\n[dependencies]\ncamel-api = { workspace = true }\n";
+            assert_eq!(comment_out_camel_dev_deps(cargo_toml), cargo_toml);
         }
 
         #[test]
