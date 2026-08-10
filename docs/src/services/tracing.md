@@ -12,7 +12,7 @@ Keep one active instance per process.
 
 Configure the OTLP endpoint and service identity with `OtelConfig`:
 
-```rust
+```rust,ignore
 {{#include ../../../examples/otel-demo/src/main.rs:otel-config}}
 ```
 
@@ -22,7 +22,7 @@ Configure the OTLP endpoint and service identity with `OtelConfig`:
 
 Create the service and register it with the context:
 
-```rust
+```rust,ignore
 {{#include ../../../examples/otel-demo/src/main.rs:otel-service-setup}}
 ```
 

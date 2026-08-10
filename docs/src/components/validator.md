@@ -29,7 +29,7 @@ The Rust example resolves the schema path with `CARGO_MANIFEST_DIR`. Substitute 
 
 ## URI
 
-```
+```text
 validator:<schema-path>[?type=xml|json|yaml&failOnNullBody=true|false&headerName=<name>&failOnNullHeader=true|false&maxPayloadBytes=<n>&schemaCacheMaxEntries=<n>]
 ```
 

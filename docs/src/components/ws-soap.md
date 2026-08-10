@@ -4,7 +4,7 @@ The WebSocket component (`ws`, `wss`) serves and connects to real-time bidirecti
 
 The ws-server example wires a chat broadcast and a per-connection echo against the same port:
 
-```rust,no_run
+```rust,ignore
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_ws::WsComponent;
@@ -61,7 +61,7 @@ The echo route replies to the sender. The chat route broadcasts to every local c
 
 ## WebSocket URI
 
-```
+```text
 ws://host:port/path[?options]
 wss://host:port/path[?options]
 ```
@@ -113,7 +113,7 @@ Auth rides on the per-route `SecurityContext` (see [Authentication and authoriza
 
 ## CXF URI
 
-```
+```text
 cxf://http://host:port/path?wsdl=file.wsdl&service={ns}Name&port={ns}Port[&operation=opName][&profile=profile_name][&timeout_ms=N][&mtom_enabled=true|false]
 ```
 

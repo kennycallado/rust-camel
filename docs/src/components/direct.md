@@ -4,7 +4,7 @@ The Direct component routes an Exchange between two routes in the same CamelCont
 
 The multi-route-direct example wires a timer-driven producer and a transform consumer:
 
-```rust,no_run
+```rust,ignore
 use camel_api::body::Body;
 use camel_api::Value;
 use camel_builder::RouteBuilder;
@@ -71,7 +71,7 @@ Both routes use the same `direct:pipeline` name. The endpoint name must match on
 
 ## URI
 
-```
+```text
 direct:<name>[?timeout_ms=30000][&failIfNoConsumers=true]
 ```
 

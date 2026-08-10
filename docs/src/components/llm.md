@@ -31,7 +31,7 @@ routes:
 
 ## URI
 
-```
+```text
 llm:<operation>?provider=<name>[&model=<model>][&temperature=<n>][&max_tokens=<n>][&stream=<bool>][&system_prompt=<text>][&timeout_secs=<n>]
 ```
 

@@ -51,7 +51,7 @@ The Rust example builds `protoFile` from `CARGO_MANIFEST_DIR`. Substitute the re
 
 ## URI
 
-```
+```text
 grpc://<host>:<port>/<package>.<Service>/<Method>?protoFile=<path>&transport=<mode>
 ```
 

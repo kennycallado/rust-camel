@@ -27,7 +27,7 @@ routes:
 
 ## URI
 
-```
+```text
 cron:<name>?schedule=<5-field-expr>[&timeZone=<IANA>&includeMetadata=true]
 ```
 
@@ -41,7 +41,7 @@ cron:<name>?schedule=<5-field-expr>[&timeZone=<IANA>&includeMetadata=true]
 
 The schedule is a standard Unix 5-field cron expression:
 
-```
+```text
 minute hour day-of-month month day-of-week
 ```
 

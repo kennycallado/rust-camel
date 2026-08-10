@@ -80,7 +80,7 @@ routes:
 
 ## URI
 
-```
+```text
 redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&password=<pwd>][&db=<n>][&ssl=<bool>]
 ```
 

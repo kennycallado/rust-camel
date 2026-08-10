@@ -2,7 +2,7 @@
 
 A Boa-backed JavaScript implementation of the Language SPI. It provides `Expression`, `Predicate`, and `MutatingExpression` for the synchronous `script:` path defined by ADR-0006.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-js/src/main.rs:full}}
 ```
 

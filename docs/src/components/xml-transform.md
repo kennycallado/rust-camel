@@ -31,7 +31,7 @@ The Producer bounds the body before forwarding. When `maxPayloadBytes` is absent
 
 ### URI
 
-```
+```text
 xslt:<stylesheet>[?output=<method>][&param.<name>=<value>][&transformerCacheSize=<n>][&failOnNullBody=<true|false>][&maxPayloadBytes=<n>]
 ```
 
@@ -79,7 +79,7 @@ The `xml2json` identity stylesheet follows the Apache Camel xj compatibility con
 
 ### URI
 
-```
+```text
 xj:<stylesheet>?direction=<xml2json|json2xml>[&maxPayloadBytes=<n>][&retryCount=<n>][&retryDelayMs=<n>][&param.<name>=<value>]
 ```
 

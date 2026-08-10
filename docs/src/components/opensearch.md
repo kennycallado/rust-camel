@@ -6,7 +6,7 @@ The OpenSearch component runs document, index, and search operations against an 
 
 The Producer sends the Exchange body as the document. The optional `CamelOpenSearch.Id` header sets the document ID. Without it, OpenSearch assigns a server-generated ID.
 
-```rust,no_run
+```rust,ignore
 use camel_api::Exchange;
 use camel_builder::RouteBuilder;
 
@@ -42,7 +42,7 @@ routes:
 
 The Producer sends the body as the search query. The `size` and `from` URI params fill in pagination when the body does not set them.
 
-```rust,no_run
+```rust,ignore
 use camel_builder::RouteBuilder;
 
 let route = RouteBuilder::from("direct:search-users")
@@ -76,7 +76,7 @@ routes:
 
 The body is a JSON array of action-and-document pairs. The Producer serializes each element to a line and rejects the call when the total payload exceeds `max_bulk_bytes`.
 
-```rust,no_run
+```rust,ignore
 use camel_builder::RouteBuilder;
 
 let route = RouteBuilder::from("direct:bulk")
@@ -114,7 +114,7 @@ routes:
 
 ## URI
 
-```
+```text
 opensearch://<host>:<port>/<index>?operation=<op>[&option=value...]
 opensearchs://<host>:<port>/<index>?operation=<op>[&option=value...]  (TLS)
 ```

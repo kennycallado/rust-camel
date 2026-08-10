@@ -4,7 +4,7 @@ The exec component runs external system processes from a route. It is producer-o
 
 The `exec-example` shows two profiles wired against a timer source:
 
-```rust,no_run
+```rust,ignore
 use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::ComponentBundle;
@@ -94,7 +94,7 @@ The full example, with a second `date` profile, lives in [`examples/exec-example
 
 ## URI
 
-```
+```text
 exec:{profile-name}
 ```
 

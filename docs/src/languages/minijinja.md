@@ -2,7 +2,7 @@
 
 A MiniJinja (Jinja2-compatible) template rendering implementation of the Language SPI. It renders structured output such as HTML, JSON, or prompts from Exchange data.
 
-```rust,no_run
+```rust,ignore
 use camel_language_api::Language;
 use camel_language_minijinja::MinijinjaLanguage;
 

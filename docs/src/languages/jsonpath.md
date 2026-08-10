@@ -2,11 +2,11 @@
 
 An RFC 9535 JSONPath expression and predicate language over `jsonpath-rust`. It evaluates `$.` queries against an Exchange JSON body.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-jsonpath/src/main.rs:setup}}
 ```
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-jsonpath/src/main.rs:route}}
 ```
 

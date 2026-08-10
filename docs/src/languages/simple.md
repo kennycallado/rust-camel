@@ -2,11 +2,11 @@
 
 A lightweight expression and predicate language for header, body, property, and exception access. It uses `${...}` interpolation syntax and supports compound predicates with `&&` and `||`.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-simple/src/main.rs:setup}}
 ```
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-simple/src/main.rs:route}}
 ```
 

@@ -63,7 +63,7 @@ The consumer uses the `activemq:orders` shorthand. It is equivalent to `activemq
 
 ## URI
 
-```
+```text
 jms:queue:<name>[?param=value&...]
 jms:topic:<name>[?param=value&...]
 activemq:queue:<name>[?param=value&...]

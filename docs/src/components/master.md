@@ -25,7 +25,7 @@ The route definition runs on every node. Only the leader fires the `log` step. T
 
 ## URI
 
-```
+```text
 master:<lockname>:<delegate-uri>
 ```
 

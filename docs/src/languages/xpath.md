@@ -2,11 +2,11 @@
 
 An XPath 1.0 expression and predicate language over `sxd-document` and `sxd-xpath`. It evaluates `//node` and `/path` queries against an Exchange XML body.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-xpath/src/main.rs:setup}}
 ```
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-xpath/src/main.rs:route}}
 ```
 

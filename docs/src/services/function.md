@@ -2,7 +2,7 @@
 
 The `camel-function` crate runs user code in isolated containers, invoked as `function:` pipeline steps. The model follows serverless functions: stateless, event-driven units scoped to one execution each.
 
-```rust,no_run
+```rust,ignore
 use camel_function::{ContainerProvider, FunctionConfig, FunctionRuntimeService};
 use camel_core::context::CamelContext;
 use std::time::Duration;

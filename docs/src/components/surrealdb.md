@@ -59,7 +59,7 @@ routes:
 
 ## URI
 
-```
+```text
 surrealdb:<operation>?datasource=<name>[&table=<t>][&id=<r>][&edge=<e>][&from=<r>][&to=<r>][&function=<f>][&top_k=<n>][&metric=<m>][&vector_field=<f>][&query=<surrealql>]
 ```
 

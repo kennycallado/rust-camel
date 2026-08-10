@@ -95,7 +95,7 @@ readiness every 10 seconds and updates the gate.
 Routes with the `master:` scheme activate only on the leader pod. The
 URI format is:
 
-```
+```text
 master:<lock-name>:<component>:<component-uri>
 ```
 
@@ -110,7 +110,7 @@ Use `KubernetesLeadershipService` in production. Use
 
 ### Example: Rust API
 
-```rust
+```rust,ignore
 {{#include ../../../examples/master-leader/src/main.rs:master-route}}
 ```
 

@@ -8,7 +8,7 @@ The SQL component executes queries against relational databases through `sqlx`. 
 
 ### URI
 
-```
+```text
 sql:<query>[?outputType=<mode>&dataSource=<name>&allowDynamicQuery=<bool>&bridgeErrorHandler=<bool>]
 ```
 
@@ -50,7 +50,7 @@ The SurrealDB component connects routes to SurrealDB for document, graph, vector
 
 ### URI
 
-```
+```text
 surrealdb:<operation>?[dataSource=<name>&...]
 ```
 

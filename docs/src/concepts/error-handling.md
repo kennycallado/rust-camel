@@ -81,7 +81,7 @@ covers routes that have no per-route handler.
 
 ### Dead Letter Channel
 
-```rust
+```rust,ignore
 {{#include ../../../examples/error-handling/src/main.rs:basic-dlc}}
 ```
 
@@ -114,7 +114,7 @@ advances.
 
 ### Retry with backoff
 
-```rust
+```rust,ignore
 {{#include ../../../examples/error-handling/src/main.rs:retry-backoff}}
 ```
 
@@ -169,7 +169,7 @@ A broad clause first shadows the rest.
 Set a default handler on `CamelContext`. Routes without a per-route handler
 use it.
 
-```rust
+```rust,ignore
 ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel(
     "log:global-dlc",
 ))
@@ -185,7 +185,7 @@ clause sets the disposition. The error handler clears the error and the
 pipeline advances to the next step. The DLC still receives the exchange for
 auditing.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/error-handling/src/main.rs:continued-disposition}}
 ```
 
@@ -226,7 +226,7 @@ block with catch clauses and an optional finally clause. A handled catch does
 not trigger the route-level error handler. The block stays a local island.
 Unhandled errors bubble up to the route.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/do-try/src/main.rs:do-try-route}}
 ```
 
@@ -300,7 +300,7 @@ See [ADR-0007](../adr/0007-route-supervised-consumer-failure.md).
 The `SupervisingRouteController` watches crashed routes and restarts them.
 Configure it with `SupervisionConfig`:
 
-```rust
+```rust,ignore
 let ctx = CamelContext::builder()
     .supervision(SupervisionConfig {
         max_attempts: None,

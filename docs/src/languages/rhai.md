@@ -2,11 +2,11 @@
 
 A Rhai implementation of the Language SPI. It provides `Expression`, `Predicate`, and `MutatingExpression` with an unconditional in-process sandbox and Rust-native type safety.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-rhai/src/main.rs:setup}}
 ```
 
-```rust
+```rust,ignore
 {{#include ../../../examples/language-rhai/src/main.rs:route}}
 ```
 

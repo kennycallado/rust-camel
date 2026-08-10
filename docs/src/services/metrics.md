@@ -11,13 +11,13 @@ runtime calls your methods as exchanges flow, errors fire, and circuit
 breakers change state. The trait covers exchange duration, error and
 exchange counts, queue depth, and circuit-breaker transitions.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/metrics-demo/src/main.rs:metrics-collector-impl}}
 ```
 
 Register the collector with `CamelContext::builder().metrics(...)`:
 
-```rust
+```rust,ignore
 {{#include ../../../examples/metrics-demo/src/main.rs:metrics-context-builder}}
 ```
 
@@ -51,7 +51,7 @@ routes:
 `PrometheusMetrics` collector and an HTTP server, exposes metrics at
 `/metrics`, and merges the health routes from `camel-health`.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/prometheus-demo/src/main.rs:prometheus-service-setup}}
 ```
 

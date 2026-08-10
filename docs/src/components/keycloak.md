@@ -47,7 +47,7 @@ The exchange property `camel.keycloak.userId` overrides the URI parameter when s
 
 ## URI
 
-```
+```text
 keycloak:<kind>?<params>
 ```
 

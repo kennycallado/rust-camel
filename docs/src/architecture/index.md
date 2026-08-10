@@ -62,7 +62,7 @@ the bottom with zero or minimal internal dependencies. Runtime and processing
 crates depend on contracts. Components, languages, and services depend on the
 runtime and contracts. Platforms depend on services.
 
-```
+```text
 Platforms
     |
 Services

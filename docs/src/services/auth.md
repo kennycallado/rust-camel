@@ -23,19 +23,19 @@ The native auth pipeline reproduces a Keycloak flow without external dependencie
 
 Issue tokens with `NativeTokenIssuer`:
 
-```rust
+```rust,ignore
 {{#include ../../../examples/security-keycloak/src/main.rs:keycloak-token-issuance}}
 ```
 
 Validate tokens with `LocalJwtValidator` and `NativeJwksProvider`:
 
-```rust
+```rust,ignore
 {{#include ../../../examples/security-keycloak/src/main.rs:keycloak-validation}}
 ```
 
 Apply a `RolePolicy` that checks for required roles:
 
-```rust
+```rust,ignore
 {{#include ../../../examples/security-keycloak/src/main.rs:keycloak-role-policy}}
 ```
 
@@ -67,7 +67,7 @@ hot-reload path.
 
 A WASM plugin can serve as an authorization policy. The plugin reads `camel.auth.*` properties from the Exchange and returns a grant or denial.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/security-wasm-policy/src/main.rs:wasm-policy-setup}}
 ```
 

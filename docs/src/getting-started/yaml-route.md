@@ -25,7 +25,7 @@ example.
 A YAML route project needs two files: a route file and a `Camel.toml`
 config file.
 
-```
+```text
 my-integration/
 ├── Camel.toml          # Config: route discovery, log level
 └── routes/

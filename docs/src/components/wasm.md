@@ -26,7 +26,7 @@ The Rust example resolves `echo.wasm` from the example `fixtures/` directory. Th
 
 ## URI
 
-```
+```text
 wasm:<path/to/module.wasm>[?<param>=<value>...]
 ```
 

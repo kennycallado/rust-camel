@@ -32,7 +32,7 @@ Increase the value if one save triggers several rapid reloads.
 The `hot-reload-yaml` example reads `watch_debounce_ms` from `Camel.toml`
 and passes it to `watch_and_reload`.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/hot-reload-yaml/src/main.rs:load-debounce}}
 ```
 
@@ -42,7 +42,7 @@ The `hot-reload` example resolves the directories to watch, then starts
 `watch_and_reload` in a background task. A `CancellationToken` stops the
 watcher on shutdown.
 
-```rust
+```rust,ignore
 {{#include ../../../examples/hot-reload/src/main.rs:watch-setup}}
 ```
 

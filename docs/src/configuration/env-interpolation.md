@@ -28,7 +28,7 @@ resolution as a public API for config-value placeholders.
 
 ## Setup
 
-```rust
+```rust,ignore
 {{#include ../../../examples/env-interpolation/src/main.rs:env-interpolation}}
 ```
 

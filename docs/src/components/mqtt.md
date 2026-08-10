@@ -45,7 +45,7 @@ Wildcard subscriptions (`sensors/#`) match every topic under the prefix. `+` mat
 
 ## URI
 
-```
+```text
 mqtt://<broker_name>[/<topic>][?query]
 mqtts://<broker_name>[/<topic>][?query]
 ```

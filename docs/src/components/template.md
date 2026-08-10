@@ -29,7 +29,7 @@ The Rust example reads the template path from `env!("CARGO_MANIFEST_DIR")` so it
 
 ## URI
 
-```
+```text
 template:file:///<absolute-path-to-template>
 ```
 

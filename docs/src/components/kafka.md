@@ -45,7 +45,7 @@ The Rust example reads the broker port from a testcontainers container. Substitu
 
 ## URI
 
-```
+```text
 kafka:<topic>?brokers=<host:port>[&groupId=<group>][&autoOffsetReset=<policy>][&partitionAssignmentStrategy=<strategy>][&acks=<level>][&securityProtocol=<protocol>]
 ```
 

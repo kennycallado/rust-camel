@@ -51,7 +51,7 @@ The Mock endpoint is the same in both APIs. The Rust builder and the YAML DSL co
 
 ## URI
 
-```
+```text
 mock:<name>
 ```
 

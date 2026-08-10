@@ -30,7 +30,7 @@ The ControlBus URI declares the target `routeId` and the `authorizedRoutes` allo
 
 ## URI
 
-```
+```text
 controlbus:route?routeId=<id>&action=<action>&authorizedRoutes=<csv>
 ```
 

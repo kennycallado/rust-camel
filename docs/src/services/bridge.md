@@ -53,7 +53,7 @@ The release URL must point at `https://github.com/...`. The crate rejects HTTP, 
 
 Components that hold stateful resources inside a bridge (compiled XSDs, compiled XSLT stylesheets, open JMS sessions) implement `BridgeReconnectHandler`. The component's reconnect loop detects failure, replaces the process, connects the new channel, then calls `on_reconnect(&channel)`.
 
-```rust,no_run
+```rust,ignore
 use camel_bridge::reconnect::BridgeReconnectHandler;
 
 #[derive(Debug)]

@@ -62,7 +62,7 @@ Both interfaces compile to the same `RouteDefinition`. The example source is at 
 
 ## URI
 
-```
+```text
 seda:<name>[?size=<n>][&concurrentConsumers=<n>][&multipleConsumers=<bool>][&blockWhenFull=<bool>][&discardIfNoConsumers=<bool>][&timeout=<ms>][&waitForTaskToComplete=<mode>][&exchangePattern=<pattern>]
 ```
 
