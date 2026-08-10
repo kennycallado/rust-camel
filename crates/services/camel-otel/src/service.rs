@@ -914,12 +914,11 @@ mod tests {
     }
 
     /// Proves that `start()` wires the span exporter correctly: a span
-    /// emitted through the global tracer reaches the in-memory exporter
-    /// that `start()` connected via `SimpleSpanProcessor`.
+    /// emitted through the provider that `start()` built and stored reaches
+    /// the in-memory exporter connected via `SimpleSpanProcessor`.
     #[tokio::test]
     #[serial_test::serial]
     async fn start_binds_real_span_exporter() {
-        use opentelemetry::global;
         use opentelemetry::trace::{Span, Tracer, TracerProvider};
         use opentelemetry_sdk::trace::InMemorySpanExporter;
 
@@ -930,8 +929,9 @@ mod tests {
 
         service.start().await.unwrap();
 
-        // Emit a span through the global tracer set by start()
-        let tracer = global::tracer_provider().tracer("start-binding-test");
+        // Emit a span through the provider that start() built and stored
+        let tracer_provider = service.tracer_provider.as_ref().unwrap();
+        let tracer = tracer_provider.tracer("start-binding-test");
         tracer.start("test-op").end();
 
         // Force flush so the span reaches the in-memory exporter
