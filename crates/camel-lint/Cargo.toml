@@ -1,0 +1,21 @@
+[package]
+name = "camel-lint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api = { workspace = true }
+noyalib = { workspace = true }
+jsonschema = { workspace = true }
+ariadne = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

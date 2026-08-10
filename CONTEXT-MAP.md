@@ -18,7 +18,8 @@
 - [Functions](./crates/services/camel-function/CONTEXT.md) — out-of-process executable units invoked as pipeline steps; inspired by serverless functions, running in isolated containers
 - [WIT Contracts](./crates/camel-wit/CONTEXT.md) — canonical cross-language ABI for WASM plugin, bean, authorization-policy, and source guests; versioned independently from Rust crates
 - [Services](./crates/services/CONTEXT.md) — cross-cutting infrastructure services: observability (OTel, Prometheus), auth/security, and platform integration (Kubernetes)
-  - [Auth Service](./crates/services/camel-auth/CONTEXT.md) — provider-neutral token validation, claim mapping, and permission evaluation (decision sources behind the route SecurityPolicy boundary)
+   - [Auth Service](./crates/services/camel-auth/CONTEXT.md) — provider-neutral token validation, claim mapping, and permission evaluation (decision sources behind the route SecurityPolicy boundary)
+- [Lint](./crates/camel-lint/CONTEXT.md) — runtime-free route diagnostics engine: 5 lint rules (syntax, schema, URI-known, secret, deprecated) + stateless engine + corpus zero-false-positives gate
 
 ## Relationships
 
@@ -28,6 +29,8 @@
 - **Languages → Runtime**: Language implementations register into `CamelContext`; the runtime resolves them to evaluate expressions and predicates within Pipeline steps
 - **Functions → Runtime**: A `FunctionInvoker` is registered in `CamelContext`; the `function:` Pipeline step calls it with an Exchange and applies the returned patch
 - **Services → Runtime**: Services implement `Lifecycle`, `MetricsCollector`, or `PlatformService` contracts and register into `CamelContext` for coordinated start/stop
+- **camel-lint → camel-api**: camel-lint depends on `ComponentMetadataCatalog` trait + `ComponentMetadata`/`UriOption`/`OptionKind` contract types. Does NOT depend on camel-core or camel-dsl — the engine is runtime-free
+- **camel-cli → camel-lint**: the `camel lint` subcommand builds the production catalog (`register_builtin_components_for_lint`) and drives `LintEngine`
 
 ## Architecture Decisions
 
@@ -148,6 +151,10 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **WASM sandbox capability posture** — Per-world grants across two surfaces: Camel host functions and WASI interfaces. Camel calls use explicit scheme allowlists; policy worlds deny call and store operations. WASI uses selective registration, not full-linker registration with runtime-only denial. Authority: ADR-0050. (camel-component-wasm)
 - **Credential redaction boundary** — Types that hold passwords, tokens, API keys, client secrets, private-key bytes, credential-bearing URLs, or credential-capable opaque state must not expose those values through `Debug` or general-purpose `Serialize`. Use manual redaction or a tested redacting wrapper. `Zeroizing<String>` clears memory but does not redact formatting. Credential-file paths are metadata and are outside this rule. Authority: ADR-0051. (workspace-wide)
 - **`uri_options()` derivation / metadata unification** — The `#[derive(UriConfig)]` macro is the single source of truth for URI parameter metadata. It generates inherent `fn uri_options() -> Vec<UriOption>` from `#[uri_param]`-annotated config struct fields, inferring `OptionKind` from Rust types (inference never produces `Enum` without an explicit `kind` override). `#[uri_config(skip_impl, metadata(..))]` retains bespoke `from_uri` parsing while deriving metadata. Each migrated component delegates `Component::metadata()` to `ConfigType::metadata()` or composes `ComponentMetadata::minimal(scheme).with_uri_options(ConfigType::uri_options())`. The `cargo xtask lint-single-source` command enforces the invariant that no hand-written `UriOption::new` calls exist in component production code. Authority: ADR-0041 amendment. (camel-endpoint-macros + components/***)
+- **LintEngine** — Stateless route diagnostics engine. Holds a rule list and a catalog reference (`Arc<dyn ComponentMetadataCatalog>`); `lint(source) -> Vec<Diagnostic>` parses, runs all rules, returns diagnostics sorted by span. Runtime-free. (camel-lint)
+- **DiagnosticCode** — Enum of all R-codes: `RSyntax`, `RSchema(..)`, `RUriKnown(..)`, `RSecret(..)`, `RDeprecated(..)`. Each variant names the rule that produced it. (camel-lint)
+- **unverified-scheme** — Info-level `UnverifiedScheme` diagnostic: the route uses a scheme not in the catalog. Not an error (the catalog might be incomplete); does not suppress other diagnostics for the same endpoint. (camel-lint)
+- **Zero-false-positives gate** — Corpus integration test (`crates/camel-cli/tests/lint_corpus.rs`) + checked-in RON baseline. Set-equality assertion: every produced diagnostic matches the baseline, every baseline entry is produced. Rule changes must update the baseline. (camel-lint)
 
 ## Documentation Authority & Refresh
 

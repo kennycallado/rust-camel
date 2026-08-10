@@ -155,7 +155,7 @@ checksum = "f211a51805bc641f3ad5b7664c77d2547af685cc33b4cd8d31964027a46f13f1"
 dependencies = [
  "anstyle",
  "memchr",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -254,6 +254,16 @@ dependencies = [
  "blake2",
  "cpufeatures 0.2.17",
  "password-hash",
+]
+
+[[package]]
+name = "ariadne"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44055e597c674aef7cb903b2b9f6e4cba1277ed0d2d61dae7cd52d7ffa81f8e2"
+dependencies = [
+ "unicode-width 0.1.14",
+ "yansi",
 ]
 
 [[package]]
@@ -656,6 +666,12 @@ name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
+
+[[package]]
+name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "base64"
@@ -1313,6 +1329,7 @@ dependencies = [
 name = "camel-cli"
 version = "0.27.0"
 dependencies = [
+ "ariadne",
  "async-trait",
  "camel-api",
  "camel-auth",
@@ -1348,6 +1365,7 @@ dependencies = [
  "camel-dataformat-protobuf",
  "camel-dsl",
  "camel-function",
+ "camel-lint",
  "camel-master",
  "camel-proto-compiler",
  "camel-template",
@@ -1357,8 +1375,10 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "glob",
  "include_dir",
  "percent-encoding",
+ "ron 0.8.1",
  "rustls",
  "serde_json",
  "tempfile",
@@ -2042,6 +2062,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
+ "toml 1.1.3+spec-1.1.0",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -2248,6 +2269,19 @@ dependencies = [
  "sxd-xpath",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "camel-lint"
+version = "0.27.0"
+dependencies = [
+ "ariadne",
+ "camel-api",
+ "jsonschema",
+ "noyalib",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -2871,7 +2905,7 @@ dependencies = [
  "convert_case",
  "json5",
  "pathdiff",
- "ron",
+ "ron 0.12.2",
  "rust-ini",
  "serde-untagged",
  "serde_core",
@@ -8944,6 +8978,18 @@ checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
 
 [[package]]
 name = "ron"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91f7eff05f748767f183df4320a63d6936e9c6107d97c9e6bdd9784f4289c94"
+dependencies = [
+ "base64 0.21.7",
+ "bitflags 2.13.1",
+ "serde",
+ "serde_derive",
+]
+
+[[package]]
+name = "ron"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81116b9531d61eabc41aeb228e4b6b2435bcca3233b98cf3b3077d4e6e9debb3"
@@ -12502,6 +12548,12 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-width"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
+
+[[package]]
+name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
@@ -13216,7 +13268,7 @@ dependencies = [
  "bumpalo",
  "leb128fmt",
  "memchr",
- "unicode-width",
+ "unicode-width 0.2.2",
  "wasm-encoder 0.255.0",
 ]
 
@@ -14036,6 +14088,12 @@ dependencies = [
  "encoding_rs",
  "hashlink 0.11.1",
 ]
+
+[[package]]
+name = "yansi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yasna"

@@ -816,3 +816,52 @@ fn context_lifecycle_use_cases_respect_dependency_rule() {
         "RouteOrderingPort impl must live in adapters"
     );
 }
+
+// ── camel-lint architecture boundary ──
+
+/// Read a crate's `[dependencies]` and `[dev-dependencies]` tables from
+/// its `Cargo.toml` via the `toml` crate. Returns the set of dependency
+/// crate names (without workspace/path quals). Network-free — no
+/// `cargo metadata`.
+fn crate_declared_deps(manifest_path: &str) -> std::collections::HashSet<String> {
+    let content = std::fs::read_to_string(manifest_path)
+        .unwrap_or_else(|e| panic!("failed to read {manifest_path}: {e}"));
+    let value: toml::Value =
+        toml::from_str(&content).unwrap_or_else(|e| panic!("failed to parse {manifest_path}: {e}"));
+
+    let mut deps = std::collections::HashSet::new();
+
+    for table_name in &["dependencies", "dev-dependencies"] {
+        if let Some(table) = value.get(table_name).and_then(|v| v.as_table()) {
+            for key in table.keys() {
+                deps.insert(key.clone());
+            }
+        }
+    }
+
+    deps
+}
+
+#[test]
+fn camel_lint_has_no_runtime_dep() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let lint_manifest = workspace_root.join("crates/camel-lint/Cargo.toml");
+    assert!(
+        lint_manifest.exists(),
+        "expected camel-lint manifest at {}",
+        lint_manifest.display()
+    );
+
+    let deps = crate_declared_deps(lint_manifest.to_str().unwrap());
+
+    assert!(
+        !deps.contains("camel-core"),
+        "camel-lint must not depend on camel-core (architecture boundary)"
+    );
+    assert!(
+        !deps.contains("camel-dsl"),
+        "camel-lint must not depend on camel-dsl (architecture boundary)"
+    );
+}

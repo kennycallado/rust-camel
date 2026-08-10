@@ -70,6 +70,8 @@ camel-function = { workspace = true }
 camel-wit.workspace = true
 camel-auth.workspace = true
 camel-component-keycloak.workspace = true
+camel-lint.workspace = true
+ariadne.workspace = true
 rustls.workspace = true
 camel-component-surrealdb = { workspace = true, optional = true }
 camel-component-exec = { workspace = true, optional = true }
@@ -77,6 +79,8 @@ camel-component-exec = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 serde_json.workspace = true
+ron = { workspace = true }
+glob = { workspace = true }
 
 [features]
 default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt"]

@@ -1051,9 +1051,28 @@ fn run_schema_generation(check: bool) -> Result<(), String> {
         if let Err(ts_err) = check_ts_drift(&ts_dir, &temp_ts_files) {
             drift.push(ts_err);
         }
+        // Verify camel-lint embedded schema matches the canonical generated copy.
+        let lint_schema = workspace_root.join("crates/camel-lint/schema/route-schema.json");
+        let dsl_schema_path = dsl_dir.join("route-schema.json");
+        let lint_content = std::fs::read(&lint_schema)
+            .map_err(|e| format!("read {}: {e}", lint_schema.display()))?;
+        let dsl_content = std::fs::read(&dsl_schema_path)
+            .map_err(|e| format!("read {}: {e}", dsl_schema_path.display()))?;
+        if lint_content != dsl_content {
+            drift.push(format!(
+                "{} differs from {} ({} vs {} bytes)",
+                lint_schema.display(),
+                dsl_schema_path.display(),
+                lint_content.len(),
+                dsl_content.len()
+            ));
+        }
+
         if !drift.is_empty() {
             return Err(format!(
-                "Schema drift detected. Re-run `cargo xtask schema` and commit.\n  {}",
+                "Schema drift detected. Re-run `cargo xtask schema` (regenerates \
+                 schemas/dsl/route-schema.json only) and also copy: \
+                 cp schemas/dsl/route-schema.json crates/camel-lint/schema/route-schema.json\n  {}",
                 drift.join("\n  ")
             ));
         }

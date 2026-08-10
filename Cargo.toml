@@ -80,6 +80,7 @@ camel-bridge = { path = "crates/services/camel-bridge", version = "=0.27.0" }
 camel-function = { path = "crates/services/camel-function", version = "=0.27.0" }
 camel-dsl = { path = "crates/camel-dsl", version = "=0.27.0" }
 camel-builder = { path = "crates/camel-builder", version = "=0.27.0" }
+camel-lint = { path = "crates/camel-lint", version = "=0.27.0" }
 camel-component-api = { path = "crates/components/camel-component-api", version = "=0.27.0" }
 camel-endpoint = { path = "crates/camel-endpoint", version = "=0.27.0" }
 camel-endpoint-macros = { path = "crates/camel-endpoint-macros", version = "=0.27.0" }
@@ -227,6 +228,8 @@ sqlx = "0.8"
 sxd-document = "0.3"
 syn = "2.0"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
+ariadne = "0.4"
+ron = "0.8"
 noyalib = { version = "0.0.18", features = ["compat-serde-yaml"] }
 toml = "1"
 percent-encoding = "2.3"

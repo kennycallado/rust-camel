@@ -78,6 +78,7 @@ camel-component-seda.workspace = true
 camel-component-http.workspace = true
 criterion.workspace = true
 uuid.workspace = true
+toml = { workspace = true }
 
 [[bench]]
 name = "context"

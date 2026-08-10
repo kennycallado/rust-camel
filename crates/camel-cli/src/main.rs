@@ -72,6 +72,9 @@ enum Commands {
         #[command(subcommand)]
         action: commands::openapi::OpenapiAction,
     },
+
+    /// Lint a route file against the production component catalog.
+    Lint(commands::lint::LintArgs),
 }
 
 #[derive(Subcommand)]
@@ -135,6 +138,9 @@ async fn main() {
         }
         Commands::Openapi { action } => {
             commands::openapi::run(action);
+        }
+        Commands::Lint(args) => {
+            commands::lint::run(args).await;
         }
     }
 }

@@ -1,0 +1,97 @@
+// Baseline for `lint_corpus::corpus_zero_false_positives`.
+//
+// Format: a RON list of `(file_relative_path, [(code, severity), ...])`
+// tuples, where file_relative_path is relative to the workspace root and each
+// (code, severity) pair is the stable Display string of a DiagnosticCode +
+// the lowercase Severity string. The gate asserts set equality between the
+// emitted diagnostics and this baseline (every emitted entry is baselined AND
+// every baseline entry is emitted). Multiple diagnostics sharing the same
+// (code, severity) in one file collapse to a single entry.
+//
+// Every entry below is an AGREED real defect or an expected by-design note
+// (e.g. an `unverified-scheme` Info for a component intentionally skipped by
+// `register_builtin_components_for_lint`). Each carries a `//` justification.
+// Suspected false positives are NOT baselined - they are reported and the
+// rule is fixed/gated instead. See Task 3.2 of openspec/changes/add-camel-lint.
+[
+    // R-SCHEMA: example uses Apache-style `from: {uri: ...}` object form and
+    // kebab `set-header`/`set-body`, neither modelled by the canonical
+    // `RouteDslRoute` types (flat `from: String`, snake_case step keys).
+    // Pre-existing fixture non-conformance; tracked separately.
+    (
+        "examples/container-nginx/routes/route.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+    (
+        "examples/custom-component-bundle/routes/echo.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+    (
+        "examples/cxf-example/routes/soap-consumer.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+    (
+        "examples/cxf-example/routes/soap-producer.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+    (
+        "examples/file-pollenrich/routes.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+    (
+        "examples/hot-reload/routes/route.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+    (
+        "examples/wasm-source-webhook/routes/webhook.yaml",
+        [("R-SCHEMA", "error")],
+    ),
+
+    // R-URI-known: real option-level defects per the builtin lint catalog.
+    (
+        "examples/file-pollenrich/routes.yaml",
+        [
+            ("R-URI-known:missing-required-option", "error"),
+            ("R-URI-known:unknown-option", "error"),
+        ],
+    ),
+    (
+        "examples/http-static-basic/routes/static.yaml",
+        [("R-URI-known:missing-required-option", "error")],
+    ),
+    (
+        "examples/http-static-spa/routes/static.yaml",
+        [("R-URI-known:missing-required-option", "error")],
+    ),
+
+    // R-URI-known:unknown-option — `showCorrelationId` on `log:` URIs. The
+    // log component's `LogConfig` declares showHeaders/showBody/maxChars/
+    // logMask/showStreamInfo/groupSize but NOT showCorrelationId, and the
+    // runtime `from_uri` does not parse it (silently ignored). Same pattern
+    // as the file-pollenrich entry above. Surfaced post-merge (main added
+    // these example files after the feature branch diverged).
+    (
+        "examples/resequencer/routes.yaml",
+        [("R-URI-known:unknown-option", "error")],
+    ),
+    (
+        "examples/sampling/routes.yaml",
+        [("R-URI-known:unknown-option", "error")],
+    ),
+    (
+        "examples/sort/routes.yaml",
+        [("R-URI-known:unknown-option", "error")],
+    ),
+
+    // R-URI-known:unverified-scheme Info — by-design. The scheme is not
+    // registered by `register_builtin_components_for_lint`, so the catalog
+    // cannot verify its options. Expected, not a defect.
+    (
+        "examples/env-interpolation/routes/routes.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+    (
+        "examples/wasm-source-webhook/routes/webhook.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+]
