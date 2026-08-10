@@ -2042,7 +2042,7 @@ m2_measure_protocol_b() {
     local probe_deadline=$((SECONDS + PROBE_DEADLINE_SECS))
     local first_success=0
     while (( SECONDS < probe_deadline )); do
-        if [[ -s "$log_file" ]] && grep -q '^BENCH_LATENCY [0-9][0-9]* [0-9][0-9]*$' "$log_file"; then
+        if [[ -s "$log_file" ]] && grep -q '^BENCH_LATENCY [0-9][0-9]* [0-9][0-9]*' "$log_file"; then
             first_success=1
             echo "m2 protocol B: first BENCH_LATENCY observed for $cell" >&2
             break
@@ -2165,7 +2165,7 @@ m2_measure_protocol_b() {
     # allows more emission than the minimum). This check catches "cell died
     # after emitting only N records" partial-data scenarios.
     local observed_samples
-    observed_samples=$(grep -c '^BENCH_LATENCY [0-9][0-9]* [0-9][0-9]*$' "$log_file" || true)
+    observed_samples=$(grep -c '^BENCH_LATENCY [0-9][0-9]* [0-9][0-9]*' "$log_file" || true)
     if (( observed_samples < M2_SAMPLES_PER_ROUND )); then
         echo "error: m2 protocol B: sample count below minimum for cell=$cell" >&2
         echo "error: expected>=$M2_SAMPLES_PER_ROUND observed=$observed_samples" >&2

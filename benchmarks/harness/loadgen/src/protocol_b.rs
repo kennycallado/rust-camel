@@ -485,6 +485,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_ignores_trailing_route_and_uri_fields() {
+        // Regression guard for an existing tolerant behavior the rust-camel
+        // emitter now depends on: bench_instrument emits
+        // `BENCH_LATENCY <tick_id> <ns> <route_id> <encoded_uri>` (4 fields),
+        // while Java fixtures keep emitting the 2-field form (covered by
+        // `parse_line_valid_record`). The parser consumes only the first two
+        // fields and must keep ignoring the trailing route_id + uri so neither
+        // runtime's output invalidates a round.
+        let rec = parse_line("BENCH_LATENCY 9 1250000 nacional-chain sql:noop?ds=c")
+            .expect("trailing route_id + uri must not invalidate the record");
+        assert_eq!(rec.tick_id, 9);
+        assert_eq!(rec.latency_ns, 1_250_000);
+
+        // Percent-encoded space in the URI stays one trailing token.
+        let rec = parse_line("BENCH_LATENCY 10 2500000 r2 http:host?q=a%20b").unwrap();
+        assert_eq!(rec.tick_id, 10);
+        assert_eq!(rec.latency_ns, 2_500_000);
+    }
+
+    #[test]
     fn parse_line_handles_leading_trailing_whitespace() {
         let rec = parse_line("  BENCH_LATENCY 7 3000000  \n").unwrap();
         assert_eq!(rec.tick_id, 7);
