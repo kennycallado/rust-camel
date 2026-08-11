@@ -18,7 +18,7 @@ The engine ships with 5 rules:
 
 | Code | Rule | Severity | Description |
 |------|------|----------|-------------|
-| R-SYN | Syntax | Error | YAML/JSON parse failure; `RSynRule` reads `Document::parse_failure` (set by `Document::parse`) and emits one diagnostic |
+| R-SYN | Syntax | Error | YAML/JSON parse failure; `RSynRule` reads the `parse_failure` field of `Document` (set by `Document::parse`) and emits one diagnostic |
 | R-SCHEMA | JSON Schema | Error | Validates the parsed document against the embedded route-schema.json, with per-keyword error anchoring |
 | R-URI-known | URI known | Error / Info | Validates endpoint schemes and options against the catalog; unknown scheme → Info, unknown option / kind mismatch / missing required → Error |
 | R-SECRET | Secret | Warning | Detects literal credentials (passwords, tokens, API keys) in route source |
