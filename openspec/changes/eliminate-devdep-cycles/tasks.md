@@ -29,7 +29,7 @@
 - `resolve_publish_order` contains no `eprintln!` (data-only).
 - `cargo fmt --check --all` and `cargo clippy -p xtask -- -D warnings` pass.
 
-- [ ] 0.1
+- [x] 0.1
 
 #### Task 0.2: `publish --show-cycles` diagnostic with a testable seam
 
@@ -51,7 +51,7 @@
 - `cargo run -p xtask -- publish --show-cycles` exits 0, prints the true `no_verify` set, publishes nothing, mutates no manifest.
 - `show_cycles` is unit-testable without invoking the CLI dispatch.
 
-- [ ] 0.2
+- [x] 0.2
 
 #### Task 0.3: Record baseline
 
@@ -68,7 +68,7 @@
 **Acceptance:**
 - `baseline.md` exists with a non-empty `no_verify` set reflecting the two real SCCs.
 
-- [ ] 0.3
+- [x] 0.3
 
 ## Phase 1: Cut the 3 real edges
 
@@ -98,7 +98,7 @@
 - `camel-component-http` and `camel-component-ws` absent from camel-core `[dev-dependencies]`.
 - Both test suites green; the two `catalog_*` TimerComponent fixture tests unchanged.
 
-- [ ] 1.1
+- [x] 1.1
 
 ### crates/camel-endpoint-macros, crates/camel-endpoint
 
@@ -128,7 +128,7 @@
 - `camel-api` and `camel-endpoint` absent from endpoint-macros `[dev-dependencies]`.
 - All relocated tests green under `camel-endpoint`; endpoint-macros pure unit tests still pass.
 
-- [ ] 1.2
+- [x] 1.2
 
 ### scripts/xtask + relocation manifest
 
@@ -151,7 +151,7 @@
 **Acceptance:**
 - `--show-cycles` reports 0 edges; `RELOCATIONS.md` accounts for every move in Phase 1.
 
-- [ ] 1.3
+- [x] 1.3
 
 ## Phase 2: Document + enforce the invariant
 
@@ -177,7 +177,7 @@
 **Acceptance:**
 - ADR-0055 exists with decision + forces + rejected alternatives; `CONTEXT-MAP.md` cites it; lint-context-citations green.
 
-- [ ] 2.1
+- [x] 2.1
 
 ### scripts/xtask
 
@@ -203,7 +203,7 @@
 - `cargo run -p xtask -- lint-publish-cycles` exits 0 (graph clean post-Phase-1).
 - `cargo clippy -p xtask -- -D warnings` + `cargo fmt --check --all` pass.
 
-- [ ] 2.2
+- [x] 2.2
 
 ### AGENTS.md
 
@@ -225,7 +225,7 @@
 **Acceptance:**
 - `AGENTS.md ## QUALITY GATES` contains the `lint-publish-cycles` entry; gate green.
 
-- [ ] 2.3
+- [x] 2.3
 
 ## Phase 3: Delete the hack
 
@@ -256,4 +256,4 @@
 **Acceptance:**
 - Deleted symbols unreferenced; `publish_crates` writes no `Cargo.toml` during the loop and errors if `no_verify` is non-empty; `--show-cycles` 0 edges; `lint-publish-cycles` exits 0; `cargo build --workspace` passes.
 
-- [ ] 3.1
+- [x] 3.1
