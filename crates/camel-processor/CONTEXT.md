@@ -7,7 +7,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 
 | Module | Processor / concern | Type | Source |
 |---|---|---|---|
-| `aggregator` | Aggregate | stateful routing / aggregation | `src/aggregator.rs` (`impl AggregatorService`, `fn poll_ready`, `fn call`): defaults are max_buckets=10_000 and bucket_ttl=300s. The background TTL sweep starts lazily on the first `poll_ready` and is bound to the route cancellation token. Inline eviction in `call` remains active before the sweep starts (Batch 1 R3-C1). |
+| `aggregator` | Aggregate | stateful routing / aggregation | `src/aggregator.rs` (`impl AggregatorService`, `fn poll_ready`, `fn call`): defaults are max_buckets=10_000 and bucket_ttl=300s. The background TTL sweep starts lazily on the first `poll_ready` and is managed via `StepLifecycle::start`/`shutdown` (ADR-0022): `shutdown` cancels the sweep token + aborts the handle; `start` resets both so the sweep respawns on route restart. The sweep token is seeded from the constructor's `route_cancel` but lives in an internal swappable cell (`sweep_cancel`), independent of any externally-threaded token. Inline eviction in `call` remains active before the sweep starts (Batch 1 R3-C1). |
 | `choice` | Choice | conditional routing | `src/lib.rs:2` |
 | `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:3` |
 | `claim_check` | Claim Check | stateful repository stash/retrieve (ADR-0046 retro-exempt) | `src/lib.rs:4` |

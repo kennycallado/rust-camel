@@ -11,7 +11,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use camel_api::{
-    Body, BoxProcessor, CamelError, Exchange, MulticastStrategy, StreamSplitFormat, Value,
+    Body, BoxProcessor, CamelError, Exchange, MulticastStrategy, StepLifecycle, StreamSplitFormat,
+    Value,
 };
 
 use super::{
@@ -327,10 +328,11 @@ impl StepCompiler for SplittingCompiler {
                 let cancel = CancellationToken::new();
                 let svc =
                     camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
+                let lifecycle: Arc<dyn StepLifecycle> = Arc::new(svc.clone());
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
-                    lifecycle: None,
+                    lifecycle: Some(lifecycle),
                 }))
             }
 
@@ -401,5 +403,144 @@ impl StepCompiler for SplittingCompiler {
 
             _ => Ok(CompileOutcome::NotHandled(step)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_api::{AggregatorConfig, ProducerContext, StepShutdownReason};
+    use camel_bean::BeanRegistry;
+    use camel_component_api::{
+        ComponentContext, NoOpComponentContext, RuntimeObservability,
+        test_support::NoopRuntimeObservability,
+    };
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+
+    /// Shared context builder — follows the pattern from `mod.rs::dispatch_tests::ctx`.
+    #[allow(clippy::too_many_arguments)]
+    fn test_ctx<'a>(
+        pc: &'a ProducerContext,
+        rt: Arc<dyn RuntimeObservability>,
+        languages: &'a SharedLanguageRegistry,
+        beans: &'a Arc<Mutex<BeanRegistry>>,
+        component_ctx: Arc<dyn ComponentContext>,
+        staging: &'a FunctionStagingMode,
+        idempotent_repositories: &'a crate::IdempotentRegistry,
+        claim_check_repositories: &'a crate::ClaimCheckRegistry,
+    ) -> CompilationContext<'a> {
+        CompilationContext {
+            producer_ctx: pc,
+            rt,
+            languages,
+            beans,
+            function_invoker: None,
+            component_ctx,
+            route_id: None,
+            staging_mode: staging,
+            idempotent_repositories,
+            claim_check_repositories,
+        }
+    }
+
+    #[test]
+    fn aggregate_step_registers_lifecycle_handle() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+        );
+
+        // Build a valid AggregatorConfig: correlate_by provides defaults
+        // (max_buckets=10_000, bucket_ttl=300s); add a completion condition.
+        let config = AggregatorConfig::correlate_by("id")
+            .complete_when_size(1)
+            .build()
+            .expect("valid aggregator config");
+
+        let aggregate_step = BuilderStep::Aggregate { config };
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::SplittingCompiler));
+
+        let result = reg
+            .compile_step(aggregate_step, 0, &ctx)
+            .expect("compilation should succeed")
+            .expect("should match Aggregate");
+
+        match result {
+            CompiledStep::Process { lifecycle, .. } => {
+                assert!(
+                    lifecycle.is_some(),
+                    "Aggregate CompiledStep should have a lifecycle handle"
+                );
+            }
+            other => panic!("Expected CompiledStep::Process, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregate_dsl_shutdown_drives_lifecycle() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+        );
+
+        let config = AggregatorConfig::correlate_by("id")
+            .complete_when_size(1)
+            .build()
+            .expect("valid aggregator config");
+
+        let aggregate_step = BuilderStep::Aggregate { config };
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::SplittingCompiler));
+
+        let result = reg
+            .compile_step(aggregate_step, 0, &ctx)
+            .expect("compilation should succeed")
+            .expect("should match Aggregate");
+
+        let lifecycle = match result {
+            CompiledStep::Process { lifecycle, .. } => {
+                lifecycle.expect("Aggregate should have a lifecycle handle")
+            }
+            other => panic!("Expected CompiledStep::Process, got {other:?}"),
+        };
+
+        let result = lifecycle.shutdown(StepShutdownReason::RouteStop).await;
+        assert!(result.is_ok(), "shutdown should return Ok(())");
     }
 }

@@ -62,14 +62,18 @@ pub struct AggregatorService {
     timeout_handles: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     late_tx: mpsc::Sender<Exchange>,
     language_registry: SharedLanguageRegistry,
-    route_cancel: CancellationToken,
+    /// Swappable cell holding the cancellation token for the background
+    /// TTL-sweep task. `StepLifecycle::start` replaces this with a fresh token
+    /// so the sweep respawns on the next `poll_ready`; `shutdown` cancels the
+    /// current token to terminate the task. The value is initially seeded from
+    /// the route token — cancelling the route token cancels the sweep (the
+    /// primary shutdown path). This replaces the plain `route_cancel` field.
+    sweep_cancel: Arc<Mutex<CancellationToken>>,
     /// Handle to the background TTL-sweep task. `None` when `config.bucket_ttl`
-    /// is `None` (no TTL → no sweep). When the TTL is set, this is populated
-    /// at construction by the auto-spawn in `new` — the caller does not need
-    /// to start the sweep explicitly. The task is bound to `route_cancel` —
-    /// cancelling the route token aborts the task. This is the fix for
-    /// R3-C1's "no background sweep" half: a flood of unique keys within the
-    /// inline-retain window can no longer grow unbounded between calls.
+    /// is `None` (no TTL → no sweep). Populated lazily on the first
+    /// `poll_ready`. The task binds to the current `sweep_cancel` token via
+    /// `select!`; `StepLifecycle::start` clears this to `None` (aborting the
+    /// old task) so `poll_ready` respawns with the fresh token.
     sweep_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
@@ -81,12 +85,11 @@ impl std::fmt::Debug for AggregatorService {
 
 impl Drop for AggregatorService {
     fn drop(&mut self) {
-        // Defense-in-depth for the R3-C1 sweep: abort the background task when
-        // the service is dropped so it cannot leak even if the route owner
-        // forgets to cancel `route_cancel` (the primary shutdown path).
-        // `abort()` on an already-finished task is a no-op, so this is safe
-        // alongside the `select!` cancel path. This also gives `sweep_handle`
-        // a production reader so it is not dead-code.
+        // Defense-in-depth: abort the background sweep on drop so it cannot
+        // leak even if the route owner forgets to call `shutdown`. The
+        // primary shutdown path is now `StepLifecycle::shutdown` which
+        // cancels `sweep_cancel` and aborts `sweep_handle`. `abort()` on an
+        // already-finished task is a no-op.
         if let Some(handle) = self
             .sweep_handle
             .lock()
@@ -99,13 +102,15 @@ impl Drop for AggregatorService {
 }
 
 impl AggregatorService {
-    /// Lifecycle invariant: `route_cancel` is owned by the route. Construction
-    /// is runtime-free (no `tokio::spawn` here) so callers that build an
-    /// `AggregatorService` outside a tokio runtime — e.g. route-spec tests —
-    /// do not panic. When `config.bucket_ttl` is `Some`, the TTL-sweep task is
-    /// spawned LAZILY on the first `poll_ready` (a runtime is guaranteed
-    /// there) and bound to `route_cancel` via `select!`. The route owner MUST
-    /// cancel it on shutdown; `Drop` also aborts it as defense-in-depth.
+    /// Lifecycle invariant: `sweep_cancel` is initially seeded from the
+    /// route's cancellation token and wrapped in a swappable `Arc<Mutex<...>>`
+    /// cell. `StepLifecycle::start` replaces it with a fresh token so the
+    /// sweep respawns after a restart. Construction is runtime-free (no
+    /// `tokio::spawn` here). When `config.bucket_ttl` is `Some`, the TTL-sweep
+    /// task is spawned LAZILY on the first `poll_ready` and bound to the
+    /// current `sweep_cancel` token via `select!`.
+    /// The route owner MUST call `shutdown` to cancel it;
+    /// `Drop` also aborts it as defense-in-depth.
     pub fn new(
         config: AggregatorConfig,
         late_tx: mpsc::Sender<Exchange>,
@@ -150,7 +155,7 @@ impl AggregatorService {
             timeout_handles: Arc::new(Mutex::new(HashMap::new())),
             late_tx,
             language_registry,
-            route_cancel,
+            sweep_cancel: Arc::new(Mutex::new(route_cancel)),
             sweep_handle: Arc::new(Mutex::new(None)),
         }
     }
@@ -251,7 +256,44 @@ impl StepLifecycle for AggregatorService {
 
     async fn shutdown(&self, reason: StepShutdownReason) -> Result<(), CamelError> {
         tracing::debug!(reason = ?reason, "Aggregator shutdown via StepLifecycle");
+
+        // Cancel the sweep token so the background task's `select!` cancel
+        // branch fires and the task exits.
+        self.sweep_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel();
+
+        // Abort any running sweep handle (defense-in-depth alongside the
+        // token cancel above).
+        if let Some(handle) = self
+            .sweep_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
+
         self.shutdown_inner().await;
+        Ok(())
+    }
+
+    /// Resets the sweep for a fresh lifecycle: replaces the cancellation token
+    /// with a new one and aborts any existing sweep handle so the next
+    /// `poll_ready` respawns the sweep bound to the new token.
+    async fn start(&self) -> Result<(), CamelError> {
+        *self.sweep_cancel.lock().unwrap_or_else(|e| e.into_inner()) = CancellationToken::new();
+
+        if let Some(handle) = self
+            .sweep_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
+
         Ok(())
     }
 }
@@ -280,7 +322,11 @@ impl Service<Exchange> for AggregatorService {
             if g.is_none() {
                 let interval = std::cmp::max(ttl / 2, Duration::from_millis(50));
                 let buckets = Arc::clone(&self.buckets);
-                let cancel = self.route_cancel.clone();
+                let cancel = self
+                    .sweep_cancel
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 *g = Some(tokio::spawn(async move {
                     loop {
                         tokio::select! {
@@ -305,7 +351,6 @@ impl Service<Exchange> for AggregatorService {
         let timeout_handles = Arc::clone(&self.timeout_handles);
         let late_tx = self.late_tx.clone();
         let language_registry = Arc::clone(&self.language_registry);
-        let route_cancel = self.route_cancel.clone();
 
         Box::pin(async move {
             let key_value =
@@ -410,7 +455,6 @@ impl Service<Exchange> for AggregatorService {
                             late_tx,
                             config.strategy.clone(),
                             config.discard_on_timeout,
-                            route_cancel,
                         );
                         timeout_handles
                             .lock()
@@ -628,7 +672,6 @@ fn spawn_timeout_task(
     late_tx: mpsc::Sender<Exchange>,
     strategy: AggregationStrategy,
     discard: bool,
-    _route_cancel: CancellationToken,
 ) -> JoinHandle<()> {
     let cancel_clone = cancel.clone();
     tokio::spawn(async move {
@@ -1962,5 +2005,125 @@ mod tests {
             "strategy must observe the first message as `old` and the second as `new`, \
              with both bodies preserved unchanged"
         );
+    }
+
+    // ── Sweep lifecycle tests (aggregate-route-cancel-threading) ──────
+
+    #[tokio::test]
+    async fn sweep_shutdown_cancels_task() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(10)
+            .bucket_ttl(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let mut svc = AggregatorService::new(config, tx, registry, cancel);
+
+        let _ = svc.ready().await.unwrap();
+
+        assert!(
+            svc.sweep_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "sweep handle should be Some after poll_ready"
+        );
+
+        svc.shutdown(StepShutdownReason::RouteStop).await.unwrap();
+
+        assert!(
+            svc.sweep_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none(),
+            "sweep handle should be None after shutdown (taken + aborted)"
+        );
+        assert!(
+            svc.sweep_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_cancelled(),
+            "sweep_cancel token should be cancelled after shutdown"
+        );
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn sweep_start_respawns_after_shutdown() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(10)
+            .bucket_ttl(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let mut svc = AggregatorService::new(config, tx, registry, cancel);
+
+        let _ = svc.ready().await.unwrap();
+        svc.shutdown(StepShutdownReason::RouteStop).await.unwrap();
+
+        svc.start().await.unwrap();
+        let _ = svc.ready().await.unwrap();
+
+        assert!(
+            svc.sweep_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "sweep handle should be Some after start + poll_ready"
+        );
+        assert!(
+            !svc.sweep_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_cancelled(),
+            "sweep_cancel should be a fresh uncancelled token after start"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_shutdown_hotswap_cancels_task() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(10)
+            .bucket_ttl(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let (tx, _rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let mut svc = AggregatorService::new(config, tx, registry, cancel);
+
+        let _ = svc.ready().await.unwrap();
+
+        assert!(
+            svc.sweep_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "sweep handle should be Some after poll_ready"
+        );
+
+        svc.shutdown(StepShutdownReason::HotSwap).await.unwrap();
+
+        assert!(
+            svc.sweep_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none(),
+            "sweep handle should be None after HotSwap shutdown"
+        );
+        assert!(
+            svc.sweep_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_cancelled(),
+            "sweep_cancel token should be cancelled after HotSwap shutdown"
+        );
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
