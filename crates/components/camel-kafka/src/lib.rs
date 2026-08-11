@@ -31,6 +31,7 @@ pub mod config;
 pub mod consumer;
 pub mod health;
 pub mod manual_commit;
+pub(crate) mod metadata;
 pub mod producer;
 
 pub use broker_config::KafkaBrokerConfig;
@@ -42,8 +43,9 @@ pub use health::KafkaHealthCheck;
 pub use manual_commit::KafkaManualCommit;
 pub use producer::KafkaProducer;
 
-use camel_component_api::{BoxProcessor, CamelError};
+use camel_component_api::{BoxProcessor, CamelError, ComponentMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use metadata::KafkaMetadataDescriptor;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -88,6 +90,10 @@ impl Default for KafkaComponent {
 impl Component for KafkaComponent {
     fn scheme(&self) -> &str {
         "kafka"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        KafkaMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

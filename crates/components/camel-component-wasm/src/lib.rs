@@ -27,6 +27,7 @@ pub mod epoch;
 pub mod error;
 pub mod health;
 pub mod host_functions;
+pub(crate) mod metadata;
 pub mod producer;
 mod return_stream;
 pub mod runtime;
@@ -56,8 +57,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use camel_api::CamelError;
-use camel_component_api::{Component, ComponentContext, Endpoint};
+use camel_component_api::{Component, ComponentContext, ComponentMetadata, Endpoint};
 use camel_core::Registry;
+use metadata::WasmMetadataDescriptor;
 
 pub struct WasmComponent {
     registry: Arc<std::sync::Mutex<Registry>>,
@@ -116,6 +118,10 @@ impl WasmComponent {
 impl Component for WasmComponent {
     fn scheme(&self) -> &str {
         "wasm"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        WasmMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

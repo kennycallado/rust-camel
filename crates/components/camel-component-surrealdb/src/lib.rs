@@ -9,6 +9,7 @@ pub mod consumer;
 pub mod endpoint;
 pub mod error;
 pub mod headers;
+pub(crate) mod metadata;
 pub mod polling;
 pub mod pool_factory;
 pub mod producer;
@@ -18,7 +19,8 @@ pub mod vector;
 use std::sync::Arc;
 
 use camel_api::datasource::DatasourceCatalog;
-use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
+use camel_component_api::{CamelError, Component, ComponentContext, ComponentMetadata, Endpoint};
+use metadata::SurrealDbMetadataDescriptor;
 
 pub use bundle::SurrealDbBundle;
 pub use config::{SurrealDbEndpointConfig, SurrealDbOperation, VectorMetric};
@@ -70,6 +72,10 @@ impl Default for SurrealDbComponent {
 impl Component for SurrealDbComponent {
     fn scheme(&self) -> &str {
         "surrealdb"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        SurrealDbMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

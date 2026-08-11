@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use camel_api::component_metadata::ComponentMetadata;
 use camel_component_api::{
     BoxProcessor, CamelError, Component, ComponentContext, Consumer, Endpoint, ProducerContext,
     RuntimeObservability,
@@ -11,6 +12,7 @@ use crate::config::{
 };
 use crate::consumer::{GrpcConsumer, resolve_grpc_mode};
 use crate::health::GrpcHealthCheck;
+use crate::metadata::GrpcMetadataDescriptor;
 use crate::producer::GrpcProducer;
 
 pub struct GrpcComponent;
@@ -30,6 +32,10 @@ impl Default for GrpcComponent {
 impl Component for GrpcComponent {
     fn scheme(&self) -> &str {
         "grpc"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        GrpcMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

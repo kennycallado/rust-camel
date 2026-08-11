@@ -19,6 +19,7 @@ pub mod config;
 pub mod consumer;
 pub mod headers;
 pub mod health;
+pub(crate) mod metadata;
 pub mod producer;
 
 pub use bundle::JmsBundle;

@@ -19,6 +19,7 @@ pub mod config;
 pub mod consumer;
 pub mod error;
 pub mod health;
+pub(crate) mod metadata;
 pub mod pool;
 pub mod producer;
 

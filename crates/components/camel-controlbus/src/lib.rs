@@ -53,12 +53,15 @@ use tower::Service;
 use tracing::debug;
 
 use camel_component_api::{
-    Body, BoxProcessor, CamelError, Exchange, RouteAction, RuntimeCommand, RuntimeHandle,
-    RuntimeQuery, RuntimeQueryResult, parse_uri,
+    Body, BoxProcessor, CamelError, ComponentMetadata, Exchange, RouteAction, RuntimeCommand,
+    RuntimeHandle, RuntimeQuery, RuntimeQueryResult, parse_uri,
 };
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
+
+pub(crate) mod metadata;
 #[cfg(test)]
 use camel_component_api::{RouteStatus, RuntimeCommandBus, RuntimeCommandResult, RuntimeQueryBus};
+use metadata::ControlBusMetadataDescriptor;
 
 // ---------------------------------------------------------------------------
 // ControlBusComponent
@@ -83,6 +86,10 @@ impl Default for ControlBusComponent {
 impl Component for ControlBusComponent {
     fn scheme(&self) -> &str {
         "controlbus"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        ControlBusMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

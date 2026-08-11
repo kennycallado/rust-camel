@@ -3,6 +3,7 @@ pub mod config;
 pub mod consumer;
 pub mod endpoint;
 pub mod headers;
+pub(crate) mod metadata;
 pub mod producer;
 #[cfg(feature = "tls")]
 pub mod tls;
@@ -12,11 +13,12 @@ use std::sync::Arc;
 
 use camel_api::CamelError;
 use camel_component_api::{
-    BoxProcessor, Component, ComponentBundle, ComponentContext, ComponentRegistrar, Consumer,
-    Endpoint, ProducerContext, RuntimeObservability,
+    BoxProcessor, Component, ComponentBundle, ComponentContext, ComponentMetadata,
+    ComponentRegistrar, Consumer, Endpoint, ProducerContext, RuntimeObservability,
 };
 use config::{MqttBrokerConfig, MqttConfig, MqttEndpointConfig};
 use consumer::MqttConsumer;
+use metadata::MqttMetadataDescriptor;
 use producer::MqttProducer;
 use uri::parse_mqtt_uri;
 
@@ -64,6 +66,10 @@ impl Default for MqttComponent {
 impl Component for MqttComponent {
     fn scheme(&self) -> &str {
         "mqtt"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        MqttMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

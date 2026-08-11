@@ -4,6 +4,7 @@ pub mod component;
 pub mod config;
 pub mod consumer;
 pub mod health;
+pub(crate) mod metadata;
 pub mod mode;
 pub mod producer;
 pub mod server;

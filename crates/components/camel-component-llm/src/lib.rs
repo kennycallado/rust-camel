@@ -15,6 +15,7 @@ pub mod cost;
 pub mod endpoint;
 pub mod error;
 pub mod headers;
+pub(crate) mod metadata;
 pub mod producer;
 pub mod producer_cache;
 pub mod provider;
@@ -35,7 +36,8 @@ pub use provider::{
 use std::sync::Arc;
 use std::time::Duration;
 
-use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
+use camel_component_api::{CamelError, Component, ComponentContext, ComponentMetadata, Endpoint};
+use metadata::LlmMetadataDescriptor;
 use provider_factory::ProviderMap;
 
 /// Build a hardened `reqwest::Client` for outbound LLM HTTP traffic.
@@ -109,6 +111,10 @@ impl LlmComponent {
 impl Component for LlmComponent {
     fn scheme(&self) -> &str {
         "llm"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        LlmMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

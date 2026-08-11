@@ -12,6 +12,7 @@ pub mod events_endpoint_config;
 pub mod keycloak_consumer;
 pub mod keycloak_endpoint;
 pub mod keycloak_producer;
+pub(crate) mod metadata;
 pub mod uma;
 
 use std::fmt;
@@ -20,12 +21,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use camel_api::component_metadata::ComponentMetadata;
 use camel_api::{CamelError, SsrfPolicy, is_ssrf_blocked_ip};
 use camel_auth::claims::ClaimPaths;
 use camel_auth::oauth2::{ClientCredentialsProvider, TokenProvider};
 use camel_auth::permission::PermissionEvaluator;
 use camel_auth::types::AuthError;
 use camel_component_api::{Component, ComponentContext, Endpoint};
+use metadata::KeycloakMetadataDescriptor;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -359,6 +362,10 @@ impl KeycloakComponent {
 impl Component for KeycloakComponent {
     fn scheme(&self) -> &str {
         "keycloak"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        KeycloakMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

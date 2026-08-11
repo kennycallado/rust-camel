@@ -11,9 +11,11 @@ use crate::config::ValidatorConfig;
 use crate::xsd_bridge::{XsdBridge, XsdBridgeBackend};
 use camel_component_api::ComponentContext;
 use camel_component_api::{
-    BoxProcessor, CamelError, Component, Consumer, Endpoint, Exchange, ProducerContext,
-    RuntimeObservability,
+    BoxProcessor, CamelError, Component, ComponentMetadata, Consumer, Endpoint, Exchange,
+    ProducerContext, RuntimeObservability,
 };
+
+use crate::metadata::ValidatorMetadataDescriptor;
 
 pub struct ValidatorComponent {
     xsd_bridge: Arc<dyn XsdBridge>,
@@ -51,6 +53,10 @@ impl Default for ValidatorComponent {
 impl Component for ValidatorComponent {
     fn scheme(&self) -> &str {
         "validator"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        ValidatorMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

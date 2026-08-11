@@ -716,6 +716,10 @@ impl Component for JmsComponent {
         &self.scheme
     }
 
+    fn metadata(&self) -> camel_component_api::ComponentMetadata {
+        crate::metadata::JmsMetadataDescriptor::metadata()
+    }
+
     fn create_endpoint(
         &self,
         uri: &str,

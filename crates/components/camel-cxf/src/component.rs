@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use camel_component_api::{
-    BoxProcessor, CamelError, Component, Consumer, Endpoint, ProducerContext,
+    BoxProcessor, CamelError, Component, ComponentMetadata, Consumer, Endpoint, ProducerContext,
 };
 
 use crate::config::{CxfEndpointConfig, CxfProfileConfig};
 use crate::consumer::CxfConsumer;
 use crate::health::CxfHealthCheck;
+use crate::metadata::CxfMetadataDescriptor;
 use crate::pool::CxfBridgePool;
 use crate::producer::CxfProducer;
 
@@ -27,6 +28,10 @@ impl CxfComponent {
 impl Component for CxfComponent {
     fn scheme(&self) -> &str {
         "cxf"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        CxfMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

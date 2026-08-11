@@ -31,10 +31,12 @@ pub mod config;
 pub mod consumer;
 pub mod executor;
 pub mod health;
+pub(crate) mod metadata;
 pub mod producer;
 
-use camel_component_api::{BoxProcessor, CamelError};
+use camel_component_api::{BoxProcessor, CamelError, ComponentMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
+use metadata::RedisMetadataDescriptor;
 use std::sync::Arc;
 
 pub use bundle::RedisBundle;
@@ -78,6 +80,10 @@ impl Default for RedisComponent {
 impl Component for RedisComponent {
     fn scheme(&self) -> &str {
         "redis"
+    }
+
+    fn metadata(&self) -> ComponentMetadata {
+        RedisMetadataDescriptor::metadata()
     }
 
     fn create_endpoint(

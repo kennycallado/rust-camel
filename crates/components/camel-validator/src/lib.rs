@@ -9,6 +9,7 @@ pub mod compiled;
 pub mod component;
 pub mod config;
 pub mod error;
+pub(crate) mod metadata;
 pub mod resolver;
 pub mod xsd_bridge;
 
