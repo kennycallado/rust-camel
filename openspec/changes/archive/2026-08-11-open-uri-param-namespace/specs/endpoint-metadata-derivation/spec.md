@@ -228,6 +228,30 @@ option via a new consuming builder
 `UriOption::pattern_prefix(separator: &str) -> Self` that sets
 `pattern: Some(UriOptionMatch::Prefix { separator: separator.to_string() })`.
 
+#### Scenario: secret key sets the secret flag
+
+- **GIVEN** a `#[uri_param(secret)]` field
+- **WHEN** the macro generates the `UriOption`
+- **THEN** the option `secret` flag is `true`
+
+#### Scenario: deprecated key records the reason
+
+- **GIVEN** a `#[uri_param(deprecated = "use newX instead")]` field
+- **WHEN** the macro generates the `UriOption`
+- **THEN** the option `deprecated` is `Some("use newX instead")`
+
+#### Scenario: aliases key populates the alias list
+
+- **GIVEN** a `#[uri_param(aliases = ["oldName", "legacyName"])]` field
+- **WHEN** the macro generates the `UriOption`
+- **THEN** the option `aliases` contains `"oldName"` and `"legacyName"`
+
+#### Scenario: unknown key remains an error
+
+- **GIVEN** a `#[uri_param(unknwonKey = "value")]` field
+- **WHEN** the macro is expanded
+- **THEN** compilation fails with an "unknown attribute key" error
+
 #### Scenario: pattern key on a Vec of pairs produces a namespace option
 
 - **GIVEN** a `#[uri_param(pattern = "param.")]` field of type `Vec<(String, String)>`
@@ -287,9 +311,3 @@ option via a new consuming builder
 - **GIVEN** a `#[uri_param(pattern = "param/")]` field of type `Vec<(String, String)>`
 - **WHEN** the macro is expanded
 - **THEN** compilation fails with a spanned error indicating the separator must end with `.` (the only permitted separator shape in this version; future `UriOptionMatch` variants may relax this)
-
-#### Scenario: existing semantic keys remain unchanged
-
-- **GIVEN** a `#[uri_param(secret)]` field with no `pattern` key (existing behavior)
-- **WHEN** the macro generates the `UriOption`
-- **THEN** the option has `secret = true`, `pattern = None`, and all other fields unchanged from pre-change behavior
