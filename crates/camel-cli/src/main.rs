@@ -75,6 +75,9 @@ enum Commands {
 
     /// Lint a route file against the production component catalog.
     Lint(commands::lint::LintArgs),
+
+    /// Start Language Server Protocol server over stdio.
+    Lsp,
 }
 
 #[derive(Subcommand)]
@@ -141,6 +144,10 @@ async fn main() {
         }
         Commands::Lint(args) => {
             commands::lint::run(args).await;
+        }
+        Commands::Lsp => {
+            let code = commands::lsp::run().await;
+            std::process::exit(code);
         }
     }
 }

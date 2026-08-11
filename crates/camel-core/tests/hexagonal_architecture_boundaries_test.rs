@@ -865,3 +865,36 @@ fn camel_lint_has_no_runtime_dep() {
         "camel-lint must not depend on camel-dsl (architecture boundary)"
     );
 }
+
+#[test]
+fn camel_lsp_has_no_runtime_dep() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let lsp_manifest = workspace_root.join("crates/camel-lsp/Cargo.toml");
+    assert!(
+        lsp_manifest.exists(),
+        "expected camel-lsp manifest at {}",
+        lsp_manifest.display()
+    );
+
+    let deps = crate_declared_deps(lsp_manifest.to_str().unwrap());
+
+    assert!(
+        !deps.contains("camel-core"),
+        "camel-lsp must not depend on camel-core (architecture boundary)"
+    );
+    assert!(
+        !deps.contains("camel-dsl"),
+        "camel-lsp must not depend on camel-dsl (architecture boundary)"
+    );
+    assert!(
+        !deps.contains("camel-cli"),
+        "camel-lsp must not depend on camel-cli (architecture boundary)"
+    );
+    assert!(
+        !deps.contains("camel-api"),
+        "camel-lsp must not depend on camel-api (architecture boundary); \
+         use re-exports from camel-lint"
+    );
+}

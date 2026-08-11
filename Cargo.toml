@@ -81,6 +81,7 @@ camel-function = { path = "crates/services/camel-function", version = "=0.27.0" 
 camel-dsl = { path = "crates/camel-dsl", version = "=0.27.0" }
 camel-builder = { path = "crates/camel-builder", version = "=0.27.0" }
 camel-lint = { path = "crates/camel-lint", version = "=0.27.0" }
+camel-lsp = { path = "crates/camel-lsp", version = "=0.27.0" }
 camel-component-api = { path = "crates/components/camel-component-api", version = "=0.27.0" }
 camel-endpoint = { path = "crates/camel-endpoint", version = "=0.27.0" }
 camel-endpoint-macros = { path = "crates/camel-endpoint-macros", version = "=0.27.0" }
@@ -139,6 +140,7 @@ tonic-prost-build = { version = "0.14" }
 tonic-prost = { version = "0.14" }
 protoc-bin-vendored = "3"
 tower = { version = "0.5", features = ["util"] }
+tower-lsp = "0.20"
 tower-http = { version = "0.7", features = ["fs"] }
 async-trait = "0.1"
 thiserror = "2"

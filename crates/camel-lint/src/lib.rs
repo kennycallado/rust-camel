@@ -1,19 +1,30 @@
 pub const ROUTE_SCHEMA: &str = include_str!("../schema/route-schema.json");
 
+pub mod completion;
 pub mod diagnostic;
 pub mod document;
 pub mod engine;
 pub mod error;
+pub mod hover;
 pub mod route_view;
 pub mod rule;
 pub mod rules;
 
+pub use completion::*;
 pub use diagnostic::*;
 pub use document::*;
 pub use engine::*;
 pub use error::*;
+pub use hover::*;
 pub use route_view::*;
 pub use rule::*;
+
+// Re-export metadata types so downstream crates (e.g. camel-lsp) can access
+// ComponentMetadataCatalog and its associated types via camel-lint without
+// depending on camel-api directly.
+pub use camel_api::component_metadata::{
+    CapabilityQuery, ComponentMetadata, ComponentMetadataCatalog, OptionKind, UriOption,
+};
 
 #[cfg(test)]
 pub(crate) mod test_support;

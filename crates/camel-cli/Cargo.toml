@@ -71,6 +71,8 @@ camel-wit.workspace = true
 camel-auth.workspace = true
 camel-component-keycloak.workspace = true
 camel-lint.workspace = true
+camel-lsp.workspace = true
+tower-lsp.workspace = true
 ariadne.workspace = true
 rustls.workspace = true
 camel-component-surrealdb = { workspace = true, optional = true }

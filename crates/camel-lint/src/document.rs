@@ -70,59 +70,101 @@ impl Document {
         }
     }
 
+    /// Apply a raw byte-range edit to this document.
+    ///
+    /// Replaces `[start, end)` in the source with `replacement`, re-parses the
+    /// result, and **always commits** the new state — including when the
+    /// re-parse produces a [`ParseFailure`]. This mirrors an editor's live
+    /// state: intermediate edits routinely produce invalid syntax, and the
+    /// document must reflect the editor's actual text so R-SYN can report the
+    /// syntax error.
+    ///
+    /// Returns `Err` ONLY for structural problems that prevent applying the
+    /// edit at all: an out-of-bounds range, a non-character-boundary offset,
+    /// or (when the CST path is used) a `replace_span` rejection. On `Err`
+    /// the document is left unchanged.
+    ///
+    /// This is the low-level edit primitive. [`apply_fix`](Document::apply_fix)
+    /// delegates to it for the byte replacement but adds a transactional
+    /// rollback when the result has a `parse_failure`.
+    pub fn apply_edit(
+        &mut self,
+        start: usize,
+        end: usize,
+        replacement: &str,
+    ) -> Result<(), LintError> {
+        // Try the CST path first: it preserves span fidelity. When the
+        // current source cannot be parsed (e.g. during an in-progress editor
+        // edit), fall back to raw string manipulation.
+        let new_raw = match cst::parse_document(&self.raw) {
+            Ok(mut cst_doc) => {
+                cst_doc
+                    .replace_span(start, end, replacement)
+                    .map_err(|e| LintError::Internal(format!("apply_edit edit rejected: {e}")))?;
+                cst_doc.source().to_string()
+            }
+            Err(_) => {
+                // CST parse failed (source currently has parse_failure). The
+                // always-commits contract requires applying edits even to broken
+                // documents (spec scenario "apply_edit recovers invalid→valid"),
+                // so fall back to raw byte-splicing instead of returning Err.
+                if start > self.raw.len() || end > self.raw.len() || start > end {
+                    return Err(LintError::Internal(format!(
+                        "apply_edit edit rejected: range ({start}, {end}) out of bounds for source length {}",
+                        self.raw.len()
+                    )));
+                }
+                if !self.raw.is_char_boundary(start) || !self.raw.is_char_boundary(end) {
+                    return Err(LintError::Internal(format!(
+                        "apply_edit edit rejected: range ({start}, {end}) not on character boundary"
+                    )));
+                }
+                let mut s =
+                    String::with_capacity(self.raw.len() - (end - start) + replacement.len());
+                s.push_str(&self.raw[..start]);
+                s.push_str(replacement);
+                s.push_str(&self.raw[end..]);
+                s
+            }
+        };
+
+        let reparsed = Document::parse(&new_raw);
+        self.raw = reparsed.raw;
+        self.route_view = reparsed.route_view;
+        self.parse_failure = reparsed.parse_failure;
+        Ok(())
+    }
+
     /// Apply a suggested [`Fix`] to this document.
     ///
-    /// Substitutes `fix.replacement` into `fix.span` via the noyalib CST
-    /// [`replace_span`](cst::Document::replace_span), then re-parses the result
-    /// and refreshes [`raw`](Document::raw) / [`route_view`](Document::route_view)
-    /// / [`parse_failure`](Document::parse_failure).
+    /// Substitutes `fix.replacement` into `fix.span` via [`apply_edit`], then
+    /// checks the result: if the re-parse produces a [`ParseFailure`], the edit
+    /// is **rolled back** (the document is restored to its pre-edit state) and
+    /// an `Err` is returned. Automated fixes must never break syntax.
     ///
-    /// On an edit that breaks syntax — or an out-of-bounds /
-    /// non-character-boundary span — returns [`LintError::Internal`] and leaves
-    /// the document **unchanged** (no field is mutated before the edit is
-    /// fully validated, so there is nothing to roll back).
+    /// On an out-of-bounds or non-character-boundary span — or any other error
+    /// from `apply_edit` — returns [`LintError::Internal`] and leaves the
+    /// document unchanged.
     ///
     /// This is a document-level operation: the engine is stateless and never
     /// retains a `Document`. A caller applies a fix with `doc.apply_fix(&fix)`
     /// and then re-runs `engine.lint(&doc.raw)` to obtain refreshed
     /// diagnostics.
     pub fn apply_fix(&mut self, fix: &Fix) -> Result<(), LintError> {
-        // Re-parse the current source into a CST document to drive
-        // `replace_span`. The stored source is normally clean (rules never
-        // emit fixes for a document that failed to parse), but the guard is
-        // cheap and keeps `apply_fix` total over its inputs.
-        let mut cst_doc = match cst::parse_document(&self.raw) {
-            Ok(d) => d,
-            Err(e) => {
-                return Err(LintError::Internal(format!(
-                    "apply_fix source un-parseable: {e}"
-                )));
+        let pre_edit = self.clone();
+        match self.apply_edit(fix.span.start, fix.span.end, &fix.replacement) {
+            Ok(()) => {
+                if self.parse_failure.is_some() {
+                    // Roll back: the fix broke syntax.
+                    *self = pre_edit;
+                    return Err(LintError::Internal(
+                        "apply_fix produced invalid syntax".into(),
+                    ));
+                }
+                Ok(())
             }
-        };
-
-        // `replace_span` rejects out-of-bounds / non-character-boundary ranges
-        // and re-parses internally. A syntactically broken replacement may
-        // still slip through noyalib's lenient recovery, so the authoritative
-        // syntax gate is the `Document::parse` re-parse below.
-        if let Err(e) = cst_doc.replace_span(fix.span.start, fix.span.end, &fix.replacement) {
-            return Err(LintError::Internal(format!("apply_fix edit rejected: {e}")));
+            Err(e) => Err(e),
         }
-
-        let new_raw = cst_doc.source().to_string();
-        let reparsed = Document::parse(&new_raw);
-        if reparsed.parse_failure.is_some() {
-            // Edit broke syntax. Nothing has been mutated yet, so the document
-            // stays byte-identical to its pre-edit state.
-            return Err(LintError::Internal(
-                "apply_fix produced invalid syntax".into(),
-            ));
-        }
-
-        // Commit the refreshed view (only reached on a clean re-parse).
-        self.raw = reparsed.raw;
-        self.route_view = reparsed.route_view;
-        self.parse_failure = reparsed.parse_failure;
-        Ok(())
     }
 }
 
@@ -542,6 +584,128 @@ mod tests {
         // only when a rule is registered).
         let diags = engine.lint("from: direct:start\n  unclosed: [");
         assert!(diags.is_empty());
+    }
+
+    // ---- apply_edit / apply_fix refactor (Task 1.1) ----
+
+    #[test]
+    fn apply_edit_replaces_range() {
+        // Byte layout: from: =0-5, direct:=6-12, start=13-17, \n=18
+        let mut doc = Document::parse("from: direct:start\n");
+        assert!(doc.parse_failure.is_none(), "fixture must parse cleanly");
+        doc.apply_edit(13, 18, "end")
+            .expect("edit within valid bounds must succeed");
+        assert_eq!(doc.raw, "from: direct:end\n");
+        assert!(doc.parse_failure.is_none(), "re-parsed doc must be valid");
+    }
+
+    #[test]
+    fn apply_edit_commits_syntax_breaking_edit() {
+        use crate::diagnostic::DiagnosticCode;
+
+        let engine = timer_log_engine();
+        let source = "from: direct:start\nsteps:\n  - to: log:out\n";
+        let mut doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "fixture must parse cleanly");
+
+        // Replace the `to` endpoint value with `[` — yields an unclosed
+        // flow sequence (`to: [`) which breaks YAML syntax.
+        let endpoints = doc.route_view.endpoints();
+        let to_ep = endpoints
+            .iter()
+            .find(|e| e.uri.value.starts_with("log:"))
+            .expect("log endpoint must be captured");
+        doc.apply_edit(to_ep.uri.span.start, to_ep.uri.span.end, "[")
+            .expect("syntax-breaking edit must commit (not reject)");
+
+        assert!(
+            doc.parse_failure.is_some(),
+            "parse_failure must be set after a syntax-breaking edit"
+        );
+        assert!(doc.raw.contains('['), "raw must reflect the edited text");
+        let diags = engine.lint(&doc.raw);
+        let syn_count = diags
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::RSyn)
+            .count();
+        assert!(
+            syn_count >= 1,
+            "expected at least one R-SYN diagnostic; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn apply_edit_recovers_invalid_to_valid() {
+        let source = "steps:\n  - to: timer:foo\n  bad: [";
+        let mut doc = Document::parse(source);
+        assert!(doc.parse_failure.is_some(), "fixture must be broken");
+
+        // Replace entire content with a valid, minimal route.
+        let valid = "from: direct:ok\n";
+        doc.apply_edit(0, source.len(), valid)
+            .expect("replacing broken content with valid must succeed");
+
+        assert!(
+            doc.parse_failure.is_none(),
+            "re-parsed doc must be valid after fixing"
+        );
+        assert_eq!(doc.raw, valid);
+        assert!(
+            doc.route_view.from.is_some(),
+            "route_view must reflect the now-valid structure"
+        );
+    }
+
+    #[test]
+    fn apply_edit_rejects_out_of_bounds() {
+        // 20-byte valid source: "from: direct:abcdef\n" = 20 bytes
+        let source = "from: direct:abcdef\n";
+        assert_eq!(source.len(), 20, "pre-condition: 20-byte source");
+        let mut doc = Document::parse(source);
+        let original_raw = doc.raw.clone();
+
+        let err = doc
+            .apply_edit(0, 25, "x")
+            .expect_err("out-of-bounds edit must be rejected");
+        assert!(
+            matches!(err, crate::error::LintError::Internal(_)),
+            "expected LintError::Internal, got: {err:?}"
+        );
+        assert_eq!(
+            doc.raw, original_raw,
+            "document must be byte-identical to pre-edit state"
+        );
+    }
+
+    #[test]
+    fn apply_fix_rolls_back_on_parse_failure() {
+        use crate::diagnostic::Fix;
+
+        let source = "from: direct:start\nsteps:\n  - to: log:out\n";
+        let mut doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "fixture must parse cleanly");
+        let original_raw = doc.raw.clone();
+
+        let endpoints = doc.route_view.endpoints();
+        let to_ep = endpoints
+            .iter()
+            .find(|e| e.uri.value.starts_with("log:"))
+            .expect("log endpoint must be captured");
+        let fix = Fix {
+            span: Span::new(to_ep.uri.span.start, to_ep.uri.span.end),
+            replacement: "[".to_string(),
+        };
+        let err = doc
+            .apply_fix(&fix)
+            .expect_err("syntax-breaking fix must be rejected");
+        assert!(
+            matches!(err, crate::error::LintError::Internal(_)),
+            "expected LintError::Internal, got: {err:?}"
+        );
+        assert_eq!(
+            doc.raw, original_raw,
+            "document must be byte-identical after rollback"
+        );
     }
 
     // ---- URI allowlist regression (Task 1.3 fix) ----
