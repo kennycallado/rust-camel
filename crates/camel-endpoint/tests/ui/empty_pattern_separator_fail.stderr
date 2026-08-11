@@ -1,0 +1,5 @@
+error: #[uri_param] `pattern` separator must be non-empty
+  --> tests/ui/empty_pattern_separator_fail.rs:10:5
+   |
+10 |     bad: Vec<(String, String)>,
+   |     ^^^

@@ -129,6 +129,27 @@ Trait defining the query interface for runtime component metadata lookup. Return
 implemented by `RuntimeComponentMetadataCatalog` in camel-core.
 _Avoid_: metadata store, metadata service
 
+**UriOptionMatch**:
+`#[non_exhaustive]` enum describing how a `UriOption` with `pattern: Some(_)` matches URI query
+keys. Initial variant: `Prefix { separator: String }`. The `#[non_exhaustive]` posture follows
+ADR-0049 (forward-compat: future variants like `Glob` or `Regex` are additive). Defined in
+`component_metadata.rs`.
+_Avoid_: pattern matcher, match type
+
+**UriOption.pattern**:
+Optional `pattern: Option<UriOptionMatch>` field on `UriOption`. When `Some`, the option matches
+URI query keys by prefix instead of by exact name; the `name` field becomes a documentation anchor
+and does not participate in matching. Serialized with
+`#[serde(default, skip_serializing_if = "Option::is_none")]` — absent for legacy options, so
+existing JSON output is byte-identical. Defined in `component_metadata.rs`.
+_Avoid_: match field, namespace flag
+
+**UriOption::pattern_prefix**:
+Consuming builder `UriOption::pattern_prefix(separator: &str) -> Self` that sets
+`pattern: Some(UriOptionMatch::Prefix { separator: separator.to_string() })`. Mirrors the
+`secret`/`required`/`deprecated` builder shape. Defined in `component_metadata.rs`.
+_Avoid_: with_pattern, set_pattern
+
 **IdempotentRepository**:
 Key-only pluggable store for the Idempotent Consumer EIP (`trait IdempotentRepository`). `contains()` returns
 `Result<bool, CamelError>` (NOT `bool`) — backends (Redis, SQL) propagate transient failures as

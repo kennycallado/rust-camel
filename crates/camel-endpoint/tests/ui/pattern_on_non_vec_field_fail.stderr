@@ -1,0 +1,5 @@
+error: `pattern` is only valid on fields of type `Vec<(String, String)>`
+  --> tests/ui/pattern_on_non_vec_field_fail.rs:10:5
+   |
+10 |     bad: String,
+   |     ^^^

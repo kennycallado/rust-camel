@@ -26,6 +26,23 @@ pub enum OptionKind {
 }
 
 // ---------------------------------------------------------------------------
+// UriOptionMatch — pattern matching for open-namespace URI options
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[cfg_attr(feature = "schema", ts(rename_all = "snake_case"))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum UriOptionMatch {
+    #[serde(rename_all = "snake_case")]
+    Prefix {
+        #[cfg_attr(feature = "schema", schemars(default))]
+        separator: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // UriOption — a single URI-parameter definition with builder
 // ---------------------------------------------------------------------------
 
@@ -48,6 +65,9 @@ pub struct UriOption {
     #[cfg_attr(feature = "schema", schemars(default))]
     #[serde(default)]
     pub secret: bool,
+    #[cfg_attr(feature = "schema", schemars(default))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<UriOptionMatch>,
 }
 
 impl UriOption {
@@ -61,6 +81,7 @@ impl UriOption {
             aliases: Vec::new(),
             deprecated: None,
             secret: false,
+            pattern: None,
         }
     }
 
@@ -91,6 +112,14 @@ impl UriOption {
     #[must_use]
     pub fn secret(mut self) -> Self {
         self.secret = true;
+        self
+    }
+
+    #[must_use]
+    pub fn pattern_prefix(mut self, separator: &str) -> Self {
+        self.pattern = Some(UriOptionMatch::Prefix {
+            separator: separator.to_string(),
+        });
         self
     }
 }
@@ -252,6 +281,79 @@ pub trait ComponentMetadataCatalog: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // UriOptionMatch tests — TDD: written before implementation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pattern_prefix_sets_prefix_variant() {
+        let opt = UriOption::new("param", "desc", OptionKind::String).pattern_prefix("param.");
+
+        assert_eq!(
+            opt.pattern,
+            Some(UriOptionMatch::Prefix {
+                separator: "param.".to_string()
+            })
+        );
+        // All original fields unchanged
+        assert_eq!(opt.name, "param");
+        assert_eq!(opt.description, "desc");
+        assert_eq!(opt.kind, OptionKind::String);
+        assert!(!opt.secret);
+        assert!(!opt.required);
+        assert_eq!(opt.default_value, None);
+        assert!(opt.aliases.is_empty());
+        assert_eq!(opt.deprecated, None);
+    }
+
+    #[test]
+    fn pattern_defaults_to_none() {
+        let opt = UriOption::new("foo", "desc", OptionKind::String);
+        assert_eq!(opt.pattern, None);
+    }
+
+    #[test]
+    fn serialize_pattern_none_omits_field() {
+        let opt = UriOption::new("foo", "desc", OptionKind::String);
+        // Fixture: serialize the pre-change struct shape (no pattern field).
+        let fixture = serde_json::to_string(&opt).unwrap();
+        // After adding pattern: None with skip_serializing_if, bytes must be identical.
+        assert!(
+            !fixture.contains("\"pattern\""),
+            "serialized JSON should not contain \"pattern\" when pattern is None, got: {fixture}"
+        );
+        // Roundtrip: the fixture must deserialize back to the same shape.
+        let roundtripped: UriOption = serde_json::from_str(&fixture).unwrap();
+        assert_eq!(opt, roundtripped);
+    }
+
+    #[test]
+    fn serialize_pattern_some_emits_externally_tagged_snake_case() {
+        let opt = UriOption::new("param", "desc", OptionKind::String).pattern_prefix("param.");
+        let json = serde_json::to_string(&opt).unwrap();
+        assert!(
+            json.contains("\"pattern\":{\"prefix\":{\"separator\":\"param.\"}}"),
+            "expected externally-tagged snake_case serialization, got: {json}"
+        );
+    }
+
+    #[test]
+    fn deserialize_pattern_some_roundtrips() {
+        let opt = UriOption::new("param", "desc", OptionKind::String).pattern_prefix("param.");
+        let json = serde_json::to_string(&opt).unwrap();
+        let deser: UriOption = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deser.pattern,
+            Some(UriOptionMatch::Prefix {
+                separator: "param.".to_string()
+            })
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pre-existing tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn uri_option_builder_chain() {

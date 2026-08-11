@@ -138,6 +138,8 @@ fn analyze_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostic::Span;
+    use crate::route_view::{LintOption, Spanned, resolve_option};
     use crate::test_support::StubCatalog;
     use camel_api::component_metadata::{
         ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
@@ -341,5 +343,164 @@ mod tests {
             .unwrap();
         assert_eq!(slice(source, &d.span), "maybe");
         assert_eq!(d.severity, Severity::Error);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pattern prefix resolution tests (open-namespace URI options)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a `LintOption` with a bare key (no value) at a dummy span.
+    fn lint_option(key: &str) -> LintOption {
+        LintOption {
+            key: Spanned {
+                value: key.to_string(),
+                span: Span::new(0, key.len()),
+            },
+            value: None,
+        }
+    }
+
+    #[test]
+    fn pattern_prefix_resolves_non_empty_suffix() {
+        let uri_options =
+            vec![UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param.")];
+        let opt = lint_option("param.foo");
+        let result = resolve_option(&opt, &uri_options);
+        assert!(
+            result.is_some(),
+            "param.foo should match pattern_prefix(\"param.\")"
+        );
+        assert_eq!(result.unwrap().name, "param");
+    }
+
+    #[test]
+    fn pattern_prefix_rejects_empty_suffix() {
+        let uri_options =
+            vec![UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param.")];
+        let opt = lint_option("param.");
+        let result = resolve_option(&opt, &uri_options);
+        assert!(
+            result.is_none(),
+            "param. should NOT match pattern_prefix(\"param.\") — empty suffix"
+        );
+    }
+
+    #[test]
+    fn pattern_prefix_rejects_unrelated_key() {
+        let uri_options =
+            vec![UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param.")];
+        let opt = lint_option("direction");
+        let result = resolve_option(&opt, &uri_options);
+        assert!(
+            result.is_none(),
+            "direction should NOT match pattern_prefix(\"param.\")"
+        );
+    }
+
+    #[test]
+    fn discrete_option_wins_over_pattern_on_name_collision() {
+        let uri_options = vec![
+            UriOption::new("param.foo", "discrete", OptionKind::String),
+            UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param."),
+        ];
+        let opt = lint_option("param.foo");
+        let result = resolve_option(&opt, &uri_options);
+        assert!(
+            result.is_some(),
+            "param.foo should resolve to the discrete option"
+        );
+        let hit = result.unwrap();
+        assert_eq!(hit.name, "param.foo");
+        assert!(
+            hit.pattern.is_none(),
+            "should be the discrete option, not the patterned one"
+        );
+    }
+
+    #[test]
+    fn discrete_option_wins_when_pattern_derived_name_collides() {
+        // Both options have name == "param"; one has pattern, one doesn't.
+        // The pattern option's derived name should NOT participate in Phase-1 matching.
+        let uri_options = vec![
+            UriOption::new("param", "discrete", OptionKind::String),
+            UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param."),
+        ];
+        let opt = lint_option("param");
+        let result = resolve_option(&opt, &uri_options);
+        assert!(
+            result.is_some(),
+            "param (no suffix) should resolve to the discrete option"
+        );
+        let hit = result.unwrap();
+        assert_eq!(hit.description, "discrete");
+        assert!(
+            hit.pattern.is_none(),
+            "should be the discrete option, not the patterned one"
+        );
+    }
+
+    #[test]
+    fn longest_pattern_separator_wins() {
+        let uri_options = vec![
+            UriOption::new("param", "short", OptionKind::String).pattern_prefix("param."),
+            UriOption::new("param.foo", "long", OptionKind::String).pattern_prefix("param.foo."),
+        ];
+        let opt = lint_option("param.foo.bar");
+        let result = resolve_option(&opt, &uri_options);
+        assert!(
+            result.is_some(),
+            "param.foo.bar should match (longer separator wins)"
+        );
+        let hit = result.unwrap();
+        assert_eq!(hit.description, "long");
+    }
+
+    #[test]
+    fn shorter_pattern_wins_when_longer_does_not_match() {
+        let uri_options = vec![
+            UriOption::new("param", "short", OptionKind::String).pattern_prefix("param."),
+            UriOption::new("param.foo", "long", OptionKind::String).pattern_prefix("param.foo."),
+        ];
+        let opt = lint_option("param.baz");
+        let result = resolve_option(&opt, &uri_options);
+        assert!(
+            result.is_some(),
+            "param.baz should match the short pattern_prefix(\"param.\")"
+        );
+        let hit = result.unwrap();
+        assert_eq!(hit.description, "short");
+    }
+
+    #[test]
+    fn alias_match_skipped_for_pattern_options() {
+        let uri_options = vec![
+            UriOption::new("param", "namespace", OptionKind::String)
+                .with_alias("legacy")
+                .pattern_prefix("param."),
+        ];
+        let opt = lint_option("legacy");
+        let result = resolve_option(&opt, &uri_options);
+        assert!(
+            result.is_none(),
+            "legacy alias should NOT match a patterned option — aliases do not participate in Phase 1 for pattern options"
+        );
+    }
+
+    #[test]
+    fn pattern_option_covers_multiple_distinct_suffixes() {
+        let uri_options =
+            vec![UriOption::new("param", "namespace", OptionKind::String).pattern_prefix("param.")];
+
+        let result_a = resolve_option(&lint_option("param.a"), &uri_options);
+        let result_b = resolve_option(&lint_option("param.b"), &uri_options);
+        let result_long = resolve_option(&lint_option("param.longName"), &uri_options);
+
+        let hit_a = result_a.expect("param.a should resolve");
+        let hit_b = result_b.expect("param.b should resolve");
+        let hit_long = result_long.expect("param.longName should resolve");
+
+        // All three distinct suffixes resolve to the SAME option.
+        assert!(std::ptr::eq(hit_a, hit_b));
+        assert!(std::ptr::eq(hit_a, hit_long));
     }
 }

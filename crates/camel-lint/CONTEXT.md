@@ -105,6 +105,28 @@ engine does not produce. Set-equality, not positional. The baseline is checked i
 any change to rule behaviour must update it.
 _Avoid_: snapshot test, golden file (the baseline is RON, not a snapshot of raw output)
 
+## `resolve_option` semantics (open namespace)
+
+The shared helper `resolve_option` matches a URI query key against a scheme's
+`UriOption` list in two phases:
+
+1. **Phase 1 — exact-name or alias match.** Considers only options whose
+   `pattern` field is `None`. The first option whose `name` equals the key, or
+   whose `aliases` contains the key, wins. Pattern options do not participate.
+2. **Phase 2 — pattern match.** Considers only options whose `pattern` field is
+   `Some(_)`. Options are ordered by **descending separator length** (longest
+   prefix wins). The first option whose `Prefix.separator` the key starts with,
+   AND whose remaining suffix is non-empty, wins. A bare `param.` key does NOT
+   match a `Prefix { separator: "param." }` option.
+
+If neither phase produces a match, the key is an `UnknownOption` diagnostic.
+
+This two-phase order ensures that a discrete option named `param.foo` wins over
+a pattern option with separator `param.` for the key `param.foo` (exact-name
+match at Phase 1 before pattern match at Phase 2). Among overlapping patterns,
+the longest separator wins (e.g. `param.foo.bar` matches `param.foo.` over
+`param.`).
+
 ## Example dialogue
 
 > "Does camel-lint need a running CamelContext?"

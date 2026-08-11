@@ -10,7 +10,7 @@
 //! macro's existing parse codegen requires `FromStr` (bare `Duration` and
 //! `Vec<T>` do not implement it). Inference of those kinds is exercised there.
 
-use camel_api::component_metadata::{ComponentMetadata, OptionKind, UriOption};
+use camel_api::component_metadata::{ComponentMetadata, OptionKind, UriOption, UriOptionMatch};
 use camel_endpoint_macros::UriConfig;
 
 // ---------------------------------------------------------------------------
@@ -292,4 +292,91 @@ fn metadata_skip_impl_combinable() {
     let meta = C::metadata();
     assert_eq!(meta.uri_options.len(), 1);
     assert!(meta.capabilities.supports_consumer);
+}
+
+// ---------------------------------------------------------------------------
+// Open namespace URI options (task 2.1) — `#[uri_param(pattern = "..")]`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pattern_field_produces_namespace_option() {
+    #[derive(UriConfig)]
+    #[uri_scheme = "ns1"]
+    #[allow(dead_code)]
+    struct C {
+        path: String,
+        #[uri_param(pattern = "param.")]
+        params: Vec<(String, String)>,
+    }
+    let opts = C::uri_options();
+    assert_eq!(opts.len(), 1);
+    let entry = &opts[0];
+    assert_eq!(entry.name, "param");
+    assert_eq!(entry.kind, OptionKind::String);
+    assert_eq!(
+        entry.pattern,
+        Some(UriOptionMatch::Prefix {
+            separator: "param.".to_string()
+        })
+    );
+}
+
+#[test]
+fn pattern_field_with_other_scalar_params_coexist() {
+    #[derive(UriConfig)]
+    #[uri_scheme = "ns2"]
+    #[allow(dead_code)]
+    struct C {
+        path: String,
+        #[uri_param]
+        scalar: String,
+        #[uri_param(pattern = "param.")]
+        params: Vec<(String, String)>,
+    }
+    let opts = C::uri_options();
+    assert_eq!(opts.len(), 2);
+    let scalar_opt = find_opt(&opts, "scalar");
+    assert_eq!(scalar_opt.pattern, None);
+    let ns_opt = find_opt(&opts, "param");
+    assert!(ns_opt.pattern.is_some());
+}
+
+#[test]
+fn pattern_field_collects_namespace_pairs_at_parse_time() {
+    use camel_endpoint::UriComponents;
+    use std::collections::HashMap;
+
+    #[derive(UriConfig)]
+    #[uri_scheme = "x"]
+    #[allow(dead_code)]
+    struct C {
+        path: String,
+        #[uri_param(pattern = "param.")]
+        params: Vec<(String, String)>,
+    }
+
+    // Three entries: two valid suffixes and one bare separator (empty suffix)
+    // which the namespace-collection rule must reject.
+    let mut query: HashMap<String, String> = HashMap::new();
+    query.insert("param.foo".to_string(), "1".to_string());
+    query.insert("param.".to_string(), "2".to_string());
+    query.insert("param.bar".to_string(), "3".to_string());
+
+    let parts = UriComponents {
+        scheme: "x".to_string(),
+        path: "p".to_string(),
+        params: query,
+    };
+
+    let cfg = C::parse_uri_components(parts).expect("parse should succeed");
+
+    // HashMap iteration order is unspecified; sort both sides before comparing.
+    let mut got = cfg.params;
+    got.sort();
+    let mut want = vec![
+        ("foo".to_string(), "1".to_string()),
+        ("bar".to_string(), "3".to_string()),
+    ];
+    want.sort();
+    assert_eq!(got, want);
 }

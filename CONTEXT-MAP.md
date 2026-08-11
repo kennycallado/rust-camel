@@ -156,6 +156,9 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **DiagnosticCode** — Enum of all R-codes: `RSyntax`, `RSchema(..)`, `RUriKnown(..)`, `RSecret(..)`, `RDeprecated(..)`. Each variant names the rule that produced it. (camel-lint)
 - **unverified-scheme** — Info-level `UnverifiedScheme` diagnostic: the route uses a scheme not in the catalog. Not an error (the catalog might be incomplete); does not suppress other diagnostics for the same endpoint. (camel-lint)
 - **Zero-false-positives gate** — Corpus integration test (`crates/camel-cli/tests/lint_corpus.rs`) + checked-in RON baseline. Set-equality assertion: every produced diagnostic matches the baseline, every baseline entry is produced. Rule changes must update the baseline. (camel-lint)
+- **open namespace** — A URI query-key namespace of the form `<prefix>.<name>` where any non-empty `<name>` is valid. Modeled by `UriOptionMatch::Prefix`. (camel-api + camel-lint)
+- **UriOptionMatch** — `#[non_exhaustive]` enum in `camel-api` describing how a `UriOption` with `pattern: Some(_)` matches URI query keys. Initial variant: `Prefix { separator }`. (camel-api)
+- **pattern prefix** — The compile-time guarantee that a `#[uri_param(pattern = "..")]` separator ends with `.`; runtime matching uses `starts_with(separator)` plus a non-empty-suffix check. (camel-endpoint-macros + camel-lint)
 
 ## Documentation Authority & Refresh
 

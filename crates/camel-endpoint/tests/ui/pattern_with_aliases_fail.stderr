@@ -1,0 +1,5 @@
+error: #[uri_param] cannot have both `pattern` and `aliases`; a namespace matches by prefix, not by exact alias
+  --> tests/ui/pattern_with_aliases_fail.rs:10:5
+   |
+10 |     bad: Vec<(String, String)>,
+   |     ^^^

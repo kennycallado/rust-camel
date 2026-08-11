@@ -1,0 +1,5 @@
+error: #[uri_param] `pattern` separator must end with `.` (the only permitted separator shape in this version)
+  --> tests/ui/pattern_separator_without_dot_fail.rs:10:5
+   |
+10 |     bad: Vec<(String, String)>,
+   |     ^^^

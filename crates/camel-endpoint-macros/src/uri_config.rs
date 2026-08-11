@@ -31,6 +31,9 @@ struct UriParamAttr {
     /// OptionKind override (`kind = "duration"` / `kind = "enum:A,B"`), with
     /// the literal's span preserved for spanned error reporting.
     kind_override: Option<syn::LitStr>,
+    /// Open-namespace separator (`pattern = "param."`). When `Some`, the field
+    /// is a namespace option matching URI query keys by prefix.
+    pattern: Option<String>,
 }
 
 impl Parse for UriParamAttr {
@@ -46,7 +49,7 @@ impl Parse for UriParamAttr {
             if input.peek(Token![=]) {
                 input.parse::<Token![=]>()?;
                 match key_str.as_str() {
-                    "name" | "default" | "desc" | "deprecated" => {
+                    "name" | "default" | "desc" | "deprecated" | "pattern" => {
                         let lit: Lit = input.parse()?;
                         if let Lit::Str(lit_str) = lit {
                             let val = lit_str.value();
@@ -55,6 +58,7 @@ impl Parse for UriParamAttr {
                                 "default" => attr.default = Some(val),
                                 "desc" => attr.desc = Some(val),
                                 "deprecated" => attr.deprecated = Some(val),
+                                "pattern" => attr.pattern = Some(val),
                                 _ => unreachable!(),
                             }
                         } else {
@@ -337,6 +341,27 @@ fn get_vec_inner(ty: &Type) -> Option<Type> {
         }
     }
     None
+}
+
+/// Check whether a type is exactly `Vec<(String, String)>` (the canonical
+/// form, the only field type permitted for a `pattern` namespace option).
+///
+/// Rejects `Vec<String>`, `(String, String)`, type aliases, and any path other
+/// than the literal `Vec` of a 2-tuple of `String`.
+fn is_vec_string_pair(ty: &Type) -> bool {
+    let Some(inner) = get_vec_inner(ty) else {
+        return false;
+    };
+    let Type::Tuple(tuple) = inner else {
+        return false;
+    };
+    if tuple.elems.len() != 2 {
+        return false;
+    }
+    tuple
+        .elems
+        .iter()
+        .all(|elem| get_type_name(elem).is_some_and(|name| name == "String"))
 }
 
 // ---------------------------------------------------------------------------
@@ -737,20 +762,104 @@ fn build_uri_option_entry(
         ));
     }
 
-    let param_name = attr.name.clone().unwrap_or_else(|| field_ident.to_string());
+    // Pattern (open-namespace) guardrails. All checks below fire only when
+    // `pattern` is present; they are co-located with the secret+default check
+    // above (same shape: spanned on the field ident, returned as syn::Error).
+    if let Some(sep) = &attr.pattern {
+        // Field-type check: must be exactly Vec<(String, String)>.
+        if !is_vec_string_pair(field_type) {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "`pattern` is only valid on fields of type `Vec<(String, String)>`",
+            ));
+        }
+        if attr.required {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] cannot have both `pattern` and `required`; \
+                 an open namespace cannot require a single key",
+            ));
+        }
+        if attr.default.is_some() {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] cannot have both `pattern` and `default`; \
+                 an open namespace has no default value",
+            ));
+        }
+        if attr.secret {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] cannot have both `pattern` and `secret`; \
+                 an open namespace has no single secret value",
+            ));
+        }
+        if attr.name.is_some() {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] cannot have both `pattern` and `name`; \
+                 the name is derived from the separator",
+            ));
+        }
+        if !attr.aliases.is_empty() {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] cannot have both `pattern` and `aliases`; \
+                 a namespace matches by prefix, not by exact alias",
+            ));
+        }
+        if let Some(lit) = &attr.kind_override
+            && lit.value() != "string"
+        {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] `kind` on a pattern field must be `string` or omitted",
+            ));
+        }
+        if sep.is_empty() {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] `pattern` separator must be non-empty",
+            ));
+        }
+        if !sep.ends_with('.') {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] `pattern` separator must end with `.` \
+                 (the only permitted separator shape in this version)",
+            ));
+        }
+    }
+
+    let param_name = if let Some(sep) = &attr.pattern {
+        // Guardrail guarantees the separator ends with '.'; strip that one trailing dot.
+        sep[..sep.len() - 1].to_string()
+    } else {
+        attr.name.clone().unwrap_or_else(|| field_ident.to_string())
+    };
     let description = attr.desc.clone().unwrap_or_default();
 
-    // Resolve kind: explicit override wins; otherwise infer (never Enum).
-    let kind_ts = if let Some(lit) = &attr.kind_override {
+    // Resolve kind: a pattern field is always String (the guardrails rejected
+    // any non-string `kind`); otherwise an explicit override wins; otherwise
+    // infer (never Enum).
+    let kind_ts = if attr.pattern.is_some() {
+        let path = quote! { #endpoint_crate::OptionKind };
+        quote! { #path::String }
+    } else if let Some(lit) = &attr.kind_override {
         parse_kind_override(&lit.value(), lit.span(), endpoint_crate)?
     } else {
         infer_option_kind(field_type, endpoint_crate)
     };
 
-    // Required inference: explicit flag wins; else Option<T> => false;
-    // else non-Option with a default => false; else => true.
+    // Required inference: a pattern namespace is never required; otherwise
+    // explicit flag wins; else Option<T> => false; else non-Option with a
+    // default => false; else => true.
     let is_option = is_option_type(field_type).is_some();
-    let required = attr.required || (!is_option && attr.default.is_none());
+    let required = if attr.pattern.is_some() {
+        false
+    } else {
+        attr.required || (!is_option && attr.default.is_none())
+    };
 
     let mut chain = quote! {
         #endpoint_crate::UriOption::new(#param_name, #description, #kind_ts)
@@ -769,6 +878,9 @@ fn build_uri_option_entry(
     }
     for alias in &attr.aliases {
         chain = quote! { #chain.with_alias(#alias) };
+    }
+    if let Some(sep) = &attr.pattern {
+        chain = quote! { #chain.pattern_prefix(#sep) };
     }
 
     Ok(chain)
@@ -897,15 +1009,35 @@ pub fn impl_uri_config(input: &DeriveInput) -> syn::Result<TokenStream> {
                 }
             }
             FieldType::Param { attr } => {
-                let param_name = attr.name.clone().unwrap_or_else(|| field_name.to_string());
-                let parsing_code = generate_param_parsing(
-                    &param_name,
-                    field_name,
-                    field_type,
-                    attr.default.as_deref(),
-                    &endpoint_crate,
-                )?;
-                bindings.push(parsing_code);
+                if let Some(sep) = &attr.pattern {
+                    // Open-namespace field: collect (suffix, value) pairs whose
+                    // query key starts with the separator and has a non-empty
+                    // suffix (matches the lint resolver semantics — a bare
+                    // `param.` key does not match). The field-type guardrail in
+                    // `build_uri_option_entry` already constrained this field to
+                    // `Vec<(String, String)>`.
+                    bindings.push(quote! {
+                        let #field_name = params.iter()
+                            .filter_map(|(k, v)| {
+                                if k.starts_with(#sep) && k.len() > #sep.len() {
+                                    Some((k[#sep.len()..].to_string(), v.clone()))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<::std::vec::Vec<(::std::string::String, ::std::string::String)>>()
+                    });
+                } else {
+                    let param_name = attr.name.clone().unwrap_or_else(|| field_name.to_string());
+                    let parsing_code = generate_param_parsing(
+                        &param_name,
+                        field_name,
+                        field_type,
+                        attr.default.as_deref(),
+                        &endpoint_crate,
+                    )?;
+                    bindings.push(parsing_code);
+                }
             }
             FieldType::DurationFromMs { .. } => {
                 // Process these in the second pass

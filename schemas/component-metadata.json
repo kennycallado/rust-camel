@@ -131,6 +131,16 @@
         "name": {
           "type": "string"
         },
+        "pattern": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UriOptionMatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "required": {
           "type": "boolean",
           "default": false
@@ -144,6 +154,28 @@
         "name",
         "description",
         "kind"
+      ]
+    },
+    "UriOptionMatch": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "prefix": {
+              "type": "object",
+              "properties": {
+                "separator": {
+                  "type": "string",
+                  "default": ""
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "prefix"
+          ]
+        }
       ]
     }
   }

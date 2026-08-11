@@ -11,7 +11,9 @@
 //! flattening without per-token annotation noise.
 
 use crate::diagnostic::Span;
-use camel_api::component_metadata::{ComponentMetadata, ComponentMetadataCatalog, UriOption};
+use camel_api::component_metadata::{
+    ComponentMetadata, ComponentMetadataCatalog, UriOption, UriOptionMatch,
+};
 
 // ---------------------------------------------------------------------------
 // Spanned
@@ -197,15 +199,42 @@ pub(crate) fn known_endpoints<'a>(
 // ---------------------------------------------------------------------------
 
 /// Resolve a provided [`LintOption`] to its canonical catalog [`UriOption`] by
-/// name or alias. Returns `None` when the key matches no name or alias.
+/// name, alias, or prefix pattern. Returns `None` when the key matches nothing.
+///
+/// Resolution order (two-phase):
+/// 1. Exact name or alias match on options with `pattern: None`.
+/// 2. Longest-prefix match on `Prefix`-patterned options, requiring a non-empty
+///    suffix.
 pub(crate) fn resolve_option<'a>(
     opt: &LintOption,
     uri_options: &'a [UriOption],
 ) -> Option<&'a UriOption> {
     let key = opt.key.value.as_str();
-    uri_options
+    // Phase 1: exact-name and alias, only on options whose pattern is None.
+    if let Some(hit) = uri_options
         .iter()
-        .find(|uo| uo.name == key || uo.aliases.contains(&opt.key.value))
+        .find(|uo| uo.pattern.is_none() && (uo.name == key || uo.aliases.contains(&opt.key.value)))
+    {
+        return Some(hit);
+    }
+    // Phase 2: pattern match, longest separator first, non-empty suffix required.
+    let mut pattern_hits: Vec<&UriOption> = uri_options
+        .iter()
+        .filter(|uo| match &uo.pattern {
+            Some(UriOptionMatch::Prefix { separator }) => {
+                !separator.is_empty()
+                    && key.len() > separator.len()
+                    && key.starts_with(separator.as_str())
+            }
+            _ => false,
+        })
+        .collect();
+    let sep_len = |uo: &UriOption| match &uo.pattern {
+        Some(UriOptionMatch::Prefix { separator }) => separator.len(),
+        _ => 0,
+    };
+    pattern_hits.sort_by_key(|b| std::cmp::Reverse(sep_len(b)));
+    pattern_hits.first().copied()
 }
 
 /// Whether a catalog option (by `name` or any `alias`) is present among the

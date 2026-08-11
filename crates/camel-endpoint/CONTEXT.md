@@ -60,9 +60,27 @@ values retain the wrapper for downstream handling.
 | `#[uri_param]` | field | No | Maps the field from a query parameter with the same name. |
 | `#[uri_param(default = "value")]` | field | No | Supplies a value when the query parameter is absent. |
 | `#[uri_param(name = "key")]` | field | No | Maps the field from a different query key. |
+| `#[uri_param(pattern = "prefix.")]` | field | No | Declares an open namespace: the field accepts `<prefix>.<name>=<value>` pairs. Valid only on `Vec<(String, String)>` fields. |
 
 The first field without `#[uri_param]` receives the path. `Option<T>` parameters are optional.
 Other parameter fields require either a query value or a declared default.
+
+### `pattern` key guardrails
+
+The `#[uri_param(pattern = "<separator>")]` key is valid only on fields of type
+`Vec<(String, String)>`. The macro rejects these combinations at compile time:
+
+- `pattern` with `required`, `default`, `secret`, `name`, or `aliases` — an open
+  namespace has no single key, value, or alias.
+- `pattern` with a non-`string` `kind` — the namespace value type is always string.
+- `pattern = ""` — an empty separator would match every key.
+- `pattern` whose value does not end with `.` — the trailing `.` is the only
+  permitted separator shape in this version; the name derivation algorithm
+  (separator with trailing `.` removed → `name`) relies on this precondition.
+
+When `pattern` is present, the generated `UriOption` has `kind = OptionKind::String`,
+`name` derived from the separator (trailing `.` stripped), and
+`pattern = Some(UriOptionMatch::Prefix { separator })`.
 
 These names are the macro contract: `#[uri_scheme]`, `#[uri_param]`, and `#[uri_config]`.
 `#[uri(...)]` is not supported.

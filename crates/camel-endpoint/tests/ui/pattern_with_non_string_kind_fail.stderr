@@ -1,0 +1,5 @@
+error: #[uri_param] `kind` on a pattern field must be `string` or omitted
+  --> tests/ui/pattern_with_non_string_kind_fail.rs:10:5
+   |
+10 |     bad: Vec<(String, String)>,
+   |     ^^^

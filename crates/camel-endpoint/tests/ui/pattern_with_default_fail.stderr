@@ -1,0 +1,5 @@
+error: #[uri_param] cannot have both `pattern` and `default`; an open namespace has no default value
+  --> tests/ui/pattern_with_default_fail.rs:10:5
+   |
+10 |     bad: Vec<(String, String)>,
+   |     ^^^
