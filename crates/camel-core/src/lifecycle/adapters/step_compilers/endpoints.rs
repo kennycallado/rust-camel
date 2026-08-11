@@ -12,6 +12,7 @@ use super::{
     CompilationContext, CompileOutcome, CompiledStep, StepCompiler, StepCompilerRegistry,
     resolve_producer_with_lifecycle,
 };
+use crate::lifecycle::adapters::CompositeStepLifecycle;
 use crate::lifecycle::application::route_definition::BuilderStep;
 
 pub(crate) struct EndpointsCompiler;
@@ -54,8 +55,20 @@ impl StepCompiler for EndpointsCompiler {
                 // endpoint, so use the parallel
                 // `resolve_producer_with_lifecycle` helper that returns
                 // `(BoxProcessor, Option<Arc<dyn StepLifecycle>>)`.
-                let (producer, lifecycle) = resolve_producer_with_lifecycle(ctx, &uri)?;
+                let (producer, endpoint_lifecycle) = resolve_producer_with_lifecycle(ctx, &uri)?;
                 let svc = camel_processor::WireTapService::new(producer);
+                let wiretap_lifecycle: Arc<dyn StepLifecycle> = svc.lifecycle();
+                // Compose endpoint + WireTap lifecycles so shutdown drains
+                // WireTap before tearing down the endpoint (reverse order).
+                let lifecycle = match endpoint_lifecycle {
+                    Some(ep) => {
+                        Some(
+                            Arc::new(CompositeStepLifecycle::new(vec![ep, wiretap_lifecycle]))
+                                as Arc<dyn StepLifecycle>,
+                        )
+                    }
+                    None => Some(wiretap_lifecycle),
+                };
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
@@ -180,6 +193,102 @@ mod tests {
                 Some(Arc::new(StatefulComponent {
                     handle: self.handle.clone(),
                 }))
+            } else {
+                None
+            }
+        }
+        fn resolve_language(&self, _name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
+            None
+        }
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            Arc::new(camel_api::NoOpMetrics)
+        }
+        fn platform_service(&self) -> Arc<dyn camel_api::PlatformService> {
+            Arc::new(camel_api::NoopPlatformService::default())
+        }
+        fn register_route_health_check(
+            &self,
+            _route_id: &str,
+            _check: Arc<dyn camel_api::AsyncHealthCheck>,
+        ) {
+        }
+        fn unregister_route_health_check(&self, _route_id: &str) {}
+    }
+
+    /// `StepLifecycle` fake that tracks how many times `shutdown` was called.
+    #[derive(Debug)]
+    struct ShutdownTrackingFake {
+        count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StepLifecycle for ShutdownTrackingFake {
+        fn name(&self) -> &'static str {
+            "shutdown-tracking-fake"
+        }
+        async fn shutdown(&self, _reason: StepShutdownReason) -> Result<(), CamelError> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Endpoint that returns `None` from `lifecycle()` — stateless.
+    struct StatelessEndpoint {
+        uri: String,
+    }
+
+    impl Endpoint for StatelessEndpoint {
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+        ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
+            Err(CamelError::EndpointCreationFailed("not a consumer".into()))
+        }
+
+        fn create_producer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
+            Ok(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })))
+        }
+
+        fn lifecycle(&self) -> Option<Arc<dyn StepLifecycle>> {
+            None
+        }
+    }
+
+    /// Component that vends `StatelessEndpoint` for the `stateless:` scheme.
+    struct StatelessComponent;
+
+    #[async_trait]
+    impl Component for StatelessComponent {
+        fn scheme(&self) -> &str {
+            "stateless"
+        }
+
+        fn create_endpoint(
+            &self,
+            uri: &str,
+            _ctx: &dyn ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            Ok(Box::new(StatelessEndpoint {
+                uri: uri.to_string(),
+            }))
+        }
+    }
+
+    /// `ComponentContext` that resolves only the `stateless:` scheme.
+    struct StatelessContext;
+
+    impl ComponentContext for StatelessContext {
+        fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn Component>> {
+            if scheme == "stateless" {
+                Some(Arc::new(StatelessComponent))
             } else {
                 None
             }
@@ -333,7 +442,130 @@ mod tests {
             CompiledStep::Process { lifecycle, .. } => {
                 let lc = lifecycle
                     .expect("Process.lifecycle should be Some for stateful WireTap endpoint");
-                assert_eq!(lc.name(), "fake");
+                // The endpoint lifecycle is now composed with the WireTap
+                // lifecycle via CompositeStepLifecycle → name is "composite".
+                assert_eq!(lc.name(), "composite");
+            }
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        }
+    }
+
+    /// WireTap arm composes endpoint + WireTap lifecycles; shutdown drains
+    /// both. Uses a shutdown-tracking fake to verify the endpoint handle is
+    /// reached.
+    #[tokio::test]
+    async fn test_wiretap_compiler_composes_endpoint_and_wiretap_lifecycles() {
+        let shutdown_count: Arc<std::sync::atomic::AtomicUsize> =
+            Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handle: Arc<dyn StepLifecycle> = Arc::new(ShutdownTrackingFake {
+            count: Arc::clone(&shutdown_count),
+        });
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(StatefulContext {
+            handle: handle.clone(),
+        });
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = IdempotentRegistry::new();
+        let claim_check_repositories = ClaimCheckRegistry::new();
+
+        let ctx = make_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+        );
+
+        let compiled = EndpointsCompiler
+            .compile(
+                BuilderStep::WireTap {
+                    uri: "stateful:dest".into(),
+                },
+                0,
+                &ctx,
+                &StepCompilerRegistry::new(),
+            )
+            .expect("compilation should succeed");
+        let step = match compiled {
+            CompileOutcome::Matched(s) => s,
+            CompileOutcome::NotHandled(_) => panic!("WireTap must be handled"),
+        };
+
+        let lifecycle = match step {
+            CompiledStep::Process { lifecycle, .. } => {
+                lifecycle.expect("Process.lifecycle should be Some")
+            }
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        };
+
+        // Shutdown should reach the endpoint fake (reverse order: WireTap
+        // first, then endpoint).
+        lifecycle
+            .shutdown(StepShutdownReason::RouteStop)
+            .await
+            .expect("shutdown should succeed");
+        assert_eq!(
+            shutdown_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "endpoint lifecycle shutdown should have been called once"
+        );
+    }
+
+    /// WireTap arm when the endpoint has no lifecycle handle: the compiled
+    /// step still gets a lifecycle (the WireTap-only handle).
+    #[tokio::test]
+    async fn test_wiretap_compiler_compose_when_no_endpoint_lifecycle() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        // Use a stateless component whose endpoints return None from lifecycle().
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(StatelessContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = IdempotentRegistry::new();
+        let claim_check_repositories = ClaimCheckRegistry::new();
+
+        let ctx = make_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+        );
+
+        let compiled = EndpointsCompiler
+            .compile(
+                BuilderStep::WireTap {
+                    uri: "stateless:dest".into(),
+                },
+                0,
+                &ctx,
+                &StepCompilerRegistry::new(),
+            )
+            .expect("compilation should succeed");
+        let step = match compiled {
+            CompileOutcome::Matched(s) => s,
+            CompileOutcome::NotHandled(_) => panic!("WireTap must be handled"),
+        };
+
+        match step {
+            CompiledStep::Process { lifecycle, .. } => {
+                let lc = lifecycle.expect("Process.lifecycle should be Some (WireTap-only)");
+                // WireTap-only lifecycle → name is "wiretap".
+                assert_eq!(lc.name(), "wiretap");
+                // Shutdown should succeed (drains the WireTap handle).
+                lc.shutdown(StepShutdownReason::RouteStop)
+                    .await
+                    .expect("WireTap-only shutdown should succeed");
             }
             other => panic!("expected CompiledStep::Process, got {other:?}"),
         }

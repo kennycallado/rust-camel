@@ -98,7 +98,7 @@ pub use streaming_split_segment::StreamingSplitSegment;
 pub use streaming_splitter::StreamingSplitterService;
 pub use throttler::{ThrottleSegment, ThrottlerService};
 pub use validate::ValidateService;
-pub use wire_tap::{WireTapConfig, WireTapLayer, WireTapService};
+pub use wire_tap::{WireTapConfig, WireTapLayer, WireTapLifecycle, WireTapService};
 
 // Resequencer
 pub use resequencer::batch::BatchPolicy;

@@ -36,6 +36,7 @@ async-stream.workspace = true
 camel-language-simple = { path = "../languages/camel-language-simple" }
 criterion.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "choice"

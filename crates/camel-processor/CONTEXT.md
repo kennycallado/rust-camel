@@ -48,7 +48,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `streaming_splitter` | Streaming Split | streaming splitter | `src/lib.rs:42` |
 | `throttler` | Throttle | rate limiting | `src/lib.rs:43` (try_new returns Err on max_requests=0 or period=0 — Batch 1 D-M8) |
 | `validate` | Validate (predicate) | predicate validation wrapper | `src/lib.rs:44` |
-| `wire_tap` | WireTap | fire-and-forget side route | `src/lib.rs:45` |
+| `wire_tap` | WireTap | fire-and-forget side route with bounded-admission semaphore (max_concurrent cap, CallerRuns at bound) | `src/lib.rs:45` |
 | `zip_splitter` | ZipSplitter | archive splitting | `src/lib.rs:46` |
 
 ## Structural EIP Segments
@@ -115,7 +115,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `StreamingSplitSegment`, `StreamingSplitterService` | stable | `pub use streaming_split_segment::StreamingSplitSegment`; `pub use streaming_splitter::StreamingSplitterService` | Streaming Split EIP; service poll_ready migration pending. |
 | `ThrottleSegment`, `ThrottlerService` | stable | `pub use throttler::{...}` | Throttle EIP. |
 | `ValidateService` | stable | `pub use validate::ValidateService` | Predicate validation. |
-| `WireTapConfig`, `WireTapLayer`, `WireTapService` | stable | `pub use wire_tap::{...}` | WireTap EIP; poll_ready migration pending. |
+| `WireTapConfig`, `WireTapLayer`, `WireTapLifecycle`, `WireTapService` | stable | `pub use wire_tap::{...}` | WireTap EIP; poll_ready migrated per ADR-0019. `WireTapLifecycle` is the lifecycle handle for graceful-drain-then-abort teardown (ADR-0022). |
 | `BatchPolicy`, `StreamPolicy`, `PassthroughPolicy`, `ResequencePolicy`, `ResequencerConfig`, `ResequencerService` | stable | `pub use resequencer...` | Resequencer policies, config, and service. |
 
 ## poll_ready contract
@@ -128,7 +128,7 @@ ADR-0019 requires processors whose errors are routable/recoverable events to avo
 | `ErrorHandlerService` | preserves `Pending`, maps readiness `Err` to `Ok(())` | migrated | Deprecated compatibility shell still follows ADR-0019. See `fn poll_ready` in `impl Service<Exchange> for ErrorHandlerService`. |
 | `AggregatorService` | starts the TTL sweep lazily, then returns `Ready(Ok(()))` | migrated | Readiness does not probe an endpoint. `call` owns aggregation state and also performs inline TTL eviction. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for AggregatorService`. |
 | `RecipientListService` | `Ready(Ok(()))` unconditional | migrated | Dynamic recipients resolve and check readiness in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for RecipientListService`. |
-| `WireTapService` | delegates to tap endpoint | pending-fix | Fire-and-forget tap errors must not block the main route. See `fn poll_ready` in `impl Service<Exchange> for WireTapService`. |
+| `WireTapService` | `Ready(Ok(()))` unconditional | migrated | Fire-and-forget tap readiness is checked inside the tap task; the main route never blocks on the tap (ADR-0019). See `fn poll_ready` in `impl Service<Exchange> for WireTapService`. |
 | `LoadBalancerService` | polls all endpoints and returns first `Err` | pending-fix | Failover/selection must happen in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for LoadBalancerService`. |
 | `SplitterService` | delegates to sub-pipeline | pending-fix | Fragment processing checks readiness in `call()` through `process_sequential` or `process_parallel`. See `fn poll_ready` in `impl Service<Exchange> for SplitterService`. |
 | `StreamingSplitterService` | delegates to sub-pipeline | pending-fix | Streaming fragment processing checks readiness in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for StreamingSplitterService`. |
@@ -330,3 +330,39 @@ is a fixed `usize` set at config time with no per-exchange evaluation path. This
 yet implemented. Implementing it is out of scope for this change (which is documentation-only per
 ADR-0046). A future feature task may add a `CompletionCondition::SizeExpr { expr, language }`
 variant mirroring the existing `PredicateExpr` variant (same enum, same file).
+
+## WireTap EIP divergences from Apache Camel (ADR-0046 protocol)
+
+This section records divergences surfaced by applying the ADR-0046 protocol to the WireTap EIP.
+Each divergence names the forcing contract shape or ADR and the observable consequence.
+
+### D-W1: flat-semaphore admission collapse
+
+Apache Camel uses a two-tier admission model: `maxPoolSize=20` (thread pool cap) plus
+`maxQueueSize=1000` (backlog queue depth). rust-camel collapses both tiers into a single flat
+concurrency cap backed by a `tokio::sync::Semaphore` with `CallerRuns` at the bound.
+Forcing rationale: Camel's own virtual-thread executor is documented as exactly this
+semaphore-based flat cap. Observable consequence: operators configure one bound
+(`max_concurrent`), not pool size plus queue depth.
+
+### D-W2: CallerRuns transient exceed
+
+Under saturation the inline task makes total concurrent execution reach `bound + 1` transiently.
+Forcing rationale: `CallerRuns` runs the tap on the caller's thread rather than queueing it.
+Observable consequence: peak concurrency is `bound + number_of_saturated_callers`, not exactly
+`bound`.
+
+### D-W3: route-level teardown, not CamelContext-level
+
+WireTap taps are drained or aborted at route `shutdown` (ADR-0022 `StepLifecycle`), not at
+CamelContext shutdown. Forcing rationale: rust-camel has no global `CamelContext` shutdown hook;
+the route lifecycle owns the drain. Observable consequence: stopping a route drains its taps;
+there is no cross-route pool.
+
+### D-W4: absent pool-profile knobs
+
+Apache Camel exposes `poolSize`, `maxPoolSize`, `maxQueueSize`, `rejectedPolicy`, and executor
+service references. rust-camel exposes only `max_concurrent` and `shutdown_grace`.
+Forcing rationale: the flat-semaphore model (D-W1) makes the pool and queue knobs redundant.
+Observable consequence: operators cannot tune the queue depth or choose a rejection policy
+other than `CallerRuns`.

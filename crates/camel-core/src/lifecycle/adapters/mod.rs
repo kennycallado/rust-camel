@@ -1,4 +1,5 @@
 pub(crate) mod body_coercing;
+pub(crate) mod composite_step_lifecycle;
 pub(crate) mod consumer_management;
 pub(crate) mod controller_actor;
 mod controller_actor_commands;
@@ -26,6 +27,7 @@ pub(crate) mod step_compilers;
 pub(crate) mod step_resolution;
 // supervising_route_controller lives in lifecycle/application/ after Task 7
 
+pub(crate) use composite_step_lifecycle::CompositeStepLifecycle;
 pub use in_memory::{
     InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore, InMemoryRouteRepository,
     InMemoryRuntimeStore,
