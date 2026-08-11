@@ -13,7 +13,7 @@ use tower::Service;
 use tracing::{debug, warn};
 
 use camel_api::{Body, CamelError, Exchange, StreamBody};
-use camel_core::Registry;
+use camel_component_api::ComponentContext;
 
 fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
     CamelError::ProcessorError(format!("lock poisoned: {}", e))
@@ -39,7 +39,7 @@ pub(crate) const DEFAULT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60)
 async fn ensure_runtime_fn(
     module_path: PathBuf,
     config: crate::config::WasmConfig,
-    registry: Arc<std::sync::Mutex<Registry>>,
+    registry: Arc<dyn ComponentContext>,
     runtime_store: Arc<std::sync::Mutex<Option<Arc<WasmRuntime>>>>,
     state_store: crate::state_store::StateStore,
 ) -> Result<Arc<WasmRuntime>, CamelError> {
@@ -74,7 +74,7 @@ type AcquireFut =
 
 pub struct WasmProducer {
     module_path: PathBuf,
-    registry: Arc<std::sync::Mutex<Registry>>,
+    registry: Arc<dyn ComponentContext>,
     runtime: Arc<std::sync::Mutex<Option<Arc<WasmRuntime>>>>,
     config: crate::config::WasmConfig,
     state_store: crate::state_store::StateStore,
@@ -123,7 +123,7 @@ impl Clone for WasmProducer {
 impl WasmProducer {
     pub fn new(
         module_path: PathBuf,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         config: crate::config::WasmConfig,
         observability: Arc<dyn camel_component_api::RuntimeObservability>,
     ) -> Self {
@@ -316,7 +316,7 @@ mod tests {
         };
         let producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
-            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
             config,
             test_rt(),
         );
@@ -329,7 +329,7 @@ mod tests {
         let config = WasmConfig::default();
         let producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
-            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
             config,
             test_rt(),
         );
@@ -341,7 +341,7 @@ mod tests {
         let config = WasmConfig::default();
         let mut producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
-            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
             config,
             test_rt(),
         );
@@ -355,7 +355,7 @@ mod tests {
         let config = WasmConfig::default();
         let mut producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
-            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
             config,
             test_rt(),
         );
@@ -377,7 +377,7 @@ mod tests {
         };
         let mut producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
-            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
             config,
             test_rt(),
         );
@@ -403,7 +403,7 @@ mod tests {
         };
         let producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
-            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
             config.clone(),
             test_rt(),
         );
@@ -444,7 +444,7 @@ mod tests {
     fn test_clone_preserves_streaming_knobs() {
         let mut producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
-            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
             WasmConfig::default(),
             test_rt(),
         );

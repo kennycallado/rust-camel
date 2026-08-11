@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camel_api::CamelError;
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{ComponentContext, ConcurrencyModel, Consumer, ConsumerContext};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -39,7 +39,7 @@ pub struct WasmSourceConsumer {
     guest_config: Vec<(String, String)>,
     config: WasmConfig,
     #[allow(dead_code)]
-    registry: Arc<std::sync::Mutex<camel_core::Registry>>,
+    registry: Arc<dyn ComponentContext>,
     cancel_token: CancellationToken,
     engine: Option<Arc<Engine>>,
     run_task: Option<JoinHandle<Result<(), CamelError>>>,
@@ -52,7 +52,7 @@ impl WasmSourceConsumer {
         module_path: PathBuf,
         config: WasmConfig,
         guest_config: Vec<(String, String)>,
-        registry: Arc<std::sync::Mutex<camel_core::Registry>>,
+        registry: Arc<dyn ComponentContext>,
     ) -> Self {
         Self {
             module_path,
@@ -373,7 +373,6 @@ pub fn parse_guest_config(uri: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     #[tokio::test]
     async fn stop_does_not_wait_for_runtime_owned_run_task() {
@@ -385,7 +384,7 @@ mod tests {
             PathBuf::from("unused.wasm"),
             config,
             Vec::new(),
-            Arc::new(Mutex::new(camel_core::Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
         );
         // Mirrors the real run task shape (tokio::spawn of an async future).
         consumer.run_task = Some(tokio::spawn(async {
@@ -415,7 +414,7 @@ mod tests {
             PathBuf::from("unused.wasm"),
             config,
             Vec::new(),
-            Arc::new(Mutex::new(camel_core::Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
         );
         // A run task that never exits on its own — only abort will stop it.
         consumer.run_task = Some(tokio::spawn(async {

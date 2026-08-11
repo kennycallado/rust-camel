@@ -296,6 +296,8 @@ pub async fn build_security_compile_context_from_config(
     camel_config: &camel_config::config::CamelConfig,
     registry: Arc<std::sync::Mutex<camel_core::Registry>>,
 ) -> Result<SecurityCompileContext, CamelError> {
+    let wasm_ctx: Arc<dyn camel_component_api::ComponentContext> =
+        Arc::new(camel_core::RegistryComponentContext::new(registry));
     let authenticator = resolve_authenticator(&camel_config.security).await?;
     let mut security_ctx = SecurityCompileContext::new(authenticator, None);
 
@@ -303,7 +305,7 @@ pub async fn build_security_compile_context_from_config(
 
     if let Some(ref policies) = camel_config.security.policies {
         let policy_registry =
-            camel_component_wasm::build_security_policy_registry(&policies.wasm, registry.clone())
+            camel_component_wasm::build_security_policy_registry(&policies.wasm, wasm_ctx.clone())
                 .await
                 .map_err(|e| CamelError::Config(e.to_string()))?;
         if !policy_registry.is_empty() {
@@ -312,7 +314,7 @@ pub async fn build_security_compile_context_from_config(
     }
 
     if let Some(ref permissions) = camel_config.security.permissions {
-        let wasm_registry = camel_component_wasm::build_permission_registry(permissions, registry)
+        let wasm_registry = camel_component_wasm::build_permission_registry(permissions, wasm_ctx)
             .await
             .map_err(|e| CamelError::Config(e.to_string()))?;
         for (name, evaluator) in wasm_registry.entries() {

@@ -4,12 +4,13 @@ fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
 }
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, ExchangePattern, Message, ProducerContext, Value};
 use camel_component_api::{
-    Component, ComponentBundle, ComponentRegistrar, Endpoint, NoOpComponentContext,
+    Component, ComponentBundle, ComponentContext, ComponentRegistrar, Endpoint,
+    NoOpComponentContext,
 };
 use camel_component_wasm::WasmComponent;
 use camel_component_wasm::WasmConfig;
@@ -18,7 +19,6 @@ use camel_component_wasm::bundle::WasmBundle;
 use camel_component_wasm::endpoint::WasmEndpoint;
 use camel_component_wasm::producer::WasmProducer;
 use camel_component_wasm::serde_bridge::{exchange_to_wasm, wasm_to_exchange};
-use camel_core::Registry;
 use serde_json::json;
 use tempfile::tempdir;
 use tower::ServiceExt;
@@ -26,8 +26,8 @@ use tower::ServiceExt;
 // TODO(WASM-010): Integration tests require a compiled WASM fixture not in repo.
 // Run: cargo build --target wasm32-wasip2 -p <fixture-crate> first.
 
-fn make_registry() -> Arc<Mutex<Registry>> {
-    Arc::new(Mutex::new(Registry::new()))
+fn make_registry() -> Arc<dyn ComponentContext> {
+    Arc::new(NoOpComponentContext)
 }
 
 struct TestRegistrar {

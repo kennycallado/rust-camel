@@ -21,12 +21,11 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use camel_component_api::Consumer;
 use camel_component_api::consumer::{ConsumerContext, ExchangeEnvelope};
-use camel_core::Registry;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -117,7 +116,7 @@ fn make_consumer(guest_config: Vec<(String, String)>) -> WasmSourceConsumer {
         wasm_path,
         config,
         guest_config,
-        Arc::new(Mutex::new(Registry::new())),
+        Arc::new(camel_component_api::NoOpComponentContext),
     )
 }
 

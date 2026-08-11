@@ -18,7 +18,6 @@ use camel_api::{Body, Exchange, Message};
 use camel_bean::BeanProcessor;
 use camel_component_wasm::WasmConfig;
 use camel_component_wasm::bean::WasmBean;
-use camel_core::Registry;
 use futures::StreamExt;
 use tokio::sync::Notify;
 
@@ -35,7 +34,7 @@ fn bean_fixture() -> PathBuf {
 }
 
 async fn fresh_bean() -> WasmBean {
-    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let registry = Arc::new(camel_component_api::NoOpComponentContext);
     WasmBean::new(
         bean_fixture(),
         WasmConfig::default(),
@@ -49,7 +48,7 @@ async fn fresh_bean() -> WasmBean {
 /// Build a bean with a drain-completion lifecycle hook (used by tests to
 /// assert drain timing / cancel-on-drop deterministically).
 async fn fresh_bean_with_drain_completion_notify() -> (WasmBean, Arc<Notify>) {
-    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let registry = Arc::new(camel_component_api::NoOpComponentContext);
     let notify = Arc::new(Notify::new());
     let bean = WasmBean::new(
         bean_fixture(),

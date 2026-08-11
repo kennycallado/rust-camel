@@ -2,15 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use camel_api::CamelError;
-use camel_component_api::{BoxProcessor, Endpoint, ProducerContext};
-use camel_core::Registry;
+use camel_component_api::{BoxProcessor, ComponentContext, Endpoint, ProducerContext};
 
 use crate::config::WasmConfig;
 
 pub struct WasmEndpoint {
     uri: String,
     module_path: PathBuf,
-    registry: Arc<std::sync::Mutex<Registry>>,
+    registry: Arc<dyn ComponentContext>,
     config: WasmConfig,
 }
 
@@ -18,7 +17,7 @@ impl WasmEndpoint {
     pub fn new(
         uri: String,
         module_path: PathBuf,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         config: WasmConfig,
     ) -> Self {
         Self {
@@ -71,7 +70,6 @@ impl Endpoint for WasmEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     #[test]
     fn test_wasm_endpoint_stores_config() {
@@ -84,7 +82,7 @@ mod tests {
         let endpoint = WasmEndpoint::new(
             "wasm:test.wasm?timeout=10&max-memory=1048576".to_string(),
             PathBuf::from("test.wasm"),
-            Arc::new(Mutex::new(Registry::new())),
+            Arc::new(camel_component_api::NoOpComponentContext),
             config.clone(),
         );
         assert_eq!(endpoint.config().timeout_secs, 10);

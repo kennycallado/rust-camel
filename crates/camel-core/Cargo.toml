@@ -82,6 +82,7 @@ camel-component-redis.workspace = true
 camel-component-grpc.workspace = true
 camel-component-llm.workspace = true
 camel-component-controlbus.workspace = true
+camel-component-wasm.workspace = true
 criterion.workspace = true
 uuid.workspace = true
 toml = { workspace = true }

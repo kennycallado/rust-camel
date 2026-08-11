@@ -10,7 +10,7 @@ use wasmtime::{AsContextMut, Config, Engine, Store};
 use wasmtime_wasi::WasiCtxBuilder;
 
 use camel_api::{Body, Exchange};
-use camel_core::Registry;
+use camel_component_api::ComponentContext;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +23,7 @@ pub struct WasmHostState {
     pub table: ResourceTable,
     pub wasi: wasmtime_wasi::WasiCtx,
     pub properties: HashMap<String, Value>,
-    pub registry: Arc<std::sync::Mutex<Registry>>,
+    pub registry: Arc<dyn ComponentContext>,
     pub call_depth: Arc<std::sync::atomic::AtomicUsize>,
     pub limits: wasmtime::StoreLimits,
     pub state_store: crate::state_store::StateStore,
@@ -130,7 +130,7 @@ impl WasmRuntime {
     /// table elements; `None` leaves it unlimited (wasmtime default).
     #[allow(clippy::too_many_arguments)] // 3 new R4-L5 caps + existing 5
     pub fn create_host_state(
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
         max_memory_bytes: u64,
@@ -171,7 +171,7 @@ impl WasmRuntime {
 
     pub async fn call_init_once(
         &self,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
     ) -> Result<(), WasmError> {
@@ -221,7 +221,7 @@ impl WasmRuntime {
 
     pub async fn call_process(
         &self,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
         exchange: WasmExchange,
@@ -296,7 +296,7 @@ impl WasmRuntime {
     #[allow(clippy::too_many_arguments)] // mirrors call_process + 3 streaming knobs
     pub async fn process_streaming_exchange(
         &self,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
         exchange: Exchange,
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_wasm_host_state_creation() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let props = HashMap::new();
         let state = WasmHostState {
             table: ResourceTable::new(),
@@ -556,7 +556,7 @@ mod tests {
     fn create_host_state_with_zero_memory_falls_back_to_default() {
         // Defensive: passing 0 must not produce a StoreLimits that blocks all
         // memory growth — it should fall back to wasmtime's default.
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -589,7 +589,7 @@ mod tests {
         let engine = Engine::new(&config).unwrap();
         let module = wasmtime::Module::new(&engine, wat).expect("compile wat");
 
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -646,7 +646,7 @@ mod tests {
         let engine = Engine::new(&config).unwrap();
         let module = wasmtime::Module::new(&engine, wat).expect("compile wat");
 
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -694,7 +694,7 @@ mod tests {
         let engine = Engine::new(&config).unwrap();
         let module = wasmtime::Module::new(&engine, wat).expect("compile wat");
 
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         // Cap = 1 page initial + 1 page growable = 2 pages = 128 KiB.
         let host_state = WasmRuntime::create_host_state(
             registry,
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_host_state_has_limits_field() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -745,7 +745,7 @@ mod tests {
         config.epoch_interruption(true);
         config.wasm_component_model(true);
         let engine = Engine::new(&config).unwrap();
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -770,7 +770,7 @@ mod tests {
         config.epoch_interruption(true);
         config.wasm_component_model(true);
         let engine = Engine::new(&config).unwrap();
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -792,7 +792,7 @@ mod tests {
         // When max_table_elements=None, the builder does NOT call
         // .table_elements() — wasmtime unlimited default preserved.
         // instances/tables at 10_000 (wasmtime defaults).
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn store_limits_custom_table_elements_cap() {
         // When max_table_elements=Some(n), the builder calls .table_elements(n).
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -883,7 +883,7 @@ mod tests {
         let engine = Engine::new(&config).unwrap();
         let module = wasmtime::Module::new(&engine, wat).expect("compile wat");
 
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
             HashMap::new(),

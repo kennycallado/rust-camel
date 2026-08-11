@@ -146,6 +146,7 @@ pub use crate::lifecycle::domain::{
     RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
 };
 pub use crate::shared::components::domain::Registry;
+pub use crate::shared::components::domain::RegistryComponentContext;
 pub use crate::shared::observability::adapters::TracingProcessor;
 pub use crate::shared::observability::domain::{
     DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,

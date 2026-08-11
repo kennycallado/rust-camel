@@ -85,6 +85,48 @@ impl Default for Registry {
     }
 }
 
+/// Adapter that lets `Registry` participate as a `ComponentContext`.
+///
+/// Wraps the shared `Arc<Mutex<Registry>>` and delegates `resolve_component`
+/// to `Registry::get`. All other `ComponentContext` methods are no-ops — wasm
+/// only needs component lookups.
+pub struct RegistryComponentContext {
+    registry: Arc<std::sync::Mutex<Registry>>,
+}
+
+impl RegistryComponentContext {
+    pub fn new(registry: Arc<std::sync::Mutex<Registry>>) -> Self {
+        Self { registry }
+    }
+}
+
+impl camel_component_api::ComponentContext for RegistryComponentContext {
+    fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn camel_component_api::Component>> {
+        self.registry.lock().ok()?.get(scheme)
+    }
+
+    fn resolve_language(&self, _name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
+        None
+    }
+
+    fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+        Arc::new(camel_api::NoOpMetrics)
+    }
+
+    fn platform_service(&self) -> Arc<dyn camel_api::PlatformService> {
+        Arc::new(camel_api::NoopPlatformService::default())
+    }
+
+    fn register_route_health_check(
+        &self,
+        _route_id: &str,
+        _check: Arc<dyn camel_api::AsyncHealthCheck>,
+    ) {
+    }
+
+    fn unregister_route_health_check(&self, _route_id: &str) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

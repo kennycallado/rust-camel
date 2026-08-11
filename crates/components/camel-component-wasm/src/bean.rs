@@ -9,7 +9,7 @@ use wasmtime::AsContextMut;
 
 use camel_api::{Body, CamelError, Exchange};
 use camel_bean::BeanProcessor;
-use camel_core::Registry;
+use camel_component_api::ComponentContext;
 
 use crate::bean_bindings::Bean as BeanGuest;
 use crate::error::WasmError;
@@ -37,7 +37,7 @@ impl WasmBean {
     pub async fn new(
         module_path: impl AsRef<Path>,
         wasm_config: crate::config::WasmConfig,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         bean_config: HashMap<String, String>,
     ) -> Result<Self, WasmError> {
         let max_stream_bytes = wasm_config.max_stream_bytes;
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_wasm_bean_host_state_creation() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = crate::runtime::WasmRuntime::create_host_state(
             registry,
             HashMap::new(),

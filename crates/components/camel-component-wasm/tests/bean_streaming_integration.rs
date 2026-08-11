@@ -21,7 +21,6 @@ use camel_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata}
 use camel_bean::BeanProcessor;
 use camel_component_wasm::WasmConfig;
 use camel_component_wasm::bean::WasmBean;
-use camel_core::Registry;
 use futures::stream::{self, BoxStream, StreamExt};
 
 const MB: usize = 1024 * 1024;
@@ -48,7 +47,7 @@ fn stream_exchange(stream: BoxStream<'static, Result<Bytes, CamelError>>) -> Exc
 }
 
 async fn fresh_bean() -> WasmBean {
-    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let registry = Arc::new(camel_component_api::NoOpComponentContext);
     WasmBean::new(
         bean_fixture(),
         WasmConfig::default(),
@@ -139,7 +138,7 @@ async fn bean_streaming_counts_chunked_stream() {
 
 #[tokio::test]
 async fn bean_streaming_watchdog_does_not_false_trip_on_stalled_read() {
-    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let registry = Arc::new(camel_component_api::NoOpComponentContext);
     let bean = WasmBean::new(
         bean_fixture(),
         WasmConfig::default(),
@@ -205,7 +204,7 @@ async fn bean_streaming_propagates_guest_error() {
 
 #[tokio::test]
 async fn bean_non_streaming_call_succeeds_with_tight_watchdog() {
-    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let registry = Arc::new(camel_component_api::NoOpComponentContext);
     let bean = WasmBean::new(
         bean_fixture(),
         WasmConfig::default(),

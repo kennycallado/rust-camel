@@ -39,7 +39,10 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     // base_dir = fixtures/ → "echo.wasm" resolves to fixtures/echo.wasm
-    ctx.register_component(WasmComponent::new(registry, fixtures_dir));
+    ctx.register_component(WasmComponent::new(
+        Arc::new(camel_core::RegistryComponentContext::new(registry)),
+        fixtures_dir,
+    ));
 
     // Phase 4 hardening: 5 s timeout, 10 MB memory cap
     // ANCHOR: wasm-producer-route

@@ -58,17 +58,16 @@ use std::sync::atomic::AtomicBool;
 
 use camel_api::CamelError;
 use camel_component_api::{Component, ComponentContext, ComponentMetadata, Endpoint};
-use camel_core::Registry;
 use metadata::WasmMetadataDescriptor;
 
 pub struct WasmComponent {
-    registry: Arc<std::sync::Mutex<Registry>>,
+    registry: Arc<dyn ComponentContext>,
     base_dir: PathBuf,
     engine_loaded: Arc<AtomicBool>,
 }
 
 impl WasmComponent {
-    pub fn new(registry: Arc<std::sync::Mutex<Registry>>, base_dir: PathBuf) -> Self {
+    pub fn new(registry: Arc<dyn ComponentContext>, base_dir: PathBuf) -> Self {
         Self {
             registry,
             base_dir,

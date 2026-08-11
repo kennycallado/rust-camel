@@ -7,9 +7,9 @@ use camel_api::security_policy::{
     store_principal_properties,
 };
 use camel_api::{Body, Exchange, Message};
+use camel_component_api::ComponentContext;
 use camel_component_wasm::WasmConfig;
 use camel_component_wasm::WasmSecurityPolicy;
-use camel_core::Registry;
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -18,8 +18,8 @@ fn fixture_path() -> PathBuf {
         .join("security-policy-test.wasm")
 }
 
-fn make_registry() -> Arc<std::sync::Mutex<Registry>> {
-    Arc::new(std::sync::Mutex::new(Registry::new()))
+fn make_registry() -> Arc<dyn ComponentContext> {
+    Arc::new(camel_component_api::NoOpComponentContext)
 }
 
 #[tokio::test]

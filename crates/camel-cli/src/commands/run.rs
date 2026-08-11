@@ -205,7 +205,9 @@ pub async fn run(
             let wasm_bean = camel_component_wasm::bean::WasmBean::new(
                 &wasm_path,
                 wasm_config,
-                component_registry.clone(),
+                Arc::new(camel_core::RegistryComponentContext::new(
+                    component_registry.clone(),
+                )),
                 bean_cfg.config.clone(),
             )
             .await
@@ -424,7 +426,12 @@ pub async fn run(
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .to_path_buf();
-        let wasm_bundle = camel_component_wasm::WasmBundle::new(ctx.registry_arc(), base_dir);
+        let wasm_bundle = camel_component_wasm::WasmBundle::new(
+            Arc::new(camel_core::RegistryComponentContext::new(
+                ctx.registry_arc(),
+            )),
+            base_dir,
+        );
         <camel_component_wasm::WasmBundle as camel_component_api::ComponentBundle>::register_all(
             wasm_bundle,
             &mut ctx,

@@ -435,7 +435,6 @@ mod tests {
         // inside run_concurrent, then verify wasm_to_body maps the Stream
         // variant to Body::Empty (Phase 1: guest→host not rebuilt).
         use crate::runtime::WasmHostState;
-        use camel_core::Registry;
         use futures::stream;
         use wasmtime::{AsContextMut, Config, Engine, Store};
 
@@ -447,7 +446,7 @@ mod tests {
             table: wasmtime::component::ResourceTable::new(),
             wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
             properties: HashMap::new(),
-            registry: Arc::new(std::sync::Mutex::new(Registry::new())),
+            registry: Arc::new(camel_component_api::NoOpComponentContext),
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),
@@ -554,7 +553,6 @@ mod tests {
         Arc<Notify>,
         BoxStreamProducer<WasmHostState>,
     ) {
-        use camel_core::Registry;
         use wasmtime::{Config, Engine, Store};
 
         let mut config = Config::new();
@@ -565,7 +563,7 @@ mod tests {
             table: wasmtime::component::ResourceTable::new(),
             wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
             properties: HashMap::new(),
-            registry: Arc::new(std::sync::Mutex::new(Registry::new())),
+            registry: Arc::new(camel_component_api::NoOpComponentContext),
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),

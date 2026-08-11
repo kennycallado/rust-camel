@@ -7,7 +7,7 @@ use wasmtime::AsContextMut;
 
 use camel_api::security_policy::{AuthorizationDecision, SecurityPolicy, principal_from_exchange};
 use camel_api::{CamelError, Exchange};
-use camel_core::Registry;
+use camel_component_api::ComponentContext;
 
 use camel_config::config::WasmSecurityPolicyConfig;
 
@@ -25,7 +25,7 @@ impl WasmSecurityPolicy {
     pub async fn new(
         module_path: impl AsRef<Path>,
         wasm_config: crate::config::WasmConfig,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         init_config: HashMap<String, String>,
     ) -> Result<Self, WasmError> {
         let ctx = WasmPluginContext::new(module_path, wasm_config, registry, init_config).await?;
@@ -99,7 +99,7 @@ impl SecurityPolicy for WasmSecurityPolicy {
 
 pub async fn build_security_policy_registry(
     policies: &HashMap<String, WasmSecurityPolicyConfig>,
-    registry: Arc<std::sync::Mutex<Registry>>,
+    registry: Arc<dyn ComponentContext>,
 ) -> Result<camel_auth::SecurityPolicyRegistry, WasmError> {
     let policy_registry = camel_auth::SecurityPolicyRegistry::new();
 
@@ -130,7 +130,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wasm_security_policy_new_missing_file() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let config = crate::config::WasmConfig::default();
         let result =
             WasmSecurityPolicy::new("/nonexistent/module.wasm", config, registry, HashMap::new())
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_wasm_security_policy_host_state_creation() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = crate::runtime::WasmRuntime::create_host_state(
             registry,
             HashMap::new(),
@@ -172,7 +172,7 @@ mod tests {
             },
         ))
         .collect();
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let result = build_security_policy_registry(&policies, registry).await;
         let err = match result {
             Ok(_) => panic!("expected error for missing module"),

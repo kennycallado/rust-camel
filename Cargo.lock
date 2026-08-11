@@ -2045,6 +2045,7 @@ dependencies = [
  "camel-component-seda",
  "camel-component-sql",
  "camel-component-timer",
+ "camel-component-wasm",
  "camel-endpoint",
  "camel-language-api",
  "camel-language-js",

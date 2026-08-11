@@ -78,7 +78,7 @@ pub fn add_to_linker(linker: &mut Linker<WasmHostState>) -> Result<(), wasmtime:
 // tests (where we don't have an Accessor in scope).
 
 async fn run_async_call(
-    registry: std::sync::Arc<std::sync::Mutex<camel_core::Registry>>,
+    registry: std::sync::Arc<dyn camel_component_api::ComponentContext>,
     uri: String,
     payload: String,
 ) -> Result<String, crate::bindings::camel::plugin::types::WasmError> {
@@ -93,20 +93,12 @@ async fn run_async_call(
         );
     }
 
-    let component = {
-        let guard = registry.lock().map_err(|e| {
-            crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
-                "registry lock poisoned: {}",
-                e
-            ))
-        })?;
-        guard.get(&scheme).ok_or_else(|| {
-            crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
-                "component not found for scheme: {}",
-                scheme
-            ))
-        })?
-    };
+    let component = registry.resolve_component(&scheme).ok_or_else(|| {
+        crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
+            "component not found for scheme: {}",
+            scheme
+        ))
+    })?;
 
     let endpoint = component
         .create_endpoint(&uri, &camel_component_api::NoOpComponentContext)
@@ -163,7 +155,7 @@ async fn run_async_call(
 }
 
 async fn run_async_poll(
-    registry: std::sync::Arc<std::sync::Mutex<camel_core::Registry>>,
+    registry: std::sync::Arc<dyn camel_component_api::ComponentContext>,
     uri: String,
     timeout_ms: u32,
 ) -> Result<String, crate::bindings::camel::plugin::types::WasmError> {
@@ -177,20 +169,12 @@ async fn run_async_poll(
         );
     }
 
-    let component = {
-        let guard = registry.lock().map_err(|e| {
-            crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
-                "registry lock poisoned: {}",
-                e
-            ))
-        })?;
-        guard.get(&scheme).ok_or_else(|| {
-            crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
-                "component not found for scheme: {}",
-                scheme
-            ))
-        })?
-    };
+    let component = registry.resolve_component(&scheme).ok_or_else(|| {
+        crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
+            "component not found for scheme: {}",
+            scheme
+        ))
+    })?;
 
     let endpoint = component
         .create_endpoint(&uri, &camel_component_api::NoOpComponentContext)
@@ -652,7 +636,6 @@ impl WasmHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_core::Registry;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -661,7 +644,7 @@ mod tests {
             table: wasmtime::component::ResourceTable::new(),
             wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
             properties: HashMap::new(),
-            registry: Arc::new(std::sync::Mutex::new(Registry::new())),
+            registry: Arc::new(camel_component_api::NoOpComponentContext),
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(call_depth)),
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),

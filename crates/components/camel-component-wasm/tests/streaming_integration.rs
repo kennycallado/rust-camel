@@ -30,7 +30,6 @@ use camel_component_wasm::WasmConfig;
 use camel_component_wasm::WasmError;
 use camel_component_wasm::bindings::camel::plugin::types::{WasmBody, WasmExchange};
 use camel_component_wasm::runtime::WasmRuntime;
-use camel_core::Registry;
 use futures::stream::{self, BoxStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
@@ -69,7 +68,7 @@ async fn process_streaming(
     max_bytes: u64,
     no_progress_timeout: Duration,
 ) -> Result<WasmExchange, WasmError> {
-    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let registry = Arc::new(camel_component_api::NoOpComponentContext);
     let state_store = StateStore::new();
     let properties: HashMap<String, serde_json::Value> = HashMap::new();
     let sem = Arc::new(tokio::sync::Semaphore::new(1));
@@ -465,7 +464,7 @@ async fn plugin_return_path_streams_body() {
         Arc::new(PanicRuntimeObservability);
     let mut producer = WasmProducer::new(
         streaming_plugin_path(),
-        Arc::new(std::sync::Mutex::new(Registry::new())),
+        Arc::new(camel_component_api::NoOpComponentContext),
         WasmConfig::default(),
         observability,
     );

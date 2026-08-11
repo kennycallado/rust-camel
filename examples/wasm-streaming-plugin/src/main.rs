@@ -43,7 +43,10 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     // base_dir = fixtures/ → "streaming-plugin.wasm" resolves to fixtures/streaming-plugin.wasm
-    ctx.register_component(WasmComponent::new(registry, fixtures_dir));
+    ctx.register_component(WasmComponent::new(
+        Arc::new(camel_core::RegistryComponentContext::new(registry)),
+        fixtures_dir,
+    ));
 
     // Create a 5 MB stream of repeating bytes (0x42 = 'B')
     let chunk_size = 64 * 1024; // 64 KB chunks

@@ -4,16 +4,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
+use camel_component_api::ComponentContext;
 use camel_component_wasm::StateStore;
 use camel_component_wasm::WasmConfig;
 use camel_component_wasm::bindings::camel::plugin::types::{
     WasmBody, WasmExchange, WasmMessage, WasmPattern,
 };
 use camel_component_wasm::runtime::WasmRuntime;
-use camel_core::Registry;
 
 fn echo_wasm_path() -> PathBuf {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,8 +30,8 @@ fn echo_wasm_path() -> PathBuf {
     panic!("echo.wasm not found at {:?}", base);
 }
 
-fn make_registry() -> Arc<Mutex<Registry>> {
-    Arc::new(Mutex::new(Registry::new()))
+fn make_registry() -> Arc<dyn ComponentContext> {
+    Arc::new(camel_component_api::NoOpComponentContext)
 }
 
 fn make_exchange() -> WasmExchange {

@@ -9,8 +9,8 @@ use camel_api::{Exchange, Message};
 use camel_auth::PermissionEvaluatorRegistry;
 use camel_auth::permission::{PermissionDecision, PermissionEvaluator, PermissionRequest};
 use camel_auth::types::AuthError;
+use camel_component_api::ComponentContext;
 use camel_config::config::PermissionProviderConfig;
-use camel_core::Registry;
 
 use crate::config::WasmConfig;
 use crate::error::WasmError;
@@ -33,7 +33,7 @@ impl WasmAuthorizationPolicyEvaluator {
     pub async fn new(
         module_path: impl AsRef<std::path::Path>,
         wasm_config: WasmConfig,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         init_config: HashMap<String, String>,
     ) -> Result<Self, WasmError> {
         let ctx = WasmPluginContext::new(module_path, wasm_config, registry, init_config).await?;
@@ -72,7 +72,7 @@ impl WasmAuthorizationPolicyEvaluator {
 
 pub async fn build_permission_registry(
     permissions: &HashMap<String, PermissionProviderConfig>,
-    registry: Arc<std::sync::Mutex<Registry>>,
+    registry: Arc<dyn ComponentContext>,
 ) -> Result<PermissionEvaluatorRegistry, AuthError> {
     let evaluator_registry = PermissionEvaluatorRegistry::new();
 
@@ -272,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn wasm_evaluator_new_missing_file_returns_error() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let result = WasmAuthorizationPolicyEvaluator::new(
             "/nonexistent/policy.wasm",
             WasmConfig::from_limits(&WasmLimitsConfig::default()),
@@ -303,8 +303,11 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         let registry = rt
             .block_on(async {
-                build_permission_registry(&perms, Arc::new(std::sync::Mutex::new(Registry::new())))
-                    .await
+                build_permission_registry(
+                    &perms,
+                    Arc::new(camel_component_api::NoOpComponentContext),
+                )
+                .await
             })
             .expect("empty permissions should succeed");
         assert!(registry.get("missing").is_none());
@@ -324,7 +327,7 @@ mod tests {
             },
         );
         let result =
-            build_permission_registry(&perms, Arc::new(std::sync::Mutex::new(Registry::new())))
+            build_permission_registry(&perms, Arc::new(camel_component_api::NoOpComponentContext))
                 .await;
         assert!(result.is_err());
     }
@@ -343,7 +346,7 @@ mod tests {
             },
         );
         let result =
-            build_permission_registry(&perms, Arc::new(std::sync::Mutex::new(Registry::new())))
+            build_permission_registry(&perms, Arc::new(camel_component_api::NoOpComponentContext))
                 .await;
         assert!(result.is_err());
     }

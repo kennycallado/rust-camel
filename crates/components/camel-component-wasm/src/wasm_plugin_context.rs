@@ -6,7 +6,7 @@ use serde_json::Value;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{AsContextMut, Config, Engine, Store};
 
-use camel_core::Registry;
+use camel_component_api::ComponentContext;
 
 use crate::config::WasmConfig;
 use crate::error::WasmError;
@@ -18,7 +18,7 @@ pub struct WasmPluginContext {
     pub component: Component,
     pub module_path: PathBuf,
     pub config: WasmConfig,
-    pub registry: Arc<std::sync::Mutex<Registry>>,
+    pub registry: Arc<dyn ComponentContext>,
     pub state_store: crate::state_store::StateStore,
     pub capabilities: crate::capabilities::WasmCapabilities,
     #[allow(dead_code)]
@@ -29,7 +29,7 @@ impl WasmPluginContext {
     async fn build(
         module_path: impl AsRef<Path>,
         wasm_config: WasmConfig,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         setup_linker: impl FnOnce(&mut Linker<WasmHostState>) -> Result<(), WasmError>,
         module_label: &str,
         capabilities: crate::capabilities::WasmCapabilities,
@@ -102,7 +102,7 @@ impl WasmPluginContext {
     pub async fn new(
         module_path: impl AsRef<Path>,
         wasm_config: WasmConfig,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         init_config: HashMap<String, String>,
     ) -> Result<Self, WasmError> {
         let ctx = Self::build(
@@ -170,7 +170,7 @@ impl WasmPluginContext {
     pub async fn new_bean(
         module_path: impl AsRef<Path>,
         wasm_config: WasmConfig,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: Arc<dyn ComponentContext>,
         bean_config: HashMap<String, String>,
     ) -> Result<(Self, Vec<String>), WasmError> {
         let caps = crate::capabilities::WasmCapabilities::from_scheme_list(
