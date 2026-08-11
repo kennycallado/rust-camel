@@ -2031,14 +2031,12 @@ dependencies = [
  "camel-component-cron",
  "camel-component-direct",
  "camel-component-file",
- "camel-component-http",
  "camel-component-log",
  "camel-component-mock",
  "camel-component-opensearch",
  "camel-component-seda",
  "camel-component-sql",
  "camel-component-timer",
- "camel-component-ws",
  "camel-endpoint",
  "camel-language-api",
  "camel-language-js",
@@ -2122,14 +2120,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "trybuild",
 ]
 
 [[package]]
 name = "camel-endpoint-macros"
 version = "0.27.0"
 dependencies = [
- "camel-api",
- "camel-endpoint",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -2464,6 +2461,7 @@ dependencies = [
  "camel-component-api",
  "camel-component-container",
  "camel-component-controlbus",
+ "camel-component-cron",
  "camel-component-cxf",
  "camel-component-direct",
  "camel-component-file",

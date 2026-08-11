@@ -98,6 +98,10 @@ enum Commands {
     /// `#[cfg(test)]` modules. Enforces the single-source-of-truth
     /// invariant: metadata MUST be macro-derived, not hand-written.
     LintSingleSource,
+    /// Enforce publish-topology invariants: no cyclic dev/build-dependencies
+    /// on publishable crates, and no publishable crate depends on camel-test
+    /// (the publish-order leaf sink).
+    LintPublishCycles,
     /// Compute the correct publish order for workspace crates by performing
     /// a topological sort over normal (non-dev) internal dependencies.
     /// Outputs shell commands suitable for publish-crates.sh.
@@ -112,6 +116,11 @@ enum Commands {
         /// Don't actually publish, just show what would be done
         #[arg(long)]
         dry_run: bool,
+        /// Print the no_verify set and broken weak edges from the
+        /// SCC-accurate cycle detector without publishing anything
+        /// or mutating any Cargo.toml.
+        #[arg(long)]
+        show_cycles: bool,
     },
     /// Print the artifact hash for an OpenSpec change directory.
     /// Used by /bless to compute the hash shown to the expert, and by
@@ -282,6 +291,14 @@ fn main() {
                 }
             }
         }
+        Commands::LintPublishCycles => {
+            let workspace_root = workspace_root_or_exit();
+            if let Err(e) = lint_publish_cycles(&workspace_root) {
+                eprintln!("lint-publish-cycles error: {e}");
+                std::process::exit(1);
+            }
+            println!("lint-publish-cycles: OK (0 violations)");
+        }
         Commands::LintNonExhaustive => {
             let workspace_root = workspace_root_or_exit();
             match lint_non_exhaustive(&workspace_root) {
@@ -329,8 +346,18 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Publish { dry_run } => {
+        Commands::Publish {
+            dry_run,
+            show_cycles: show_cycles_flag,
+        } => {
             let workspace_root = workspace_root_or_exit();
+            if show_cycles_flag {
+                if let Err(e) = show_cycles(&workspace_root, &mut std::io::stdout()) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             if let Err(e) = publish_crates(&workspace_root, dry_run) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
@@ -3157,7 +3184,7 @@ pub fn lint_credential_derives(workspace_root: &Path) -> Result<Vec<SecretViolat
 }
 
 /// Represents a workspace crate with its publish-relevant metadata.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct WorkspaceCrate {
     name: String,
     path: String,
@@ -3178,16 +3205,32 @@ struct WorkspaceCrate {
 /// edges come from `[dev-dependencies]` and `[build-dependencies]`; cargo
 /// still resolves them during `cargo publish`, but cycles closed only by
 /// weak edges can be broken by publishing one member first.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EdgeKind {
     Normal,
     Weak,
 }
 
-/// Discover workspace crates and compute topological publish order.
-fn resolve_publish_order(
-    workspace_root: &Path,
-) -> Result<(Vec<WorkspaceCrate>, std::collections::HashSet<String>), String> {
+/// Discover workspace crates and compute the topological publish order with
+/// SCC-accurate cycle detection. Returns `(sorted_crates, no_verify_holders,
+/// broken_weak_edges)` where each broken edge is a `(holder, target)` pair and
+/// `holder` is the crate that DECLARES the dev/build-dependency. Data-only —
+/// callers format any human-readable report.
+type PublishOrderResult = (
+    Vec<WorkspaceCrate>,
+    std::collections::HashSet<String>,
+    Vec<(String, String)>,
+);
+
+fn resolve_publish_order(workspace_root: &Path) -> Result<PublishOrderResult, String> {
+    let crates = discover_publishable_crates(workspace_root)?;
+    compute_publish_order(crates)
+}
+
+/// Walk `crates/*/Cargo.toml` (nested one level) into `WorkspaceCrate` records.
+/// Pure disk walk — no graph logic — so the topological solver is unit-testable
+/// from in-memory `WorkspaceCrate` vecs.
+fn discover_publishable_crates(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, String> {
     let mut crates: Vec<WorkspaceCrate> = Vec::new();
 
     let crates_dir = workspace_root.join("crates");
@@ -3235,6 +3278,21 @@ fn resolve_publish_order(
         });
     }
 
+    Ok(crates)
+}
+
+/// Topological publish-order solver with SCC-gated weak-edge breaking.
+///
+/// Runs Kahn's algorithm; when the ready queue drains with unscheduled crates
+/// remaining, computes Tarjan SCC over the subgraph induced by the unscheduled
+/// nodes and breaks the single globally-lexicographically-smallest intra-SCC
+/// weak edge (holder = declaring crate), then re-runs Kahn and recomputes the
+/// SCC decomposition. This per-iteration recompute is what makes the result
+/// cycle-accurate instead of the previous greedy over-breaking behaviour: a
+/// weak edge is broken only if both its endpoints still lie inside the same
+/// non-trivial SCC. When unscheduled nodes remain but no non-trivial SCC has a
+/// breakable intra-SCC weak edge, a hard normal-only cycle is reported.
+fn compute_publish_order(crates: Vec<WorkspaceCrate>) -> Result<PublishOrderResult, String> {
     let name_map: std::collections::HashMap<String, usize> = crates
         .iter()
         .enumerate()
@@ -3248,8 +3306,10 @@ fn resolve_publish_order(
         .map(|(i, _)| i)
         .collect();
 
-    // Build adjacency with edge-kind tagging. We need to track edges by kind
-    // so we can break weak-only cycles after Kahn's algorithm stalls.
+    // Build adjacency with edge-kind tagging. `adj[di]` lists the dependents
+    // of `di` — i.e. for each entry `(ci, kind)`, `ci` declares a dependency
+    // on `di`. We track the kind so we can break weak-only cycles after Kahn
+    // stalls.
     let mut adj: Vec<Vec<(usize, EdgeKind)>> = vec![Vec::new(); crates.len()];
     let mut in_degree: Vec<usize> = vec![0; crates.len()];
 
@@ -3296,69 +3356,13 @@ fn resolve_publish_order(
         .collect();
 
     let mut sorted: Vec<usize> = Vec::new();
-    while let Some(ci) = queue.pop_front() {
-        sorted.push(ci);
-        for &(dependent, _kind) in &adj[ci] {
-            in_degree[dependent] -= 1;
-            if in_degree[dependent] == 0 {
-                queue.push_back(dependent);
-            }
-        }
-    }
-
-    // If Kahn stalled, try breaking weak edges that participate in cycles.
-    // Each broken weak edge means the dependent must be published with
-    // `cargo publish --no-verify` (or the dev-dep restructured), because
-    // cargo cannot resolve it at publish time.
+    // Each broken weak edge is `(holder, target)`: holder = the declaring
+    // crate (the one whose dev/build-dep got cut, i.e. must publish with
+    // --no-verify), target = the dependency the holder declared.
     let mut broken_weak_edges: Vec<(String, String)> = Vec::new();
-    while sorted.len() < publishable.len() {
-        let sorted_set: std::collections::HashSet<usize> = sorted.iter().copied().collect();
 
-        // Find an unscheduled crate whose remaining in-degree comes entirely
-        // from weak edges whose source is also unscheduled. Dropping one such
-        // edge breaks at least one cycle.
-        let mut progress = false;
-        for &ci in &publishable {
-            if sorted_set.contains(&ci) || in_degree[ci] == 0 {
-                continue;
-            }
-            // Count how many of ci's remaining unresolved incoming edges are
-            // weak and come from other unscheduled crates.
-            let weak_unresolved: Vec<usize> = adj
-                .iter()
-                .enumerate()
-                .filter_map(|(di, dependents)| {
-                    if sorted_set.contains(&di) {
-                        return None;
-                    }
-                    dependents
-                        .iter()
-                        .any(|&(d, k)| d == ci && k == EdgeKind::Weak)
-                        .then_some(di)
-                })
-                .collect();
-
-            if weak_unresolved.is_empty() {
-                continue;
-            }
-            // Drop the first such weak edge. Pick the source with the smallest
-            // index for deterministic output. `weak_unresolved` is guaranteed
-            // non-empty here because we skipped empty cases above.
-            let di = *weak_unresolved.iter().min().unwrap(); // allow-unwrap
-            adj[di].retain(|&(d, _)| d != ci);
-            in_degree[ci] -= 1;
-            broken_weak_edges.push((crates[di].name.clone(), crates[ci].name.clone()));
-            progress = true;
-            if in_degree[ci] == 0 {
-                queue.push_back(ci);
-            }
-        }
-
-        if !progress {
-            break;
-        }
-
-        // Drain the queue we may have just refilled.
+    loop {
+        // Drain the ready queue.
         while let Some(ci) = queue.pop_front() {
             sorted.push(ci);
             for &(dependent, _kind) in &adj[ci] {
@@ -3368,44 +3372,248 @@ fn resolve_publish_order(
                 }
             }
         }
-    }
 
-    if sorted.len() != publishable.len() {
+        if sorted.len() == publishable.len() {
+            break;
+        }
+
+        // Kahn stalled with unscheduled crates remaining. Induce the subgraph
+        // on the unscheduled set and decompose it into SCCs.
         let sorted_set: std::collections::HashSet<usize> = sorted.iter().copied().collect();
-        eprintln!(
-            "⚠️  CYCLE! Only sorted {} of {} publishable crates.",
-            sorted.len(),
-            publishable.len()
-        );
-        for &ci in &publishable {
-            if !sorted_set.contains(&ci) {
-                eprintln!("  {} (in-degree: {})", crates[ci].name, in_degree[ci]);
+        let sub_adj: Vec<Vec<(usize, EdgeKind)>> = (0..crates.len())
+            .map(|i| {
+                if sorted_set.contains(&i) {
+                    Vec::new()
+                } else {
+                    adj[i]
+                        .iter()
+                        .filter(|(d, _)| !sorted_set.contains(d))
+                        .copied()
+                        .collect()
+                }
+            })
+            .collect();
+        let sccs = tarjan_scc(&sub_adj);
+
+        // Non-trivial SCCs: size > 1, or size-1 carrying a self-loop.
+        let nontrivial: Vec<&Vec<usize>> = sccs
+            .iter()
+            .filter(|scc| {
+                if scc.len() > 1 {
+                    return true;
+                }
+                let n = scc[0];
+                adj[n].iter().any(|&(d, _)| d == n)
+            })
+            .collect();
+
+        if nontrivial.is_empty() {
+            // Unreachable in correct code: a Kahn stall with unscheduled
+            // nodes implies a cycle, which implies a non-trivial SCC, so
+            // `nontrivial` cannot be empty here. Kept as a fail-closed guard
+            // against an in-degree bookkeeping regression.
+            return Err("Cannot compute publish order due to dependency cycles".to_string());
+        }
+
+        // Pick the single globally-lexicographically-smallest breakable
+        // intra-SCC weak edge across all non-trivial SCCs.
+        let name_of = |i: usize| crates[i].name.clone();
+        let mut chosen: Option<(usize, usize)> = None;
+        let mut chosen_key: Option<(String, String)> = None;
+        for scc in &nontrivial {
+            let Some((holder_idx, target_idx)) = find_intra_scc_weak_edge(&adj, scc, name_of)
+            else {
+                continue;
+            };
+            let key = (
+                crates[holder_idx].name.clone(),
+                crates[target_idx].name.clone(),
+            );
+            if chosen_key.as_ref().is_none_or(|ck| &key < ck) {
+                chosen = Some((holder_idx, target_idx));
+                chosen_key = Some(key);
             }
         }
-        return Err("Cannot compute publish order due to dependency cycles".to_string());
+
+        let Some((holder_idx, target_idx)) = chosen else {
+            // Non-trivial SCCs exist but none has a breakable intra-SCC weak
+            // edge — a hard cycle closed only by normal edges.
+            return Err("Cannot compute publish order due to dependency cycles".to_string());
+        };
+
+        // Break the edge. Recall `adj[target_idx]` holds `(holder_idx, Weak)`.
+        adj[target_idx].retain(|&(d, k)| !(d == holder_idx && k == EdgeKind::Weak));
+        in_degree[holder_idx] -= 1;
+        broken_weak_edges.push((
+            crates[holder_idx].name.clone(),
+            crates[target_idx].name.clone(),
+        ));
+        if in_degree[holder_idx] == 0 {
+            queue.push_back(holder_idx);
+        }
+        // Loop: re-drain Kahn, then recompute SCC if it stalls again.
     }
 
     let no_verify: std::collections::HashSet<String> =
-        broken_weak_edges.iter().map(|(_, to)| to.clone()).collect();
-
-    if !broken_weak_edges.is_empty() {
-        eprintln!(
-            "⚠️  Broke {} weak (dev/build) dependency edge(s) to resolve cycles:",
-            broken_weak_edges.len()
-        );
-        for (from, to) in &broken_weak_edges {
-            eprintln!("  {from} --dev/build-dep--> {to} (will publish {to} with --no-verify)");
-        }
-    }
+        broken_weak_edges.iter().map(|(h, _)| h.clone()).collect();
 
     Ok((
         sorted.into_iter().map(|i| crates[i].clone()).collect(),
         no_verify,
+        broken_weak_edges,
     ))
 }
 
+/// Iterative Tarjan strongly-connected-components algorithm over a graph whose
+/// edges carry an `EdgeKind` — both kinds are traversable for cycle detection.
+/// Returns every SCC as a vec of node indices; trivial singletons are included
+/// (callers filter). Iterative rather than recursive so the workspace cannot
+/// stack-overflow as the publish graph grows.
+fn tarjan_scc(adj: &[Vec<(usize, EdgeKind)>]) -> Vec<Vec<usize>> {
+    let n = adj.len();
+    let mut index_counter: usize = 0;
+    let mut stack: Vec<usize> = Vec::with_capacity(n);
+    let mut on_stack = vec![false; n];
+    let mut index: Vec<usize> = vec![usize::MAX; n];
+    let mut lowlink: Vec<usize> = vec![0; n];
+    let mut result: Vec<Vec<usize>> = Vec::new();
+    // Explicit DFS work stack of `(node, next-child-cursor)` frames.
+    let mut work: Vec<(usize, usize)> = Vec::with_capacity(n);
+
+    for start in 0..n {
+        if index[start] != usize::MAX {
+            continue;
+        }
+        index[start] = index_counter;
+        lowlink[start] = index_counter;
+        index_counter += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        work.push((start, 0));
+
+        while let Some((v, mut i)) = work.pop() {
+            let neighbors_len = adj[v].len();
+            let mut recursed = false;
+            while i < neighbors_len {
+                let w = adj[v][i].0;
+                if index[w] == usize::MAX {
+                    // Recurse into w: save v's resume point, then push w.
+                    work.push((v, i + 1));
+                    index[w] = index_counter;
+                    lowlink[w] = index_counter;
+                    index_counter += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    work.push((w, 0));
+                    recursed = true;
+                    break;
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(index[w]);
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            if recursed {
+                continue;
+            }
+            if lowlink[v] == index[v] {
+                // v roots an SCC; pop the stack down to v.
+                let mut comp = Vec::new();
+                let mut found_root = false;
+                while !found_root {
+                    match stack.pop() {
+                        Some(w) => {
+                            on_stack[w] = false;
+                            comp.push(w);
+                            if w == v {
+                                found_root = true;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                result.push(comp);
+            }
+            // Propagate lowlink to the parent frame now on top of `work`.
+            if let Some(&(parent, _)) = work.last() {
+                lowlink[parent] = lowlink[parent].min(lowlink[v]);
+            }
+        }
+    }
+    result
+}
+
+/// Find the lexicographically-smallest breakable weak edge whose both endpoints
+/// lie in `scc`. Edge semantics: `adj[target_idx]` contains `(holder_idx,
+/// Weak)` where `holder_idx` is the crate that DECLARES the dev/build-dep and
+/// `target_idx` is the dependency target. Returns `(holder_idx, target_idx)`
+/// ranked smallest by `(holder_name, target_name)`, or `None` if no such edge
+/// exists in this SCC.
+fn find_intra_scc_weak_edge(
+    adj: &[Vec<(usize, EdgeKind)>],
+    scc: &[usize],
+    name_of: impl Fn(usize) -> String,
+) -> Option<(usize, usize)> {
+    let in_scc: std::collections::HashSet<usize> = scc.iter().copied().collect();
+    let mut best: Option<(usize, usize)> = None;
+    let mut best_key: Option<(String, String)> = None;
+    for &target_idx in scc {
+        for &(holder_idx, kind) in &adj[target_idx] {
+            if kind != EdgeKind::Weak || !in_scc.contains(&holder_idx) {
+                continue;
+            }
+            let key = (name_of(holder_idx), name_of(target_idx));
+            if best_key.as_ref().is_none_or(|bk| &key < bk) {
+                best = Some((holder_idx, target_idx));
+                best_key = Some(key);
+            }
+        }
+    }
+    best
+}
+
+/// Format the broken-weak-edge report shared by the `publish-order` and
+/// `publish` commands. `broken` entries are `(holder, target)`; the holder is
+/// the crate that declared the cut dev/build-dep (it must publish with
+/// `--no-verify`). Returns an empty string when there is nothing to report.
+fn format_cycle_report(
+    no_verify: &std::collections::HashSet<String>,
+    broken: &[(String, String)],
+) -> String {
+    if broken.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "⚠️  {n} crate(s) in publish cycles; broke {m} weak (dev/build) edge(s):\n",
+        n = no_verify.len(),
+        m = broken.len()
+    ));
+    for (holder, target) in broken {
+        out.push_str(&format!(
+            "  {holder} --dev/build-dep--> {target} (cycle participant — remediate before publish)\n"
+        ));
+    }
+    out
+}
+
+/// Fail-closed guard: if any crates are in dev/build-dep cycles, return an
+/// error with the cycle report. Callers may wrap the error with additional
+/// context.
+fn check_no_publish_cycles(
+    no_verify: &std::collections::HashSet<String>,
+    broken: &[(String, String)],
+) -> Result<(), String> {
+    if !no_verify.is_empty() {
+        Err(format_cycle_report(no_verify, broken))
+    } else {
+        Ok(())
+    }
+}
+
 fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
-    let (sorted, _no_verify) = resolve_publish_order(workspace_root)?;
+    let (sorted, no_verify, broken) = resolve_publish_order(workspace_root)?;
 
     if shell {
         for c in &sorted {
@@ -3430,9 +3638,141 @@ fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
                 println!("  - {}", c.name);
             }
         }
+        // The cycle report lives here (data-only resolver; callers format).
+        let report = format_cycle_report(&no_verify, &broken);
+        if !report.is_empty() {
+            println!();
+            print!("{report}");
+        }
     }
 
     Ok(())
+}
+
+/// Print the `no_verify` set and broken weak edges from the SCC-accurate
+/// cycle detector. Performs NO `cargo publish` and writes NO `Cargo.toml`.
+fn show_cycles(workspace_root: &Path, w: &mut impl std::io::Write) -> Result<(), String> {
+    let (sorted, no_verify, broken) = resolve_publish_order(workspace_root)?;
+    let _ = sorted; // unused in diagnostic mode
+
+    writeln!(w, "no_verify set: {} crate(s)", no_verify.len())
+        .map_err(|e| format!("write failed: {e}"))?;
+    if !no_verify.is_empty() {
+        let mut holders: Vec<&String> = no_verify.iter().collect();
+        holders.sort();
+        for h in &holders {
+            writeln!(w, "  {h}").map_err(|e| format!("write failed: {e}"))?;
+        }
+    }
+
+    writeln!(w, "broken weak edges:").map_err(|e| format!("write failed: {e}"))?;
+    if broken.is_empty() {
+        writeln!(w).map_err(|e| format!("write failed: {e}"))?;
+        return Ok(());
+    }
+    for (holder, target) in &broken {
+        writeln!(w, "  {holder} --dev/build-dep--> {target}")
+            .map_err(|e| format!("write failed: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Enforce publish-topology invariants:
+/// 1. The `no_verify` set (SCC cycle participants) must be empty.
+/// 2. No publishable crate may declare `camel-test` as any kind of dependency
+///    (`camel-test` is the publish-order leaf sink — ADR-0055).
+fn lint_publish_cycles(workspace_root: &Path) -> Result<(), String> {
+    let (_, no_verify, broken) = resolve_publish_order(workspace_root)?;
+    if !no_verify.is_empty() {
+        return Err(format_cycle_report(&no_verify, &broken));
+    }
+
+    let crates_dir = workspace_root.join("crates");
+    for entry in walkdir::WalkDir::new(&crates_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.file_name() != Some(std::ffi::OsStr::new("Cargo.toml")) {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+
+        if !is_publishable_crate(&content) {
+            continue;
+        }
+
+        if let Some(kind) = find_camel_test_dep_kind(&content) {
+            let crate_name = extract_toml_name(&content)
+                .ok_or_else(|| format!("No name in {}", path.display()))?;
+            return Err(format!(
+                "publishable crate {crate_name} depends on camel-test ({kind})"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns true unless `publish = false` is set in `[package]`.
+fn is_publishable_crate(content: &str) -> bool {
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "[package]" {
+            in_package = true;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            if in_package {
+                break;
+            }
+            continue;
+        }
+        if in_package && trimmed == "publish = false" {
+            return false;
+        }
+    }
+    true
+}
+
+/// Scan TOML content for a `camel-test` line under a dependency section.
+/// Returns the section kind ("dependencies", "dev-dependencies", or
+/// "build-dependencies") on first match, or `None` if `camel-test` is not
+/// declared as a dependency.
+fn find_camel_test_dep_kind(content: &str) -> Option<&'static str> {
+    let mut section = "";
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            section = trimmed;
+            continue;
+        }
+        let Some(dep) = extract_camel_dep_name(trimmed) else {
+            continue;
+        };
+        if dep != "camel-test" {
+            continue;
+        }
+        if is_weak_dependency_section(section) {
+            if section.contains("build-dependencies") {
+                return Some("build-dependencies");
+            } else {
+                return Some("dev-dependencies");
+            }
+        } else if is_dependency_section(section) {
+            return Some("dependencies");
+        }
+    }
+    None
 }
 
 /// Get workspace version from root Cargo.toml.
@@ -3490,17 +3830,17 @@ fn wait_for_crate_index(name: &str, version: &str) -> Result<(), String> {
 
 /// Publish all workspace crates to crates.io in topological order.
 fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
-    let (sorted, no_verify) = resolve_publish_order(workspace_root)?;
+    let (sorted, no_verify, broken) = resolve_publish_order(workspace_root)?;
     let version = workspace_version(workspace_root)?;
 
     println!("📦 Publishing rust-camel crates v{version} to crates.io");
     println!("=============================================");
-    if !no_verify.is_empty() {
-        println!(
-            "⚠️  {} crate(s) will publish with camel-* dev/build-deps stripped + --no-verify (dev-dep cycle participants)",
-            no_verify.len()
-        );
-    }
+    check_no_publish_cycles(&no_verify, &broken).map_err(|report| {
+        format!(
+            "Publish blocked: {n} crate(s) in dev/build-dep cycles. Remediate the cycle before publishing.\n{report}",
+            n = no_verify.len()
+        )
+    })?;
 
     let mut published = 0;
     let mut skipped = 0;
@@ -3537,60 +3877,11 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
             continue;
         }
 
-        let needs_strip = no_verify.contains(&c.name);
-        let manifest_path = workspace_root.join(&c.path).join("Cargo.toml");
-
-        // A cyclic crate carries camel-* dev/build-deps that close a cycle.
-        // `cargo publish` resolves those against the registry index *during
-        // packaging* (before any --no-verify step), so they must be absent
-        // from the manifest at publish time. We comment them out just before
-        // publishing and restore the original bytes immediately afterwards —
-        // in a way that survives errors — so the packaged tarball omits the
-        // dev-deps (which crates.io ignores anyway) while the working tree is
-        // left untouched. `--no-verify` still skips the post-package compile,
-        // since a stripped crate cannot run its own integration tests.
-        let restore: Option<String> = if needs_strip {
-            let original = std::fs::read_to_string(&manifest_path).map_err(|e| {
-                format!(
-                    "Failed to read {} for stripping: {e}",
-                    manifest_path.display()
-                )
-            })?;
-            let stripped = comment_out_camel_dev_deps(&original);
-            std::fs::write(&manifest_path, &stripped).map_err(|e| {
-                format!(
-                    "Failed to strip dev-deps in {}: {e}",
-                    manifest_path.display()
-                )
-            })?;
-            println!(
-                "⚠️  Publishing {name} with camel-* dev/build-deps stripped + --no-verify (dev-dep cycle)",
-                name = c.name
-            );
-            Some(original)
-        } else {
-            None
-        };
-
         let mut cmd = std::process::Command::new("cargo");
         cmd.arg("publish").arg("--allow-dirty");
-        if needs_strip {
-            cmd.arg("--no-verify");
-        }
-        let publish_result = cmd.current_dir(workspace_root.join(&c.path)).output();
-
-        // Restore the original manifest before doing anything else, so a
-        // publish failure never leaves the working tree mutated.
-        if let Some(original) = restore {
-            std::fs::write(&manifest_path, original).map_err(|e| {
-                format!(
-                    "CRITICAL: failed to restore {}: {e}",
-                    manifest_path.display()
-                )
-            })?;
-        }
-
-        let output = publish_result
+        let output = cmd
+            .current_dir(workspace_root.join(&c.path))
+            .output()
             .map_err(|e| format!("Failed to run cargo publish for {}: {e}", c.name))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -3686,43 +3977,6 @@ fn extract_normal_camel_deps(content: &str) -> Vec<String> {
 /// their target-specific variants) — cargo still resolves them during
 /// `cargo publish`, but cycles closed only by weak edges can be broken
 /// by publishing one member first.
-/// Comment out every `camel-*` dependency line that appears under a weak
-/// dependency section (`[dev-dependencies]`, `[build-dependencies]`, and their
-/// target-specific variants). Used just before `cargo publish` for crates that
-/// participate in a dev/build-dep cycle: cargo resolves these lines against the
-/// registry index during packaging, but crates.io never uses a published
-/// crate's dev-dependencies, so removing them from the packaged manifest is
-/// safe. All other bytes — including camel-* lines in `[dependencies]` — are
-/// preserved exactly, and the caller restores the original file afterwards.
-fn comment_out_camel_dev_deps(content: &str) -> String {
-    let mut out = String::with_capacity(content.len() + 64);
-    let mut section = "";
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            section = trimmed;
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if is_weak_dependency_section(section)
-            && !trimmed.starts_with('#')
-            && extract_camel_dep_name(trimmed).is_some()
-        {
-            out.push_str("# xtask-publish-stripped: ");
-            out.push_str(line);
-        } else {
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-    // Preserve absence of a trailing newline if the original lacked one.
-    if !content.ends_with('\n') {
-        out.pop();
-    }
-    out
-}
-
 fn extract_camel_deps_grouped(content: &str) -> (Vec<String>, Vec<String>) {
     let mut normal = Vec::new();
     let mut weak = Vec::new();
@@ -3753,6 +4007,21 @@ fn extract_camel_deps_grouped(content: &str) -> (Vec<String>, Vec<String>) {
     (normal, weak)
 }
 
+/// Returns true for TOML section headers whose dependencies are weak (dev
+/// or build). Covers plain sections (`[dev-dependencies]`,
+/// `[build-dependencies]`) and target-specific variants. Guards against
+/// non-section strings — returns `false` when brackets are absent.
+fn is_weak_dependency_section(section: &str) -> bool {
+    let section = section.trim();
+    if !section.starts_with('[') || !section.ends_with(']') {
+        return false;
+    }
+    let inner = &section[1..section.len() - 1];
+    matches!(inner, "dev-dependencies" | "build-dependencies")
+        || inner.ends_with(".dev-dependencies")
+        || inner.ends_with(".build-dependencies")
+}
+
 /// Returns true for TOML section headers whose dependencies cargo resolves
 /// when publishing. Covers plain sections (`[dependencies]`,
 /// `[dev-dependencies]`, `[build-dependencies]`) and target-specific variants
@@ -3767,21 +4036,6 @@ fn is_dependency_section(section: &str) -> bool {
         inner,
         "dependencies" | "dev-dependencies" | "build-dependencies"
     ) || inner.ends_with(".dependencies")
-        || inner.ends_with(".dev-dependencies")
-        || inner.ends_with(".build-dependencies")
-}
-
-/// Returns true for `[dev-dependencies]`, `[build-dependencies]` and their
-/// target-specific variants — sections cargo resolves during `cargo publish`
-/// but which are weaker constraints than `[dependencies]` (cycles closed
-/// only by these edges can be broken at publish time).
-fn is_weak_dependency_section(section: &str) -> bool {
-    let section = section.trim();
-    if !section.starts_with('[') || !section.ends_with(']') {
-        return false;
-    }
-    let inner = &section[1..section.len() - 1];
-    matches!(inner, "dev-dependencies" | "build-dependencies")
         || inner.ends_with(".dev-dependencies")
         || inner.ends_with(".build-dependencies")
 }
@@ -4859,42 +5113,6 @@ camel-core = { workspace = true }
         }
 
         #[test]
-        fn strip_comments_only_weak_camel_deps() {
-            let cargo_toml = "[package]\nname = \"camel-platform-kubernetes\"\n\n[dependencies]\ncamel-api = { workspace = true }\ntokio = { workspace = true }\n\n[dev-dependencies]\ncamel-core = { workspace = true }\ntokio = { workspace = true, features = [\"macros\"] }\n";
-            let stripped = comment_out_camel_dev_deps(cargo_toml);
-            // camel-core under [dev-dependencies] is commented out.
-            assert!(
-                stripped.contains("# xtask-publish-stripped: camel-core = { workspace = true }"),
-                "camel-core dev-dep must be commented: {stripped}"
-            );
-            // camel-api under [dependencies] is untouched.
-            assert!(stripped.contains("\ncamel-api = { workspace = true }"));
-            assert!(!stripped.contains("stripped: camel-api"));
-            // Non-camel dev-deps (tokio) are untouched.
-            assert!(stripped.contains("\ntokio = { workspace = true, features = [\"macros\"] }"));
-            // Result stays valid: cargo would resolve zero camel-* dev-deps.
-            let (_, weak) = extract_camel_deps_grouped(&stripped);
-            assert!(weak.is_empty(), "no camel dev-deps should remain: {weak:?}");
-        }
-
-        #[test]
-        fn strip_preserves_target_specific_dev_deps() {
-            let cargo_toml = "[package]\nname = \"camel-foo\"\n\n[target.'cfg(unix)'.dev-dependencies]\ncamel-core = { workspace = true }\n";
-            let stripped = comment_out_camel_dev_deps(cargo_toml);
-            assert!(
-                stripped.contains("# xtask-publish-stripped: camel-core = { workspace = true }")
-            );
-            let (_, weak) = extract_camel_deps_grouped(&stripped);
-            assert!(weak.is_empty());
-        }
-
-        #[test]
-        fn strip_is_noop_without_weak_camel_deps() {
-            let cargo_toml = "[package]\nname = \"camel-foo\"\n\n[dependencies]\ncamel-api = { workspace = true }\n";
-            assert_eq!(comment_out_camel_dev_deps(cargo_toml), cargo_toml);
-        }
-
-        #[test]
         fn is_dependency_section_classifies_headers() {
             assert!(is_dependency_section("[dependencies]"));
             assert!(is_dependency_section("[dev-dependencies]"));
@@ -4913,6 +5131,352 @@ camel-core = { workspace = true }
             assert!(!is_dependency_section("[target.'cfg(unix)']"));
             // Bare `[target]` table header (no nested dep section) must not match.
             assert!(!is_dependency_section("[target]"));
+        }
+    }
+
+    mod publish_order_scc_tests {
+        use super::*;
+
+        /// Build a publishable `WorkspaceCrate` with the given camel-* normal
+        /// and weak (dev/build) deps. Paths are synthetic — these fixtures
+        /// never touch disk.
+        fn wc(name: &str, normal: &[&str], weak: &[&str]) -> WorkspaceCrate {
+            WorkspaceCrate {
+                name: name.to_string(),
+                path: format!("crates/{name}"),
+                normal_deps: normal.iter().map(|s| s.to_string()).collect(),
+                weak_deps: weak.iter().map(|s| s.to_string()).collect(),
+                publish: true,
+            }
+        }
+
+        #[test]
+        fn tarjan_identifies_nontrivial_scc() {
+            // 0 → 1 → 2 → 0  (one 3-node cycle).
+            let adj: Vec<Vec<(usize, EdgeKind)>> = vec![
+                vec![(1, EdgeKind::Normal)],
+                vec![(2, EdgeKind::Normal)],
+                vec![(0, EdgeKind::Normal)],
+            ];
+            let sccs = tarjan_scc(&adj);
+            let big: Vec<&Vec<usize>> = sccs.iter().filter(|s| s.len() == 3).collect();
+            assert_eq!(
+                big.len(),
+                1,
+                "expected exactly one size-3 SCC, got {sccs:?}"
+            );
+            let mut members = big[0].clone();
+            members.sort();
+            assert_eq!(members, vec![0, 1, 2]);
+        }
+
+        #[test]
+        fn acyclic_weak_graph_breaks_zero_edges() {
+            // A --weak--> B --weak--> C, no back path: no cycle, no break.
+            let crates = vec![
+                wc("camel-a", &[], &["camel-b"]),
+                wc("camel-b", &[], &["camel-c"]),
+                wc("camel-c", &[], &[]),
+            ];
+            let (sorted, no_verify, broken) = compute_publish_order(crates).expect("acyclic");
+            assert!(
+                broken.is_empty(),
+                "no weak edge should be broken: {broken:?}"
+            );
+            assert!(no_verify.is_empty(), "no_verify must be empty");
+            assert_eq!(
+                sorted.len(),
+                3,
+                "all three crates must be scheduled: only {sorted:?}"
+            );
+        }
+
+        #[test]
+        fn deterministic_lexicographic_edge_selection() {
+            // SCC {a, b, c}: a --weak--> c, b --weak--> c, c --normal--> {a, b}.
+            // Two candidate breakable intra-SCC weak edges with holders "a"
+            // and "b"; the lexicographically smaller holder ("a") must be
+            // chosen first.
+            let crates = vec![
+                wc("camel-a", &[], &["camel-c"]),
+                wc("camel-b", &[], &["camel-c"]),
+                wc("camel-c", &["camel-a", "camel-b"], &[]),
+            ];
+            let (_sorted, no_verify, broken) = compute_publish_order(crates).expect("breakable");
+            // The {a,b,c} SCC needs TWO breaks (a→c then b→c): breaking a→c
+            // leaves {b,c} as a non-trivial SCC, which the recompute pass must
+            // catch. Asserting the full 2-edge sequence exercises both the
+            // lexicographic first pick AND the recompute-after-break contract.
+            assert_eq!(
+                broken.len(),
+                2,
+                "expected exactly two breaks (recompute catches {{b,c}}): {broken:?}"
+            );
+            assert_eq!(
+                broken[0].0, "camel-a",
+                "first break holder must be lexicographically-smallest camel-a, not {:?}",
+                broken[0].0
+            );
+            assert_eq!(
+                broken[1].0, "camel-b",
+                "second break holder must be camel-b after recompute, not {:?}",
+                broken[1].0
+            );
+            assert!(no_verify.contains("camel-a") && no_verify.contains("camel-b"));
+        }
+
+        #[test]
+        fn recompute_scc_after_each_break() {
+            // Two independent cycles: {p,q} and {r,s}. Each needs exactly one
+            // weak-edge break. The old greedy loop fabricated phantom edges;
+            // SCC-gating must break exactly 2 and no third.
+            let crates = vec![
+                wc("camel-p", &[], &["camel-q"]),
+                wc("camel-q", &["camel-p"], &[]),
+                wc("camel-r", &[], &["camel-s"]),
+                wc("camel-s", &["camel-r"], &[]),
+            ];
+            let (sorted, _no_verify, broken) = compute_publish_order(crates).expect("breakable");
+            assert_eq!(
+                broken.len(),
+                2,
+                "exactly two real edges must break, no phantom: {broken:?}"
+            );
+            assert_eq!(sorted.len(), 4, "all four crates must be scheduled");
+        }
+
+        #[test]
+        fn hard_normal_only_cycle_errors() {
+            // a --normal--> b --normal--> a, no weak edge to break.
+            let crates = vec![
+                wc("camel-a", &["camel-b"], &[]),
+                wc("camel-b", &["camel-a"], &[]),
+            ];
+            let err = compute_publish_order(crates).unwrap_err();
+            assert!(
+                err.contains("dependency cycles"),
+                "hard normal-only cycle must error with 'dependency cycles', got: {err}"
+            );
+        }
+
+        /// Build a tempdir workspace with the given `crates/*/Cargo.toml`
+        /// files. Creates `bridges/` and root `Cargo.toml` sentinels so
+        /// `resolve_publish_order` can crawl the workspace.
+        fn tmp_ws(crates: &[(&str, &str)]) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-show-cycles-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            std::fs::create_dir_all(dir.join("bridges")).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+            for (rel_path, content) in crates {
+                let full = dir.join(rel_path);
+                std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                std::fs::write(&full, content).unwrap();
+            }
+            dir
+        }
+
+        #[test]
+        fn show_cycles_formats_holder_first() {
+            // camel-a --dev-dep--> camel-b, camel-b --normal-dep--> camel-a.
+            // The cycle is closed by a → b (weak), so a is the holder.
+            let ws = tmp_ws(&[
+                (
+                    "crates/camel-a/Cargo.toml",
+                    "[package]\nname = \"camel-a\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ncamel-b = \"0.1.0\"\n",
+                ),
+                (
+                    "crates/camel-b/Cargo.toml",
+                    "[package]\nname = \"camel-b\"\nversion = \"0.1.0\"\n\n[dependencies]\ncamel-a = \"0.1.0\"\n",
+                ),
+            ]);
+            let mut buf: Vec<u8> = Vec::new();
+            show_cycles(&ws, &mut buf).unwrap();
+            let out = String::from_utf8(buf).unwrap();
+            assert!(
+                out.contains("no_verify set: 1 crate(s)"),
+                "expected no_verify header, got:\n{out}"
+            );
+            assert!(
+                out.contains("  camel-a\n"),
+                "expected camel-a listed as holder, got:\n{out}"
+            );
+            assert!(
+                out.contains("camel-a --dev/build-dep--> camel-b"),
+                "expected edge line with holder first, got:\n{out}"
+            );
+            std::fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn show_cycles_clean_graph() {
+            // camel-a --normal--> camel-b (acyclic, no dev-dep).
+            let ws = tmp_ws(&[
+                (
+                    "crates/camel-a/Cargo.toml",
+                    "[package]\nname = \"camel-a\"\nversion = \"0.1.0\"\n\n[dependencies]\ncamel-b = \"0.1.0\"\n",
+                ),
+                (
+                    "crates/camel-b/Cargo.toml",
+                    "[package]\nname = \"camel-b\"\nversion = \"0.1.0\"\n",
+                ),
+            ]);
+            let mut buf: Vec<u8> = Vec::new();
+            show_cycles(&ws, &mut buf).unwrap();
+            let out = String::from_utf8(buf).unwrap();
+            assert!(
+                out.contains("no_verify set: 0 crate(s)"),
+                "expected empty no_verify, got:\n{out}"
+            );
+            assert!(
+                out.contains("broken weak edges:\n"),
+                "expected broken weak edges section, got:\n{out}"
+            );
+            // No edge line should follow — just the empty newline.
+            let after_header = out.split("broken weak edges:\n").nth(1).unwrap();
+            // show_cycles prints a newline for empty broken
+            assert!(
+                after_header.trim().is_empty(),
+                "expected zero edge lines after broken header, got: '{after_header}'"
+            );
+            std::fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn lint_fails_when_no_verify_nonempty() {
+            // camel-a --dev-dep--> camel-b, camel-b --normal-dep--> camel-a.
+            // Cycle closed by a's weak edge; a is the holder.
+            let ws = tmp_ws(&[
+                (
+                    "crates/camel-a/Cargo.toml",
+                    "[package]\nname = \"camel-a\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ncamel-b = \"0.1.0\"\n",
+                ),
+                (
+                    "crates/camel-b/Cargo.toml",
+                    "[package]\nname = \"camel-b\"\nversion = \"0.1.0\"\n\n[dependencies]\ncamel-a = \"0.1.0\"\n",
+                ),
+            ]);
+            let err = lint_publish_cycles(&ws).unwrap_err();
+            assert!(
+                err.contains("camel-a --dev/build-dep--> camel-b"),
+                "lint error must name holder + edge, got: {err}"
+            );
+            assert!(
+                err.contains("camel-a"),
+                "lint error must mention holder camel-a, got: {err}"
+            );
+            std::fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn lint_passes_on_clean_graph() {
+            // camel-a --normal--> camel-b (acyclic, no dev-dep),
+            // camel-test is not a dependency of either.
+            let ws = tmp_ws(&[
+                (
+                    "crates/camel-a/Cargo.toml",
+                    "[package]\nname = \"camel-a\"\nversion = \"0.1.0\"\n\n[dependencies]\ncamel-b = \"0.1.0\"\n",
+                ),
+                (
+                    "crates/camel-b/Cargo.toml",
+                    "[package]\nname = \"camel-b\"\nversion = \"0.1.0\"\n",
+                ),
+            ]);
+            lint_publish_cycles(&ws).expect("clean graph must return Ok(())");
+            std::fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn lint_fails_on_camel_test_dependent() {
+            // Publishable crate camel-x declares camel-test as a dev-dep.
+            let ws = tmp_ws(&[(
+                "crates/camel-x/Cargo.toml",
+                "[package]\nname = \"camel-x\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ncamel-test = { workspace = true }\n",
+            )]);
+            let err = lint_publish_cycles(&ws).unwrap_err();
+            assert!(
+                err.contains("camel-x")
+                    && err.contains("camel-test")
+                    && err.contains("dev-dependencies"),
+                "lint error must name crate camel-x + camel-test + dev-dependencies, got: {err}"
+            );
+            std::fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn lint_and_show_cycles_report_identical_set() {
+            // Shared cycle fixture: camel-p --dev-dep--> camel-q --normal--> camel-p.
+            // Both lint and show_cycles must report the same no_verify holder set.
+            let ws = tmp_ws(&[
+                (
+                    "crates/camel-p/Cargo.toml",
+                    "[package]\nname = \"camel-p\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\ncamel-q = \"0.1.0\"\n",
+                ),
+                (
+                    "crates/camel-q/Cargo.toml",
+                    "[package]\nname = \"camel-q\"\nversion = \"0.1.0\"\n\n[dependencies]\ncamel-p = \"0.1.0\"\n",
+                ),
+            ]);
+
+            let (_, no_verify, _) = resolve_publish_order(&ws).unwrap();
+            assert!(
+                no_verify.contains("camel-p"),
+                "expected camel-p in no_verify: {no_verify:?}"
+            );
+
+            let lint_err = lint_publish_cycles(&ws).unwrap_err();
+            for holder in &no_verify {
+                assert!(
+                    lint_err.contains(holder.as_str()),
+                    "lint error must name holder {holder}, got: {lint_err}"
+                );
+            }
+            std::fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn lint_asserts_camel_test_remains_publishable() {
+            // Read the real camel-test manifest and assert publish is NOT false.
+            let ws_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let manifest =
+                std::fs::read_to_string(ws_root.join("crates/camel-test/Cargo.toml")).unwrap();
+            assert!(
+                is_publishable_crate(&manifest),
+                "camel-test must remain publishable (publish = false must not be set)"
+            );
+        }
+
+        #[test]
+        fn publish_crates_fail_closed_on_no_verify() {
+            let no_verify: std::collections::HashSet<String> =
+                ["camel-a".to_string()].into_iter().collect();
+            let broken = vec![("camel-a".to_string(), "camel-b".to_string())];
+            let err = check_no_publish_cycles(&no_verify, &broken).unwrap_err();
+            assert!(
+                err.contains("camel-a --dev/build-dep--> camel-b"),
+                "error must name holder + edge, got: {err}"
+            );
+            assert!(
+                err.contains("camel-a"),
+                "error must mention holder, got: {err}"
+            );
+        }
+
+        #[test]
+        fn publish_crates_pass_when_no_cycle() {
+            let no_verify: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let broken: Vec<(String, String)> = vec![];
+            check_no_publish_cycles(&no_verify, &broken)
+                .expect("empty no_verify must return Ok(())");
         }
     }
 

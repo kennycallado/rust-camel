@@ -53,6 +53,8 @@
   run: cargo xtask lint-log-levels
 - name: lint-ignore
   run: cargo xtask lint-ignore
+- name: lint-publish-cycles
+  run: cargo xtask lint-publish-cycles
 - name: lint-context-citations
   run: cargo xtask lint-context-citations
 - name: schema-check

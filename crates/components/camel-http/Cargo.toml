@@ -42,6 +42,8 @@ otel = ["dep:camel-otel"]
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
+# Publish-order-safe only while camel-core does NOT weak-depend back (ADR-0055).
+# lint-publish-cycles guards this; re-add a core→http dev-dep and this cycles again.
 camel-core = { workspace = true }
 tempfile = { workspace = true }
 flate2 = { workspace = true }

@@ -69,13 +69,11 @@ camel-component-sql.workspace = true
 camel-component-file.workspace = true
 camel-component-cron.workspace = true
 camel-component-opensearch.workspace = true
-camel-component-ws.workspace = true
 camel-component-container.workspace = true
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
 camel-component-direct.workspace = true
 camel-component-seda.workspace = true
-camel-component-http.workspace = true
 criterion.workspace = true
 uuid.workspace = true
 toml = { workspace = true }

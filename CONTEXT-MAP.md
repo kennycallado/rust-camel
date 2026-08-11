@@ -91,6 +91,7 @@ are a convenience index and may lag the file.
 - [0050](./docs/adr/0050-wasm-sandbox-capability-posture.md) — Per-world WASM capability posture: explicit Camel grants and selective WASI registration; no filesystem, sockets, environment, CLI, or stdio by default
 - [0051](./docs/adr/0051-credential-redaction-at-diagnostic-boundaries.md) — Credential-bearing types use manual redacting `Debug` or a tested redacting wrapper; general-purpose `Serialize` must not expose credential bytes; credential-file paths are metadata, not credential bytes
 - [0053](./docs/adr/0053-wit-interface-versioning.md) — `camel:plugin` uses one package-level WIT SemVer, independent from Rust crate versions; v1.0 establishes `camel:plugin@1.0.0`
+- [0055](./docs/adr/0055-publish-topology-no-cyclic-devdeps.md) — Publishable crates MUST NOT declare a `camel-*` dev/build-dependency that closes a publish-order cycle; SCC-accurate detection; `camel-test` is the publish-order leaf sink; remediation via StubComponent substitution or proc-macro test relocation to the consumer; the manifest-mutation publish hack is deleted
 
 ## Key Terms
 

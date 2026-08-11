@@ -1,3 +1,5 @@
+//! Origin: camel-endpoint-macros/tests/derive_integration.rs (relocated per ADR-0055)
+
 //! Integration tests for `#[derive(UriConfig)]` codegen of `uri_options()` and
 //! `metadata()`. These exercise the macro end-to-end (derive a struct, call the
 //! generated inherent fn) and complement the pure parse/infer unit tests in
