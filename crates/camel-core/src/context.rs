@@ -57,6 +57,7 @@ pub struct CamelContext {
     template_registry: Arc<TemplateRegistry>,
     idempotent_repositories: crate::registry::SharedIdempotentRegistry,
     claim_check_repositories: crate::registry::SharedClaimCheckRegistry,
+    cache_repositories: crate::registry::SharedCacheRegistry,
     /// Fail-closed startup validation registry (ADR-0033). Checks are drained
     /// and executed synchronously at the head of [`start()`](Self::start) before
     /// any route consumer is started.
@@ -83,6 +84,7 @@ pub(crate) struct FromParts {
     pub(crate) template_registry: Arc<TemplateRegistry>,
     pub(crate) idempotent_repositories: crate::registry::SharedIdempotentRegistry,
     pub(crate) claim_check_repositories: crate::registry::SharedClaimCheckRegistry,
+    pub(crate) cache_repositories: crate::registry::SharedCacheRegistry,
     pub(crate) startup_checks: Vec<Box<dyn ConfigCheck>>,
 }
 
@@ -106,6 +108,7 @@ impl CamelContext {
             template_registry: parts.template_registry,
             idempotent_repositories: parts.idempotent_repositories,
             claim_check_repositories: parts.claim_check_repositories,
+            cache_repositories: parts.cache_repositories,
             startup_checks: parts.startup_checks,
         }
     }
@@ -859,6 +862,44 @@ impl CamelContext {
         name: &str,
     ) -> Option<Arc<dyn camel_api::ClaimCheckRepository>> {
         self.claim_check_repositories.get(name)
+    }
+
+    // --- Cache Repository Registry ---
+
+    /// Register a cache repository.
+    ///
+    /// Returns `Err(RegistryError::AlreadyRegistered)` if a repository with
+    /// the same name is already registered.
+    pub fn register_cache_repository(
+        &mut self,
+        name: impl Into<String>,
+        repo: Arc<dyn camel_api::CacheRepository>,
+    ) -> Result<(), RegistryError> {
+        self.cache_repositories.register(name, repo)
+    }
+
+    /// Replace an existing cache repository, returning the evicted value.
+    ///
+    /// Returns `None` if no repository was registered under `name`.
+    pub fn replace_cache_repository(
+        &mut self,
+        name: impl Into<String>,
+        repo: Arc<dyn camel_api::CacheRepository>,
+    ) -> Option<Arc<dyn camel_api::CacheRepository>> {
+        self.cache_repositories.register_or_replace(name, repo)
+    }
+
+    /// Retrieve a cache repository by name.
+    pub fn cache_repository(&self, name: &str) -> Option<Arc<dyn camel_api::CacheRepository>> {
+        self.cache_repositories.get(name)
+    }
+
+    /// Access the shutdown cancellation token.
+    ///
+    /// Repositories that need to bind background sweep tasks to context
+    /// shutdown (e.g. `RedbCacheRepository`) can `child_token()` from this.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
     }
 }
 

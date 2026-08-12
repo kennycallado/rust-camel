@@ -78,6 +78,9 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
         RouteDslStep::Enrich(_) => (),
         RouteDslStep::PollEnrich(_) => (),
         RouteDslStep::IdempotentConsumer(_) => (),
+        RouteDslStep::Cache(_) => (),
+        RouteDslStep::CacheInvalidate(_) => (),
+        RouteDslStep::CachePeekStale(_) => (),
         RouteDslStep::ClaimCheck(_) => (),
         RouteDslStep::Sampling(_) => (),
         RouteDslStep::Sort(_) => (),
@@ -564,6 +567,44 @@ routes:
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"scatter_gather":{"endpoints":["direct:a","direct:b","direct:c"],"aggregation":"collect_all"}}]}]}"#,
         },
+        ParityCase {
+            name: "Cache",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache:
+          key: "${header.k}"
+          on_miss:
+            - log: "miss"
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache":{"key":"${header.k}","on_miss":[{"log":"miss"}]}}]}]}"#,
+        },
+        ParityCase {
+            name: "CacheInvalidate",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache_invalidate:
+          key: "${header.k}"
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_invalidate":{"key":"${header.k}"}}]}]}"#,
+        },
+        ParityCase {
+            name: "CachePeekStale",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache_peek_stale:
+          key: "${header.k}"
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_peek_stale":{"key":"${header.k}"}}]}]}"#,
+        },
     ]
 }
 
@@ -617,7 +658,7 @@ fn test_variant_count_matches_matrix() {
     //   2. Bumped EXPECTED_VARIANTS below.
     //   3. Added a ParityCase for the new variant.
     // Step 3 is not mechanically enforced; review discipline applies.
-    const EXPECTED_VARIANTS: usize = 36;
+    const EXPECTED_VARIANTS: usize = 40;
     let actual = parity_cases().len();
     assert!(
         actual >= EXPECTED_VARIANTS,

@@ -436,6 +436,41 @@ pub fn compile_canonical_step(
             stream_cache_threshold,
         ),
         CanonicalStepSpec::Aggregate(config) => compile_canonical_aggregate(config),
+        CanonicalStepSpec::Cache {
+            repository,
+            key,
+            ttl,
+            max_entry_bytes,
+            on_miss,
+        } => {
+            let sub_steps = compile_canonical_steps(on_miss, stream_cache_threshold)?;
+            Ok(BuilderStep::Cache {
+                repository,
+                key: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: key,
+                },
+                ttl,
+                max_entry_bytes,
+                on_miss: sub_steps,
+            })
+        }
+        CanonicalStepSpec::CacheInvalidate { repository, key } => {
+            Ok(BuilderStep::CacheInvalidate {
+                repository,
+                key: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: key,
+                },
+            })
+        }
+        CanonicalStepSpec::CachePeekStale { repository, key } => Ok(BuilderStep::CachePeekStale {
+            repository,
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: key,
+            },
+        }),
         _ => Err(CamelError::RouteError(
             "unsupported canonical step".to_string(),
         )),
@@ -1145,6 +1180,24 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::IdempotentConsumer(def) => {
             compile_idempotent_consumer_step(def, stream_cache_threshold)
         }
+        DeclarativeStep::Cache(def) => {
+            let on_miss = compile_declarative_steps(def.on_miss, stream_cache_threshold)?;
+            Ok(BuilderStep::Cache {
+                repository: def.repository,
+                key: def.key,
+                ttl: def.ttl,
+                max_entry_bytes: def.max_entry_bytes,
+                on_miss,
+            })
+        }
+        DeclarativeStep::CacheInvalidate(def) => Ok(BuilderStep::CacheInvalidate {
+            repository: def.repository,
+            key: def.key,
+        }),
+        DeclarativeStep::CachePeekStale(def) => Ok(BuilderStep::CachePeekStale {
+            repository: def.repository,
+            key: def.key,
+        }),
         DeclarativeStep::ClaimCheck(ClaimCheckStepDef {
             repository,
             operation,
@@ -1368,6 +1421,21 @@ fn compile_declarative_step_to_canonical(
         DeclarativeStep::IdempotentConsumer(_) => Err(CamelError::RouteError(
             "canonical v2 does not support step `idempotent_consumer`".into(),
         )),
+        DeclarativeStep::Cache(def) => Ok(CanonicalStepSpec::Cache {
+            repository: def.repository,
+            key: def.key.source,
+            ttl: def.ttl,
+            max_entry_bytes: def.max_entry_bytes,
+            on_miss: compile_declarative_steps_to_canonical(def.on_miss)?,
+        }),
+        DeclarativeStep::CacheInvalidate(def) => Ok(CanonicalStepSpec::CacheInvalidate {
+            repository: def.repository,
+            key: def.key.source,
+        }),
+        DeclarativeStep::CachePeekStale(def) => Ok(CanonicalStepSpec::CachePeekStale {
+            repository: def.repository,
+            key: def.key.source,
+        }),
         DeclarativeStep::ClaimCheck(_) => Err(CamelError::RouteError(
             "canonical v2 does not support step `claim_check`".into(),
         )),
@@ -1496,6 +1564,9 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Enrich(_) => "enrich",
         DeclarativeStep::PollEnrich(_) => "poll_enrich",
         DeclarativeStep::IdempotentConsumer(_) => "idempotent_consumer",
+        DeclarativeStep::Cache(_) => "cache",
+        DeclarativeStep::CacheInvalidate(_) => "cache_invalidate",
+        DeclarativeStep::CachePeekStale(_) => "cache_peek_stale",
         DeclarativeStep::ClaimCheck(_) => "claim_check",
         DeclarativeStep::Sampling(_) => "sampling",
         DeclarativeStep::Sort(_) => "sort",
@@ -1872,6 +1943,9 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         | DeclarativeStep::Enrich(_)
         | DeclarativeStep::PollEnrich(_)
         | DeclarativeStep::ClaimCheck(_)
+        | DeclarativeStep::Cache(_)
+        | DeclarativeStep::CacheInvalidate(_)
+        | DeclarativeStep::CachePeekStale(_)
         | DeclarativeStep::Sampling(_)
         | DeclarativeStep::Sort(_)
         | DeclarativeStep::Resequence(_) => {}
@@ -1935,7 +2009,8 @@ fn validate_redelivery_policy(policy: &DeclarativeRedeliveryPolicy) -> Result<()
 mod tests {
     use super::*;
     use crate::model::{
-        AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
+        AggregateStrategyDef, BeanStepDef, BodyTypeDef, CacheInvalidateStepDef,
+        CachePeekStaleStepDef, CacheStepDef, ChoiceStepDef, DataFormatDef,
         DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
         DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
         DeclarativeSecurityPolicy, DelayStepDef, DynamicRouterStepDef, FilterStepDef,
@@ -4641,5 +4716,118 @@ mod tests {
             msg.contains("does not support 'config'"),
             "msg should mention config rejection: {msg}"
         );
+    }
+
+    // ── Cache step compile tests ──
+
+    #[test]
+    fn cache_step_compiles_declarative_to_canonical() {
+        let step = DeclarativeStep::Cache(CacheStepDef {
+            repository: Some("redis".into()),
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${header.cacheKey}".into(),
+            },
+            ttl: Some("60s".into()),
+            max_entry_bytes: Some(65536),
+            on_miss: vec![DeclarativeStep::To(ToStepDef::new("http:backend"))],
+        });
+        let canonical = compile_declarative_step_to_canonical(step).unwrap();
+        match canonical {
+            CanonicalStepSpec::Cache {
+                repository,
+                key,
+                ttl,
+                max_entry_bytes,
+                on_miss,
+            } => {
+                assert_eq!(repository.as_deref(), Some("redis"));
+                assert_eq!(key, "${header.cacheKey}");
+                assert_eq!(ttl.as_deref(), Some("60s"));
+                assert_eq!(max_entry_bytes, Some(65536));
+                assert_eq!(on_miss.len(), 1);
+            }
+            other => panic!("expected Cache, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_invalidate_and_peek_stale_compile() {
+        let invalidate = DeclarativeStep::CacheInvalidate(CacheInvalidateStepDef {
+            repository: Some("redis".into()),
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${header.key}".into(),
+            },
+        });
+        let canonical = compile_declarative_step_to_canonical(invalidate).unwrap();
+        assert!(matches!(
+            canonical,
+            CanonicalStepSpec::CacheInvalidate { .. }
+        ));
+
+        let peek = DeclarativeStep::CachePeekStale(CachePeekStaleStepDef {
+            repository: None,
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${header.key}".into(),
+            },
+        });
+        let canonical = compile_declarative_step_to_canonical(peek).unwrap();
+        assert!(matches!(
+            canonical,
+            CanonicalStepSpec::CachePeekStale { .. }
+        ));
+    }
+
+    #[test]
+    fn cache_step_repository_defaults_to_none_at_dsl_layer() {
+        let step = DeclarativeStep::Cache(CacheStepDef {
+            repository: None,
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${header.key}".into(),
+            },
+            ttl: None,
+            max_entry_bytes: None,
+            on_miss: vec![],
+        });
+        let canonical = compile_declarative_step_to_canonical(step).unwrap();
+        match canonical {
+            CanonicalStepSpec::Cache { repository, .. } => {
+                assert!(repository.is_none(), "repository should default to None");
+            }
+            other => panic!("expected Cache, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_step_compiles_route_to_declarative() {
+        use crate::route_ast::{CacheBody, CacheConfig, CacheStep as RouteCacheStep};
+        use crate::yaml::route_step_to_declarative_step;
+        use crate::yaml::{RouteDslStep, StopStep};
+
+        let route_step = RouteDslStep::Cache(RouteCacheStep {
+            cache: CacheBody::Full(CacheConfig {
+                repository: Some("redis".into()),
+                key: "${header.cacheKey}".into(),
+                ttl: None,
+                max_entry_bytes: None,
+                on_miss: vec![RouteDslStep::Stop(StopStep { stop: true })],
+            }),
+        });
+
+        let decl = route_step_to_declarative_step(route_step).unwrap();
+        match decl {
+            DeclarativeStep::Cache(def) => {
+                assert_eq!(def.repository.as_deref(), Some("redis"));
+                assert_eq!(def.key.source, "${header.cacheKey}");
+                assert_eq!(def.ttl, None);
+                assert_eq!(def.max_entry_bytes, None);
+                assert_eq!(def.on_miss.len(), 1);
+                assert!(matches!(def.on_miss[0], DeclarativeStep::Stop));
+            }
+            other => panic!("expected Cache, got {other:?}"),
+        }
     }
 }

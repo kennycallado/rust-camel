@@ -44,7 +44,9 @@ async-stream.workspace = true
 notify.workspace = true
 opentelemetry = { workspace = true }
 redb = { workspace = true }
+moka = { workspace = true }
 parking_lot = "0.12"
+humantime.workspace = true
 
 [features]
 default = ["export-internal-adapters"]

@@ -21,9 +21,10 @@ use crate::compile::{
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::input_format::{InputFormat, annotate_format};
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef,
-    ClaimCheckStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
-    DeclarativeErrorHandler, DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
+    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, CacheInvalidateStepDef,
+    CachePeekStaleStepDef, CacheStepDef, ChoiceStepDef, ClaimCheckStepDef, DataFormatDef,
+    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
+    DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
     DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DoTryCatchClauseDef, DoTryFinallyDef,
     DynamicRouterStepDef, EnrichStepDef, IdempotentConsumerStepDef, LanguageExpressionDef,
     LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
@@ -34,24 +35,25 @@ use crate::model::{
     ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::route_ast::{
-    AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, ClaimCheckBody,
-    ClaimCheckStep, DelayBody, DelayStep, DynamicRouterData, DynamicRouterStep, EnrichBody,
-    EnrichConfig, EnrichStep, FilterStep, FunctionStep, IdempotentConsumerBody,
-    IdempotentConsumerStep, LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData,
-    LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PollEnrichStep,
-    PredicateBlock, RecipientListData, RecipientListStep, ResequenceBatchYaml, ResequenceData,
-    ResequenceStep, ResequenceStreamYaml, RouteDslRest, RouteDslRoute, RouteDslRoutes,
-    RouteDslStep, RoutingSlipData, RoutingSlipStep, SamplingBody, SamplingConfig, SamplingStep,
-    ScatterGatherData, ScatterGatherStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData,
-    SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, SortBody,
-    SortStep, SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep,
+    AggregateData, AggregateStep, BeanStep, BeanStepData, CacheBody, CacheConfig,
+    CacheInvalidateBody, CacheInvalidateStep, CachePeekStaleBody, CachePeekStaleStep, CacheStep,
+    ChoiceData, ChoiceStep, ClaimCheckBody, ClaimCheckStep, DelayBody, DelayStep,
+    DynamicRouterData, DynamicRouterStep, EnrichBody, EnrichConfig, EnrichStep, FilterStep,
+    FunctionStep, IdempotentConsumerBody, IdempotentConsumerStep, LoadBalanceData, LoadBalanceStep,
+    LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
+    PollEnrichStep, PredicateBlock, RecipientListData, RecipientListStep, ResequenceBatchYaml,
+    ResequenceData, ResequenceStep, ResequenceStreamYaml, RouteDslRest, RouteDslRoute,
+    RouteDslRoutes, RouteDslStep, RoutingSlipData, RoutingSlipStep, SamplingBody, SamplingConfig,
+    SamplingStep, ScatterGatherData, ScatterGatherStep, ScriptData, ScriptStep, SetBodyConfig,
+    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep,
+    SortBody, SortStep, SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep,
     StreamCacheBody, StreamCacheConfig, StreamCacheStep, StreamCapacityPolicyYaml,
     StreamGapPolicyYaml, ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep,
     ValidateStep, WireTapStep,
 };
 use crate::route_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 35] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 38] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -83,6 +85,9 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 35] = [
     DeclarativeStepKind::PollEnrich,
     DeclarativeStepKind::DoTry,
     DeclarativeStepKind::IdempotentConsumer,
+    DeclarativeStepKind::Cache,
+    DeclarativeStepKind::CacheInvalidate,
+    DeclarativeStepKind::CachePeekStale,
     DeclarativeStepKind::ClaimCheck,
     DeclarativeStepKind::Sampling,
     DeclarativeStepKind::Sort,
@@ -1237,6 +1242,69 @@ pub(crate) fn route_step_to_declarative_step(
                     remove_on_failure: body.remove_on_failure,
                 },
             ))
+        }
+        RouteDslStep::Cache(CacheStep { cache }) => {
+            let (repository, key, ttl, max_entry_bytes, on_miss_steps) = match cache {
+                CacheBody::Uri(repo) => (Some(repo), String::new(), None, None, vec![]),
+                CacheBody::Full(cfg) => (
+                    cfg.repository,
+                    cfg.key,
+                    cfg.ttl,
+                    cfg.max_entry_bytes,
+                    cfg.on_miss,
+                ),
+            };
+            if key.trim().is_empty() {
+                return Err(CamelError::ValidationError(
+                    "cache: key is required for full form (use cache: <repository> for shorthand or cache: { key: ... } for full)".into(),
+                ));
+            }
+            let on_miss = on_miss_steps
+                .into_iter()
+                .map(route_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DeclarativeStep::Cache(CacheStepDef {
+                repository,
+                key: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: key,
+                },
+                ttl,
+                max_entry_bytes,
+                on_miss,
+            }))
+        }
+        RouteDslStep::CacheInvalidate(CacheInvalidateStep {
+            cache_invalidate: body,
+        }) => {
+            if body.key.trim().is_empty() {
+                return Err(CamelError::ValidationError(
+                    "cache_invalidate: key is required".into(),
+                ));
+            }
+            Ok(DeclarativeStep::CacheInvalidate(CacheInvalidateStepDef {
+                repository: body.repository,
+                key: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: body.key,
+                },
+            }))
+        }
+        RouteDslStep::CachePeekStale(CachePeekStaleStep {
+            cache_peek_stale: body,
+        }) => {
+            if body.key.trim().is_empty() {
+                return Err(CamelError::ValidationError(
+                    "cache_peek_stale: key is required".into(),
+                ));
+            }
+            Ok(DeclarativeStep::CachePeekStale(CachePeekStaleStepDef {
+                repository: body.repository,
+                key: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: body.key,
+                },
+            }))
         }
         RouteDslStep::ClaimCheck(ClaimCheckStep {
             claim_check:
@@ -4609,5 +4677,114 @@ routes:
             result.is_err(),
             "set_header_if_absent YAML key must be rejected at deserialization"
         );
+    }
+
+    #[test]
+    fn yaml_parses_cache_step_full() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache:
+          repository: persistent
+          key: "${header.k}"
+          ttl: 24h
+          max_entry_bytes: 1048576
+          on_miss:
+            - log: "miss"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Cache(def) => {
+                assert_eq!(def.repository.as_deref(), Some("persistent"));
+                assert_eq!(def.key.source, "${header.k}");
+                assert_eq!(def.ttl.as_deref(), Some("24h"));
+                assert_eq!(def.max_entry_bytes, Some(1048576));
+                assert_eq!(def.on_miss.len(), 1);
+            }
+            _ => panic!("expected Cache step"),
+        }
+    }
+
+    #[test]
+    fn yaml_parses_cache_step_minimal() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache:
+          key: "k"
+          on_miss:
+            - log: "x"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Cache(def) => {
+                assert!(def.repository.is_none());
+                assert_eq!(def.key.source, "k");
+                assert!(def.ttl.is_none());
+                assert!(def.max_entry_bytes.is_none());
+                assert_eq!(def.on_miss.len(), 1);
+            }
+            _ => panic!("expected Cache step"),
+        }
+    }
+
+    #[test]
+    fn yaml_rejects_empty_key() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache:
+          key: ""
+          on_miss:
+            - log: "x"
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err(), "expected error for empty cache key");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cache: key is required"),
+            "expected 'cache: key is required' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn yaml_parses_cache_invalidate_and_peek_stale() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache_invalidate:
+          repository: my-cache
+          key: "${header.k}"
+      - cache_peek_stale:
+          key: "${header.k2}"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes[0].steps.len(), 2);
+
+        match &routes[0].steps[0] {
+            DeclarativeStep::CacheInvalidate(def) => {
+                assert_eq!(def.repository.as_deref(), Some("my-cache"));
+                assert_eq!(def.key.source, "${header.k}");
+            }
+            other => panic!("expected CacheInvalidate, got {other:?}"),
+        }
+
+        match &routes[0].steps[1] {
+            DeclarativeStep::CachePeekStale(def) => {
+                assert!(def.repository.is_none());
+                assert_eq!(def.key.source, "${header.k2}");
+            }
+            other => panic!("expected CachePeekStale, got {other:?}"),
+        }
     }
 }

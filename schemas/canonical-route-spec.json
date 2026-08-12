@@ -516,6 +516,117 @@
             "step",
             "config"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "max_entry_bytes": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint",
+                  "minimum": 0
+                },
+                "on_miss": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/CanonicalStepSpec"
+                  }
+                },
+                "repository": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ttl": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "key",
+                "on_miss"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "cache"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "key"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "cache_invalidate"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "key"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "cache_peek_stale"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
         }
       ]
     },

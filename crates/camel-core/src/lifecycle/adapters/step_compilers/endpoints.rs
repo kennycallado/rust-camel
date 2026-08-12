@@ -322,6 +322,7 @@ mod tests {
         staging: &'a FunctionStagingMode,
         idempotent_repositories: &'a IdempotentRegistry,
         claim_check_repositories: &'a ClaimCheckRegistry,
+        cache_repositories: &'a crate::CacheRegistry,
     ) -> CompilationContext<'a> {
         CompilationContext {
             producer_ctx: pc,
@@ -334,6 +335,7 @@ mod tests {
             staging_mode: staging,
             idempotent_repositories,
             claim_check_repositories,
+            cache_repositories,
         }
     }
 
@@ -353,6 +355,7 @@ mod tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = IdempotentRegistry::new();
         let claim_check_repositories = ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = make_ctx(
             &pc,
@@ -363,6 +366,7 @@ mod tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         // Sanity: the URI parses under the `stateful:` scheme.
@@ -411,6 +415,7 @@ mod tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = IdempotentRegistry::new();
         let claim_check_repositories = ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = make_ctx(
             &pc,
@@ -421,6 +426,7 @@ mod tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         let compiled = EndpointsCompiler
@@ -470,6 +476,7 @@ mod tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = IdempotentRegistry::new();
         let claim_check_repositories = ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = make_ctx(
             &pc,
@@ -480,6 +487,7 @@ mod tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         let compiled = EndpointsCompiler
@@ -530,6 +538,7 @@ mod tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = IdempotentRegistry::new();
         let claim_check_repositories = ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = make_ctx(
             &pc,
@@ -540,6 +549,7 @@ mod tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         let compiled = EndpointsCompiler

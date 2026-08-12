@@ -1,0 +1,47 @@
+# Cache EIP — cache a computed body and serve it on subsequent requests
+# with the same key, invalidate a single entry, and serve a stale entry
+# after its TTL expires.
+#
+# Demonstrates cache (lookup → on-miss → write-back), cache_invalidate
+# (remove a single key), and cache_peek_stale (serve a post-expiry entry).
+
+routes:
+  - id: "cache-demo"
+    from: "timer:tick?period=2000&repeatCount=3"
+    steps:
+      - set_header:
+          key: "cacheKey"
+          value: "user-profile-42"
+      # ANCHOR: cache-route
+      - cache:
+          key: "${header.cacheKey}"
+          ttl: "5s"
+          on_miss:
+            - set_body: "computed-fresh-data"
+            - log: "Cache MISS — body computed and stored"
+      - log: "After cache body is: ${body}"
+      # ANCHOR_END: cache-route
+
+  - id: "cache-invalidate-demo"
+    from: "timer:tick?period=6000&repeatCount=1"
+    steps:
+      - set_header:
+          key: "cacheKey"
+          value: "user-profile-42"
+      # ANCHOR: cache-invalidate-route
+      - cache_invalidate:
+          key: "${header.cacheKey}"
+      - log: "Cache entry invalidated for key: ${header.cacheKey}"
+      # ANCHOR_END: cache-invalidate-route
+
+  - id: "cache-peek-stale-demo"
+    from: "timer:tick?period=8000&repeatCount=1"
+    steps:
+      - set_header:
+          key: "cacheKey"
+          value: "user-profile-42"
+      # ANCHOR: cache-peek-stale-route
+      - cache_peek_stale:
+          key: "${header.cacheKey}"
+      - log: "After peek_stale body is: ${body}"
+      # ANCHOR_END: cache-peek-stale-route

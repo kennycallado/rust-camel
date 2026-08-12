@@ -7,7 +7,7 @@ pub(crate) enum FunctionStagingMode {
 }
 
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
-use crate::{ClaimCheckRegistry, IdempotentRegistry};
+use crate::{CacheRegistry, ClaimCheckRegistry, IdempotentRegistry};
 use camel_api::{CamelError, Exchange, FilterPredicate, FunctionInvoker, ProducerContext, Value};
 use camel_bean::BeanRegistry;
 use camel_component_api::{ComponentContext, RuntimeObservability};
@@ -201,6 +201,7 @@ pub(crate) fn resolve_steps(
     staging_mode: &FunctionStagingMode,
     idempotent_repositories: &IdempotentRegistry,
     claim_check_repositories: &ClaimCheckRegistry,
+    cache_repositories: &CacheRegistry,
 ) -> Result<Vec<CompiledStep>, CamelError> {
     use crate::lifecycle::adapters::step_compilers::{CompilationContext, build_registry};
 
@@ -216,6 +217,7 @@ pub(crate) fn resolve_steps(
         staging_mode,
         idempotent_repositories,
         claim_check_repositories,
+        cache_repositories,
     };
     compiler_registry.compile_steps(steps, &ctx)
 }
@@ -420,6 +422,7 @@ mod tests {
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
+            &crate::CacheRegistry::new(),
         )
         .unwrap_err();
         assert!(
@@ -450,6 +453,7 @@ mod tests {
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
+            &crate::CacheRegistry::new(),
         )
         .unwrap_err();
         assert!(
@@ -486,6 +490,7 @@ mod tests {
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
+            &crate::CacheRegistry::new(),
         )
         .unwrap_err();
 
@@ -686,6 +691,7 @@ mod tests {
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
+            &crate::CacheRegistry::new(),
         )
         .unwrap();
 
@@ -718,6 +724,7 @@ mod tests {
             &FunctionStagingMode::DirectAdd,
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
+            &crate::CacheRegistry::new(),
         )
         .unwrap_err();
 

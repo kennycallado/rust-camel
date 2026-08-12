@@ -119,6 +119,87 @@ impl StepCompiler for CoreCompiler {
                 }))
             }
 
+            // ── Cache (Segment-mode) ──
+            // Caching EIP: lookup → on-miss sub-pipeline → write-back. Same
+            // Segment-mode rationale as IdempotentConsumer above.
+            BuilderStep::Cache {
+                repository,
+                key,
+                ttl,
+                max_entry_bytes,
+                on_miss,
+            } => {
+                use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
+
+                let repo_name = repository.as_deref().unwrap_or("memory");
+                let repo = ctx.cache_repositories.get(repo_name).ok_or_else(|| {
+                    CamelError::ComponentNotFound(format!(
+                        "cache: repository '{repo_name}' is not registered"
+                    ))
+                })?;
+                let key_expr = compile_message_id_expression(ctx.languages, &key)?;
+                let ttl_dur = ttl
+                    .as_ref()
+                    .map(|s| humantime::parse_duration(s))
+                    .transpose()
+                    .map_err(|e| {
+                        CamelError::RouteError(format!(
+                            "cache: invalid ttl '{}': {e}",
+                            ttl.as_deref().unwrap_or("<none>")
+                        ))
+                    })?;
+                let (child_segments, child_lifecycles) =
+                    ctx.compile_children_segments(on_miss, registry)?;
+                let child_pipeline = compose_outcome_segment(child_segments);
+                let svc = camel_processor::CacheService::new(
+                    repo,
+                    key_expr,
+                    ttl_dur,
+                    max_entry_bytes.unwrap_or(camel_api::body::DEFAULT_MATERIALIZE_LIMIT),
+                    child_pipeline,
+                    ctx.rt.clone(),
+                );
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(svc)),
+                    body_contract: None,
+                    lifecycle: pack_lifecycles(child_lifecycles),
+                }))
+            }
+
+            // ── Cache Invalidate (Segment-mode) ──
+            BuilderStep::CacheInvalidate { repository, key } => {
+                let repo_name = repository.as_deref().unwrap_or("memory");
+                let repo = ctx.cache_repositories.get(repo_name).ok_or_else(|| {
+                    CamelError::ComponentNotFound(format!(
+                        "cache_invalidate: repository '{repo_name}' is not registered"
+                    ))
+                })?;
+                let key_expr = compile_message_id_expression(ctx.languages, &key)?;
+                let svc = camel_processor::CacheInvalidateService::new(repo, key_expr);
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(svc)),
+                    body_contract: None,
+                    lifecycle: None,
+                }))
+            }
+
+            // ── Cache Peek Stale (Segment-mode) ──
+            BuilderStep::CachePeekStale { repository, key } => {
+                let repo_name = repository.as_deref().unwrap_or("memory");
+                let repo = ctx.cache_repositories.get(repo_name).ok_or_else(|| {
+                    CamelError::ComponentNotFound(format!(
+                        "cache_peek_stale: repository '{repo_name}' is not registered"
+                    ))
+                })?;
+                let key_expr = compile_message_id_expression(ctx.languages, &key)?;
+                let svc = camel_processor::CachePeekStaleService::new(repo, key_expr);
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(svc)),
+                    body_contract: None,
+                    lifecycle: None,
+                }))
+            }
+
             // ── Static Log ──
             BuilderStep::Log { level, message } => {
                 let svc = LogProcessor::new(level, message);
@@ -502,6 +583,7 @@ mod tests {
             .register("memory", repo)
             .expect("register repo");
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         // ── registry with only CoreCompiler ──
         let mut reg = StepCompilerRegistry::new();
@@ -525,6 +607,7 @@ mod tests {
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
+            cache_repositories: &cache_repositories,
         };
 
         // ── IdempotentConsumer step ──
@@ -623,6 +706,7 @@ mod tests {
             Box::leak(Box::new(crate::IdempotentRegistry::new()));
         let claim_check: &'static crate::ClaimCheckRegistry =
             Box::leak(Box::new(crate::ClaimCheckRegistry::new()));
+        let cache: &'static crate::CacheRegistry = Box::leak(Box::new(crate::CacheRegistry::new()));
 
         let ctx = CompilationContext {
             producer_ctx,
@@ -635,6 +719,7 @@ mod tests {
             staging_mode: staging,
             idempotent_repositories: idempotent,
             claim_check_repositories: claim_check,
+            cache_repositories: cache,
         };
 
         let mut reg = StepCompilerRegistry::new();
@@ -695,6 +780,7 @@ mod tests {
             Box::leak(Box::new(crate::IdempotentRegistry::new()));
         let claim_check: &'static crate::ClaimCheckRegistry =
             Box::leak(Box::new(crate::ClaimCheckRegistry::new()));
+        let cache: &'static crate::CacheRegistry = Box::leak(Box::new(crate::CacheRegistry::new()));
 
         CompilationContext {
             producer_ctx,
@@ -707,6 +793,7 @@ mod tests {
             staging_mode: staging,
             idempotent_repositories: idempotent,
             claim_check_repositories: claim_check,
+            cache_repositories: cache,
         }
     }
 }

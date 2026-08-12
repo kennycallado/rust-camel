@@ -1,4 +1,5 @@
 pub mod aggregator;
+pub mod cache_eip;
 pub mod choice;
 pub mod circuit_breaker;
 pub mod claim_check;
@@ -46,6 +47,7 @@ pub mod wire_tap;
 pub mod zip_splitter;
 
 pub use aggregator::AggregatorService;
+pub use cache_eip::{CacheInvalidateService, CachePeekStaleService, CacheService};
 pub use choice::{ChoiceSegment, ChoiceService, WhenClause, WhenClauseSegment};
 pub use circuit_breaker::{
     CircuitBreakerDecision, CircuitBreakerGate, CircuitBreakerLayer, CircuitBreakerService,

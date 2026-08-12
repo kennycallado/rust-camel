@@ -36,6 +36,7 @@ tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 opentelemetry-appender-tracing = { workspace = true, optional = true }
 camel-platform-kubernetes = { workspace = true, optional = true }
+humantime = { workspace = true }
 
 [dev-dependencies]
 tokio.workspace = true

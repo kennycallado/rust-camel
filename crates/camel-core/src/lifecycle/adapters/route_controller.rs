@@ -80,6 +80,7 @@ pub struct DefaultRouteController {
     /// built-in `"memory"` repository.
     pub(super) idempotent_repositories: crate::SharedIdempotentRegistry,
     pub(super) claim_check_repositories: crate::SharedClaimCheckRegistry,
+    pub(super) cache_repositories: crate::SharedCacheRegistry,
     /// F2 staging: prepared-but-not-inserted ManagedRoutes keyed by route_id.
     /// `prepare_*` writes here; `insert_prepared_route` drains via `remove()`.
     /// On insert-failure error paths, the caller (`reload_actions.rs`) must
@@ -142,6 +143,7 @@ impl DefaultRouteController {
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
+            cache_repositories: Arc::new(crate::CacheRegistry::new()),
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
         }
@@ -169,6 +171,7 @@ impl DefaultRouteController {
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
+            cache_repositories: Arc::new(crate::CacheRegistry::new()),
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
         }
@@ -196,6 +199,7 @@ impl DefaultRouteController {
             health_registry: None,
             idempotent_repositories: Arc::new(crate::IdempotentRegistry::new()),
             claim_check_repositories: Arc::new(crate::ClaimCheckRegistry::new()),
+            cache_repositories: Arc::new(crate::CacheRegistry::new()),
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
         }
@@ -218,6 +222,10 @@ impl DefaultRouteController {
         repositories: crate::SharedClaimCheckRegistry,
     ) {
         self.claim_check_repositories = repositories;
+    }
+
+    pub(crate) fn set_cache_repositories(&mut self, repositories: crate::SharedCacheRegistry) {
+        self.cache_repositories = repositories;
     }
 
     pub fn set_health_registry(&mut self, registry: Arc<HealthCheckRegistry>) {
@@ -278,6 +286,7 @@ impl DefaultRouteController {
             route_registry: &self.routes,
             idempotent_repositories: Arc::clone(&self.idempotent_repositories),
             claim_check_repositories: Arc::clone(&self.claim_check_repositories),
+            cache_repositories: Arc::clone(&self.cache_repositories),
         }
     }
 
@@ -317,6 +326,7 @@ impl DefaultRouteController {
             staging_mode,
             &self.idempotent_repositories,
             &self.claim_check_repositories,
+            &self.cache_repositories,
         )
     }
 

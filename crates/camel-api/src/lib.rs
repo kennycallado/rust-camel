@@ -9,6 +9,7 @@ pub mod aggregator;
 pub mod backoff;
 pub mod body;
 pub mod body_converter;
+pub mod cache;
 pub mod circuit_breaker;
 pub mod claim_check;
 pub mod component_metadata;
@@ -61,6 +62,7 @@ pub use aggregator::{AggregationFn, AggregatorConfig, CompletionCondition};
 pub use backoff::{BackoffConfig, BackoffState};
 pub use body::{Body, BoxAsyncRead, StreamBody, StreamMetadata};
 pub use body_converter::{BodyType, convert as convert_body};
+pub use cache::{CacheEntry, CacheRepository, CacheStats, ContentType};
 pub use circuit_breaker::CircuitBreakerConfig;
 pub use data_format::DataFormat;
 pub use datasource::{

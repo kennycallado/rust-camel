@@ -42,6 +42,7 @@
     - [Sampling](eip/sampling.md)
     - [Resequencer](eip/resequencer.md)
     - [Claim Check](eip/claim-check.md)
+    - [Cache](eip/cache.md)
   - [Resilience and control](eip/resilience.md)
     - [Circuit breaker](eip/circuit-breaker.md)
     - [Do Try](eip/do-try.md)

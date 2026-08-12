@@ -271,6 +271,28 @@ pub enum BuilderStep {
         eager: bool,
         remove_on_failure: bool,
     },
+    /// Cache step (EIP). Wraps a child sub-pipeline that runs only on cache
+    /// miss; on hit the stored body is reconstructed and the child is skipped.
+    /// Compiled to a `CacheService` (OutcomePipeline, segment-mode).
+    Cache {
+        repository: Option<String>,
+        key: LanguageExpressionDef,
+        ttl: Option<String>,
+        max_entry_bytes: Option<usize>,
+        on_miss: Vec<BuilderStep>,
+    },
+    /// Cache Invalidate step (EIP). Removes a single cache entry by key.
+    /// Compiled to a `CacheInvalidateService` (OutcomePipeline, segment-mode).
+    CacheInvalidate {
+        repository: Option<String>,
+        key: LanguageExpressionDef,
+    },
+    /// Cache Peek Stale step (EIP). Serves a stale (post-expiry) cache entry.
+    /// Compiled to a `CachePeekStaleService` (OutcomePipeline, segment-mode).
+    CachePeekStale {
+        repository: Option<String>,
+        key: LanguageExpressionDef,
+    },
     /// Declarative doTry/doCatch/doFinally, resolved at route-add time.
     DeclarativeDoTry {
         try_steps: Vec<BuilderStep>,

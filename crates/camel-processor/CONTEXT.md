@@ -8,6 +8,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | Module | Processor / concern | Type | Source |
 |---|---|---|---|
 | `aggregator` | Aggregate | stateful routing / aggregation | `src/aggregator.rs` (`impl AggregatorService`, `fn poll_ready`, `fn call`): defaults are max_buckets=10_000 and bucket_ttl=300s. The background TTL sweep starts lazily on the first `poll_ready` and is managed via `StepLifecycle::start`/`shutdown` (ADR-0022): `shutdown` cancels the sweep token + aborts the handle; `start` resets both so the sweep respawns on route restart. The sweep token is seeded from the constructor's `route_cancel` but lives in an internal swappable cell (`sweep_cancel`), independent of any externally-threaded token. Inline eviction in `call` remains active before the sweep starts (Batch 1 R3-C1). |
+| `cache_eip` | Cache | stateful caching (ADR-0056) | `src/cache_eip.rs` (`CacheService`, `CacheInvalidateService`, `CachePeekStaleService`): OutcomePipeline-backed lookup → on-miss sub-pipeline → write-back. HIT short-circuits; MISS runs body and stores result (subject to `max_entry_bytes`). `ttl` propagated to repository `set`. `CacheInvalidateService` removes a single key. `CachePeekStaleService` serves a post-expiry stale entry. |
 | `choice` | Choice | conditional routing | `src/lib.rs:2` |
 | `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:3` |
 | `claim_check` | Claim Check | stateful repository stash/retrieve (ADR-0046 retro-exempt) | `src/lib.rs:4` |
@@ -78,6 +79,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `ChoiceSegment`, `ChoiceService`, `WhenClause`, `WhenClauseSegment` | stable | `pub use choice::{...}` | Choice EIP. |
 | `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `pub use circuit_breaker::{...}` | README claims deprecation for layer/service; code has no `#[deprecated]` yet. |
 | `ClaimCheckOp`, `ClaimCheckService`, `KeyExpression` | stable | `pub use claim_check::{...}` | Claim Check EIP. |
+| `CacheService`, `CacheInvalidateService`, `CachePeekStaleService` | stable | `pub use cache_eip::{...}` | Cache EIP. Outcome-aware segment for lookup, invalidation, and stale-serving. |
 | `EnrichService`, `PollEnrichService` | stable | `pub use content_enricher::{...}` | Enrich / pollEnrich. |
 | `ConvertBodyTo` | stable | `pub use convert_body::ConvertBodyTo` | Body conversion. |
 | `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonConfig`, `JsonDataFormat`, `XmlConfig`, `XmlDataFormat`, `ZipConfig`, `ZipDataFormat`, `builtin_data_format`, `builtin_data_format_with_config` | stable | `pub use data_format::{...}` | Built-in data formats. CSV added per ADR-0030. Configurable DoS caps per ADR-0038. |

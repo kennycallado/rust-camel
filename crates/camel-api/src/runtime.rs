@@ -18,6 +18,9 @@ pub const CANONICAL_CONTRACT_SUPPORTED_STEPS: &[&str] = &[
     "aggregate",
     "stop",
     "delay",
+    "cache",
+    "cache_invalidate",
+    "cache_peek_stale",
 ];
 pub const CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS: &[&str] =
     &["script", "filter", "choice", "split"];
@@ -146,6 +149,21 @@ pub enum CanonicalStepSpec {
         #[ts(type = "number")]
         delay_ms: u64,
         dynamic_header: Option<String>,
+    },
+    Cache {
+        repository: Option<String>,
+        key: String,
+        ttl: Option<String>,
+        max_entry_bytes: Option<usize>,
+        on_miss: Vec<CanonicalStepSpec>,
+    },
+    CacheInvalidate {
+        repository: Option<String>,
+        key: String,
+    },
+    CachePeekStale {
+        repository: Option<String>,
+        key: String,
     },
 }
 
@@ -436,10 +454,15 @@ fn validate_steps(steps: &[CanonicalStepSpec]) -> Result<(), CamelError> {
                     ));
                 }
             }
+            CanonicalStepSpec::Cache { on_miss, .. } => {
+                validate_steps(on_miss)?;
+            }
             CanonicalStepSpec::Log { .. }
             | CanonicalStepSpec::Script { .. }
             | CanonicalStepSpec::Stop
-            | CanonicalStepSpec::Delay { .. } => {}
+            | CanonicalStepSpec::Delay { .. }
+            | CanonicalStepSpec::CacheInvalidate { .. }
+            | CanonicalStepSpec::CachePeekStale { .. } => {}
         }
     }
     Ok(())

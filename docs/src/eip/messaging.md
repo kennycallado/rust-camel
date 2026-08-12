@@ -10,5 +10,6 @@ Messaging patterns change the cardinality or order of exchanges. They split one 
 - [Sort](sort.md) — sort an array body by a comparator expression
 - [Sampling](sampling.md) — pass through one out of every N exchanges
 - [Claim Check](claim-check.md) — stash a large payload and replace it with a claim ticket
+- [Cache](cache.md) — cache a computed body by key with TTL and stale-read fallback
 
 For the processor contract that implements these patterns, see [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).

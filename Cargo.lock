@@ -1197,6 +1197,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cache-example"
+version = "0.27.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "camel-api"
 version = "0.27.0"
 dependencies = [
@@ -2015,6 +2028,7 @@ dependencies = [
  "camel-template",
  "config",
  "glob",
+ "humantime",
  "noyalib",
  "opentelemetry-appender-tracing",
  "serde",
@@ -2072,6 +2086,8 @@ dependencies = [
  "criterion",
  "dashmap 6.2.1",
  "futures",
+ "humantime",
+ "moka",
  "notify",
  "opentelemetry",
  "parking_lot",
@@ -3423,6 +3439,15 @@ dependencies = [
  "camel-core",
  "tokio",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -6890,6 +6915,26 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "moka"
+version = "0.12.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4293f18e7567a1caf3c584855554377025c65e0aa445344d04171f5ad63d19b9"
+dependencies = [
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "equivalent",
+ "event-listener",
+ "futures-util",
+ "parking_lot",
+ "portable-atomic",
+ "smallvec",
+ "tagptr",
+ "uuid",
 ]
 
 [[package]]
@@ -11643,6 +11688,12 @@ name = "tag_ptr"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0e973b34477b7823833469eb0f5a3a60370fef7a453e02d751b59180d0a5a05"
+
+[[package]]
+name = "tagptr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "tap"

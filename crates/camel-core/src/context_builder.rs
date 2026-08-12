@@ -9,6 +9,7 @@ use camel_api::{
 use camel_language_api::Language;
 
 use super::context::{CamelContext, FromParts};
+use crate::cache::memory::MemoryCacheRepository;
 use crate::claim_check::memory_repository::MemoryClaimCheckRepository;
 use crate::health_registry::HealthCheckRegistry;
 use crate::idempotent::memory_repository::MemoryIdempotentRepository;
@@ -21,7 +22,7 @@ use crate::lifecycle::adapters::route_controller::{
 };
 use crate::lifecycle::application::ports::RuntimeExecutionPort;
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
-use crate::registry::{ClaimCheckRegistry, IdempotentRegistry};
+use crate::registry::{CacheRegistry, ClaimCheckRegistry, IdempotentRegistry};
 use crate::shared::components::domain::Registry;
 use crate::startup_validation::ConfigCheck;
 use crate::template::TemplateRegistry;
@@ -228,6 +229,15 @@ impl CamelContextBuilder {
             reg
         };
 
+        // Default cache repository registry with a built-in memory repo.
+        let cache_repositories: crate::registry::SharedCacheRegistry = {
+            let reg = Arc::new(CacheRegistry::new());
+            let memory = Arc::new(MemoryCacheRepository::new("memory", 10_000));
+            reg.register("memory", memory)
+                .expect("built-in memory cache repository registration must succeed"); // allow-unwrap
+            reg
+        };
+
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {
                 let (crash_tx, crash_rx) = tokio::sync::mpsc::channel(64);
@@ -250,6 +260,7 @@ impl CamelContextBuilder {
                 }
                 controller_impl.set_idempotent_repositories(Arc::clone(&idempotent_repositories));
                 controller_impl.set_claim_check_repositories(Arc::clone(&claim_check_repositories));
+                controller_impl.set_cache_repositories(Arc::clone(&cache_repositories));
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
@@ -280,6 +291,7 @@ impl CamelContextBuilder {
                 }
                 controller_impl.set_idempotent_repositories(Arc::clone(&idempotent_repositories));
                 controller_impl.set_claim_check_repositories(Arc::clone(&claim_check_repositories));
+                controller_impl.set_cache_repositories(Arc::clone(&cache_repositories));
                 controller_impl.set_health_registry(Arc::clone(&health_registry));
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
@@ -320,6 +332,7 @@ impl CamelContextBuilder {
             template_registry,
             idempotent_repositories,
             claim_check_repositories,
+            cache_repositories,
             startup_checks: Vec::<Box<dyn ConfigCheck>>::new(),
         }))
     }
@@ -352,5 +365,19 @@ mod tests {
             repo.is_some(),
             "default 'memory' idempotent repository should be registered"
         );
+    }
+
+    #[tokio::test]
+    async fn builder_registers_default_memory_cache_repository() {
+        let ctx = CamelContext::builder()
+            .build()
+            .await
+            .expect("build context");
+        let repo = ctx.cache_repository("memory");
+        assert!(
+            repo.is_some(),
+            "default 'memory' cache repository should be registered"
+        );
+        assert_eq!(repo.unwrap().name(), "memory");
     }
 }

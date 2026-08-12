@@ -20,7 +20,7 @@ split into:
 | Category | Count | Posture |
 |---|---|---|
 | `#[non_exhaustive]` | 51 | 48 attributed by rc-3pw3 + 3 pre-existing (`CamelError`, `ConfigValidationError`, `TemplateError`). |
-| `exhaustive-by-contract` exception | 2 | `PipelineOutcome` (the ADR-0024 outcome algebra) and `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
+| `exhaustive-by-contract` exception | 3 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), and `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
 
 New contract enums use `#[non_exhaustive]` from birth; a closed-set exception needs a
 `/// exhaustive-by-contract: <rationale>` note. ADR-0049 Rule 3 governs public structs (out of
@@ -166,6 +166,10 @@ key-only vs payload-bearing split from `IdempotentRepository` is the central dec
 (each pattern owns its trait; only the `NamedRegistry` wiring is shared). Canonical impl:
 `MemoryClaimCheckRepository` in camel-core. Established by ADR-0028.
 _Avoid_: claim store, payload cache, idempotent repository (that is the key-only trait)
+
+**CacheRepository**:
+TTL cache port for the Caching EIP (`trait CacheRepository`). Stores `CacheEntry { bytes: Vec<u8>, content_type, expires_at }` — materialized bytes, not `Body` (which is not Serialize and includes the un-cacheable `Stream` variant). `get` returns `Ok(None)` on miss OR in-band expiry (never silent on backend failure — Contract C1). `peek_stale` ignores in-band expiry. `set` computes `expires_at` from `ttl`. Distinct from `IdempotentRepository` (key-only) and `ClaimCheckRepository` (payload-owning, no expiry). Canonical impls: `MemoryCacheRepository` (moka) and `RedbCacheRepository` in camel-core. Established by ADR-0056.
+_Avoid_: cache store, payload cache, idempotent repository (that is the key-only trait)
 
 ## Example dialogue
 

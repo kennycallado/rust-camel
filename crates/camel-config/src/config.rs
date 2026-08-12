@@ -31,6 +31,13 @@ pub struct CamelConfig {
     /// bounded by `DEFAULT_MAX_ENTRIES`).
     pub idempotent_repo: Option<RedbIdempotentConfig>,
 
+    /// Optional cache repository configuration.
+    ///
+    /// When unset, the default in-memory cache repository is used (ephemeral,
+    /// bounded by 10_000 entries). Set `backend = "redb"` to use a persistent
+    /// on-disk store with background stale-entry sweep.
+    pub cache_repo: Option<CacheRepoConfig>,
+
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
@@ -128,6 +135,7 @@ impl CamelConfigBuilder {
             watch: self.watch.unwrap_or(defaults.watch),
             runtime_journal: defaults.runtime_journal,
             idempotent_repo: defaults.idempotent_repo,
+            cache_repo: defaults.cache_repo,
             log_level: self.log_level.unwrap_or(defaults.log_level),
             timeout_ms: self.timeout_ms.unwrap_or(defaults.timeout_ms),
             drain_timeout_ms: self.drain_timeout_ms.unwrap_or(defaults.drain_timeout_ms),
@@ -153,6 +161,7 @@ impl Default for CamelConfig {
             watch: false,
             runtime_journal: None,
             idempotent_repo: None,
+            cache_repo: None,
             log_level: default_log_level(),
             timeout_ms: default_timeout_ms(),
             drain_timeout_ms: default_drain_timeout_ms(),
@@ -503,6 +512,72 @@ pub struct RedbIdempotentConfig {
     /// Durability mode. Default: `immediate`.
     #[serde(default)]
     pub durability: JournalDurability,
+}
+
+/// Configuration for the cache repository.
+///
+/// Supports two backends: `"memory"` (in-process, bounded by `max_capacity`, default)
+/// and `"redb"` (persistent on-disk store with background stale-entry sweep).
+///
+/// When omitted from `Camel.toml`, the runtime uses the in-memory cache repository
+/// (ephemeral, bounded by 10_000 entries). Use `backend = "redb"` to opt into
+/// a durable on-disk store that survives restarts.
+///
+/// # TOML example
+///
+/// ```toml
+/// [default.cache_repo]
+/// backend = "redb"
+/// path = "cache.redb"
+/// stale_retention = "168h"
+/// max_entries = 1_000_000
+/// ```
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CacheRepoConfig {
+    /// Cache backend: `"memory"` (default) or `"redb"` (persistent).
+    #[serde(default = "default_cache_backend")]
+    pub backend: String,
+
+    /// Maximum entry count before eviction starts. Memory backend only.
+    /// Default: 10_000.
+    #[serde(default)]
+    pub max_capacity: Option<usize>,
+
+    /// Path to the `.redb` file. Required when `backend = "redb"`.
+    /// Created if it does not exist.
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// How long after expiry a stale entry survives before the sweep reclaims it.
+    /// Redb backend only. Accepts human-readable strings like "168h", "7d", "1w".
+    /// Default: "168h" (7 days).
+    #[serde(default = "default_stale_retention")]
+    pub stale_retention: Option<String>,
+
+    /// Maximum entry count for the redb backend. Default: 1_000_000.
+    #[serde(default)]
+    pub max_entries: Option<usize>,
+}
+
+fn default_cache_backend() -> String {
+    "memory".to_string()
+}
+
+fn default_stale_retention() -> Option<String> {
+    Some("168h".to_string())
+}
+
+impl Default for CacheRepoConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_cache_backend(),
+            max_capacity: None,
+            path: None,
+            stale_retention: None,
+            max_entries: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1097,6 +1172,27 @@ impl CamelConfig {
                 "idempotent_repo.path must not be empty".to_string(),
             ));
         }
+        if let Some(ref cache) = self.cache_repo {
+            match cache.backend.as_str() {
+                "memory" | "redb" => {}
+                other => {
+                    return Err(CamelError::Config(format!(
+                        "cache_repo.backend must be \"memory\" or \"redb\", got \"{other}\""
+                    )));
+                }
+            }
+            if cache.backend == "redb" {
+                let path_empty = match &cache.path {
+                    None => true,
+                    Some(p) => p.is_empty(),
+                };
+                if path_empty {
+                    return Err(CamelError::Config(
+                        "cache_repo.path must be set when backend is \"redb\"".to_string(),
+                    ));
+                }
+            }
+        }
         for (name, bean) in &self.beans {
             if bean.plugin.trim().is_empty() {
                 return Err(CamelError::Config(format!(
@@ -1351,6 +1447,11 @@ const ALLOWED_ENV_OVERRIDES: &[&str] = &[
     "CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS",
     "CAMEL_IDEMPOTENT_REPO_PATH",
     "CAMEL_IDEMPOTENT_REPO_DURABILITY",
+    "CAMEL_CACHE_REPO_BACKEND",
+    "CAMEL_CACHE_REPO_PATH",
+    "CAMEL_CACHE_REPO_MAX_CAPACITY",
+    "CAMEL_CACHE_REPO_STALE_RETENTION",
+    "CAMEL_CACHE_REPO_MAX_ENTRIES",
     "CAMEL_SUPERVISION_INITIAL_DELAY_MS",
     "CAMEL_SUPERVISION_MAX_ATTEMPTS",
 ];
@@ -1442,6 +1543,13 @@ fn build_from_toml_value_inner(
                         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
                     if let serde_json::Value::Object(repo_map) = repo {
                         repo_map.insert(nested_key.to_string(), parsed);
+                    }
+                } else if let Some(nested_key) = key.strip_prefix("cache_repo_") {
+                    let cache = env_map
+                        .entry("cache_repo".to_string())
+                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                    if let serde_json::Value::Object(cache_map) = cache {
+                        cache_map.insert(nested_key.to_string(), parsed);
                     }
                 } else {
                     env_map.insert(key, parsed);

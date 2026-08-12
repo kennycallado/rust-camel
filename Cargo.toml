@@ -177,6 +177,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 async-stream = "0.3"
 dirs = "6"
 regex = "1"
+moka = { version = "0.12", features = ["future"] }
 redb = "4"
 redis = "1"
 rumqttc = { version = "0.33.2", package = "rumqttc-v4-next", default-features = false }
@@ -195,6 +196,7 @@ minijinja = { version = "2", features = ["fuel", "json", "urlencode"] }
 # Pin to 0.21: Context is !Send + !Sync
 boa_engine = { version = "0.21", features = [] }
 arc-swap = "1"
+humantime = "2"
 config = "0.15"
 glob = "0.3"
 notify = { version = "8", features = ["macos_fsevent"] }

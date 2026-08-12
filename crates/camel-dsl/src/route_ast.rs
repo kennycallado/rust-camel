@@ -330,6 +330,9 @@ pub enum RouteDslStep {
     Enrich(EnrichStep),
     PollEnrich(PollEnrichStep),
     IdempotentConsumer(IdempotentConsumerStep),
+    Cache(CacheStep),
+    CacheInvalidate(CacheInvalidateStep),
+    CachePeekStale(CachePeekStaleStep),
     ClaimCheck(ClaimCheckStep),
     Sampling(SamplingStep),
     Sort(SortStep),
@@ -944,6 +947,84 @@ pub struct IdempotentConsumerBody {
     /// When `eager`, remove the key if the child fails (default `false`).
     #[serde(default)]
     pub remove_on_failure: Option<bool>,
+}
+
+/// Cache EIP step — puts/stores an exchange result in a `CacheRepository`.
+///
+/// Short-hand (`cache: "redis-cache"`) uses the URI directly as repository
+/// name. Full form (`cache: { repository: ..., key: ..., ... }`) supplies the
+/// full configuration with an `on_miss` sub-pipeline.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CacheStep {
+    pub cache: CacheBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", schemars(untagged))]
+pub enum CacheBody {
+    /// Shorthand: `cache: "redis-cache"` (repository name).
+    Uri(String),
+    /// Full form: `cache: { repository: ..., key: ..., ... }`.
+    Full(CacheConfig),
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    /// Name of the registered CacheRepository (optional; defaults to system default).
+    pub repository: Option<String>,
+    /// Simple-language expression for the cache key.
+    pub key: String,
+    /// Optional TTL expression/"duration string" (e.g. "60s", "5m").
+    #[serde(default)]
+    pub ttl: Option<String>,
+    /// Maximum bytes per cache entry (optional).
+    #[serde(default)]
+    pub max_entry_bytes: Option<usize>,
+    /// Child sub-pipeline executed on cache miss.
+    #[serde(default)]
+    pub on_miss: Vec<RouteDslStep>,
+}
+
+/// Cache Invalidate step — removes an entry from a CacheRepository.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CacheInvalidateStep {
+    pub cache_invalidate: CacheInvalidateBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CacheInvalidateBody {
+    /// Name of the registered CacheRepository (optional; defaults to system default).
+    pub repository: Option<String>,
+    /// Simple-language expression for the cache key to invalidate.
+    pub key: String,
+}
+
+/// Cache Peek Stale step — returns cached data even if TTL has expired.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CachePeekStaleStep {
+    pub cache_peek_stale: CachePeekStaleBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CachePeekStaleBody {
+    /// Name of the registered CacheRepository (optional; defaults to system default).
+    pub repository: Option<String>,
+    /// Simple-language expression for the cache key to peek.
+    pub key: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

@@ -67,6 +67,19 @@ impl<T: ?Sized + Send + Sync + 'static> NamedRegistry<T> {
         Ok(())
     }
 
+    /// Register or replace `value` under `name`.
+    ///
+    /// Returns the previous value if `name` was already registered, or `None`
+    /// if this is the first registration under this name.
+    pub fn register_or_replace(&self, name: impl Into<String>, value: Arc<T>) -> Option<Arc<T>> {
+        let name = name.into();
+        let mut map = self
+            .map
+            .lock()
+            .expect("registry mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
+        map.insert(name, value)
+    }
+
     /// Retrieve a registered value by name.
     pub fn get(&self, name: &str) -> Option<Arc<T>> {
         self.map
@@ -104,6 +117,16 @@ pub(crate) type ClaimCheckRegistry = NamedRegistry<dyn camel_api::ClaimCheckRepo
 /// `DefaultRouteController` for step-compile-time repository resolution.
 pub(crate) type SharedClaimCheckRegistry = Arc<ClaimCheckRegistry>;
 
+/// Convenience alias for the cache repository registry.
+pub(crate) type CacheRegistry = NamedRegistry<dyn camel_api::CacheRepository>;
+
+/// Shareable handle to the cache repository registry.
+///
+/// Shared between `CamelContext` (which owns the user-facing
+/// `register_cache_repository` / `replace_cache_repository` API) and
+/// any consumer that needs read access during step compilation.
+pub(crate) type SharedCacheRegistry = Arc<CacheRegistry>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +161,27 @@ mod tests {
         // the error kept the wrong repository silently.
         let val = registry.get("key1").unwrap();
         assert_eq!(*val, *"first");
+    }
+
+    #[test]
+    fn register_or_replace_inserts_and_returns_previous() {
+        let registry: NamedRegistry<str> = NamedRegistry::new();
+        // First insert — no previous value
+        assert!(
+            registry
+                .register_or_replace("key1", Arc::from("first"))
+                .is_none()
+        );
+        assert_eq!(*registry.get("key1").unwrap(), *"first");
+        // Replace — previous value returned, new value stored
+        let prev = registry.register_or_replace("key1", Arc::from("second"));
+        assert!(prev.is_some());
+        assert_eq!(*prev.unwrap(), *"first");
+        assert_eq!(*registry.get("key1").unwrap(), *"second");
+        // Replace again
+        let prev = registry.register_or_replace("key1", Arc::from("third"));
+        assert!(prev.is_some());
+        assert_eq!(*prev.unwrap(), *"second");
+        assert_eq!(*registry.get("key1").unwrap(), *"third");
     }
 }

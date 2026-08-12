@@ -229,6 +229,48 @@ impl CamelConfig {
                 .map_err(|e| CamelError::Config(format!("register idempotent 'redb': {e:?}")))?;
         }
 
+        // Opt-in cache repository: when `cache_repo` is set with
+        // `backend = "redb"`, register a RedbCacheRepository alongside the
+        // default "memory" repo. When set with `backend = "memory"` and a
+        // custom `max_capacity`, replace the default memory repo.
+        if let Some(ref ccfg) = config.cache_repo {
+            match ccfg.backend.as_str() {
+                "redb" => {
+                    let path: std::path::PathBuf = ccfg.path.as_deref().unwrap_or("").into();
+                    let stale_retention: std::time::Duration = ccfg
+                        .stale_retention
+                        .as_deref()
+                        .and_then(|s| humantime::parse_duration(s).ok())
+                        .unwrap_or(std::time::Duration::from_secs(7 * 24 * 3600));
+                    let sweep_interval = std::time::Duration::from_secs(3600); // 1h default
+                    let max_entries = ccfg.max_entries.unwrap_or(1_000_000);
+                    let repo = camel_core::cache::RedbCacheRepository::new(
+                        "persistent",
+                        path,
+                        stale_retention,
+                        Some(max_entries),
+                        sweep_interval,
+                        ctx.shutdown_token(),
+                    )
+                    .await?;
+                    ctx.register_cache_repository("persistent", Arc::new(repo))
+                        .map_err(|e| {
+                            CamelError::Config(format!(
+                                "register cache repository 'persistent': {e:?}"
+                            ))
+                        })?;
+                }
+                "memory" => {
+                    if let Some(cap) = ccfg.max_capacity {
+                        let repo =
+                            Arc::new(camel_core::cache::MemoryCacheRepository::new("memory", cap));
+                        ctx.replace_cache_repository("memory", repo);
+                    }
+                }
+                _ => {} // unreachable: validated in CamelConfig::validate()
+            }
+        }
+
         ctx.set_shutdown_timeout(std::time::Duration::from_millis(config.timeout_ms));
 
         let tracer_config = config.observability.tracer.clone();

@@ -16,7 +16,7 @@ use camel_endpoint::parse_uri;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
 use crate::lifecycle::application::route_definition::BuilderStep;
-use crate::{ClaimCheckRegistry, IdempotentRegistry};
+use crate::{CacheRegistry, ClaimCheckRegistry, IdempotentRegistry};
 use camel_bean::BeanRegistry;
 
 mod control_flow;
@@ -109,6 +109,10 @@ pub(crate) struct CompilationContext<'a> {
     /// Claim check repository registry. Used by the `ClaimCheck` compiler arm
     /// to resolve repository names into `Arc<dyn ClaimCheckRepository>`.
     pub claim_check_repositories: &'a ClaimCheckRegistry,
+    /// Cache repository registry. Used by the `Cache`, `CacheInvalidate`, and
+    /// `CachePeekStale` compiler arms to resolve repository names into
+    /// `Arc<dyn CacheRepository>`.
+    pub cache_repositories: &'a CacheRegistry,
 }
 
 impl<'a> CompilationContext<'a> {
@@ -470,6 +474,7 @@ mod segment_tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -482,6 +487,7 @@ mod segment_tests {
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
+            cache_repositories: &cache_repositories,
         };
 
         // Compile a Filter with a child Processor step.
@@ -561,6 +567,7 @@ mod segment_tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -573,6 +580,7 @@ mod segment_tests {
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
+            cache_repositories: &cache_repositories,
         };
 
         // Filter with TWO child Processors → both get the same lifecycle handle.
@@ -642,6 +650,7 @@ mod segment_tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -654,6 +663,7 @@ mod segment_tests {
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
+            cache_repositories: &cache_repositories,
         };
 
         // Choice with 2 when branches, each containing 1 stateful child.
@@ -729,6 +739,7 @@ mod segment_tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = CompilationContext {
             producer_ctx: &pc,
@@ -741,6 +752,7 @@ mod segment_tests {
             staging_mode: &staging,
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
+            cache_repositories: &cache_repositories,
         };
 
         // Outer Filter containing an inner Filter that has a stateful Processor.
@@ -858,6 +870,7 @@ mod dispatch_tests {
         staging: &'a FunctionStagingMode,
         idempotent_repositories: &'a crate::IdempotentRegistry,
         claim_check_repositories: &'a crate::ClaimCheckRegistry,
+        cache_repositories: &'a crate::CacheRegistry,
     ) -> CompilationContext<'a> {
         CompilationContext {
             producer_ctx: pc,
@@ -870,6 +883,7 @@ mod dispatch_tests {
             staging_mode: staging,
             idempotent_repositories,
             claim_check_repositories,
+            cache_repositories,
         }
     }
 
@@ -885,6 +899,7 @@ mod dispatch_tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let context = ctx(
             &pc,
@@ -895,6 +910,7 @@ mod dispatch_tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         // Register ToStopCompiler FIRST, ToProcessCompiler SECOND.
@@ -926,6 +942,7 @@ mod dispatch_tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let context = ctx(
             &pc,
@@ -936,6 +953,7 @@ mod dispatch_tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         // Register a compiler that only handles BuilderStep::To.
@@ -971,6 +989,7 @@ mod dispatch_tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let context = ctx(
             &pc,
@@ -981,6 +1000,7 @@ mod dispatch_tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         // Register PassThroughCompiler FIRST (never handles anything),

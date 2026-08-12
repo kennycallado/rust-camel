@@ -275,6 +275,7 @@ pub(crate) struct RouteCompilerExt<'a> {
     pub(crate) route_registry: &'a RouteRegistry,
     pub(crate) idempotent_repositories: crate::SharedIdempotentRegistry,
     pub(crate) claim_check_repositories: crate::SharedClaimCheckRegistry,
+    pub(crate) cache_repositories: crate::SharedCacheRegistry,
 }
 
 impl RouteCompilerExt<'_> {
@@ -327,6 +328,7 @@ impl RouteCompilerExt<'_> {
             staging_mode,
             self.idempotent_repositories.as_ref(),
             self.claim_check_repositories.as_ref(),
+            self.cache_repositories.as_ref(),
         )
     }
 

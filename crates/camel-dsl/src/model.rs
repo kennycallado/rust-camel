@@ -459,6 +459,46 @@ pub struct IdempotentConsumerStepDef {
     pub remove_on_failure: Option<bool>,
 }
 
+/// Cache EIP step definition.
+///
+/// Looks up/puts data in a `CacheRepository` by key, running `on_miss`
+/// when the key is absent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheStepDef {
+    /// Name of the registered `CacheRepository` (optional; defaults to system default).
+    pub repository: Option<String>,
+    /// Expression that extracts the cache key from the exchange.
+    pub key: LanguageExpressionDef,
+    /// Optional TTL as a string expression (e.g. "60s", "5m").
+    pub ttl: Option<String>,
+    /// Maximum bytes per cache entry.
+    pub max_entry_bytes: Option<usize>,
+    /// Child sub-pipeline executed on cache miss.
+    pub on_miss: Vec<DeclarativeStep>,
+}
+
+/// Cache Invalidate EIP step definition.
+///
+/// Removes an entry from a `CacheRepository` by key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheInvalidateStepDef {
+    /// Name of the registered `CacheRepository` (optional; defaults to system default).
+    pub repository: Option<String>,
+    /// Expression that extracts the cache key to invalidate.
+    pub key: LanguageExpressionDef,
+}
+
+/// Cache Peek Stale EIP step definition.
+///
+/// Returns cached data even if TTL has expired (graceful degradation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachePeekStaleStepDef {
+    /// Name of the registered `CacheRepository` (optional; defaults to system default).
+    pub repository: Option<String>,
+    /// Expression that extracts the cache key to peek.
+    pub key: LanguageExpressionDef,
+}
+
 /// Sampling EIP step definition.
 ///
 /// Passes 1 of every N exchanges (counter-based, deterministic).
@@ -561,6 +601,9 @@ pub enum DeclarativeStep {
     Enrich(EnrichStepDef),
     PollEnrich(EnrichStepDef),
     IdempotentConsumer(IdempotentConsumerStepDef),
+    Cache(CacheStepDef),
+    CacheInvalidate(CacheInvalidateStepDef),
+    CachePeekStale(CachePeekStaleStepDef),
     ClaimCheck(ClaimCheckStepDef),
     Sampling(SamplingStepDef),
     Sort(SortStepDef),
@@ -615,6 +658,13 @@ impl DeclarativeStep {
             DeclarativeStep::PollEnrich(_) => crate::contract::DeclarativeStepKind::PollEnrich,
             DeclarativeStep::IdempotentConsumer(_) => {
                 crate::contract::DeclarativeStepKind::IdempotentConsumer
+            }
+            DeclarativeStep::Cache(_) => crate::contract::DeclarativeStepKind::Cache,
+            DeclarativeStep::CacheInvalidate(_) => {
+                crate::contract::DeclarativeStepKind::CacheInvalidate
+            }
+            DeclarativeStep::CachePeekStale(_) => {
+                crate::contract::DeclarativeStepKind::CachePeekStale
             }
             DeclarativeStep::ClaimCheck(_) => crate::contract::DeclarativeStepKind::ClaimCheck,
             DeclarativeStep::Sampling(_) => crate::contract::DeclarativeStepKind::Sampling,

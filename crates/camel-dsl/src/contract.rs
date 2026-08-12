@@ -37,13 +37,16 @@ pub enum DeclarativeStepKind {
     PollEnrich,
     DoTry,
     IdempotentConsumer,
+    Cache,
+    CacheInvalidate,
+    CachePeekStale,
     ClaimCheck,
     Sampling,
     Sort,
     Resequence,
 }
 
-pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 35] = [
+pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 38] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -75,6 +78,9 @@ pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 35] = [
     DeclarativeStepKind::PollEnrich,
     DeclarativeStepKind::DoTry,
     DeclarativeStepKind::IdempotentConsumer,
+    DeclarativeStepKind::Cache,
+    DeclarativeStepKind::CacheInvalidate,
+    DeclarativeStepKind::CachePeekStale,
     DeclarativeStepKind::ClaimCheck,
     DeclarativeStepKind::Sampling,
     DeclarativeStepKind::Sort,
@@ -143,9 +149,9 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_kinds_has_35_entries() {
-        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 35);
-        assert_eq!(mandatory_declarative_step_kinds().len(), 35);
+    fn mandatory_kinds_has_38_entries() {
+        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 38);
+        assert_eq!(mandatory_declarative_step_kinds().len(), 38);
     }
 
     #[test]

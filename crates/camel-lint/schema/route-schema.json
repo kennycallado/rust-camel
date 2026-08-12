@@ -123,6 +123,142 @@
       ],
       "type": "object"
     },
+    "CacheBody": {
+      "anyOf": [
+        {
+          "description": "Shorthand: `cache: \"redis-cache\"` (repository name).",
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/CacheConfig",
+          "description": "Full form: `cache: { repository: ..., key: ..., ... }`."
+        }
+      ]
+    },
+    "CacheConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "description": "Simple-language expression for the cache key.",
+          "type": "string"
+        },
+        "max_entry_bytes": {
+          "default": null,
+          "description": "Maximum bytes per cache entry (optional).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "on_miss": {
+          "description": "Child sub-pipeline executed on cache miss.",
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "repository": {
+          "description": "Name of the registered CacheRepository (optional; defaults to system default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ttl": {
+          "default": null,
+          "description": "Optional TTL expression/\"duration string\" (e.g. \"60s\", \"5m\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "CacheInvalidateBody": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "description": "Simple-language expression for the cache key to invalidate.",
+          "type": "string"
+        },
+        "repository": {
+          "description": "Name of the registered CacheRepository (optional; defaults to system default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "CacheInvalidateStep": {
+      "additionalProperties": false,
+      "description": "Cache Invalidate step — removes an entry from a CacheRepository.",
+      "properties": {
+        "cache_invalidate": {
+          "$ref": "#/$defs/CacheInvalidateBody"
+        }
+      },
+      "required": [
+        "cache_invalidate"
+      ],
+      "type": "object"
+    },
+    "CachePeekStaleBody": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "description": "Simple-language expression for the cache key to peek.",
+          "type": "string"
+        },
+        "repository": {
+          "description": "Name of the registered CacheRepository (optional; defaults to system default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "CachePeekStaleStep": {
+      "additionalProperties": false,
+      "description": "Cache Peek Stale step — returns cached data even if TTL has expired.",
+      "properties": {
+        "cache_peek_stale": {
+          "$ref": "#/$defs/CachePeekStaleBody"
+        }
+      },
+      "required": [
+        "cache_peek_stale"
+      ],
+      "type": "object"
+    },
+    "CacheStep": {
+      "additionalProperties": false,
+      "description": "Cache EIP step — puts/stores an exchange result in a `CacheRepository`.\n\nShort-hand (`cache: \"redis-cache\"`) uses the URI directly as repository\nname. Full form (`cache: { repository: ..., key: ..., ... }`) supplies the\nfull configuration with an `on_miss` sub-pipeline.",
+      "properties": {
+        "cache": {
+          "$ref": "#/$defs/CacheBody"
+        }
+      },
+      "required": [
+        "cache"
+      ],
+      "type": "object"
+    },
     "CatchClauseData": {
       "additionalProperties": false,
       "properties": {
@@ -1721,6 +1857,15 @@
         },
         {
           "$ref": "#/$defs/IdempotentConsumerStep"
+        },
+        {
+          "$ref": "#/$defs/CacheStep"
+        },
+        {
+          "$ref": "#/$defs/CacheInvalidateStep"
+        },
+        {
+          "$ref": "#/$defs/CachePeekStaleStep"
         },
         {
           "$ref": "#/$defs/ClaimCheckStep"

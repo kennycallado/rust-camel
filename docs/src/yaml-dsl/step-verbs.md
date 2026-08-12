@@ -609,6 +609,52 @@ Stash or retrieve the message body in a claim check repository.
     key: "${header.claimKey}"
 ```
 
+### `cache`
+
+Cache a computed body by key with TTL. On hit, serves the cached body. On miss, runs the `on_miss` sub-pipeline and stores the result.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `repository` | string | no | `"memory"` | Repository name |
+| `key` | string | yes | — | Cache key expression (None = bypass cache) |
+| `ttl` | duration | no | — | Time-to-live for the cached entry |
+| `max_entry_bytes` | integer | no | 10 MiB | Maximum body size to cache |
+| `on_miss` | list | yes | — | Sub-pipeline to run on cache miss |
+
+```yaml
+- cache:
+    key: "${header.cacheKey}"
+    ttl: "5s"
+    on_miss:
+      - set_body: "computed"
+```
+
+### `cache_invalidate`
+
+Remove a single key from the cache repository.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `key` | string | yes | Cache key expression |
+
+```yaml
+- cache_invalidate:
+    key: "${header.cacheKey}"
+```
+
+### `cache_peek_stale`
+
+Serve a cached entry, ignoring its in-band expiry. Used as a stale-read fallback.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `key` | string | yes | Cache key expression |
+
+```yaml
+- cache_peek_stale:
+    key: "${header.cacheKey}"
+```
+
 ### `sampling`
 
 Process one exchange out of every N.

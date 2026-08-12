@@ -43,6 +43,7 @@ async fn main() -> Result<(), CamelError> {
         beans: Default::default(),
         security: Default::default(),
         languages: Default::default(),
+        cache_repo: None,
         _extra: Default::default(),
     };
 

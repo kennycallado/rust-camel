@@ -87,6 +87,9 @@ _Avoid_: OnException (use OnException in DSL context; ExceptionPolicy in runtime
 **In-memory repository max_entries cap (evict-oldest)**:
 `MemoryIdempotentRepository` and `MemoryClaimCheckRepository` (in `camel-core`) accept a per-instance `max_entries` cap via `new_with_max_entries(name, cap)`. The default `new()` uses `DEFAULT_MAX_ENTRIES = 100_000`. When the cap is reached for a new key, the OLDEST entry is evicted on the write path (insertion-order via a per-instance atomic seq counter) before the new key is inserted; new-key writes are serialized by a per-instance write guard so the cap invariant holds under concurrent writers. Clock-free, no background task; O(1) amortized under the cap, one O(n) scan per insert-at-cap. Trade-off: an evicted idempotent key re-admits as new (bounded at-most-once ceiling — duplicates possible under a >cap unique-key flood; upgrade path is a persistent repository). Established Batch 1 (H10, H11).
 
+**CacheRepository backends**:
+`MemoryCacheRepository` (moka-based, size-eviction only via `eviction_listener` filtered to `RemovalCause::Size`) and `RedbCacheRepository` (persistent, async `new()`, sweep loop bound to `CamelContext::shutdown_token()`). Both implement `CacheRepository` from camel-api. The memory backend is registered as `"memory"` by default with `max_capacity = 10_000`. The redb backend is registered as `"persistent"` when `[default.cache_repo] backend = "redb"` is configured. Established by ADR-0056.
+
 **RuntimeComponentMetadataCatalog**:
 Thin wrapper around `Arc<Mutex<Registry>>` implementing `ComponentMetadataCatalog`. Created
 on-demand via `CamelContext::metadata_catalog()`. Defined in `component_metadata_catalog.rs`.
