@@ -431,6 +431,7 @@ mod tests {
         staging: &'a FunctionStagingMode,
         idempotent_repositories: &'a crate::IdempotentRegistry,
         claim_check_repositories: &'a crate::ClaimCheckRegistry,
+        cache_repositories: &'a crate::CacheRegistry,
     ) -> CompilationContext<'a> {
         CompilationContext {
             producer_ctx: pc,
@@ -443,6 +444,7 @@ mod tests {
             staging_mode: staging,
             idempotent_repositories,
             claim_check_repositories,
+            cache_repositories,
         }
     }
 
@@ -456,6 +458,7 @@ mod tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = test_ctx(
             &pc,
@@ -466,6 +469,7 @@ mod tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         // Build a valid AggregatorConfig: correlate_by provides defaults
@@ -506,6 +510,7 @@ mod tests {
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = crate::IdempotentRegistry::new();
         let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
 
         let ctx = test_ctx(
             &pc,
@@ -516,6 +521,7 @@ mod tests {
             &staging,
             &idempotent_repositories,
             &claim_check_repositories,
+            &cache_repositories,
         );
 
         let config = AggregatorConfig::correlate_by("id")
