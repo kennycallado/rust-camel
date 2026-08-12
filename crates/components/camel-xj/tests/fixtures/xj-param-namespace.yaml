@@ -1,0 +1,5 @@
+routes:
+  - id: "xj-param-namespace"
+    from: "xj:classpath:identity.xslt?direction=xml2json&param.mode=debug&param.lang=en"
+    steps:
+      - to: "mock:result"

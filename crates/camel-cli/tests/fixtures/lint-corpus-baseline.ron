@@ -27,6 +27,15 @@
             ("R-URI-known:missing-required-option", "error"),
         ],
     ),
+    // soap-producer: R-URI-known surfaced by route_view.rs fix (from:
+    // query options now parsed). R-SCHEMA removed post canonicalize-YAML.
+    // Unresolved — Bd: rc-9qjq
+    (
+        "examples/cxf-example/routes/soap-producer.yaml",
+        [
+            ("R-URI-known:missing-required-option", "error"),
+        ],
+    ),
     (
         "examples/hot-reload/routes/route.yaml",
         [("R-SCHEMA", "error")],
@@ -36,7 +45,16 @@
         [("R-SCHEMA", "error")],
     ),
 
-    // R-URI-known: real option-level defects per the builtin lint catalog.
+    // Unresolved diagnostic under investigation — route emits
+    // missing-required-option on jms URIs. May be metadata over-declaration
+    // (bare String fields marked required) or real route defect.
+    // Bd: rc-9qjq
+    (
+        "examples/camel-cli-run/routes/jms.yaml",
+        [
+            ("R-URI-known:missing-required-option", "error"),
+        ],
+    ),
     (
         "examples/file-pollenrich/routes.yaml",
         [
@@ -53,6 +71,14 @@
         [("R-URI-known:missing-required-option", "error")],
     ),
 
+    // Unresolved diagnostic under investigation — same root cause as jms.
+    // Bd: rc-9qjq
+    (
+        "examples/master-leader-yaml/routes/master.yaml",
+        [
+            ("R-URI-known:missing-required-option", "error"),
+        ],
+    ),
     // R-URI-known:unknown-option — `showCorrelationId` on `log:` URIs. The
     // log component's `LogConfig` declares showHeaders/showBody/maxChars/
     // logMask/showStreamInfo/groupSize but NOT showCorrelationId, and the

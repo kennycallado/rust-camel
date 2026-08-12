@@ -265,6 +265,10 @@ impl Component for XsltComponent {
         "xslt"
     }
 
+    fn metadata(&self) -> camel_component_api::ComponentMetadata {
+        crate::metadata::XsltMetadataDescriptor::metadata()
+    }
+
     fn create_endpoint(
         &self,
         uri: &str,

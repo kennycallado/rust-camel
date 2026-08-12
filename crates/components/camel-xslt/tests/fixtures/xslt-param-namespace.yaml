@@ -1,0 +1,5 @@
+routes:
+  - id: "xslt-param-namespace"
+    from: "xslt:classpath:transform.xslt?output=xml&param.title=Hello"
+    steps:
+      - to: "mock:result"

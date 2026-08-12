@@ -16,6 +16,7 @@ mod endpoint;
 mod error;
 pub mod health;
 mod identity;
+pub(crate) mod metadata;
 mod producer;
 
 pub use component::{XjBridgeRuntime, XjComponent, XjComponentConfig};

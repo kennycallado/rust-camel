@@ -478,6 +478,10 @@ impl Component for XjComponent {
         "xj"
     }
 
+    fn metadata(&self) -> camel_component_api::ComponentMetadata {
+        crate::metadata::XjMetadataDescriptor::metadata()
+    }
+
     fn create_endpoint(
         &self,
         uri: &str,

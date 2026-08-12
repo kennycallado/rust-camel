@@ -15,6 +15,7 @@ mod config;
 mod endpoint;
 mod error;
 pub mod health;
+pub(crate) mod metadata;
 mod producer;
 
 pub const BRIDGE_VERSION: &str = "0.5.0";

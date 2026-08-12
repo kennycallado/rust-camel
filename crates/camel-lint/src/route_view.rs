@@ -140,12 +140,13 @@ impl LintRoute {
     pub fn endpoints(&self) -> Vec<Endpoint> {
         let mut out = Vec::new();
         if let Some(f) = &self.from {
+            let options = LintOption::parse_from_query(&f.value, f.span.clone());
             out.push(Endpoint {
                 uri: Spanned {
                     value: f.value.clone(),
                     span: f.span.clone(),
                 },
-                options: Vec::new(),
+                options,
             });
         }
         for node in &self.nodes {
