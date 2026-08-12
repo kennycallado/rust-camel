@@ -98,6 +98,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
             health: None,
         },
         idempotent_repo: None,
+        cache_repo: None,
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: Default::default(),
