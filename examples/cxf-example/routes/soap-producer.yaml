@@ -4,5 +4,5 @@ routes:
     steps:
       - set_body:
           value: "<sayHello><name>World</name></sayHello>"
-      - to: "cxf://http://localhost:8080/hello?wsdl=wsdl/hello.wsdl&service={http://example.com/hello}HelloService&port={http://example.com/hello}HelloPort&operation=sayHello"
+      - to: "cxf://http://localhost:8080/hello?wsdl=wsdl/hello.wsdl&service={http://example.com/hello}HelloService&port={http://example.com/hello}HelloPort&operation=sayHello&profile=hello"
       - log: "SOAP response: ${body}"

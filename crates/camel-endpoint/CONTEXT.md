@@ -82,6 +82,22 @@ When `pattern` is present, the generated `UriOption` has `kind = OptionKind::Str
 `name` derived from the separator (trailing `.` stripped), and
 `pattern = Some(UriOptionMatch::Prefix { separator })`.
 
+### `descriptor` flag
+
+The `descriptor` bare-ident flag on `#[uri_config(..)]` suppresses shape-based
+`required` inference for the struct's `#[uri_param]` fields. When `descriptor`
+is set, a field is `required = true` ONLY with explicit
+`#[uri_param(..., required)]`. When `descriptor` is absent (default), shape
+inference is unchanged: `non-Option + no default => required`.
+
+The flag is opt-in: it does NOT categorically distinguish metadata-only
+descriptors from runtime configs. Authors declare intent at the struct level.
+Runtime config structs (including `skip_impl` configs like `TimerConfig`,
+`CronConfig`, `SqlUriConfig`, `OpenSearchUriConfig`, `ContainerUriConfig`,
+`HttpStaticUriConfig`) MUST NOT set `descriptor`.
+
+See bd rc-1pfm for the e_opus ruling that introduced this attribute.
+
 These names are the macro contract: `#[uri_scheme]`, `#[uri_param]`, and `#[uri_config]`.
 `#[uri(...)]` is not supported.
 

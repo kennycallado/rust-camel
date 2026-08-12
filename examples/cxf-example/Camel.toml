@@ -4,7 +4,8 @@ dir = "routes"
 [components.cxf]
 version = "0.8.1"
 
-[[components.cxf.services]]
+[[components.cxf.profiles]]
+name = "hello"
 wsdl_path = "wsdl/hello.wsdl"
 service_name = "{http://example.com/hello}HelloService"
 port_name = "{http://example.com/hello}HelloPort"

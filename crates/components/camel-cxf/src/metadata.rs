@@ -5,6 +5,7 @@ use camel_component_api::UriConfig;
 #[uri_scheme = "cxf"]
 #[uri_config(
     skip_impl,
+    descriptor,
     metadata(
         scheme = "cxf",
         description = "CXF/SOAP WebService consumer/producer",
@@ -26,8 +27,8 @@ pub(super) struct CxfMetadataDescriptor {
     #[uri_param(name = "operation")]
     pub _operation: String,
 
-    #[uri_param(name = "profile")]
-    pub _profile: Option<String>,
+    #[uri_param(name = "profile", required)]
+    pub _profile: String,
 
     #[uri_param(name = "timeout_ms")]
     pub _timeout_ms: Option<u64>,
@@ -43,6 +44,15 @@ pub(super) struct CxfMetadataDescriptor {
 mod tests {
     use super::*;
     use camel_component_api::ComponentMetadata;
+
+    fn find<'a>(
+        meta: &'a [camel_component_api::UriOption],
+        name: &str,
+    ) -> &'a camel_component_api::UriOption {
+        meta.iter()
+            .find(|o| o.name == name)
+            .unwrap_or_else(|| panic!("uri_option '{}' not found", name))
+    }
 
     #[test]
     fn cxf_metadata_uri_options_parity() {
@@ -67,18 +77,42 @@ mod tests {
             "metadata uri_options names must match parser keys"
         );
 
-        // Verify required flags
-        let wsdl = meta.uri_options.iter().find(|o| o.name == "wsdl").unwrap();
-        assert!(wsdl.required, "wsdl must be required");
+        // ── required assertions ──────────────────────────────────────────────
 
-        let service = meta
-            .uri_options
-            .iter()
-            .find(|o| o.name == "service")
-            .unwrap();
-        assert!(service.required, "service must be required");
+        // Explicitly required fields
+        assert!(
+            find(&meta.uri_options, "wsdl").required,
+            "wsdl must be required"
+        );
+        assert!(
+            find(&meta.uri_options, "service").required,
+            "service must be required"
+        );
+        assert!(
+            find(&meta.uri_options, "port").required,
+            "port must be required"
+        );
+        assert!(
+            find(&meta.uri_options, "profile").required,
+            "profile must be required"
+        );
 
-        let port = meta.uri_options.iter().find(|o| o.name == "port").unwrap();
-        assert!(port.required, "port must be required");
+        // descriptor-defaulted fields (not required)
+        assert!(
+            !find(&meta.uri_options, "operation").required,
+            "operation must not be required"
+        );
+        assert!(
+            !find(&meta.uri_options, "timeout_ms").required,
+            "timeout_ms must not be required"
+        );
+        assert!(
+            !find(&meta.uri_options, "mtom_enabled").required,
+            "mtom_enabled must not be required"
+        );
+        assert!(
+            !find(&meta.uri_options, "attachment_content_type").required,
+            "attachment_content_type must not be required"
+        );
     }
 }

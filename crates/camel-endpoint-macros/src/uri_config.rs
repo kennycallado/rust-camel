@@ -186,6 +186,7 @@ fn parse_uri_param_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<UriParam
 
 struct UriConfigAttr {
     skip_impl: bool,
+    descriptor: bool,
     crate_path: syn::Path,
     has_metadata: bool,
     metadata_scheme: Option<String>,
@@ -198,6 +199,7 @@ struct UriConfigAttr {
 
 fn parse_uri_config_attr(attrs: &[syn::Attribute]) -> syn::Result<UriConfigAttr> {
     let mut skip_impl = false;
+    let mut descriptor = false;
     let mut crate_path: Option<syn::Path> = None;
     let mut has_metadata = false;
     let mut metadata_scheme = None;
@@ -217,6 +219,11 @@ fn parse_uri_config_attr(attrs: &[syn::Attribute]) -> syn::Result<UriConfigAttr>
                 attr.parse_nested_meta(|meta| {
                     if meta.path.is_ident("skip_impl") {
                         skip_impl = true;
+                        return Ok(());
+                    }
+
+                    if meta.path.is_ident("descriptor") {
+                        descriptor = true;
                         return Ok(());
                     }
 
@@ -280,6 +287,7 @@ fn parse_uri_config_attr(attrs: &[syn::Attribute]) -> syn::Result<UriConfigAttr>
 
     Ok(UriConfigAttr {
         skip_impl,
+        descriptor,
         crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(camel_endpoint)),
         has_metadata,
         metadata_scheme,
@@ -752,6 +760,7 @@ fn build_uri_option_entry(
     field_type: &Type,
     attr: &UriParamAttr,
     endpoint_crate: &syn::Path,
+    is_descriptor: bool,
 ) -> syn::Result<TokenStream> {
     // Guardrail: secret + default is a compile error.
     if attr.secret && attr.default.is_some() {
@@ -851,14 +860,18 @@ fn build_uri_option_entry(
         infer_option_kind(field_type, endpoint_crate)
     };
 
-    // Required inference: a pattern namespace is never required; otherwise
-    // explicit flag wins; else Option<T> => false; else non-Option with a
-    // default => false; else => true.
+    // Required inference: a pattern namespace is never required; explicit
+    // flag wins; descriptor mode suppresses shape inference; else
+    // non-Option with no default => required, Option or has-default => false.
     let is_option = is_option_type(field_type).is_some();
     let required = if attr.pattern.is_some() {
         false
+    } else if attr.required {
+        true
+    } else if is_descriptor {
+        false
     } else {
-        attr.required || (!is_option && attr.default.is_none())
+        !is_option && attr.default.is_none()
     };
 
     let mut chain = quote! {
@@ -1085,6 +1098,7 @@ pub fn impl_uri_config(input: &DeriveInput) -> syn::Result<TokenStream> {
                 field_type,
                 attr,
                 &endpoint_crate,
+                uri_config_attr.descriptor,
             )?);
         }
     }
@@ -1328,5 +1342,28 @@ mod tests {
     fn kind_typo_errors() {
         let res = parse_kind_override("duraton", proc_macro2::Span::call_site(), &test_crate());
         assert!(res.is_err());
+    }
+
+    // ── uri_config parser-level tests ──
+
+    /// Parse a `#[uri_config(...)]` attribute string, returning the
+    /// parsed `UriConfigAttr`.
+    fn parse_uri_config_str(attr_str: &str) -> UriConfigAttr {
+        let input: syn::DeriveInput =
+            syn::parse_str(&format!("#[uri_config({attr_str})]\nstruct Dummy;"))
+                .expect("failed to parse derive input");
+        parse_uri_config_attr(&input.attrs).expect("failed to parse uri_config attr")
+    }
+
+    #[test]
+    fn descriptor_flag_parses_as_bare_ident() {
+        let attr = parse_uri_config_str("skip_impl, descriptor, metadata(scheme = \"x\")");
+        assert!(attr.descriptor);
+    }
+
+    #[test]
+    fn absent_descriptor_defaults_to_false() {
+        let attr = parse_uri_config_str("skip_impl, metadata(scheme = \"x\")");
+        assert!(!attr.descriptor);
     }
 }
