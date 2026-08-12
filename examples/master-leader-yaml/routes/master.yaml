@@ -13,6 +13,6 @@ routes:
   - id: "status-route"
     from: "timer:status?period=5000"
     steps:
-      - to: "controlbus:route?routeId=master-route_1&action=status"
+      - to: "controlbus:route?routeId=master-route_1&action=status&authorizedRoutes=master-route_1"
       - to: "log:info"
 # ANCHOR_END: master-yaml-route

@@ -36,15 +36,6 @@
         [("R-SCHEMA", "error")],
     ),
 
-    // Real defect: controlbus:route URIs missing required authorizedRoutes
-    // param (fail-closed at runtime per CONTEXT.md). Example routes need fix.
-    // Bd: rc-9qjq
-    (
-        "examples/camel-cli-run/routes/jms.yaml",
-        [
-            ("R-URI-known:missing-required-option", "error"),
-        ],
-    ),
     (
         "examples/file-pollenrich/routes.yaml",
         [
@@ -61,14 +52,6 @@
         [("R-URI-known:missing-required-option", "error")],
     ),
 
-    // Real defect: same as jms — controlbus:route missing authorizedRoutes.
-    // Bd: rc-9qjq
-    (
-        "examples/master-leader-yaml/routes/master.yaml",
-        [
-            ("R-URI-known:missing-required-option", "error"),
-        ],
-    ),
     // R-URI-known:unknown-option — `showCorrelationId` on `log:` URIs. The
     // log component's `LogConfig` declares showHeaders/showBody/maxChars/
     // logMask/showStreamInfo/groupSize but NOT showCorrelationId, and the

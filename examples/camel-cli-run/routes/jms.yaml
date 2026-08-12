@@ -29,9 +29,9 @@ routes:
             - simple: "${header.artemis-status} == 'running'"
               steps:
                 - log: "message=Artemis container already running — starting JMS routes directly"
-                - to: "controlbus:route?routeId=artemis-ready-watcher&action=stop"
-                - to: "controlbus:route?routeId=jms-producer&action=start"
-                - to: "controlbus:route?routeId=jms-consumer&action=start"
+                - to: "controlbus:route?routeId=artemis-ready-watcher&action=stop&authorizedRoutes=artemis-ready-watcher"
+                - to: "controlbus:route?routeId=jms-producer&action=start&authorizedRoutes=jms-producer"
+                - to: "controlbus:route?routeId=jms-consumer&action=start&authorizedRoutes=jms-consumer"
             - simple: "${header.artemis-status} == 'exited'"
               steps:
                 - to: "container:start?containerId=artemis-demo"
@@ -50,8 +50,8 @@ routes:
           simple: "${body} contains 'AMQ221007'"
           steps:
             - log: "message=Artemis broker ready — starting JMS routes"
-            - to: "controlbus:route?routeId=jms-producer&action=start"
-            - to: "controlbus:route?routeId=jms-consumer&action=start"
+            - to: "controlbus:route?routeId=jms-producer&action=start&authorizedRoutes=jms-producer"
+            - to: "controlbus:route?routeId=jms-consumer&action=start&authorizedRoutes=jms-consumer"
 
   # Step 3 (lazy): Sends a message to the JMS queue every 5 seconds.
   # Started by artemis-ready-watcher once the broker is accepting connections.
