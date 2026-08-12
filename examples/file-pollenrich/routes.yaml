@@ -11,8 +11,7 @@
 
 routes:
   - id: pollenrich-demo
-    from:
-      uri: "timer:tick?period=1000&repeatCount=3"
+    from: "timer:tick?period=1000&repeatCount=3"
     steps:
       - poll_enrich:
           uri: "file:/tmp/rust-camel-pollenrich?fileName=config.json&noop=true"

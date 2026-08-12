@@ -14,14 +14,7 @@
 // Suspected false positives are NOT baselined - they are reported and the
 // rule is fixed/gated instead. See Task 3.2 of openspec/changes/add-camel-lint.
 [
-    // R-SCHEMA: example uses Apache-style `from: {uri: ...}` object form and
-    // kebab `set-header`/`set-body`, neither modelled by the canonical
-    // `RouteDslRoute` types (flat `from: String`, snake_case step keys).
-    // Pre-existing fixture non-conformance; tracked separately.
-    (
-        "examples/container-nginx/routes/route.yaml",
-        [("R-SCHEMA", "error")],
-    ),
+    // R-SCHEMA: remaining Apache-style forms not yet rewritten.
     (
         "examples/custom-component-bundle/routes/echo.yaml",
         [("R-SCHEMA", "error")],
@@ -29,20 +22,10 @@
     (
         "examples/cxf-example/routes/soap-consumer.yaml",
         [
-            ("R-SCHEMA", "error"),
-            // rc-m1mx fix: object-form `from: { uri: "cxf://..." }` now falls
-            // through to URI_KEYS handler. Same missing-required-option as
-            // the `to:` step in soap-producer.yaml.
+            // rc-m1mx fix: object-form `from` fall-through produced this.
+            // Stays after canonical rewrite (cxf:// still lacks required opts).
             ("R-URI-known:missing-required-option", "error"),
         ],
-    ),
-    (
-        "examples/cxf-example/routes/soap-producer.yaml",
-        [("R-SCHEMA", "error")],
-    ),
-    (
-        "examples/file-pollenrich/routes.yaml",
-        [("R-SCHEMA", "error")],
     ),
     (
         "examples/hot-reload/routes/route.yaml",
