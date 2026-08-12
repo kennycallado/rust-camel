@@ -128,9 +128,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // For production routes, prefer Camel.toml registration via
     // [security.policies.wasm.<name>] + YAML `security_policy: wasm: <name>`.
     // See crates/components/camel-component-wasm/README.md for details.
-    let wasm_policy =
-        WasmSecurityPolicy::new(&wasm_path, WasmConfig::default(), registry, HashMap::new())
-            .await?;
+    let wasm_policy = WasmSecurityPolicy::new(
+        &wasm_path,
+        WasmConfig::default(),
+        Arc::new(camel_core::RegistryComponentContext::new(registry)),
+        HashMap::new(),
+    )
+    .await?;
 
     let policy =
         AuthenticatedWasmPolicy::new(validator, alice_token.access_token.to_string(), wasm_policy);
