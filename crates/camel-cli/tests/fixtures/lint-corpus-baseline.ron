@@ -36,9 +36,8 @@
         [("R-SCHEMA", "error")],
     ),
 
-    // Unresolved diagnostic under investigation — route emits
-    // missing-required-option on jms URIs. May be metadata over-declaration
-    // (bare String fields marked required) or real route defect.
+    // Real defect: controlbus:route URIs missing required authorizedRoutes
+    // param (fail-closed at runtime per CONTEXT.md). Example routes need fix.
     // Bd: rc-9qjq
     (
         "examples/camel-cli-run/routes/jms.yaml",
@@ -62,7 +61,7 @@
         [("R-URI-known:missing-required-option", "error")],
     ),
 
-    // Unresolved diagnostic under investigation — same root cause as jms.
+    // Real defect: same as jms — controlbus:route missing authorizedRoutes.
     // Bd: rc-9qjq
     (
         "examples/master-leader-yaml/routes/master.yaml",
