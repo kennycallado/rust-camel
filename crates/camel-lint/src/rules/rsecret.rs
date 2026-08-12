@@ -51,6 +51,7 @@ impl Rule for RSecretRule {
                     code: DiagnosticCode::RSecret,
                     severity: Severity::Warning,
                     span: value.span.clone(),
+                    // allow-secret: message text names the rule, not a credential
                     message: format!(
                         "secret option `{}` set to a literal value; use an interpolation reference",
                         canon.name
