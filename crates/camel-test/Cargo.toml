@@ -45,6 +45,9 @@ camel-component-validator = { workspace = true, optional = true }
 camel-xslt = { workspace = true, optional = true }
 camel-xj = { workspace = true, optional = true }
 camel-platform-kubernetes = { workspace = true, optional = true }
+camel-component-grpc = { workspace = true, optional = true }
+camel-component-wasm = { workspace = true, optional = true }
+camel-component-llm = { workspace = true, optional = true }
 camel-master = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
@@ -112,6 +115,9 @@ integration-tests = [
     "dep:k8s-openapi",
     "dep:camel-component-surrealdb",
     "dep:surrealdb",
+    "dep:camel-component-grpc",
+    "dep:camel-component-wasm",
+    "dep:camel-component-llm",
 ]
 
 [lints]

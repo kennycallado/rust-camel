@@ -76,15 +76,6 @@ camel-component-log.workspace = true
 camel-component-mock.workspace = true
 camel-component-direct.workspace = true
 camel-component-seda.workspace = true
-camel-component-http.workspace = true
-camel-component-kafka.workspace = true
-camel-component-jms.workspace = true
-camel-component-mqtt.workspace = true
-camel-component-redis.workspace = true
-camel-component-grpc.workspace = true
-camel-component-llm.workspace = true
-camel-component-controlbus.workspace = true
-camel-component-wasm.workspace = true
 criterion.workspace = true
 uuid.workspace = true
 toml = { workspace = true }
