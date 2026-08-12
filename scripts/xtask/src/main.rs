@@ -1,4 +1,5 @@
 mod changelog;
+mod lint_component_deps;
 mod lint_context_citations;
 mod lint_single_source;
 
@@ -98,6 +99,10 @@ enum Commands {
     /// `#[cfg(test)]` modules. Enforces the single-source-of-truth
     /// invariant: metadata MUST be macro-derived, not hand-written.
     LintSingleSource,
+    /// Enforce hexagonal invariant: no `camel_core::` references in
+    /// component crate source outside `#[cfg(test)]`. Components must
+    /// depend on ports (camel-component-api), not concrete adapters.
+    LintComponentDeps,
     /// Enforce publish-topology invariants: no cyclic dev/build-dependencies
     /// on publishable crates, and no publishable crate depends on camel-test
     /// (the publish-order leaf sink).
@@ -287,6 +292,26 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-single-source error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintComponentDeps => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_component_deps::lint_component_deps(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-component-deps: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("COMPONENT-DEPS VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-component-deps: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-component-deps error: {e}");
                     std::process::exit(1);
                 }
             }

@@ -55,6 +55,8 @@
   run: cargo xtask lint-ignore
 - name: lint-publish-cycles
   run: cargo xtask lint-publish-cycles
+- name: lint-component-deps
+  run: cargo xtask lint-component-deps
 - name: lint-context-citations
   run: cargo xtask lint-context-citations
 - name: schema-check
