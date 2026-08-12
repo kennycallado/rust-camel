@@ -5,6 +5,7 @@ use camel_component_api::UriConfig;
 #[uri_scheme = "kafka"]
 #[uri_config(
     skip_impl,
+    descriptor,
     metadata(
         scheme = "kafka",
         description = "Apache Kafka consumer/producer",

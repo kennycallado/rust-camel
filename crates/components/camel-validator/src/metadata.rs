@@ -5,6 +5,7 @@ use camel_component_api::UriConfig;
 #[uri_scheme = "validator"]
 #[uri_config(
     skip_impl,
+    descriptor,
     metadata(
         scheme = "validator",
         description = "Schema validation producer (XSD, JSON Schema, YAML)",

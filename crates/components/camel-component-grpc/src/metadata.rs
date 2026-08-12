@@ -5,6 +5,7 @@ use camel_component_api::UriConfig;
 #[uri_scheme = "grpc"]
 #[uri_config(
     skip_impl,
+    descriptor,
     metadata(
         scheme = "grpc",
         description = "gRPC client/server",

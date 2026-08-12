@@ -5,6 +5,7 @@ use camel_component_api::UriConfig;
 #[uri_scheme = "mqtt"]
 #[uri_config(
     skip_impl,
+    descriptor,
     metadata(scheme = "mqtt", description = "MQTT messaging", producer, consumer),
     crate = "camel_component_api"
 )]

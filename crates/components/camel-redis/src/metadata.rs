@@ -5,6 +5,7 @@ use camel_component_api::UriConfig;
 #[uri_scheme = "redis"]
 #[uri_config(
     skip_impl,
+    descriptor,
     metadata(
         scheme = "redis",
         description = "Redis commands / pub-sub",
