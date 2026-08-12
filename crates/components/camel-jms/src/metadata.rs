@@ -18,7 +18,7 @@ pub(super) struct JmsMetadataDescriptor {
     pub _broker: Option<String>,
 
     #[uri_param(name = "acknowledgementMode")]
-    pub _acknowledgement_mode: String,
+    pub _acknowledgement_mode: Option<String>,
 
     #[uri_param(name = "messageSelector")]
     pub _message_selector: Option<String>,
@@ -27,7 +27,7 @@ pub(super) struct JmsMetadataDescriptor {
     pub _concurrent_consumers: u32,
 
     #[uri_param(name = "transactionMode")]
-    pub _transaction_mode: String,
+    pub _transaction_mode: Option<String>,
 
     #[uri_param(name = "timeToLive")]
     pub _time_to_live: Option<u64>,
@@ -42,7 +42,7 @@ pub(super) struct JmsMetadataDescriptor {
     pub _map_jms_headers: bool,
 
     #[uri_param(name = "exchangePattern")]
-    pub _exchange_pattern: String,
+    pub _exchange_pattern: Option<String>,
 }
 
 #[cfg(test)]

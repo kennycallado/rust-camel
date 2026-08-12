@@ -27,7 +27,7 @@ pub(super) struct CxfMetadataDescriptor {
     pub _operation: String,
 
     #[uri_param(name = "profile")]
-    pub _profile: String,
+    pub _profile: Option<String>,
 
     #[uri_param(name = "timeout_ms")]
     pub _timeout_ms: Option<u64>,
@@ -36,7 +36,7 @@ pub(super) struct CxfMetadataDescriptor {
     pub _mtom_enabled: bool,
 
     #[uri_param(name = "attachment_content_type")]
-    pub _attachment_content_type: String,
+    pub _attachment_content_type: Option<String>,
 }
 
 #[cfg(test)]
