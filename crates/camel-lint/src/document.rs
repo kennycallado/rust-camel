@@ -344,16 +344,20 @@ fn walk(
             for (key, child) in m.iter() {
                 let cpath = child_path(path, key);
                 let k = key.as_str();
-                if k == "from" {
-                    if from_slot.is_none()
-                        && let Some(s) = child.as_str()
-                        && let Some((start, end)) = doc.span_at(&cpath)
-                    {
-                        *from_slot = Some(Spanned {
-                            value: s.to_string(),
-                            span: Span::new(start, end),
-                        });
-                    }
+                // Route 1's scalar `from` is captured in the dedicated slot.
+                // Routes 2..N (from_slot already set) and the object form
+                // (child.as_str() returns None) fall through to the URI_KEYS
+                // handler below so the URI is still emitted as an endpoint
+                // node and validated by rules.
+                if k == "from"
+                    && from_slot.is_none()
+                    && let Some(s) = child.as_str()
+                    && let Some((start, end)) = doc.span_at(&cpath)
+                {
+                    *from_slot = Some(Spanned {
+                        value: s.to_string(),
+                        span: Span::new(start, end),
+                    });
                     continue;
                 }
                 if URI_KEYS.contains(&k) {
@@ -899,5 +903,42 @@ steps:
             original_diags.len(),
             "diagnostic set must be unchanged after a rejected edit"
         );
+    }
+
+    #[test]
+    fn multi_route_envelope_captures_all_from_uris() {
+        // Regression for rc-m1mx: routes 2..N's `from` was silently dropped
+        // by the first-wins guard on from_slot. After the fix, route 1's
+        // from is captured in the `from` field, and routes 2..N's from
+        // values appear as endpoint nodes.
+        let source = "routes:\n  - id: a\n    from: timer:one\n  - id: b\n    from: timer:two\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+
+        // Route 1's from is in the dedicated `from` slot.
+        let from = doc
+            .route_view
+            .from
+            .as_ref()
+            .expect("route 1 from must be captured in from slot");
+        assert_eq!(from.value, "timer:one");
+
+        // Both from URIs appear in the flattened endpoint list.
+        let endpoints = doc.route_view.endpoints();
+        let uris: Vec<&str> = endpoints.iter().map(|e| e.uri.value.as_str()).collect();
+        assert!(
+            uris.contains(&"timer:one"),
+            "route 1 from must appear in endpoints: {uris:?}"
+        );
+        assert!(
+            uris.contains(&"timer:two"),
+            "route 2 from must appear in endpoints: {uris:?}"
+        );
+
+        // No span appears twice (no duplication).
+        let mut spans: Vec<_> = endpoints.iter().map(|e| e.uri.span.clone()).collect();
+        spans.sort_by_key(|s| (s.start, s.end));
+        let dupes = spans.windows(2).filter(|w| w[0] == w[1]).count();
+        assert_eq!(dupes, 0, "endpoint spans must not duplicate");
     }
 }
