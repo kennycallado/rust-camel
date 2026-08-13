@@ -89,7 +89,11 @@ pub(crate) async fn dispatch_static(
 
         let req = rebuild_request_with_path(&parts, &stripped_path);
         let resp = serve_via_serve_dir(serve_dir.clone(), req, cache_control).await;
-        if resp.status().is_success() {
+        // Forward ServeDir's success AND its legitimate 304 Not Modified for
+        // conditional GETs (If-None-Match / If-Modified-Since). Without this
+        // gate, a matching conditional request falls through to the generic
+        // 404 at the bottom of dispatch_static. Per RFC 7232 §2.1/§4.1.
+        if resp.status().is_success() || resp.status() == StatusCode::NOT_MODIFIED {
             return resp;
         }
 
@@ -181,7 +185,13 @@ async fn serve_via_serve_dir(
     match serve_dir.oneshot(req).await {
         Ok(res) => {
             let (mut parts, body) = res.into_parts();
-            if parts.status.is_success() {
+            // Attach Cache-Control on 2xx success AND on 304 Not Modified.
+            // Per RFC 7232 §4.1, a 304 response SHOULD include Cache-Control
+            // (and the validators ETag/Last-Modified, which ServeDir already
+            // carries over from the original 200). Without this gate, a
+            // conditional GET that correctly returns 304 would be missing
+            // the caching directive.
+            if parts.status.is_success() || parts.status == StatusCode::NOT_MODIFIED {
                 parts.headers.insert(
                     http::header::CACHE_CONTROL,
                     http::HeaderValue::from_str(cache_control)

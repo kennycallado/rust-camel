@@ -5817,6 +5817,181 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    // Regression for rc-zoai: a conditional GET (If-None-Match / If-Modified-Since)
+    // whose validator matches MUST return 304 Not Modified, not 404. The bug was
+    // dispatch_static's L92 gate `if resp.status().is_success()` discarding
+    // ServeDir's legitimate 304 and falling through to the generic 404. The fix
+    // adds `|| resp.status() == StatusCode::NOT_MODIFIED` to that gate (and the
+    // matching gate in serve_via_serve_dir so the 304 keeps its Cache-Control).
+    #[allow(clippy::await_holding_lock)]
+    async fn run_conditional_get_returns_304(mode: MountMode) {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "http_cond_get_{}_{}",
+            if mode == MountMode::Spa {
+                "spa"
+            } else {
+                "static"
+            },
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("index.html"), "<h1>Home</h1>").unwrap();
+
+        let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+        let registry = make_test_registry();
+        let serve_dir = ServeDir::new(&canonical_dir)
+            .precompressed_gzip()
+            .precompressed_br()
+            .append_index_html_on_directories(true);
+
+        let mount = StaticMount {
+            mount_path: "/".to_string(),
+            mode,
+            dir: canonical_dir.clone(),
+            cache_control: "public, max-age=3600".to_string(),
+            error_pages: std::collections::HashMap::new(),
+            serve_dir,
+        };
+        registry.register_static_mount(mount).await.unwrap();
+
+        let state = make_test_state(registry);
+
+        // 1st request: normal GET → 200, capture validators.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/index.html")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "first GET should return 200, got {}",
+            resp.status()
+        );
+        // Cache-Control must be attached on 200 (sanity for serve_via_serve_dir).
+        assert!(
+            resp.headers().contains_key(http::header::CACHE_CONTROL),
+            "200 response missing Cache-Control"
+        );
+        let etag = resp
+            .headers()
+            .get(http::header::ETAG)
+            .expect("ServeDir must emit ETag on 200 for If-None-Match coverage")
+            .clone();
+        let last_modified = resp
+            .headers()
+            .get(http::header::LAST_MODIFIED)
+            .expect("ServeDir must emit Last-Modified on 200 for If-Modified-Since coverage")
+            .clone();
+        // Consume the body so the response is fully drained.
+        let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        // 2nd request: If-None-Match with the captured ETag → 304.
+        // Unconditional: ETag presence is required (asserted above) so this
+        // sub-test cannot silently skip on a ServeDir etag_method change.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/index.html")
+            .header(http::header::IF_NONE_MATCH, etag.clone())
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_MODIFIED,
+            "If-None-Match with matching ETag should return 304, got {}",
+            resp.status()
+        );
+        // RFC 7232 §4.1: 304 SHOULD include Cache-Control (the serve_via_serve_dir fix).
+        assert!(
+            resp.headers().contains_key(http::header::CACHE_CONTROL),
+            "304 (If-None-Match) missing Cache-Control"
+        );
+        // RFC 7232 §4.1: 304 SHOULD carry the validators forward. Assert the
+        // response parts rebuild in serve_via_serve_dir preserves them.
+        assert_eq!(
+            resp.headers().get(http::header::ETAG),
+            Some(&etag),
+            "304 (If-None-Match) must echo the ETag validator"
+        );
+        assert_eq!(
+            resp.headers().get(http::header::LAST_MODIFIED),
+            Some(&last_modified),
+            "304 (If-None-Match) must carry Last-Modified"
+        );
+
+        // 3rd request: If-Modified-Since with the captured Last-Modified → 304.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/index.html")
+            .header(http::header::IF_MODIFIED_SINCE, last_modified.clone())
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_MODIFIED,
+            "If-Modified-Since with matching timestamp should return 304, got {}",
+            resp.status()
+        );
+        assert!(
+            resp.headers().contains_key(http::header::CACHE_CONTROL),
+            "304 (If-Modified-Since) missing Cache-Control"
+        );
+        assert_eq!(
+            resp.headers().get(http::header::ETAG),
+            Some(&etag),
+            "304 (If-Modified-Since) must carry the ETag validator"
+        );
+        assert_eq!(
+            resp.headers().get(http::header::LAST_MODIFIED),
+            Some(&last_modified),
+            "304 (If-Modified-Since) must echo Last-Modified"
+        );
+
+        // Negative control: a PAST If-Modified-Since (before the file's mtime)
+        // MUST return 200 — proving the 304 path is validator-aware, not a
+        // blanket "always 304" regression. A future date would correctly yield
+        // 304 since the file's mtime precedes it; that is RFC-correct 304
+        // behaviour, not a negative control.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/index.html")
+            .header(
+                http::header::IF_MODIFIED_SINCE,
+                "Wed, 21 Oct 2000 07:28:00 GMT",
+            )
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "past If-Modified-Since should return 200 (file modified after it), got {}",
+            resp.status()
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_conditional_get_returns_304_static_mode() {
+        run_conditional_get_returns_304(MountMode::Static).await;
+    }
+
+    #[tokio::test]
+    async fn test_conditional_get_returns_304_spa_mode() {
+        run_conditional_get_returns_304(MountMode::Spa).await;
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_error_page_mapping_serves_custom_404() {
