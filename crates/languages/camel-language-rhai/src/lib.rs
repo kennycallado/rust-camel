@@ -77,6 +77,12 @@
 //! - The `body` variable is always a string. Structured access to JSON/XML
 //!   bodies requires explicit parsing within the script using Rhai's built-in
 //!   map/array types.
+//! - String methods such as `replace`, `trim`, and `pad` mutate the subject in
+//!   place and return unit `()`. They do NOT return a new string. Call them as
+//!   statements (`body.replace(",", "%2C")`). Never write `body = body.replace(...)`
+//!   or `headers["k"] = headers["k"].replace(...)` — the right-hand side is unit,
+//!   so the assignment silently drops the value (the body stays unchanged; a
+//!   header entry becomes `Null`). See the `rhai_replace_*` tests and bd rc-2mjo.
 
 use async_trait::async_trait;
 use camel_language_api::{
@@ -1292,5 +1298,96 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(custom.max_call_levels, 16);
+    }
+
+    // ── Rhai string .replace() characterization (demo-found footgun) ──
+    //
+    // A demo reported `body.replace(",", "%2C")` "returns empty silently,
+    // no error". Root cause captured by these tests: Rhai's `replace`
+    // (registered by `StandardPackage`) is an IN-PLACE `&mut` method that
+    // returns unit `()`. It does NOT return a new string like most
+    // languages' replace. Consequences:
+    //
+    //   - statement form  `body.replace(...)`     → works (mutates in place)
+    //   - expression form `body.replace(...)`     → evaluates to `()` (Null)
+    //   - assignment form `body = body.replace()` → silently wrong: RHS is
+    //     `()`, so `body` becomes non-String and the sync-back falls back
+    //     to the original snapshot (unchanged) — or, for a header entry,
+    //     the value becomes Null. No error is emitted.
+    //
+    // These tests pin the actual behaviour so a future Rhai upgrade that
+    // changes the `replace` signature is caught, and so the footgun is
+    // documented in the test suite.
+
+    /// Statement form (CORRECT usage): mutates `body` in place.
+    #[tokio::test]
+    async fn rhai_replace_statement_mutates_body_in_place() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"body.replace(",", "%2C")"#)
+            .expect("replace must compile");
+        let mut ex = exchange_with_body("bbox=1,2,3,4");
+        expr.evaluate(&mut ex).await.expect("replace must eval");
+        assert_eq!(
+            ex.input.body.as_text(),
+            Some("bbox=1%2C2%2C3%2C4"),
+            "in-place replace must update body"
+        );
+    }
+
+    /// Expression form (FOOTGUN): `.replace(...)` evaluates to `()`
+    /// because the method returns unit. Using it as a value yields Null.
+    #[tokio::test]
+    async fn rhai_replace_expression_returns_unit_not_a_string() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(r#"body.replace(",", "%2C")"#)
+            .expect("replace must compile");
+        let ex = exchange_with_body("bbox=1,2,3,4");
+        let val = expr.evaluate(&ex).await.expect("replace must eval");
+        assert_eq!(
+            val,
+            Value::Null,
+            "replace returns unit, not the replaced string"
+        );
+    }
+
+    /// Assignment form (FOOTGUN): `body = body.replace(...)` assigns unit
+    /// to `body`; the String sync-back then fails and the original body
+    /// snapshot is restored — silently unchanged.
+    #[tokio::test]
+    async fn rhai_replace_assigned_to_body_is_silently_unchanged() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"body = body.replace(",", "%2C")"#)
+            .expect("replace must compile");
+        let mut ex = exchange_with_body("bbox=1,2,3,4");
+        expr.evaluate(&mut ex).await.expect("replace must eval");
+        assert_eq!(
+            ex.input.body.as_text(),
+            Some("bbox=1,2,3,4"),
+            "assignment form is a footgun: body silently stays original"
+        );
+    }
+
+    /// Header assignment form (FOOTGUN): `h["k"] = h["k"].replace(...)`
+    /// writes unit into the map entry, so the header value becomes Null.
+    #[tokio::test]
+    async fn rhai_replace_assigned_to_header_becomes_null() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["url"] = headers["url"].replace(",", "%2C")"#)
+            .expect("replace must compile");
+        let mut ex = exchange_with_body("x");
+        ex.input.headers.insert(
+            "url".to_string(),
+            Value::String("http://x/wfs?bbox=1,2,3,4".into()),
+        );
+        expr.evaluate(&mut ex).await.expect("replace must eval");
+        assert_eq!(
+            ex.input.headers.get("url"),
+            Some(&Value::Null),
+            "header assignment form is a footgun: value silently becomes Null"
+        );
     }
 }
