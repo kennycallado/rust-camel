@@ -21,6 +21,7 @@ import type { MarshalStep } from "./MarshalStep";
 import type { MulticastStep } from "./MulticastStep";
 import type { PollEnrichStep } from "./PollEnrichStep";
 import type { RecipientListStep } from "./RecipientListStep";
+import type { RemoveHeaderStep } from "./RemoveHeaderStep";
 import type { ResequenceStep } from "./ResequenceStep";
 import type { RoutingSlipStep } from "./RoutingSlipStep";
 import type { SamplingStep } from "./SamplingStep";
@@ -40,4 +41,4 @@ import type { UnmarshalStep } from "./UnmarshalStep";
 import type { ValidateStep } from "./ValidateStep";
 import type { WireTapStep } from "./WireTapStep";
 
-export type RouteDslStep = ToStep | SetHeaderStep | SetPropertyStep | SetBodyStep | BeanStep | ChoiceStep | DynamicRouterStep | FilterStep | FunctionStep | LoadBalanceStep | LogStep | SplitStep | AggregateStep | WireTapStep | MulticastStep | RoutingSlipStep | RecipientListStep | ScatterGatherStep | StopStep | StreamCacheStep | ThrottleStep | TransformStep | ScriptStep | ConvertBodyToStep | MarshalStep | UnmarshalStep | DelayStep | DoTryStep | LoopStep | ValidateStep | EnrichStep | PollEnrichStep | IdempotentConsumerStep | CacheStep | CacheInvalidateStep | CachePeekStaleStep | ClaimCheckStep | SamplingStep | SortStep | ResequenceStep;
+export type RouteDslStep = ToStep | SetHeaderStep | RemoveHeaderStep | SetPropertyStep | SetBodyStep | BeanStep | ChoiceStep | DynamicRouterStep | FilterStep | FunctionStep | LoadBalanceStep | LogStep | SplitStep | AggregateStep | WireTapStep | MulticastStep | RoutingSlipStep | RecipientListStep | ScatterGatherStep | StopStep | StreamCacheStep | ThrottleStep | TransformStep | ScriptStep | ConvertBodyToStep | MarshalStep | UnmarshalStep | DelayStep | DoTryStep | LoopStep | ValidateStep | EnrichStep | PollEnrichStep | IdempotentConsumerStep | CacheStep | CacheInvalidateStep | CachePeekStaleStep | ClaimCheckStep | SamplingStep | SortStep | ResequenceStep;

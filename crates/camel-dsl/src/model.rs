@@ -188,6 +188,11 @@ impl SetHeaderStepDef {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveHeaderStepDef {
+    pub key: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetPropertyStepDef {
     pub key: String,
@@ -573,6 +578,7 @@ pub enum DeclarativeStep {
     To(ToStepDef),
     SetHeader(SetHeaderStepDef),
     SetHeaderIfAbsent(SetHeaderStepDef),
+    RemoveHeader(RemoveHeaderStepDef),
     SetProperty(SetPropertyStepDef),
     SetBody(SetBodyStepDef),
     ConvertBodyTo(BodyTypeDef),
@@ -624,6 +630,7 @@ impl DeclarativeStep {
             DeclarativeStep::SetHeaderIfAbsent(_) => {
                 crate::contract::DeclarativeStepKind::SetHeaderIfAbsent
             }
+            DeclarativeStep::RemoveHeader(_) => crate::contract::DeclarativeStepKind::RemoveHeader,
             DeclarativeStep::SetProperty(_) => crate::contract::DeclarativeStepKind::SetProperty,
             DeclarativeStep::SetBody(_) => crate::contract::DeclarativeStepKind::SetBody,
             DeclarativeStep::ConvertBodyTo(_) => {
@@ -703,6 +710,17 @@ mod tests {
             ValueSourceDef::Literal(v) => assert_eq!(v, serde_json::Value::String("value".into())),
             _ => panic!("expected literal"),
         }
+    }
+
+    #[test]
+    fn remove_header_kind_returns_correct_variant() {
+        let step = DeclarativeStep::RemoveHeader(RemoveHeaderStepDef {
+            key: "X-Foo".into(),
+        });
+        assert_eq!(
+            step.kind(),
+            crate::contract::DeclarativeStepKind::RemoveHeader
+        );
     }
 
     #[test]

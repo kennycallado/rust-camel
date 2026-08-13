@@ -62,6 +62,21 @@ Set a message header.
     value: "hello"
 ```
 
+### `remove_header`
+
+Remove a message header from the input message. If the header is absent,
+the step does nothing (no error). Removal is input-only: output message
+headers are not changed.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `key` | string | yes | Header name to remove |
+
+```yaml
+- remove_header:
+    key: "CamelHttpPath"
+```
+
 ### `set_property`
 
 Set an exchange property. Same expression fields as `set_header` but keyed by

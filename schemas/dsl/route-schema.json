@@ -1202,6 +1202,30 @@
       ],
       "type": "object"
     },
+    "RemoveHeaderData": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "RemoveHeaderStep": {
+      "additionalProperties": false,
+      "properties": {
+        "remove_header": {
+          "$ref": "#/$defs/RemoveHeaderData"
+        }
+      },
+      "required": [
+        "remove_header"
+      ],
+      "type": "object"
+    },
     "ResequenceBatchYaml": {
       "additionalProperties": false,
       "properties": {
@@ -1764,6 +1788,9 @@
         },
         {
           "$ref": "#/$defs/SetHeaderStep"
+        },
+        {
+          "$ref": "#/$defs/RemoveHeaderStep"
         },
         {
           "$ref": "#/$defs/SetPropertyStep"

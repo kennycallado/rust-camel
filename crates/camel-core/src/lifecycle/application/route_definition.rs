@@ -81,6 +81,10 @@ pub enum BuilderStep {
         key: String,
         value: ValueSourceDef,
     },
+    /// Declarative remove_header, resolved at route-add time.
+    DeclarativeRemoveHeader {
+        key: String,
+    },
     DeclarativeSetProperty {
         key: String,
         value_source: ValueSourceDef,

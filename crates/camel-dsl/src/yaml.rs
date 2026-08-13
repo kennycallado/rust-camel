@@ -28,11 +28,11 @@ use crate::model::{
     DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DoTryCatchClauseDef, DoTryFinallyDef,
     DynamicRouterStepDef, EnrichStepDef, IdempotentConsumerStepDef, LanguageExpressionDef,
     LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
-    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, ResequenceModeDef,
-    ResequenceStepDef, RoutingSlipStepDef, SamplingStepDef, ScriptStepDef, SecurityCompileContext,
-    SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SortStepDef, SplitAggregationDef,
-    SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef,
-    ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RemoveHeaderStepDef,
+    ResequenceModeDef, ResequenceStepDef, RoutingSlipStepDef, SamplingStepDef, ScriptStepDef,
+    SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SortStepDef,
+    SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
+    ThrottleStrategyDef, ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::route_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, CacheBody, CacheConfig,
@@ -41,19 +41,19 @@ pub use crate::route_ast::{
     DynamicRouterData, DynamicRouterStep, EnrichBody, EnrichConfig, EnrichStep, FilterStep,
     FunctionStep, IdempotentConsumerBody, IdempotentConsumerStep, LoadBalanceData, LoadBalanceStep,
     LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
-    PollEnrichStep, PredicateBlock, RecipientListData, RecipientListStep, ResequenceBatchYaml,
-    ResequenceData, ResequenceStep, ResequenceStreamYaml, RouteDslRest, RouteDslRoute,
-    RouteDslRoutes, RouteDslStep, RoutingSlipData, RoutingSlipStep, SamplingBody, SamplingConfig,
-    SamplingStep, ScatterGatherData, ScatterGatherStep, ScriptData, ScriptStep, SetBodyConfig,
-    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep,
-    SortBody, SortStep, SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep,
-    StreamCacheBody, StreamCacheConfig, StreamCacheStep, StreamCapacityPolicyYaml,
-    StreamGapPolicyYaml, ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep,
-    ValidateStep, WireTapStep,
+    PollEnrichStep, PredicateBlock, RecipientListData, RecipientListStep, RemoveHeaderData,
+    RemoveHeaderStep, ResequenceBatchYaml, ResequenceData, ResequenceStep, ResequenceStreamYaml,
+    RouteDslRest, RouteDslRoute, RouteDslRoutes, RouteDslStep, RoutingSlipData, RoutingSlipStep,
+    SamplingBody, SamplingConfig, SamplingStep, ScatterGatherData, ScatterGatherStep, ScriptData,
+    ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
+    SetPropertyData, SetPropertyStep, SortBody, SortStep, SplitData, SplitExpressionConfig,
+    SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
+    StreamCapacityPolicyYaml, StreamGapPolicyYaml, ThrottleData, ThrottleStep, ToStep,
+    TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
 };
 use crate::route_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 38] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 39] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -92,6 +92,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 38] = [
     DeclarativeStepKind::Sampling,
     DeclarativeStepKind::Sort,
     DeclarativeStepKind::Resequence,
+    DeclarativeStepKind::RemoveHeader,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -628,6 +629,16 @@ pub(crate) fn route_step_to_declarative_step(
             Ok(DeclarativeStep::SetHeader(SetHeaderStepDef {
                 key: set_header.key,
                 value,
+            }))
+        }
+        RouteDslStep::RemoveHeader(RemoveHeaderStep { remove_header }) => {
+            if remove_header.key.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "remove_header: key must not be empty".into(),
+                ));
+            }
+            Ok(DeclarativeStep::RemoveHeader(RemoveHeaderStepDef {
+                key: remove_header.key,
             }))
         }
         RouteDslStep::SetProperty(SetPropertyStep { set_property }) => {
@@ -4786,5 +4797,63 @@ routes:
             }
             other => panic!("expected CachePeekStale, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn yaml_parses_remove_header() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - remove_header:
+          key: X-Foo
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::RemoveHeader(def) => {
+                assert_eq!(def.key, "X-Foo");
+            }
+            other => panic!("expected RemoveHeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn yaml_rejects_empty_remove_header_key() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - remove_header:
+          key: ""
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(
+            result.is_err(),
+            "expected error for empty remove_header key"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("remove_header: key must not be empty"),
+            "expected 'remove_header: key must not be empty' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn yaml_rejects_whitespace_remove_header_key() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - remove_header:
+          key: "   "
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(
+            result.is_err(),
+            "expected error for whitespace-only remove_header key"
+        );
     }
 }

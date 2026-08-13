@@ -299,6 +299,7 @@ pub enum RouteDslStep {
     #[cfg_attr(feature = "schema", schemars(skip))]
     #[cfg_attr(feature = "schema", ts(skip))]
     SetHeaderIfAbsent(SetHeaderStep),
+    RemoveHeader(RemoveHeaderStep),
     SetProperty(SetPropertyStep),
     SetBody(SetBodyStep),
     Bean(BeanStep),
@@ -368,6 +369,20 @@ pub struct ToStep {
 #[serde(deny_unknown_fields)]
 pub struct SetHeaderStep {
     pub set_header: SetHeaderData,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveHeaderStep {
+    pub remove_header: RemoveHeaderData,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveHeaderData {
+    pub key: String,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

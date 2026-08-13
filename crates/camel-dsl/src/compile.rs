@@ -39,9 +39,10 @@ use crate::model::{
     DelayStepDef, DynamicRouterStepDef, FunctionStepDef, IdempotentConsumerStepDef,
     LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
     LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
-    RoutingSlipStepDef, SamplingStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef,
-    SetHeaderStepDef, SetPropertyStepDef, SortStepDef, SplitAggregationDef, SplitExpressionDef,
-    SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
+    RemoveHeaderStepDef, RoutingSlipStepDef, SamplingStepDef, ScriptStepDef,
+    SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SortStepDef,
+    SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
+    ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
 fn require_authenticator(
@@ -899,6 +900,9 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::SetHeaderIfAbsent(SetHeaderStepDef { key, value }) => {
             compile_set_header_if_absent_step(key, value)
         }
+        DeclarativeStep::RemoveHeader(RemoveHeaderStepDef { key }) => {
+            Ok(BuilderStep::DeclarativeRemoveHeader { key })
+        }
         DeclarativeStep::SetProperty(SetPropertyStepDef { key, value }) => {
             compile_set_property_step(key, value)
         }
@@ -1537,6 +1541,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Log(_) => "log",
         DeclarativeStep::SetHeader(_) => "set_header",
         DeclarativeStep::SetHeaderIfAbsent(_) => "set_header_if_absent",
+        DeclarativeStep::RemoveHeader(_) => "remove_header",
         DeclarativeStep::SetProperty(_) => "set_property",
         DeclarativeStep::SetBody(_) => "set_body",
         DeclarativeStep::Filter(_) => "filter",
@@ -1809,6 +1814,13 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
             if key.trim().is_empty() {
                 return Err(CamelError::Config(
                     "set_header_if_absent key must not be empty".to_string(),
+                ));
+            }
+        }
+        DeclarativeStep::RemoveHeader(RemoveHeaderStepDef { key, .. }) => {
+            if key.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "remove_header key must not be empty".to_string(),
                 ));
             }
         }

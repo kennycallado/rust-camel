@@ -265,6 +265,16 @@ impl StepCompiler for CoreCompiler {
                 _ => Err(CamelError::Config("unsupported value source".into())),
             },
 
+            // ── RemoveHeader (declarative) ──
+            BuilderStep::DeclarativeRemoveHeader { key } => {
+                let svc = camel_processor::RemoveHeader::new(IdentityProcessor, key);
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                    lifecycle: None,
+                }))
+            }
+
             // ── SetHeaderIfAbsent (declarative, internal-only) ──
             BuilderStep::DeclarativeSetHeaderIfAbsent { key, value } => match value {
                 ValueSourceDef::Literal(value) => {
@@ -753,6 +763,85 @@ mod tests {
         assert!(
             msg.contains("unauthorized_method") && msg.contains("not found"),
             "error should mention method name and 'not found', got: {msg}"
+        );
+    }
+
+    /// End-to-end: compile a DeclarativeRemoveHeader step and run it against an
+    /// exchange whose input headers contain the target key.
+    #[tokio::test]
+    async fn test_remove_header_end_to_end() {
+        use tower::ServiceExt;
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let step = BuilderStep::DeclarativeRemoveHeader {
+            key: "CamelHttpPath".into(),
+        };
+
+        let compiled = reg
+            .compile_step(step, 0, &dummy_context())
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        let processor = match compiled {
+            CompiledStep::Process { processor, .. } => processor,
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        };
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("CamelHttpPath", "some-path");
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert!(
+            !result.input.headers.contains_key("CamelHttpPath"),
+            "CamelHttpPath should be removed from input headers"
+        );
+    }
+
+    /// RemoveHeader only mutates `input.headers` — a same-named key on
+    /// `output.headers` must survive.
+    #[tokio::test]
+    async fn test_remove_header_input_only_preserves_output() {
+        use tower::ServiceExt;
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let step = BuilderStep::DeclarativeRemoveHeader {
+            key: "X-Shared".into(),
+        };
+
+        let compiled = reg
+            .compile_step(step, 0, &dummy_context())
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        let processor = match compiled {
+            CompiledStep::Process { processor, .. } => processor,
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        };
+
+        let mut output = Message::default();
+        output.set_header("X-Shared", "output-value");
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("X-Shared", "input-value");
+        exchange.output = Some(output);
+
+        let result = processor.oneshot(exchange).await.unwrap();
+
+        assert!(
+            !result.input.headers.contains_key("X-Shared"),
+            "X-Shared should be removed from input headers"
+        );
+        let output = result
+            .output
+            .as_ref()
+            .expect("output message should be preserved");
+        assert!(
+            output.headers.contains_key("X-Shared"),
+            "X-Shared should remain on output headers"
         );
     }
 

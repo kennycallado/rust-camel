@@ -1119,6 +1119,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::Log { .. } => "log",
         BuilderStep::DeclarativeSetHeader { .. } => "set_header",
         BuilderStep::DeclarativeSetHeaderIfAbsent { .. } => "set_header_if_absent",
+        BuilderStep::DeclarativeRemoveHeader { .. } => "remove_header",
         BuilderStep::DeclarativeSetBody { .. } => "set_body",
         BuilderStep::DeclarativeFilter { .. } => "filter",
         BuilderStep::DeclarativeChoice { .. } => "choice",

@@ -452,4 +452,26 @@ steps:
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn lint_accepts_remove_header_route() {
+        // `remove_header` is a first-class RouteDslStep variant: a route using
+        // it must validate with zero errors against ROUTE_SCHEMA. Direct
+        // jsonschema validation (not the full Rule) isolates the schema shape
+        // from rule-level span anchoring.
+        let schema: serde_json::Value =
+            serde_json::from_str(ROUTE_SCHEMA).expect("embedded route schema is valid JSON");
+        let validator =
+            jsonschema::validator_for(&schema).expect("embedded route schema must compile");
+        let doc: serde_json::Value = serde_json::from_str(
+            r#"{"routes": [{"id": "r1", "from": "direct://test", "steps": [{"remove_header": {"key": "CamelHttpPath"}}]}]}"#,
+        )
+        .expect("remove_header fixture must parse as JSON");
+        let errors: Vec<_> = validator.iter_errors(&doc).collect();
+        assert!(
+            errors.is_empty(),
+            "a remove_header step must validate cleanly; got: {:?}",
+            errors
+        );
+    }
 }
