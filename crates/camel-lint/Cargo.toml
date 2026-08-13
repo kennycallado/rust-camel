@@ -1,5 +1,6 @@
 [package]
 name = "camel-lint"
+description = "Runtime-free route diagnostics engine for rust-camel"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

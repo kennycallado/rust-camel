@@ -3854,12 +3854,106 @@ fn wait_for_crate_index(name: &str, version: &str) -> Result<(), String> {
 }
 
 /// Publish all workspace crates to crates.io in topological order.
+/// Whether the workspace root `Cargo.toml` defines an inheritable
+/// `description` under `[workspace.package]`. When true, member crates may
+/// use `description.workspace = true`.
+fn workspace_defines_description(workspace_root: &Path) -> Result<bool, String> {
+    let root = workspace_root.join("Cargo.toml");
+    let content = std::fs::read_to_string(&root)
+        .map_err(|e| format!("Cannot read {}: {e}", root.display()))?;
+    let mut in_ws_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_ws_package = trimmed == "[workspace.package]";
+            continue;
+        }
+        if in_ws_package && trimmed.starts_with("description") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether a crate's `Cargo.toml` supplies a non-empty `description`, either
+/// inline (`description = "..."`) or inherited (`description.workspace = true`)
+/// when the workspace defines one. Section-aware: only the `[package]` table
+/// is inspected.
+fn crate_has_description(content: &str, workspace_has_description: bool) -> bool {
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            if in_package {
+                break;
+            }
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("description") {
+            let rest = rest.trim_start();
+            if let Some(val) = rest.strip_prefix('=') {
+                // Inline form: description = "..."
+                return !val.trim().trim_matches('"').is_empty();
+            }
+            if rest.starts_with(".workspace") {
+                // Inherited form: valid only if the workspace defines it.
+                return workspace_has_description;
+            }
+        }
+    }
+    false
+}
+
+/// Preflight gate: every publishable crate must supply the `description`
+/// metadata field that crates.io requires. Fails fast with the full list of
+/// offenders rather than aborting mid-release.
+fn check_publishable_metadata(
+    workspace_root: &Path,
+    sorted: &[WorkspaceCrate],
+) -> Result<(), String> {
+    let ws_has_description = workspace_defines_description(workspace_root)?;
+    let mut missing: Vec<String> = Vec::new();
+    for c in sorted {
+        let manifest = workspace_root.join(&c.path).join("Cargo.toml");
+        let content = std::fs::read_to_string(&manifest)
+            .map_err(|e| format!("Cannot read {}: {e}", manifest.display()))?;
+        if !crate_has_description(&content, ws_has_description) {
+            missing.push(c.name.clone());
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "Publish blocked: {n} publishable crate(s) missing required `description` metadata: {list}.\n\
+             crates.io rejects a publish without it. Add `description = \"...\"` to each crate's [package] table \
+             (or define it under [workspace.package] and use `description.workspace = true`).",
+            n = missing.len(),
+            list = missing.join(", "),
+        ));
+    }
+    Ok(())
+}
+
 fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
     let (sorted, no_verify, broken) = resolve_publish_order(workspace_root)?;
     let version = workspace_version(workspace_root)?;
 
     println!("📦 Publishing rust-camel crates v{version} to crates.io");
     println!("=============================================");
+    // Preflight: crates.io rejects any publish that omits required metadata
+    // (e.g. `description`). Catch it here — before the irreversible publish
+    // loop — instead of failing partway through a release with some crates
+    // already pushed. Runs in dry-run too, so CI blocks the gap pre-tag.
+    check_publishable_metadata(workspace_root, &sorted)?;
     check_no_publish_cycles(&no_verify, &broken).map_err(|report| {
         format!(
             "Publish blocked: {n} crate(s) in dev/build-dep cycles. Remediate the cycle before publishing.\n{report}",
@@ -5502,6 +5596,72 @@ camel-core = { workspace = true }
             let broken: Vec<(String, String)> = vec![];
             check_no_publish_cycles(&no_verify, &broken)
                 .expect("empty no_verify must return Ok(())");
+        }
+
+        #[test]
+        fn description_inline_present_is_ok() {
+            let toml = "[package]\nname = \"camel-x\"\ndescription = \"does a thing\"\n";
+            assert!(crate_has_description(toml, false));
+        }
+
+        #[test]
+        fn description_missing_is_rejected() {
+            let toml = "[package]\nname = \"camel-x\"\nversion.workspace = true\n";
+            assert!(!crate_has_description(toml, false));
+        }
+
+        #[test]
+        fn description_empty_string_is_rejected() {
+            let toml = "[package]\nname = \"camel-x\"\ndescription = \"\"\n";
+            assert!(!crate_has_description(toml, false));
+        }
+
+        #[test]
+        fn description_workspace_inherit_requires_workspace_definition() {
+            let toml = "[package]\nname = \"camel-x\"\ndescription.workspace = true\n";
+            assert!(!crate_has_description(toml, false));
+            assert!(crate_has_description(toml, true));
+        }
+
+        #[test]
+        fn description_only_counts_in_package_section() {
+            // A description under some other table must not satisfy the gate.
+            let toml =
+                "[package]\nname = \"camel-x\"\n\n[dependencies]\ndescription = \"nope\"\n";
+            assert!(!crate_has_description(toml, false));
+        }
+
+        #[test]
+        fn camel_lint_manifest_now_has_description() {
+            // Regression guard for the v0.28.0 publish failure: camel-lint
+            // shipped without a description and crates.io rejected it.
+            let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .find(|p| p.join("crates/camel-lint/Cargo.toml").exists())
+                .expect("workspace root with crates/camel-lint")
+                .to_path_buf();
+            let manifest =
+                std::fs::read_to_string(ws_root.join("crates/camel-lint/Cargo.toml")).unwrap();
+            let ws_has = workspace_defines_description(&ws_root).unwrap();
+            assert!(
+                crate_has_description(&manifest, ws_has),
+                "camel-lint must declare a description to be publishable"
+            );
+        }
+
+        #[test]
+        fn all_publishable_crates_have_description() {
+            // Full-workspace guard: mirrors the publish-time preflight so the
+            // whole class of "missing metadata" publish failures is caught by
+            // `cargo test` and CI, not by an aborted release.
+            let ws_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .find(|p| p.join("Cargo.toml").exists() && p.join("crates").exists())
+                .expect("workspace root")
+                .to_path_buf();
+            let (sorted, _, _) = resolve_publish_order(&ws_root).unwrap();
+            check_publishable_metadata(&ws_root, &sorted)
+                .expect("every publishable crate must declare a description");
         }
     }
 

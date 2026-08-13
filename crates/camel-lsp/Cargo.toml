@@ -1,5 +1,6 @@
 [package]
 name = "camel-lsp"
+description = "Language Server Protocol adapter for rust-camel route diagnostics"
 version.workspace = true
 edition = "2021"
 rust-version.workspace = true
