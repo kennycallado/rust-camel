@@ -32,7 +32,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `map_body` | MapBody | transformation | `src/lib.rs:23` |
 | `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:24` |
 | `multicast` | Multicast | fan-out routing | `src/lib.rs:25` |
-| `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:27` (expression capped to max_recipients, default 1_000 — Batch 1 H13) |
+| `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:27` (expression capped to max_recipients, default 1_000 — Batch 1 H13). Zero-success contract: when at least one recipient is called and zero return Ok, the result is `Err(last_error)` (ADR-0058), never `Ok(original)`. |
 | `resequencer` | Resequencer (batch/stream) | stateful reorder; continuation boundary (ADR-0029) | `src/lib.rs:28` |
 | `routing_slip` | RoutingSlip | dynamic routing | `src/lib.rs:29` |
 | `sampling` | Sampling | deterministic 1-of-N (period>0 enforced at build) | `src/lib.rs:30` |

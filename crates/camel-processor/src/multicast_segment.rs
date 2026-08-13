@@ -640,4 +640,121 @@ mod tests {
             "Expected Failed due to timeout with stop_on_exception=false, got {result:?}"
         );
     }
+
+    // ── ADR-0058 regression: zero-success + Stopped-wins (multicast already complies) ─
+
+    fn always_failed_body(msg: &str) -> OutcomeSegment {
+        let msg = String::from(msg);
+        #[derive(Clone)]
+        struct AlwaysFailed(String);
+        impl camel_api::OutcomePipeline for AlwaysFailed {
+            fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                _exchange: Exchange,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+            {
+                let msg = self.0.clone();
+                Box::pin(async move {
+                    PipelineOutcome::Failed(camel_api::CamelError::ProcessorError(msg))
+                })
+            }
+        }
+        OutcomeSegment::new(Box::new(AlwaysFailed(msg)))
+    }
+
+    fn always_completed_body() -> OutcomeSegment {
+        #[derive(Clone)]
+        struct AlwaysCompleted;
+        impl camel_api::OutcomePipeline for AlwaysCompleted {
+            fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                exchange: Exchange,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+            {
+                Box::pin(async move { PipelineOutcome::Completed(exchange) })
+            }
+        }
+        OutcomeSegment::new(Box::new(AlwaysCompleted))
+    }
+
+    fn always_stopped_body() -> OutcomeSegment {
+        #[derive(Clone)]
+        struct AlwaysStopped;
+        impl camel_api::OutcomePipeline for AlwaysStopped {
+            fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                exchange: Exchange,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+            {
+                Box::pin(async move { PipelineOutcome::Stopped(exchange) })
+            }
+        }
+        OutcomeSegment::new(Box::new(AlwaysStopped))
+    }
+
+    #[tokio::test]
+    async fn multicast_all_branches_failed_no_stopped_returns_failed() {
+        // ADR-0058: zero-success (all branches Failed, no Stopped) MUST return
+        // Failed, not Completed(original). Multicast already complies; this
+        // locks the behavior.
+        let mut seg = MulticastSegment {
+            branches: vec![
+                always_failed_body("branch-a-failed"),
+                always_failed_body("branch-b-failed"),
+            ],
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: false,
+            timeout: None,
+            aggregator: Arc::new(|exchanges: Vec<Exchange>| {
+                exchanges.into_iter().last().unwrap_or_default()
+            }),
+        };
+
+        let ex = Exchange::new(Message::new("inbound"));
+        let result = OutcomePipeline::run(&mut seg, ex).await;
+
+        assert!(
+            matches!(result, PipelineOutcome::Failed(_)),
+            "zero-success multicast must return Failed, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multicast_stopped_branch_wins_over_failed() {
+        // ADR-0058 Stopped-wins: when a branch returns Stopped, multicast
+        // propagates Stopped (intentional halt per ADR-0025 section 3) and
+        // does NOT return Failed or Completed.
+        let mut seg = MulticastSegment {
+            branches: vec![
+                always_completed_body(),
+                always_failed_body("branch-b-failed"),
+                always_stopped_body(),
+            ],
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: false,
+            timeout: None,
+            aggregator: Arc::new(|exchanges: Vec<Exchange>| {
+                exchanges.into_iter().last().unwrap_or_default()
+            }),
+        };
+
+        let ex = Exchange::new(Message::new("inbound"));
+        let result = OutcomePipeline::run(&mut seg, ex).await;
+
+        assert!(
+            matches!(result, PipelineOutcome::Stopped(_)),
+            "Stopped branch must win over Completed and Failed, got: {result:?}"
+        );
+    }
 }

@@ -84,6 +84,7 @@ impl Service<Exchange> for RecipientListService {
                 let mut iter = endpoints_to_call.into_iter();
                 let raw_limit = config.parallel_limit.unwrap_or(results.capacity());
                 let limit = raw_limit.max(1).min(results.capacity().max(1));
+                let mut last_parallel_error: Option<CamelError> = None;
 
                 for _ in 0..limit {
                     if let Some((uri, mut endpoint)) = iter.next() {
@@ -100,7 +101,24 @@ impl Service<Exchange> for RecipientListService {
                             join_set.abort_all();
                             return Err(e);
                         }
-                        _ => {}
+                        Ok(Err(e)) => {
+                            // stop_on_exception=false: track the representative
+                            // error — the last failing task to complete via
+                            // join_next order (ADR-0058). Pending tasks continue.
+                            last_parallel_error = Some(e);
+                        }
+                        Err(join_err) if join_err.is_panic() => {
+                            // A recipient task panicked. ADR-0058: a panic is
+                            // zero-success attempted work and MUST NOT launder to
+                            // Ok(original); convert to a representative error so
+                            // the zero-success guard fires. (Cancellation is
+                            // handled separately below — it is often self-induced
+                            // by stop_on_exception's abort_all.)
+                            last_parallel_error = Some(CamelError::ProcessorError(format!(
+                                "recipient task panicked: {join_err}"
+                            )));
+                        }
+                        Err(_) => {} // Cancellation (JoinSet abort); ignore.
                     }
 
                     if let Some((uri, mut endpoint)) = iter.next() {
@@ -110,9 +128,22 @@ impl Service<Exchange> for RecipientListService {
                     }
                 }
 
+                // ADR-0058: zero-success operational failure. At least one
+                // recipient was called and zero returned Ok — report the
+                // representative error instead of laundering to Ok(original).
+                let zero_success_error = if results.is_empty() {
+                    last_parallel_error
+                } else {
+                    None
+                };
+                if let Some(err) = zero_success_error {
+                    return Err(err);
+                }
+
                 exchange = aggregate_results(config.strategy, original_for_aggregate, results);
             } else {
                 let mut results: Vec<Exchange> = Vec::new();
+                let mut last_error: Option<CamelError> = None;
                 let original_for_aggregate = exchange.clone();
                 for uri in &uris {
                     let endpoint = match pipeline.resolve(uri)? {
@@ -128,8 +159,21 @@ impl Service<Exchange> for RecipientListService {
                             exchange = ex;
                         }
                         Err(e) if config.stop_on_exception => return Err(e),
-                        Err(_) => continue,
+                        Err(e) => {
+                            // stop_on_exception=false: track the iteration-last
+                            // error (ADR-0058) and continue to remaining recipients.
+                            last_error = Some(e);
+                            continue;
+                        }
                     }
+                }
+                // ADR-0058: zero-success operational failure. At least one
+                // recipient was called and zero returned Ok — report the
+                // iteration-last error instead of laundering to Ok(original),
+                // which would poison an outer cache write-back with the inbound body.
+                let zero_success_error = if results.is_empty() { last_error } else { None };
+                if let Some(err) = zero_success_error {
+                    return Err(err);
                 }
                 exchange = aggregate_results(config.strategy, original_for_aggregate, results);
             }
@@ -663,5 +707,202 @@ mod tests {
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
 
         assert_eq!(result.input.body.as_text(), Some("third"));
+    }
+
+    // ── ADR-0058: zero-success operational failure must not launder to Ok(original) ─
+
+    fn err_resolver(uri_to_err: Vec<(&'static str, CamelError)>) -> camel_api::EndpointResolver {
+        Arc::new(move |uri: &str| {
+            for (pattern, err) in &uri_to_err {
+                if uri == *pattern {
+                    let err = err.clone();
+                    return Some(BoxProcessor::from_fn(move |_ex| {
+                        let err = err.clone();
+                        Box::pin(async move { Err(err) })
+                    }));
+                }
+            }
+            None
+        })
+    }
+
+    #[tokio::test]
+    async fn recipient_list_sequential_all_failed_returns_err() {
+        // ADR-0058: zero-success sequential. One recipient errors; zero Ok.
+        // MUST return Err, not Ok(original) (which would poison an outer cache).
+        let resolver = err_resolver(vec![(
+            "mock:a",
+            CamelError::Config(String::from("seq-all-failed")),
+        )]);
+        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:a".to_string()))
+            .strategy(MulticastStrategy::LastWins);
+
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
+        let mut ex = Exchange::new(Message::new("timer:t tick #1"));
+        ex.input.body = Body::Text(String::from("timer:t tick #1"));
+        let result = svc.ready().await.unwrap().call(ex).await;
+
+        assert!(
+            result.is_err(),
+            "zero-success recipient_list must return Err, not Ok(original)"
+        );
+        assert!(
+            matches!(result, Err(CamelError::Config(m)) if m == "seq-all-failed"),
+            "returned error must carry the iteration-last error"
+        );
+    }
+
+    #[tokio::test]
+    async fn recipient_list_parallel_all_failed_returns_err() {
+        // ADR-0058: zero-success parallel. Two recipients error; zero Ok.
+        // MUST return a representative Err, not Ok(original).
+        let resolver = err_resolver(vec![
+            ("mock:a", CamelError::Config(String::from("par-err-a"))),
+            ("mock:b", CamelError::Config(String::from("par-err-b"))),
+        ]);
+        let config =
+            RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:a,mock:b".to_string()))
+                .strategy(MulticastStrategy::LastWins)
+                .parallel(true);
+
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
+        let ex = Exchange::new(Message::new("inbound"));
+        let result = svc.ready().await.unwrap().call(ex).await;
+
+        assert!(
+            result.is_err(),
+            "zero-success parallel recipient_list must return Err, not Ok(original)"
+        );
+    }
+
+    #[tokio::test]
+    async fn recipient_list_parallel_last_error_is_join_next_order() {
+        // ADR-0058 last-error determinism: the representative error is the one
+        // from the task returned by the last `JoinSet::join_next` that completed
+        // with an error. mock:a errors immediately; mock:b awaits a oneshot
+        // signal then errors. The test sends the signal after a brief yield so
+        // mock:a completes first → join_next order yields mock:b's error last.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let rx = Arc::new(tokio::sync::Mutex::new(Some(rx)));
+        let resolver: camel_api::EndpointResolver = Arc::new(move |uri: &str| {
+            if uri == "mock:a" {
+                Some(BoxProcessor::from_fn(|_ex| {
+                    Box::pin(async move { Err(CamelError::Config(String::from("par-err-a"))) })
+                }))
+            } else if uri == "mock:b" {
+                let rx = rx.clone();
+                Some(BoxProcessor::from_fn(move |_ex| {
+                    let rx = rx.clone();
+                    Box::pin(async move {
+                        // Wait for the test's signal before completing.
+                        let mut lock = rx.lock().await;
+                        if let Some(rx) = lock.take() {
+                            let _ = rx.await;
+                        }
+                        Err(CamelError::Config(String::from("par-err-b")))
+                    })
+                }))
+            } else {
+                None
+            }
+        });
+        let config =
+            RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:a,mock:b".to_string()))
+                .strategy(MulticastStrategy::LastWins)
+                .parallel(true);
+
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
+        let ex = Exchange::new(Message::new("inbound"));
+
+        // Drive the call concurrently; release mock:b after mock:a has had a
+        // chance to error first.
+        let join = tokio::spawn(async move { svc.ready().await.unwrap().call(ex).await });
+        // Yield the runtime so mock:a (synchronous Err) completes before mock:b.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let _ = tx.send(());
+        let result = join.await.unwrap();
+
+        assert!(
+            matches!(result, Err(CamelError::Config(ref m)) if m == "par-err-b"),
+            "representative error must be the last failing task to complete (mock:b), got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recipient_list_partial_success_aggregates_and_returns_ok() {
+        // ADR-0058: partial success (>=1 Ok) MUST aggregate over successes and
+        // return Ok. The invariant fires only on ZERO successes.
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let ok_count = call_count.clone();
+        let resolver: camel_api::EndpointResolver = Arc::new(move |uri: &str| {
+            if uri == "mock:ok" {
+                let c = ok_count.clone();
+                Some(BoxProcessor::from_fn(move |mut ex| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    ex.input.body = Body::Text(String::from("ok-body"));
+                    Box::pin(async move { Ok(ex) })
+                }))
+            } else if uri == "mock:fail" {
+                Some(BoxProcessor::from_fn(|_ex| {
+                    Box::pin(async move { Err(CamelError::Config(String::from("partial-fail"))) })
+                }))
+            } else {
+                None
+            }
+        });
+        let config =
+            RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:fail,mock:ok".to_string()))
+                .strategy(MulticastStrategy::LastWins);
+
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
+        let ex = Exchange::new(Message::new("inbound"));
+        let result = svc.ready().await.unwrap().call(ex).await;
+
+        assert!(
+            result.is_ok(),
+            "partial success must return Ok, got: {result:?}"
+        );
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(result.unwrap().input.body.as_text(), Some("ok-body"));
+    }
+
+    #[tokio::test]
+    async fn recipient_list_parallel_all_panic_returns_err() {
+        // ADR-0058 (e_gpt review gap): a parallel recipient_list where every
+        // spawned task PANICS produces only JoinError(panic) results. These
+        // MUST NOT launder to Ok(original); convert to a representative error
+        // so the zero-success guard fires. Cancels (self-induced abort) stay
+        // ignored.
+        let resolver: camel_api::EndpointResolver = Arc::new(|uri: &str| {
+            if uri.starts_with("mock:panic") {
+                Some(BoxProcessor::from_fn(|_ex| {
+                    Box::pin(async move {
+                        panic!("recipient panicked");
+                    })
+                }))
+            } else {
+                None
+            }
+        });
+        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
+            "mock:panic1,mock:panic2".to_string()
+        }))
+        .strategy(MulticastStrategy::LastWins)
+        .parallel(true);
+
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
+        let ex = Exchange::new(Message::new("inbound"));
+        let result = svc.ready().await.unwrap().call(ex).await;
+
+        assert!(
+            result.is_err(),
+            "all-panic parallel recipient_list must return Err, not Ok(original); got: {result:?}"
+        );
+        assert!(
+            matches!(result, Err(CamelError::ProcessorError(_))),
+            "panic must surface as a ProcessorError representative"
+        );
     }
 }

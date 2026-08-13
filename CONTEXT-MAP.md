@@ -92,6 +92,7 @@ are a convenience index and may lag the file.
 - [0051](./docs/adr/0051-credential-redaction-at-diagnostic-boundaries.md) — Credential-bearing types use manual redacting `Debug` or a tested redacting wrapper; general-purpose `Serialize` must not expose credential bytes; credential-file paths are metadata, not credential bytes
 - [0053](./docs/adr/0053-wit-interface-versioning.md) — `camel:plugin` uses one package-level WIT SemVer, independent from Rust crate versions; v1.0 establishes `camel:plugin@1.0.0`
 - [0055](./docs/adr/0055-publish-topology-no-cyclic-devdeps.md) — Publishable crates MUST NOT declare a `camel-*` dev/build-dependency that closes a publish-order cycle; SCC-accurate detection; `camel-test` is the publish-order leaf sink; remediation via StubComponent substitution or proc-macro test relocation to the consumer; the manifest-mutation publish hack is deleted
+- [0058](./docs/adr/0058-outcome-aware-segment-composition.md) — Segment composition is outcome-aware: zero-success operational failure MUST yield `Failed(last_error)`, never `Ok(original)`; `Stopped` is for intentional halts only; canonical all-failed outcome is `Failed(last_error)`; recipient_list and multicast comply, with different parallel representative-error selection orders
 
 ## Key Terms
 

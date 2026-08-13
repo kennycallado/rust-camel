@@ -84,6 +84,23 @@ macro_rules! impl_builder_methods {
                 self
             }
 
+            /// Replace the default `MockComponent` with one configured for
+            /// fail-fast mode. Every mock endpoint created in this harness will
+            /// honour the per-endpoint `trigger_fail_fast` latch: once tripped,
+            /// subsequent `MockProducer::call` invocations return
+            /// `Err(ProcessorError)`. Use this to build endpoints that resolve
+            /// successfully but fail on call — e.g. to drive a `recipient_list`
+            /// into the zero-success guard of ADR-0058.
+            pub fn with_mock_fail_fast(mut self) -> Self {
+                self.mock = camel_component_mock::MockComponent::with_config(
+                    camel_component_mock::MockConfig {
+                        fail_fast: true,
+                        ..Default::default()
+                    },
+                );
+                self
+            }
+
             /// Register `TimerComponent`.
             pub fn with_timer(mut self) -> Self {
                 self.registrations.push(Box::new(|ctx: &mut CamelContext| {
