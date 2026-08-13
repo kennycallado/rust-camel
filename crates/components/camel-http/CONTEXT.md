@@ -55,7 +55,7 @@ Reviewer: r_glm5.1 verifies these classifications against source at Phase C revi
 
 ## Contract Surface
 
-Per ADR-0024 and spec §3.4. Documents the accepted and rejected names/values for the HTTP consumer reply finaliser. Future bug reports check here first: if behaviour is in this surface, it's a feature request; if not, it's a bug.
+Per ADR-0057 (headers) and ADR-0024 (status/body/Stop). Documents the accepted and rejected names/values for the HTTP consumer reply finaliser. Future bug reports check here first: if behaviour is in this surface, it is a feature request. If not, it is a bug.
 
 ### Accepted — reply status code
 
@@ -74,9 +74,38 @@ Per ADR-0024 and spec §3.4. Documents the accepted and rejected names/values fo
 
 ### Accepted — reply headers
 
-- All Exchange headers EXCEPT:
-  - Headers starting with `Camel` (Camel-internal namespace).
-  - Hop-by-hop / request-side headers: `content-length`, `content-type` (use the explicit Content-Type derivation above), `transfer-encoding`, `connection`, `cache-control`, `date`, `pragma`, `trailer`, `upgrade`, `via`, `warning`, `host`, `user-agent`, `accept`, `accept-encoding`, `accept-language`, `accept-charset`, `authorization`, `proxy-authorization`, `cookie`, `expect`, `from`, `if-match`, `if-modified-since`, `if-none-match`, `if-range`, `if-unmodified-since`, `max-forwards`, `proxy-connection`, `range`, `referer`, `te`.
+The reply finaliser copies an Exchange header to the HTTP response unless a
+rule below excludes it. ADR-0057 defines the rules. It sorts header names
+into three buckets and treats two fields as re-derived. See
+`docs/adr/0057-http-header-emission-policy.md`.
+
+Excluded from the response:
+
+- Headers starting with `Camel` (Camel-internal namespace).
+- Hop-by-hop / framing (compatibility set: RFC 2616 section 13.5.1
+  conventions + RFC 7230 per-section definitions; RFC 7230 section 6.1
+  mandates removing `Connection` and connection-option-named headers):
+  `connection`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`,
+  `te`, `trailer`, `transfer-encoding`, `upgrade`, `proxy-connection`.
+- Request-only (client-side, not valid in a response): `host`, `user-agent`,
+  `accept`, `accept-encoding`, `accept-language`, `accept-charset`,
+  `accept-datetime`, `authorization`, `cookie`, `expect`, `from`, `if-match`,
+  `if-modified-since`, `if-none-match`, `if-range`, `if-unmodified-since`,
+  `max-forwards`, `range`, `referer`.
+- Server-owned (RFC 7231 section 7.1.1.2): `date`. Only the origin server
+  sets this field.
+- Re-derived by the HTTP server, not copied from the Exchange:
+  `content-length` and `content-type`. Use the explicit Content-Type
+  derivation above.
+- Dynamic Connection-named headers: any header that a `Connection` field
+  value names is hop-by-hop for that connection (RFC 7230 section 6.1).
+
+Emitted (valid response headers, NOT excluded):
+
+- `cache-control`, `pragma`, `warning`, `via`. RFC 7231 and RFC 7234 define
+  these for server-to-client communication. A bridging proxy passes them
+  through.
+
 - User-supplied `Content-Type` header on the Exchange overrides the inferred content type.
 
 ### Rejected

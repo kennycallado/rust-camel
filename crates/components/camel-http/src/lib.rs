@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod bundle;
 pub mod config;
+mod header_policy;
 pub mod health;
 pub mod registry;
 pub(crate) mod rest_match;
@@ -1584,58 +1585,11 @@ impl Consumer for HttpConsumer {
                                     _ => (HttpReplyBody::Bytes(bytes::Bytes::new()), None),
                                 };
 
-                                let mut resp_headers: Vec<(String, String)> = out
-                                    .input
-                                    .headers
-                                    .iter()
-                                    .filter(|(k, _)| !k.starts_with("Camel"))
-                                    .filter(|(k, _)| {
-                                        !matches!(
-                                            k.to_lowercase().as_str(),
-                                            "content-length"
-                                            | "content-type"
-                                            | "transfer-encoding"
-                                            | "connection"
-                                            | "cache-control"
-                                            | "date"
-                                            | "pragma"
-                                            | "trailer"
-                                            | "upgrade"
-                                            | "via"
-                                            | "warning"
-                                            | "host"
-                                            | "user-agent"
-                                            | "accept"
-                                            | "accept-encoding"
-                                            | "accept-language"
-                                            | "accept-charset"
-                                            | "authorization"
-                                            | "proxy-authorization"
-                                            | "cookie"
-                                            | "expect"
-                                            | "from"
-                                            | "if-match"
-                                            | "if-modified-since"
-                                            | "if-none-match"
-                                            | "if-range"
-                                            | "if-unmodified-since"
-                                            | "max-forwards"
-                                            | "proxy-connection"
-                                            | "range"
-                                            | "referer"
-                                            | "te"
-                                        )
-                                    })
-                                    .filter_map(|(k, v)| {
-                                        v.as_str().map(|s| (k.clone(), s.to_string()))
-                                    })
-                                    .collect();
-
-                                let content_type = user_content_type
-                                    .or(inferred_content_type);
-                                if let Some(ct) = content_type {
-                                    resp_headers.push(("Content-Type".to_string(), ct));
-                                }
+                                let resp_headers = select_response_headers(
+                                    &out.input.headers,
+                                    user_content_type,
+                                    inferred_content_type,
+                                );
 
                                 HttpReply {
                                     status,
@@ -1968,6 +1922,23 @@ impl HttpProducer {
     }
 
     fn resolve_url(exchange: &Exchange, config: &HttpEndpointConfig) -> String {
+        // bridgeEndpoint=true: emit the endpoint base URL verbatim and ignore
+        // ALL exchange URL headers (CamelHttpUri, CamelHttpPath,
+        // CamelHttpQuery) per Apache Camel bridging semantics. Only
+        // configured query_params are applied. This check MUST come before the
+        // CamelHttpUri override so bridging wins over that header.
+        if config.bridge_endpoint {
+            let url = config.base_url.clone();
+            if config.query_params.is_empty() {
+                return url;
+            }
+            let mut parsed = url::Url::parse(&url).expect("base URL must be valid"); // allow-unwrap
+            for (k, v) in &config.query_params {
+                parsed.query_pairs_mut().append_pair(k, v);
+            }
+            return parsed.to_string();
+        }
+
         if let Some(uri) = exchange
             .input
             .header("CamelHttpUri")
@@ -2104,12 +2075,22 @@ impl Service<Exchange> for HttpProducer {
                 }
             }
 
+            let conn_tokens = header_policy::connection_tokens(
+                exchange
+                    .input
+                    .headers
+                    .iter()
+                    .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
+                    .filter_map(|(_, v)| v.as_str()),
+            );
+
             for (key, value) in &exchange.input.headers {
                 if !key.starts_with("Camel")
                     && !config
                         .skip_request_headers
                         .iter()
                         .any(|h| h.eq_ignore_ascii_case(key))
+                    && !header_policy::excluded_outbound(key, &conn_tokens)
                     && let Some(val_str) = value.as_str()
                     && let (Ok(name), Ok(val)) = (
                         reqwest::header::HeaderName::from_bytes(key.as_bytes()),
@@ -2393,6 +2374,38 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
             }
         }
     }
+}
+
+/// Select the HTTP response headers emitted by the consumer reply finaliser
+/// (ADR-0057 / rc-2jj2). Extracted from the inline filter in
+/// `dispatch_handler` for unit testability.
+///
+/// Drops Camel-namespace headers, hop-by-hop/framing, request-only, and
+/// server-owned headers, plus `content-length`/`content-type` (re-derived),
+/// and any header named by a `Connection` token. Appends a single
+/// `Content-Type` from `user_content_type` falling back to
+/// `inferred_content_type` when either is present.
+fn select_response_headers(
+    headers: &HashMap<String, serde_json::Value>,
+    user_content_type: Option<String>,
+    inferred_content_type: Option<String>,
+) -> Vec<(String, String)> {
+    let conn_tokens = header_policy::connection_tokens(
+        headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
+            .filter_map(|(_, v)| v.as_str()),
+    );
+    let mut selected: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(k, _)| !k.starts_with("Camel"))
+        .filter(|(k, _)| !header_policy::excluded_response(k, &conn_tokens))
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+    if let Some(ct) = user_content_type.or(inferred_content_type) {
+        selected.push(("Content-Type".to_string(), ct));
+    }
+    selected
 }
 
 #[cfg(test)]
@@ -2752,6 +2765,37 @@ mod tests {
         (url, handle)
     }
 
+    async fn start_request_capturing_server() -> (
+        String,
+        Arc<std::sync::Mutex<Option<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 16384];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                if request.contains("\r\n\r\n") {
+                    *captured_clone.lock().unwrap() = Some(request);
+                }
+                let body = r#"{"echo":"ok"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        (url, captured, handle)
+    }
+
     #[tokio::test]
     async fn test_http_producer_get_request() {
         use tower::ServiceExt;
@@ -2777,6 +2821,133 @@ mod tests {
         assert_eq!(status, 200);
 
         assert!(!result.input.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn producer_excludes_host_and_framing() {
+        use tower::ServiceExt;
+
+        let (url, captured, _handle) = start_request_capturing_server().await;
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api/test?allowInternal=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("Host", "localhost");
+        exchange.input.set_header("Content-Length", "42");
+        exchange.input.set_header("Connection", "keep-alive");
+        exchange.input.set_header("Upgrade", "h2c");
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let request = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("no outbound request captured");
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            !lower.contains("\r\nhost: localhost"),
+            "forwarded Host: localhost must be stripped\n{request}"
+        );
+        assert!(
+            !lower.contains("content-length: 42"),
+            "exchange Content-Length must not be copied\n{request}"
+        );
+        assert!(
+            !lower.lines().any(|l| l.starts_with("connection:")),
+            "Connection header must not be forwarded\n{request}"
+        );
+        assert!(
+            !lower.lines().any(|l| l.starts_with("upgrade:")),
+            "Upgrade header must not be forwarded\n{request}"
+        );
+        let host_header = lower
+            .lines()
+            .find(|l| l.starts_with("host:"))
+            .map(|l| l.split_once(':').map(|(_, v)| v).unwrap_or("").trim())
+            .expect("outbound Host header must be set by reqwest");
+        assert!(
+            host_header.starts_with("127.0.0.1:"),
+            "outbound Host '{host_header}' must match the capture-server address"
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_forwards_request_only_headers() {
+        use tower::ServiceExt;
+
+        let (url, captured, _handle) = start_request_capturing_server().await;
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api/test?allowInternal=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("Accept", "application/json");
+        exchange.input.set_header("User-Agent", "myclient/1.0");
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let request = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("no outbound request captured");
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            lower.contains("accept: application/json"),
+            "request-only Accept header must be forwarded\n{request}"
+        );
+        assert!(
+            lower.contains("user-agent: myclient/1.0"),
+            "request-only User-Agent header must be forwarded\n{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_honours_skip_request_headers() {
+        use tower::ServiceExt;
+
+        let (url, captured, _handle) = start_request_capturing_server().await;
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}/api/test?allowInternal=true&skipRequestHeaders=Authorization"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("Authorization", "Bearer x");
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let request = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("no outbound request captured");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "Authorization must be stripped by skipRequestHeaders\n{request}"
+        );
     }
 
     #[tokio::test]
@@ -5249,6 +5420,83 @@ mod tests {
         assert_eq!(override_url, "http://other.test/root/next?a=1&b=2");
     }
 
+    fn exchange_with_path_and_query(path: &str, query: &str) -> Exchange {
+        let mut exchange = Exchange::new(Message::default());
+        exchange
+            .input
+            .set_header("CamelHttpPath", serde_json::Value::String(path.to_string()));
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String(query.to_string()),
+        );
+        exchange
+    }
+
+    #[test]
+    fn resolve_url_bridge_endpoint_true_ignores_exchange_path() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+        cfg.bridge_endpoint = true;
+        cfg.query_params
+            .insert("token".to_string(), "secret".to_string());
+        let exchange = exchange_with_path_and_query("/foo", "dropme=1");
+        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        assert_eq!(url, "http://x/?token=secret");
+        assert!(!url.contains("/foo"));
+        assert!(!url.contains("dropme"));
+    }
+
+    #[test]
+    fn resolve_url_bridge_endpoint_false_merges_path() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+        cfg.bridge_endpoint = false;
+        let exchange = exchange_with_path_and_query("/foo", "dropme=1");
+        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        assert!(url.contains("/foo"), "url should contain /foo: {url}");
+        assert!(
+            url.contains("dropme=1"),
+            "url should contain dropme=1: {url}"
+        );
+    }
+
+    #[test]
+    fn resolve_url_bridge_endpoint_true_keeps_base_when_no_query_params() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+        cfg.bridge_endpoint = true;
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpPath",
+            serde_json::Value::String("/foo".to_string()),
+        );
+        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        assert_eq!(url, "http://x");
+        assert!(!url.contains("/foo"));
+    }
+
+    #[test]
+    fn resolve_url_bridge_endpoint_true_ignores_camel_http_uri() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+        cfg.bridge_endpoint = true;
+        // query_params stays empty ([])
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://dest/explicit".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpPath",
+            serde_json::Value::String("/foo".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("x=1".to_string()),
+        );
+        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        // Under bridgeEndpoint=true ALL exchange URL headers (CamelHttpUri,
+        // CamelHttpPath, CamelHttpQuery) are ignored; the endpoint base URL
+        // wins verbatim.
+        assert_eq!(url, "http://x");
+    }
+
     #[test]
     fn test_http_producer_helpers_status_and_size_boundaries() {
         assert!(HttpProducer::is_ok_status(200, (200, 299)));
@@ -6866,5 +7114,247 @@ mod tests {
             20,
             "HttpEndpointUriConfig #[uri_param] count drifted from parser"
         );
+    }
+
+    fn make_headers(pairs: &[(&str, &str)]) -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    (*k).to_string(),
+                    serde_json::Value::String((*v).to_string()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn response_emits_cache_control_via_pragma_warning() {
+        let headers = make_headers(&[
+            ("Cache-Control", "public, max-age=3600"),
+            ("Via", "1.1 myproxy"),
+            ("Pragma", "no-cache"),
+            ("Warning", "199 misc"),
+        ]);
+        let selected = select_response_headers(&headers, None, None);
+        let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+        for expected in ["Cache-Control", "Via", "Pragma", "Warning"] {
+            assert!(
+                names.contains(&expected),
+                "{expected} should pass through to the response"
+            );
+        }
+    }
+
+    #[test]
+    fn response_excludes_request_only_and_server_owned() {
+        let headers = make_headers(&[
+            ("User-Agent", "x"),
+            ("Accept", "*/*"),
+            ("Date", "Thu, 01 Jan 2026 00:00:00 GMT"),
+        ]);
+        let selected = select_response_headers(&headers, None, None);
+        let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+        for excluded in ["User-Agent", "Accept", "Date"] {
+            assert!(
+                !names.contains(&excluded),
+                "{excluded} should NOT appear in the response"
+            );
+        }
+    }
+
+    #[test]
+    fn response_re_derives_content_type() {
+        let headers = make_headers(&[("Content-Type", "text/plain")]);
+        let selected = select_response_headers(&headers, Some("application/json".into()), None);
+        let ct_entries: Vec<&str> = selected
+            .iter()
+            .filter(|(k, _)| k == "Content-Type")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(
+            ct_entries,
+            ["application/json"],
+            "exactly one Content-Type entry, re-derived from user_content_type"
+        );
+    }
+
+    #[test]
+    fn response_excludes_camel_headers() {
+        let headers = make_headers(&[("CamelHttpPath", "/foo"), ("Cache-Control", "public")]);
+        let selected = select_response_headers(&headers, None, None);
+        let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            !names.contains(&"CamelHttpPath"),
+            "Camel-namespace headers must be excluded"
+        );
+        assert!(
+            names.contains(&"Cache-Control"),
+            "Cache-Control must pass through"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bridge proxy end-to-end integration tests (Task 4.1)
+    // Fully local + deterministic: raw TCP / in-process consumer / reqwest
+    // to 127.0.0.1. No public CDN, no httpbin, no network egress.
+    // -----------------------------------------------------------------------
+
+    /// Destination server that captures the outbound request line and the
+    /// `Host:` header the producer actually sent on the wire. Returns
+    /// `(host_value, request_line)` so a bridge-proxy test can assert that
+    /// the producer derived `Host` from the destination (not the exchange)
+    /// and honoured bridging semantics for the path.
+    async fn start_host_capturing_destination() -> (
+        String,
+        Arc<std::sync::Mutex<Option<(String, String)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let captured: Arc<std::sync::Mutex<Option<(String, String)>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 16384];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                if request.contains("\r\n\r\n") {
+                    let request_line = request.lines().next().unwrap_or("").to_string();
+                    let host_value = request
+                        .lines()
+                        .find(|l| l.to_lowercase().starts_with("host:"))
+                        .and_then(|l| l.split_once(':'))
+                        .map(|(_, v)| v.trim().to_string())
+                        .unwrap_or_default();
+                    *captured_clone.lock().unwrap() = Some((host_value, request_line));
+                }
+                let body = r#"{"echo":"ok"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        (url, captured, handle)
+    }
+
+    /// A bridging producer must derive `Host` from the destination URL and
+    /// ignore the exchange `CamelHttpPath`, matching Apache Camel bridging
+    /// semantics. The wire-level proof is the raw `Host:` header and request
+    /// line captured at the destination TCP socket.
+    #[tokio::test]
+    async fn bridge_proxy_outbound_host_matches_destination() {
+        use tower::ServiceExt;
+
+        let (url, captured, _handle) = start_host_capturing_destination().await;
+        // The Host header reqwest derives for http://127.0.0.1:{port} is the
+        // authority, scheme-stripped: "127.0.0.1:{port}".
+        let expected_host = url.strip_prefix("http://").unwrap();
+
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}?bridgeEndpoint=true&allowInternal=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        // Exchange carries a stale Host and a CamelHttpPath that bridging
+        // must drop.
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("Host", "localhost");
+        exchange.input.set_header("CamelHttpPath", "/foo");
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (host_value, request_line) = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("destination capture mutex empty — producer did not reach the destination");
+
+        assert_ne!(
+            host_value, "localhost",
+            "bridge producer must not forward the exchange Host: localhost"
+        );
+        assert_eq!(
+            host_value, expected_host,
+            "Host must be derived from the destination authority (no scheme)"
+        );
+        assert!(
+            !request_line.contains("/foo"),
+            "bridge_endpoint must drop CamelHttpPath; request line was: {request_line}"
+        );
+    }
+
+    /// A response header set by the route (`Cache-Control`) must survive to
+    /// the wire. The assertion is on the reqwest HTTP response — not an
+    /// in-process HttpReply struct — so it proves the consumer's reply
+    /// finaliser emitted the header over the socket.
+    #[tokio::test]
+    async fn bridge_proxy_route_set_response_header_survives() {
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/cache"), &endpoint_ctx)
+            .unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/cache")).send();
+
+        // Route sets Cache-Control on the outbound reply (exchange.input is
+        // the message the reply finaliser reads — see select_response_headers
+        // at the dispatch site).
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope
+                    .exchange
+                    .input
+                    .set_header("Cache-Control", "public, max-age=3600");
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        let cache_control = resp.headers().get("cache-control");
+        assert!(
+            cache_control.is_some(),
+            "Cache-Control header must survive to the wire response"
+        );
+        assert_eq!(
+            cache_control.unwrap().to_str().unwrap(),
+            "public, max-age=3600"
+        );
+
+        token.cancel();
     }
 }
