@@ -5626,8 +5626,7 @@ camel-core = { workspace = true }
         #[test]
         fn description_only_counts_in_package_section() {
             // A description under some other table must not satisfy the gate.
-            let toml =
-                "[package]\nname = \"camel-x\"\n\n[dependencies]\ndescription = \"nope\"\n";
+            let toml = "[package]\nname = \"camel-x\"\n\n[dependencies]\ndescription = \"nope\"\n";
             assert!(!crate_has_description(toml, false));
         }
 
