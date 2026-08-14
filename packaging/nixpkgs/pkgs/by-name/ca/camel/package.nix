@@ -26,7 +26,11 @@ rustPlatform.buildRustPackage (finalAttrs: {
   ];
   buildInputs = [ libxml2 ];
 
-  cargoBuildFlags = [ "-p camel-cli" ];
+  cargoBuildFlags = [
+    "-p"
+    "camel-cli"
+  ];
+
   cargoTestFlags = [
     "-p"
     "camel-cli"
