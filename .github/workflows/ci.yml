@@ -11,6 +11,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   unit-tests:
@@ -24,7 +25,8 @@ jobs:
       - name: Maximize disk space
         if: runner.os == 'Linux'
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
           sudo apt-get clean
           df -h /
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -42,11 +44,18 @@ jobs:
   full-tests-linux:
     name: Full Tests (ubuntu-latest)
     runs-on: ubuntu-latest
+    env:
+      # ENOSPC mitigation: strip debug info from dev/test profiles.
+      # Line-table backtraces are not needed to gate merges; rerun
+      # failures locally with debug info when diagnosing.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
           sudo apt-get clean
           df -h /
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -69,18 +78,24 @@ jobs:
         env:
           CAMEL_JMS_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/jms/build/native/jms-bridge
         run: cargo test -p camel-test --features integration-tests --test jms_test
+      - name: Reclaim JMS bridge artifacts
+        run: rm -rf bridges/jms/build bridges/jms/.gradle-docker-cache
       - name: Build XML bridge binary
         run: cargo xtask build-xml-bridge
       - name: XML bridge integration tests
         env:
           CAMEL_XML_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/xml/build/native/xml-bridge
         run: cargo test -p camel-test --features integration-tests --test xml_bridge_validator_test --test xml_bridge_xslt_test
+      - name: Reclaim XML bridge artifacts
+        run: rm -rf bridges/xml/build bridges/xml/.gradle-docker-cache
       - name: Build CXF bridge binary
         run: cargo xtask build-cxf-bridge
       - name: CXF bridge integration tests
         env:
           CAMEL_CXF_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/cxf/build/native/cxf-bridge
         run: cargo test -p camel-test --features integration-tests --test cxf_test
+      - name: Reclaim CXF bridge artifacts
+        run: rm -rf bridges/cxf/build bridges/cxf/.gradle-docker-cache
       - name: Container integration tests
         run: cargo test -p camel-test --features integration-tests --test container_test
       - name: Kafka integration tests (testcontainers)
@@ -91,6 +106,13 @@ jobs:
         run: cargo test -p camel-test --features integration-tests --test opensearch_test
       - name: Kubernetes integration tests (testcontainers K3s)
         run: cargo test -p camel-test --features integration-tests --test kubernetes_test
+      - name: Reclaim disk before full workspace test
+        # Drop the GraalVM builder image (~5GB), testcontainers images,
+        # and Docker build cache before compiling every test target in
+        # the workspace — the peak-disk moment of this job.
+        run: |
+          docker system prune -af --volumes || true
+          df -h /
       - name: Test (full workspace)
         run: cargo test --workspace
 
@@ -101,7 +123,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
           sudo apt-get clean
           df -h /
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -143,7 +166,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
           sudo apt-get clean
           df -h /
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -169,7 +193,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
           sudo apt-get clean
           df -h /
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -223,7 +248,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
           sudo apt-get clean
           df -h /
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
