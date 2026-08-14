@@ -33,6 +33,17 @@ async fn main() -> Result<(), CamelError> {
     let destinations = Arc::new(Mutex::new(vec!["a", "b", "c"].into_iter().cycle()));
     let dest_clone = destinations.clone();
 
+    // Per-exchange routing state: the dynamic router calls the closure
+    // repeatedly on the SAME exchange until it returns None. The log endpoint
+    // does not clear the `destination` header, so a plain header read would
+    // return the same URI on every iteration and trip the router's infinite
+    // loop guard. Track which exchanges have already been routed: first call
+    // routes, the second returns None (routing complete). Keys are removed on
+    // completion so the set stays bounded.
+    let routed: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let routed_clone = routed.clone();
+
     // ANCHOR: dynamic-router-route
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=10")
         .route_id("dynamic-router-demo")
@@ -50,16 +61,24 @@ async fn main() -> Result<(), CamelError> {
             })
         })
         // Dynamic router: read header and route to correct endpoint
-        .dynamic_router(Arc::new(|exchange: &camel_api::Exchange| {
-            let dest = exchange
-                .input
-                .header("destination")
-                .and_then(|v| v.as_str())
-                .unwrap_or("a");
-            Some(format!(
-                "log:routed-{}?showBody=true&showHeaders=true",
-                dest
-            ))
+        .dynamic_router(Arc::new(move |exchange: &camel_api::Exchange| {
+            let mut routed = routed_clone.lock().unwrap(); // allow-unwrap
+            let key = exchange.correlation_id().to_string();
+            if routed.insert(key.clone()) {
+                let dest = exchange
+                    .input
+                    .header("destination")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("a");
+                Some(format!(
+                    "log:routed-{}?showBody=true&showHeaders=true",
+                    dest
+                ))
+            } else {
+                // Second call on the same exchange: routing is complete.
+                routed.remove(&key);
+                None
+            }
         }))
         .build()?;
     // ANCHOR_END: dynamic-router-route
