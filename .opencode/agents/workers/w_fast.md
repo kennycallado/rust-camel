@@ -2,7 +2,7 @@
 description: Stable alias — fast cheap implementation worker. Points to the current preferred fast model.
 mode: subagent
 temperature: 0.1
-model: opencode/deepseek-v4-flash
+model: opencode-go/deepseek-v4-flash
 tools:
   write: true
   edit: true

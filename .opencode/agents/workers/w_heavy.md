@@ -2,7 +2,7 @@
 description: Stable alias — hard-reasoning implementation worker for complex tasks. Points to the current preferred heavy model.
 mode: subagent
 temperature: 0.1
-model: zhipuai-coding-plan/glm-5.2
+model: zhipuai-coding-plan/glm-5.3
 tools:
   write: true
   edit: true

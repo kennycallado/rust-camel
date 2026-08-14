@@ -2,7 +2,7 @@
 description: Combined reviewer. Reviews implementation plans and code changes against specs, repo context, and architecture patterns.
 mode: subagent
 temperature: 0.1
-model: zai-coding-plan/glm-5.2
+model: zai-coding-plan/glm-5.3
 tools:
   write: false
   edit: false
