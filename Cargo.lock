@@ -8679,9 +8679,11 @@ dependencies = [
  "combine",
  "futures-util",
  "itoa",
+ "log",
  "num-bigint",
  "percent-encoding",
  "pin-project-lite",
+ "rand 0.10.2",
  "rustls",
  "rustls-native-certs",
  "ryu",
@@ -8708,6 +8710,20 @@ dependencies = [
  "redis",
  "testcontainers",
  "testcontainers-modules",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "redis-sentinel"
+version = "0.28.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-redis",
+ "camel-component-timer",
+ "camel-core",
  "tokio",
  "tracing-subscriber",
 ]

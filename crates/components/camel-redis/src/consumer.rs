@@ -3,28 +3,18 @@ use camel_component_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, RuntimeObservability,
 };
-use futures_util::StreamExt;
 use redis::Msg;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::{RedisCommand, RedisEndpointConfig, is_transient_redis_error};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueuePopCommand {
-    Blpop,
-    Brpop,
-}
-
-fn queue_command_name(pop_command: QueuePopCommand) -> &'static str {
-    match pop_command {
-        QueuePopCommand::Blpop => "BLPOP",
-        QueuePopCommand::Brpop => "BRPOP",
-    }
-}
+use crate::pubsub::{PubSubIo, RedisPubSubIo, pubsub_session};
+use crate::queue::{
+    QueueConsumerParams, QueueIo, QueuePopCommand, RedisQueueIo, queue_command_name, queue_session,
+};
+use crate::topology::RedisTopology;
 
 /// Mode of operation for the Redis consumer.
 #[derive(Debug, Clone)]
@@ -51,6 +41,8 @@ pub enum RedisConsumerMode {
 pub struct RedisConsumer {
     config: RedisEndpointConfig,
     mode: RedisConsumerMode,
+    /// Topology used to resolve the current master (enables sentinel failover).
+    topology: Arc<dyn RedisTopology>,
     /// Runtime observability for ADR-0012 metrics calls
     runtime: Arc<dyn RuntimeObservability>,
     /// Cancellation token for graceful shutdown
@@ -104,13 +96,25 @@ impl RedisConsumer {
             }
         };
 
+        // Build the topology from the endpoint config (same factory as the
+        // producer) so the consumer re-resolves the master on failover.
+        let topology = crate::topology::topology_from_config(&config)?;
+
         Ok(Self {
             config,
             mode,
+            topology,
             runtime,
             cancel_token: None,
             task_handle: None,
         })
+    }
+
+    /// Test-only accessor exposing the resolved topology so tests can assert
+    /// the standalone vs sentinel kind without a broker.
+    #[cfg(test)]
+    pub(crate) fn topology(&self) -> &Arc<dyn RedisTopology> {
+        &self.topology
     }
 }
 
@@ -161,25 +165,34 @@ impl Consumer for RedisConsumer {
 
         // Capture runtime for ADR-0012 metrics in spawned tasks
         let runtime = self.runtime.clone();
-        let handle =
-            match mode {
-                RedisConsumerMode::PubSub { channels, patterns } => tokio::spawn(
-                    run_pubsub_consumer(config, channels, patterns, ctx, cancel_token, runtime),
-                ),
-                RedisConsumerMode::Queue {
+        let topology = self.topology.clone();
+        let handle = match mode {
+            RedisConsumerMode::PubSub { channels, patterns } => tokio::spawn(run_pubsub_consumer(
+                config,
+                channels,
+                patterns,
+                ctx,
+                cancel_token,
+                runtime,
+                topology,
+            )),
+            RedisConsumerMode::Queue {
+                key,
+                timeout,
+                pop_command,
+            } => tokio::spawn(run_queue_consumer(
+                config,
+                QueueConsumerParams {
                     key,
                     timeout,
                     pop_command,
-                } => tokio::spawn(run_queue_consumer(
-                    config,
-                    key,
-                    timeout,
-                    pop_command,
-                    ctx,
-                    cancel_token,
-                    runtime,
-                )),
-            };
+                },
+                ctx,
+                cancel_token,
+                runtime,
+                topology,
+            )),
+        };
 
         self.task_handle = Some(handle);
         Ok(())
@@ -241,9 +254,16 @@ impl Consumer for RedisConsumer {
 
 /// Runs a Pub/Sub consumer loop.
 ///
-/// Creates a dedicated PubSub connection and subscribes to the specified
-/// channels and/or patterns. Messages are converted to Exchanges and sent
-/// through the consumer context.
+/// Drives the [`pubsub_session`] failover core: the session holds ONE
+/// connection and delivers every message on it, reconnecting (with
+/// subscription replay) only on stream end or transient error. For each
+/// delivered message this wrapper builds an Exchange and sends it through the
+/// consumer context. On budget exhaustion the session returns `Err` so Route
+/// supervision fires (ADR-0007).
+///
+/// Delivery is **best-effort**: messages published while disconnected are
+/// lost, and a failover reconnect can re-deliver a message already handed to
+/// the pipeline. Loss and duplicates are possible and expected.
 async fn run_pubsub_consumer(
     config: RedisEndpointConfig,
     channels: Vec<String>,
@@ -251,67 +271,77 @@ async fn run_pubsub_consumer(
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
     runtime: Arc<dyn RuntimeObservability>,
+    topology: Arc<dyn RedisTopology>,
 ) -> Result<(), CamelError> {
     info!(endpoint = %config.safe_endpoint(), "PubSub consumer connecting");
 
-    // Create dedicated PubSub connection
-    let client = redis::Client::open(config.redis_url())
-        .map_err(|e| CamelError::ProcessorError(format!("Failed to create Redis client: {}", e)))?;
-
-    let timeout_secs = config.connection_timeout_secs;
-    let mut pubsub =
-        tokio::time::timeout(Duration::from_secs(timeout_secs), client.get_async_pubsub())
-            .await
-            .map_err(|_| {
-                CamelError::ProcessorError(format!(
-                    "PubSub connection timed out after {}s",
-                    timeout_secs
-                ))
-            })?
-            .map_err(|e| {
-                CamelError::ProcessorError(format!("Failed to create PubSub connection: {}", e))
-            })?;
-
-    // Subscribe to channels
-    for channel in &channels {
-        debug!(channel = %channel, "Subscribing to channel");
-        pubsub.subscribe(channel).await.map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to subscribe to channel {}: {}", channel, e))
-        })?;
-    }
-
-    // Subscribe to patterns
-    for pattern in &patterns {
-        debug!(pattern = %pattern, "Subscribing to pattern");
-        pubsub.psubscribe(pattern).await.map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to subscribe to pattern {}: {}", pattern, e))
-        })?;
-    }
+    let mut io: Box<dyn PubSubIo> = Box::new(RedisPubSubIo::new(config.connection_timeout_secs));
 
     info!("PubSub consumer started, waiting for messages");
     ctx.mark_ready();
 
-    // Message loop
-    let mut stream = pubsub.on_message();
-    loop {
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                info!("PubSub consumer received shutdown signal");
-                break;
+    let route_id = ctx.route_id().to_string();
+    let route_id_err = route_id.clone();
+    let runtime_err = Arc::clone(&runtime);
+    // Per-message delivery: build the Exchange and hand it to the pipeline.
+    // A clone of `ctx` per message keeps the closure `Fn` (the session may
+    // call it any number of times on one connection).
+    let deliver = move |msg: Msg| {
+        let ctx = ctx.clone();
+        let runtime = Arc::clone(&runtime);
+        let route_id = route_id.clone();
+        let exchange = build_exchange_from_pubsub(msg);
+        async move {
+            if let Err(e) = ctx.send(exchange).await {
+                runtime
+                    .metrics()
+                    .increment_errors(&route_id, "b-prime:redis:pubsub-channel-closed");
+                // log-policy: outside-contract
+                error!("Failed to send exchange to pipeline: {}", e);
+                // Don't break - continue processing messages
             }
-            msg = stream.next() => {
-                if let Some(msg) = msg {
-                    let exchange = build_exchange_from_pubsub(msg);
-                    if let Err(e) = ctx.send(exchange).await {
-                        runtime.metrics().increment_errors(ctx.route_id(), "b-prime:redis:pubsub-channel-closed");
-                        // log-policy: outside-contract
-                        error!("Failed to send exchange to pipeline: {}", e);
-                        // Don't break - continue processing messages
+        }
+    };
+
+    tokio::select! {
+        _ = cancel_token.cancelled() => {
+            info!("PubSub consumer received shutdown signal");
+        }
+        result = pubsub_session(
+            &*topology,
+            &mut *io,
+            &channels,
+            &patterns,
+            &config.reconnect,
+            &cancel_token,
+            deliver,
+        ) => {
+            match result {
+                Ok(()) => {
+                    // Cancellation observed inside the session.
+                    info!("PubSub consumer received shutdown signal");
+                }
+                Err(e) => {
+                    if is_transient_redis_error(&e) {
+                        // Budget exhaustion — the task ends, supervision fires (ADR-0007).
+                        runtime_err
+                            .metrics()
+                            .increment_errors(&route_id_err, "e:redis:message-transient-budget");
+                        // log-policy: system-broken
+                        error!(
+                            error = %e,
+                            "PubSub consumer terminated after transient-error budget exhausted"
+                        );
+                    } else {
+                        // Non-transient error — the route terminates and
+                        // supervision restarts it (ADR-0007).
+                        runtime_err
+                            .metrics()
+                            .increment_errors(&route_id_err, "e:redis:message-non-transient");
+                        // log-policy: system-broken
+                        error!(error = %e, "Non-transient error");
                     }
-                } else {
-                    // Stream ended
-                    warn!("PubSub stream ended");
-                    break;
+                    return Err(e);
                 }
             }
         }
@@ -322,128 +352,100 @@ async fn run_pubsub_consumer(
 
 /// Runs a Queue consumer loop using BLPOP or BRPOP.
 ///
-/// Creates a dedicated connection and performs blocking list pop operations.
-/// Items are converted to Exchanges and sent through the consumer context.
+/// Drives the [`queue_session`] failover core: the session resolves the
+/// master, connects once, and performs blocking pops on that single
+/// connection, delivering every item through the wrapper. On a transient
+/// error the session re-resolves the master and reconnects (enabling sentinel
+/// failover); on budget exhaustion it returns `Err` so Route supervision
+/// fires (ADR-0007).
 async fn run_queue_consumer(
     config: RedisEndpointConfig,
-    key: String,
-    timeout: u64,
-    pop_command: QueuePopCommand,
+    params: QueueConsumerParams,
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
     runtime: Arc<dyn RuntimeObservability>,
+    topology: Arc<dyn RedisTopology>,
 ) -> Result<(), CamelError> {
+    let key = &params.key;
+    let timeout = params.timeout;
+    let pop_command = params.pop_command;
+    let queue_cmd = queue_command_name(pop_command);
     info!(
         endpoint = %config.safe_endpoint(),
         key = %key,
-        command = %queue_command_name(pop_command),
+        command = %queue_cmd,
         timeout_s = timeout,
         "Queue consumer connecting"
     );
 
-    // Create dedicated multiplexed connection
-    let client = redis::Client::open(config.redis_url())
-        .map_err(|e| CamelError::ProcessorError(format!("Failed to create Redis client: {}", e)))?;
-
-    let timeout_secs = config.connection_timeout_secs;
-    let mut conn = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        client.get_multiplexed_async_connection(),
-    )
-    .await
-    .map_err(|_| {
-        CamelError::ProcessorError(format!(
-            "Queue connection timed out after {}s",
-            timeout_secs
-        ))
-    })?
-    .map_err(|e| CamelError::ProcessorError(format!("Failed to create connection: {}", e)))?;
+    let mut io: Box<dyn QueueIo> = Box::new(RedisQueueIo::new(
+        config.connection_timeout_secs,
+        pop_command,
+    ));
 
     info!("Queue consumer started, waiting for items");
     ctx.mark_ready();
 
-    // Blocking pop loop (BLPOP/BRPOP) with capped exponential backoff via NetworkRetryPolicy (REDIS-004)
-    let queue_cmd = queue_command_name(pop_command);
-    let mut attempt: u32 = 0;
-
-    // Manual retry loop (not retry_async / retry_async_cancelable) because:
-    // - This is a long-running polling loop, not a bounded retry.
-    //   retry_async is designed for "try N times then fail" patterns; this
-    //   loop polls forever with error backoff, which is a different contract.
-    // - cmd.query_async() borrows &mut conn; the mutable borrow cannot
-    //   be captured by FnMut() -> async move { ... } across retries.
-    // - Timeout is a normal event (resets attempt counter) vs transient
-    //   errors (increment counter) — classification is per-outcome, not
-    //   per-error-type, so retry_async's is_retryable closure doesn't fit.
-    // - Uses tokio::select! with cancel_token.cancelled(); could theoretically
-    //   use retry_async_cancelable but the polling-loop pattern requires
-    //   interleaved cancellation checks between every poll, not just during
-    //   error backoff sleep.
-    loop {
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                info!("Queue consumer received shutdown signal");
-                break;
+    let route_id = ctx.route_id().to_string();
+    let route_id_err = route_id.clone();
+    let runtime_err = Arc::clone(&runtime);
+    // Per-item delivery: build the Exchange and hand it to the pipeline.
+    let deliver = move |(item_key, value): (String, String)| {
+        let ctx = ctx.clone();
+        let runtime = Arc::clone(&runtime);
+        let route_id = route_id.clone();
+        let exchange = build_exchange_from_blpop(item_key, value);
+        async move {
+            if let Err(e) = ctx.send(exchange).await {
+                runtime
+                    .metrics()
+                    .increment_errors(&route_id, "b-prime:redis:blpop-channel-closed");
+                // log-policy: outside-contract
+                error!("Failed to send exchange to pipeline: {}", e);
+                // Don't break - continue processing items
             }
-            result = async {
-                let cmd = redis::cmd(queue_cmd)
-                    .arg(&key)
-                    .arg(timeout)
-                    .to_owned();
-                cmd.query_async::<Option<(String, String)>>(&mut conn).await
-            } =>
-            {
-                match result {
-                    Ok(Some((key, value))) => {
-                        // Reset retry counter on success
-                        attempt = 0;
-                        let exchange = build_exchange_from_blpop(key, value);
-                        if let Err(e) = ctx.send(exchange).await {
-                            runtime.metrics().increment_errors(ctx.route_id(), "b-prime:redis:blpop-channel-closed");
-                            // log-policy: outside-contract
-                            error!("Failed to send exchange to pipeline: {}", e);
-                            // Don't break - continue processing items
-                        }
+        }
+    };
+
+    tokio::select! {
+        _ = cancel_token.cancelled() => {
+            info!("Queue consumer received shutdown signal");
+        }
+        result = queue_session(
+            &*topology,
+            &mut *io,
+            &params,
+            &config.reconnect,
+            &cancel_token,
+            deliver,
+        ) => {
+            match result {
+                Ok(()) => {
+                    // Cancellation observed inside the session.
+                    info!("Queue consumer received shutdown signal");
+                }
+                Err(e) => {
+                    if is_transient_redis_error(&e) {
+                        // Budget exhaustion — the task ends, supervision fires (ADR-0007).
+                        runtime_err
+                            .metrics()
+                            .increment_errors(&route_id_err, "e:redis:message-transient-budget");
+                        // log-policy: system-broken
+                        error!(
+                            command = %queue_cmd,
+                            error = %e,
+                            "Queue consumer terminated after transient-error budget exhausted"
+                        );
+                    } else {
+                        // Non-transient error — the route terminates and
+                        // supervision restarts it (ADR-0007).
+                        runtime_err
+                            .metrics()
+                            .increment_errors(&route_id_err, "e:redis:message-non-transient");
+                        // log-policy: system-broken
+                        error!(command = %queue_cmd, error = %e, "Non-transient error");
                     }
-                    Ok(None) => {
-                        // Timeout - continue loop
-                        // This is normal for blocking POP with timeout
-                    }
-                    Err(e) => {
-                        if e.is_timeout() {
-                            // Timeout - continue loop silently
-                            attempt = 0;
-                        } else if is_transient_redis_error(&CamelError::ProcessorError(e.to_string())) {
-                            attempt += 1;
-                            if !config.reconnect.should_retry(attempt) {
-                                // log-policy: system-broken
-                                error!(
-                                    command = %queue_cmd,
-                                    attempts = attempt,
-                                    "Max attempts exceeded for transient error, terminating"
-                                );
-                                return Err(CamelError::ProcessorError(format!(
-                                    "{} failed after {} attempts: {}",
-                                    queue_cmd, config.reconnect.max_attempts, e
-                                )));
-                            }
-                            let delay = config.reconnect.delay_for(attempt - 1);
-                            warn!(
-                                command = %queue_cmd,
-                                error = %e,
-                                attempt,
-                                delay_ms = delay.as_millis(),
-                                "Transient error, retrying with backoff"
-                            );
-                            tokio::time::sleep(delay).await;
-                        } else {
-                            // Non-transient error — log and continue with small delay
-                            runtime.metrics().increment_errors(ctx.route_id(), "e:redis:message-non-transient");
-                            // log-policy: outside-contract
-                            error!(command = %queue_cmd, error = %e, "Non-transient error");
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    }
+                    return Err(e);
                 }
             }
         }
@@ -504,7 +506,9 @@ fn build_exchange_from_blpop(key: String, value: String) -> Exchange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::topology::ServerKind;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::mpsc;
 
     fn test_rt() -> Arc<dyn RuntimeObservability> {
@@ -523,8 +527,32 @@ mod tests {
             db: 0,
             ssl: Some(false),
             reconnect: camel_component_api::NetworkRetryPolicy::default(),
-            connection_timeout_secs: 10,
+            // Short so lifecycle tests that spawn a real queue/pubsub consumer
+            // (which now retries on connect failure) terminate quickly.
+            connection_timeout_secs: 1,
+            topology_kind: crate::sentinel_config::TopologyKind::Standalone,
         }
+    }
+
+    // Task 2.3: a `redis://` endpoint must construct a StandaloneTopology that
+    // resolves the fixed URL. `RedisTopology` is a trait, so assert indirectly:
+    // resolve against the consumer's topology and check the client address.
+    // No broker needed — `Client::open` only parses the URL.
+    #[tokio::test]
+    async fn standalone_consumer_uses_standalone_topology() {
+        let config = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=BLPOP&key=demo")
+            .expect("valid standalone uri");
+        let consumer = RedisConsumer::new(config, test_rt()).expect("BLPOP should be valid");
+
+        let client = consumer
+            .topology()
+            .resolve(ServerKind::Master)
+            .await
+            .expect("standalone topology should resolve the fixed URL");
+        assert_eq!(
+            client.get_connection_info().addr().to_string(),
+            "127.0.0.1:6379"
+        );
     }
 
     #[test]

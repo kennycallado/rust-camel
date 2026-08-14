@@ -3,11 +3,15 @@ use camel_component_api::{CamelError, Exchange, NetworkRetryPolicy};
 // retry_async is used in tests (the regression test in this file).
 #[cfg(test)]
 use camel_component_api::retry_async;
+use redis::aio::MultiplexedConnection;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::config::{RedisCommand, is_transient_redis_error};
+use crate::commands;
+use crate::config::{RedisCommand, RedisEndpointConfig, is_transient_redis_error};
+use crate::topology::{RedisTopology, ServerKind};
 
 /// Abstraction over a Redis connection that can execute commands.
 ///
@@ -109,6 +113,225 @@ impl RedisCommandExecutor for FakeExecutor {
     }
 }
 
+/// Dispatches a Redis command to the appropriate module handler.
+///
+/// Moved here from `RedisProducer` so the producer no longer owns the
+/// command-to-module mapping. The producer (and any executor) calls this free
+/// function with a live connection.
+pub async fn dispatch_command(
+    cmd: &RedisCommand,
+    conn: &mut MultiplexedConnection,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    match cmd {
+        // String commands
+        RedisCommand::Set
+        | RedisCommand::Get
+        | RedisCommand::Getset
+        | RedisCommand::Setnx
+        | RedisCommand::Setex
+        | RedisCommand::Mget
+        | RedisCommand::Mset
+        | RedisCommand::Incr
+        | RedisCommand::Incrby
+        | RedisCommand::Decr
+        | RedisCommand::Decrby
+        | RedisCommand::Append
+        | RedisCommand::Strlen => commands::string::dispatch(cmd, conn, exchange).await,
+
+        // Key commands
+        RedisCommand::Exists
+        | RedisCommand::Del
+        | RedisCommand::Expire
+        | RedisCommand::Expireat
+        | RedisCommand::Pexpire
+        | RedisCommand::Pexpireat
+        | RedisCommand::Ttl
+        | RedisCommand::Keys
+        | RedisCommand::Rename
+        | RedisCommand::Renamenx
+        | RedisCommand::Type
+        | RedisCommand::Persist
+        | RedisCommand::Move
+        | RedisCommand::Sort => commands::key::dispatch(cmd, conn, exchange).await,
+
+        // List commands
+        RedisCommand::Lpush
+        | RedisCommand::Rpush
+        | RedisCommand::Lpushx
+        | RedisCommand::Rpushx
+        | RedisCommand::Lpop
+        | RedisCommand::Rpop
+        | RedisCommand::Blpop
+        | RedisCommand::Brpop
+        | RedisCommand::Llen
+        | RedisCommand::Lrange
+        | RedisCommand::Lindex
+        | RedisCommand::Linsert
+        | RedisCommand::Lset
+        | RedisCommand::Lrem
+        | RedisCommand::Ltrim
+        | RedisCommand::Rpoplpush => commands::list::dispatch(cmd, conn, exchange).await,
+
+        // Hash commands
+        RedisCommand::Hset
+        | RedisCommand::Hget
+        | RedisCommand::Hsetnx
+        | RedisCommand::Hmset
+        | RedisCommand::Hmget
+        | RedisCommand::Hdel
+        | RedisCommand::Hexists
+        | RedisCommand::Hlen
+        | RedisCommand::Hkeys
+        | RedisCommand::Hvals
+        | RedisCommand::Hgetall
+        | RedisCommand::Hincrby => commands::hash::dispatch(cmd, conn, exchange).await,
+
+        // Set commands
+        RedisCommand::Sadd
+        | RedisCommand::Srem
+        | RedisCommand::Smembers
+        | RedisCommand::Scard
+        | RedisCommand::Sismember
+        | RedisCommand::Spop
+        | RedisCommand::Smove
+        | RedisCommand::Sinter
+        | RedisCommand::Sunion
+        | RedisCommand::Sdiff
+        | RedisCommand::Sinterstore
+        | RedisCommand::Sunionstore
+        | RedisCommand::Sdiffstore
+        | RedisCommand::Srandmember => commands::set::dispatch(cmd, conn, exchange).await,
+
+        // Sorted set commands
+        RedisCommand::Zadd
+        | RedisCommand::Zrem
+        | RedisCommand::Zrange
+        | RedisCommand::Zrevrange
+        | RedisCommand::Zrank
+        | RedisCommand::Zrevrank
+        | RedisCommand::Zscore
+        | RedisCommand::Zcard
+        | RedisCommand::Zincrby
+        | RedisCommand::Zcount
+        | RedisCommand::Zrangebyscore
+        | RedisCommand::Zrevrangebyscore
+        | RedisCommand::Zremrangebyrank
+        | RedisCommand::Zremrangebyscore
+        | RedisCommand::Zunionstore
+        | RedisCommand::Zinterstore => commands::zset::dispatch(cmd, conn, exchange).await,
+
+        // Pub/Sub commands
+        RedisCommand::Publish | RedisCommand::Subscribe | RedisCommand::Psubscribe => {
+            commands::pubsub::dispatch(cmd, conn, exchange).await
+        }
+
+        // Other commands
+        RedisCommand::Ping | RedisCommand::Echo => {
+            commands::other::dispatch(cmd, conn, exchange).await
+        }
+    }
+}
+
+/// A real [`RedisCommandExecutor`] backed by a lazily-created multiplexed
+/// connection whose target is re-resolved through a [`RedisTopology`].
+///
+/// The connection is created on first use and cached.
+/// [`RedisCommandExecutor::reconnect`] drops the cached connection and rebuilds
+/// it, which re-resolves the master address through the topology — this is what
+/// enables sentinel failover detection.
+///
+// log-policy: the transient retry `warn!` in `execute_with_retry` is
+// category (e) outside-contract (ADR-0012). Error messages here are kept
+// redaction-safe via `config.redis_url_safe()`.
+#[derive(Clone)]
+pub struct MultiplexedExecutor {
+    config: RedisEndpointConfig,
+    topology: Arc<dyn RedisTopology>,
+    conn: Arc<Mutex<Option<MultiplexedConnection>>>,
+}
+
+impl MultiplexedExecutor {
+    /// Create a new executor that resolves connections through `topology`.
+    pub fn new(config: RedisEndpointConfig, topology: Arc<dyn RedisTopology>) -> Self {
+        Self {
+            config,
+            topology,
+            conn: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Return a cached connection, or resolve and build one on first use.
+    ///
+    /// `pub(crate)` so the producer's `check_connection` (sibling module) can
+    /// reuse the same connection in Task 1.5.
+    pub(crate) async fn get_conn(&self) -> Result<MultiplexedConnection, CamelError> {
+        // Fast path: reuse the cached connection.
+        {
+            let guard = self.conn.lock().await;
+            if let Some(c) = guard.as_ref() {
+                return Ok(c.clone());
+            }
+        }
+
+        // Resolve the master address through the topology, then connect.
+        let client = self.topology.resolve(ServerKind::Master).await?;
+        let redis_url_safe = self.config.redis_url_safe();
+        let timeout_secs = self.config.connection_timeout_secs;
+
+        let new_conn = tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            client.get_multiplexed_async_connection(),
+        )
+        .await
+        .map_err(|_| {
+            CamelError::ProcessorError(format!(
+                "Redis connection to '{}' timed out after {}s",
+                redis_url_safe, timeout_secs
+            ))
+        })?
+        .map_err(|e| {
+            CamelError::ProcessorError(format!(
+                "Failed to connect to Redis at '{}': {}",
+                redis_url_safe, e
+            ))
+        })?;
+
+        let mut guard = self.conn.lock().await;
+        *guard = Some(new_conn.clone());
+        Ok(new_conn)
+    }
+
+    /// Expose the shared connection Arc so sibling-module tests (producer) can
+    /// assert that clones share the same underlying connection.
+    #[cfg(test)]
+    pub(crate) fn conn_arc(&self) -> Arc<Mutex<Option<MultiplexedConnection>>> {
+        Arc::clone(&self.conn)
+    }
+}
+
+#[async_trait]
+impl RedisCommandExecutor for MultiplexedExecutor {
+    async fn execute_command(
+        &mut self,
+        cmd: &RedisCommand,
+        exchange: &mut Exchange,
+    ) -> Result<(), CamelError> {
+        let mut conn = self.get_conn().await?;
+        dispatch_command(cmd, &mut conn, exchange).await
+    }
+
+    async fn reconnect(&mut self) -> Result<(), CamelError> {
+        // Drop the cached connection so the next get_conn re-resolves.
+        {
+            let mut guard = self.conn.lock().await;
+            *guard = None;
+        }
+        self.get_conn().await?;
+        Ok(())
+    }
+}
+
 /// Executes a command with retry on transient errors, using `NetworkRetryPolicy`.
 ///
 /// This is the core retry logic extracted for testability.
@@ -157,6 +380,7 @@ pub async fn execute_with_retry<E: RedisCommandExecutor>(
                     return Err(err);
                 }
                 let delay = effective_policy.delay_for(attempt);
+                // log-policy: outside-contract
                 tracing::warn!(
                     attempt,
                     delay_ms = delay.as_millis(),
@@ -173,6 +397,7 @@ pub async fn execute_with_retry<E: RedisCommandExecutor>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::topology::FakeTopology;
     use std::time::Duration;
 
     fn transient_err(msg: &str) -> Result<(), FakeError> {
@@ -395,5 +620,53 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    fn test_config() -> RedisEndpointConfig {
+        let mut config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        // Keep the connect timeout short so dead-address tests fail fast.
+        config.connection_timeout_secs = 1;
+        config
+    }
+
+    #[tokio::test]
+    async fn multiplexed_executor_lazy_connects_via_topology() {
+        let topology = Arc::new(FakeTopology::addrs(vec!["redis://127.0.0.1:1".into()]));
+        let mut executor = MultiplexedExecutor::new(test_config(), topology.clone());
+
+        let mut exchange = Exchange::default();
+        let cmd = RedisCommand::Get;
+        let result = executor.execute_command(&cmd, &mut exchange).await;
+
+        // The topology must have been consulted to resolve the master address.
+        assert!(
+            topology.resolve_call_count() >= 1,
+            "topology should be resolved on first execute_command"
+        );
+        // Connecting to a dead port (127.0.0.1:1) must fail deterministically.
+        assert!(
+            matches!(result, Err(CamelError::ProcessorError(_))),
+            "expected ProcessorError connecting to dead port, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiplexed_executor_reconnect_reresolves() {
+        let topology = Arc::new(FakeTopology::addrs(vec![
+            "redis://a".into(),
+            "redis://b".into(),
+        ]));
+        let mut executor = MultiplexedExecutor::new(test_config(), topology.clone());
+
+        // Each reconnect drops the cached connection and re-resolves via the
+        // topology. Connecting to the fake addresses fails, which is fine.
+        let _ = executor.reconnect().await;
+        let _ = executor.reconnect().await;
+
+        assert_eq!(
+            topology.resolve_call_count(),
+            2,
+            "each reconnect should re-resolve the topology"
+        );
     }
 }

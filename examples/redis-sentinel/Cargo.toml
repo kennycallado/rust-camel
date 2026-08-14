@@ -1,0 +1,19 @@
+[package]
+name = "redis-sentinel"
+description = "Redis Sentinel failover example for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-redis = { workspace = true, features = ["sentinel"] }
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

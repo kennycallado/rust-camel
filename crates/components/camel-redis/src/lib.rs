@@ -33,6 +33,12 @@ pub mod executor;
 pub mod health;
 pub(crate) mod metadata;
 pub mod producer;
+pub(crate) mod pubsub;
+pub(crate) mod queue;
+pub(crate) mod retry;
+pub mod sentinel_component;
+pub mod sentinel_config;
+pub mod topology;
 
 use camel_component_api::{BoxProcessor, CamelError, ComponentMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
@@ -42,8 +48,14 @@ use std::sync::Arc;
 pub use bundle::RedisBundle;
 pub use config::{RedisCommand, RedisConfig, RedisEndpointConfig};
 pub use consumer::RedisConsumer;
+pub use executor::MultiplexedExecutor;
 pub use health::RedisHealthCheck;
 pub use producer::RedisProducer;
+pub use sentinel_component::{RedisSentinelComponent, RedissSentinelComponent};
+pub use sentinel_config::{SentinelConfig, TopologyKind};
+#[cfg(test)]
+pub use topology::FakeTopology;
+pub use topology::{RedisTopology, ServerKind, StandaloneTopology};
 
 pub struct RedisComponent {
     config: Option<RedisConfig>,
@@ -91,22 +103,61 @@ impl Component for RedisComponent {
         uri: &str,
         ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
-        let mut config = RedisEndpointConfig::from_uri(uri)?;
-        // Apply global config defaults if available
-        if let Some(ref global_cfg) = self.config {
-            config.apply_defaults(global_cfg);
-        }
-        // Resolve any remaining None fields to hardcoded defaults
-        config.resolve_defaults();
-
-        let health_check = RedisHealthCheck::new(&config)?;
-        ctx.register_current_route_health_check(Arc::new(health_check));
-
-        Ok(Box::new(RedisEndpoint {
-            uri: uri.to_string(),
-            config,
-        }))
+        create_redis_endpoint(uri, self.config.as_ref(), ctx)
     }
+}
+
+/// Shared endpoint-creation logic for every redis-scheme component
+/// (`redis`, `redis-sentinel`, `rediss-sentinel`).
+///
+/// The config parser derives the topology from the URI scheme; global config
+/// defaults (including the `[components.redis.sentinel]` block) are applied
+/// when provided. Fail-closed checks run here so all schemes behave
+/// identically.
+pub(crate) fn create_redis_endpoint(
+    uri: &str,
+    global_config: Option<&RedisConfig>,
+    ctx: &dyn camel_component_api::ComponentContext,
+) -> Result<Box<dyn Endpoint>, CamelError> {
+    let mut config = RedisEndpointConfig::from_uri(uri)?;
+    // Apply global config defaults if available
+    if let Some(global_cfg) = global_config {
+        config.apply_defaults(global_cfg);
+        // Apply sentinel topology from the TOML block (fail-closed, ADR-0033).
+        config.apply_topology_defaults(global_cfg)?;
+    }
+    // Resolve any remaining None fields to hardcoded defaults
+    config.resolve_defaults();
+
+    // Fail-closed when a sentinel config is present but the feature is off
+    if cfg!(not(feature = "sentinel")) && matches!(config.topology_kind, TopologyKind::Sentinel(_))
+    {
+        return Err(CamelError::Config(
+            "redis-sentinel requires the 'sentinel' cargo feature".into(),
+        ));
+    }
+
+    // Validate topology (mutual exclusion, non-empty master_name/nodes)
+    #[cfg(feature = "cluster")]
+    let cluster_nodes_present = cluster_nodes_in_global_config(global_config);
+    #[cfg(not(feature = "cluster"))]
+    let cluster_nodes_present = false;
+    crate::sentinel_config::validate_topology(&config.topology_kind, cluster_nodes_present)?;
+
+    let health_check = RedisHealthCheck::new(&config)?;
+    ctx.register_current_route_health_check(Arc::new(health_check));
+
+    Ok(Box::new(RedisEndpoint {
+        uri: uri.to_string(),
+        config,
+    }))
+}
+
+#[cfg(feature = "cluster")]
+fn cluster_nodes_in_global_config(global_config: Option<&RedisConfig>) -> bool {
+    global_config
+        .map(|c| !c.cluster_nodes.is_empty())
+        .unwrap_or(false)
 }
 
 pub struct RedisEndpoint {
@@ -124,7 +175,7 @@ impl Endpoint for RedisEndpoint {
         _rt: Arc<dyn RuntimeObservability>,
         _ctx: &ProducerContext,
     ) -> Result<BoxProcessor, CamelError> {
-        Ok(BoxProcessor::new(RedisProducer::new(self.config.clone())))
+        Ok(BoxProcessor::new(RedisProducer::new(self.config.clone())?))
     }
 
     fn create_consumer(

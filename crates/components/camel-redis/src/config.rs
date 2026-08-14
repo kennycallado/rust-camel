@@ -4,6 +4,8 @@ use camel_component_api::parse_uri;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use std::str::FromStr;
 
+use crate::sentinel_config::{SentinelConfig, TopologyKind};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedisCommand {
     // String operations
@@ -254,6 +256,9 @@ pub struct RedisConfig {
     /// Reconnection policy for lost Redis connections.
     #[serde(default)]
     pub reconnect: NetworkRetryPolicy,
+    /// Sentinel topology configuration. Empty means standalone mode.
+    #[serde(default)]
+    pub sentinel: SentinelConfig,
     /// Cluster node URLs. Empty means single-node mode. Feature-gated behind `cluster`.
     #[cfg(feature = "cluster")]
     pub cluster_nodes: Vec<String>,
@@ -272,7 +277,8 @@ impl std::fmt::Debug for RedisConfig {
             .field("tls", &self.tls)
             .field("tls_ca_cert", &redacted_opt(&self.tls_ca_cert))
             .field("connection_timeout_secs", &self.connection_timeout_secs)
-            .field("reconnect", &self.reconnect);
+            .field("reconnect", &self.reconnect)
+            .field("sentinel", &self.sentinel);
         #[cfg(feature = "cluster")]
         s.field("cluster_nodes", &self.cluster_nodes);
         s.finish()
@@ -289,6 +295,7 @@ impl Default for RedisConfig {
             tls_ca_cert: None,
             connection_timeout_secs: 10,
             reconnect: NetworkRetryPolicy::default(),
+            sentinel: SentinelConfig::default(),
             #[cfg(feature = "cluster")]
             cluster_nodes: Vec::new(),
         }
@@ -509,6 +516,10 @@ pub struct RedisEndpointConfig {
     /// Connection timeout in seconds for establishing Redis connections.
     /// Filled by `apply_defaults()` from global config.
     pub connection_timeout_secs: u64,
+
+    /// Topology kind: Standalone, Sentinel, or Cluster.
+    /// Defaults to `TopologyKind::Standalone`.
+    pub topology_kind: TopologyKind,
 }
 
 impl std::fmt::Debug for RedisEndpointConfig {
@@ -525,6 +536,7 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("ssl", &self.ssl)
             .field("reconnect", &self.reconnect)
             .field("connection_timeout_secs", &self.connection_timeout_secs)
+            .field("topology_kind", &self.topology_kind)
             .finish()
     }
 }
@@ -532,6 +544,75 @@ impl std::fmt::Debug for RedisEndpointConfig {
 impl RedisEndpointConfig {
     pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
+
+        // Handle sentinel schemes: redis-sentinel:// and rediss-sentinel://
+        if parts.scheme == "redis-sentinel" || parts.scheme == "rediss-sentinel" {
+            // Feature-disabled fail-closed: reject when sentinel feature is off
+            if cfg!(not(feature = "sentinel")) {
+                return Err(CamelError::Config(
+                    "redis-sentinel requires the 'sentinel' cargo feature".into(),
+                ));
+            }
+
+            let parsed = crate::sentinel_config::parse_sentinel_uri(uri)?;
+            let topology_kind = parsed.topology;
+            let db = parsed.db;
+
+            // Defense-in-depth: validate the programmatically-built topology early.
+            // Mutual exclusion with cluster is still checked at Component::start
+            // where cluster_nodes is known; here cluster_nodes_present is false.
+            crate::sentinel_config::validate_topology(&topology_kind, false)?;
+
+            // Parse command (default to SET)
+            let command = parts
+                .params
+                .get("command")
+                .map(|s| RedisCommand::from_str(s))
+                .transpose()?
+                .unwrap_or(RedisCommand::Set);
+
+            // Parse channels (comma-separated)
+            let channels = parts
+                .params
+                .get("channels")
+                .map(|s| s.split(',').map(String::from).collect())
+                .unwrap_or_default();
+
+            // Parse key
+            let key = parts.params.get("key").cloned();
+
+            // Parse timeout (default to 1 second if absent)
+            let timeout = match parts.params.get("timeout") {
+                Some(s) => s.parse::<u64>().map_err(|_| {
+                    CamelError::InvalidUri(format!(
+                        "invalid timeout '{}': expected non-negative integer",
+                        s
+                    ))
+                })?,
+                None => 1,
+            };
+
+            // Parse password
+            let password = parts.params.get("password").cloned();
+
+            // Parse ssl from scheme
+            let ssl = Some(parts.scheme == "rediss-sentinel");
+
+            return Ok(Self {
+                host: None,
+                port: None,
+                command,
+                channels,
+                key,
+                timeout,
+                password,
+                db,
+                ssl,
+                reconnect: NetworkRetryPolicy::default(),
+                connection_timeout_secs: RedisConfig::default().connection_timeout_secs,
+                topology_kind,
+            });
+        }
 
         // Support both `redis://` and `rediss://` (TLS) schemes
         if parts.scheme != "redis" && parts.scheme != "rediss" {
@@ -649,6 +730,7 @@ impl RedisEndpointConfig {
             ssl,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: RedisConfig::default().connection_timeout_secs,
+            topology_kind: TopologyKind::Standalone,
         })
     }
 
@@ -663,6 +745,16 @@ impl RedisEndpointConfig {
         }
         if self.port.is_none() {
             self.port = Some(defaults.port);
+        }
+        // Password from global config applies only when not set in the URI.
+        // Standalone endpoints normally take the password from the `password=`
+        // query parameter; sentinel endpoints (`redis-sentinel://nodes/master/db`)
+        // have no URI slot for the node password, so it comes from
+        // `[components.redis] password` here.
+        if self.password.is_none()
+            && let Some(ref pw) = defaults.password
+        {
+            self.password = Some(pw.clone());
         }
         // TLS from global config applies only when ssl was not explicitly set in URI.
         // Use effective_tls() so auto-enable for non-loopback hosts propagates to endpoints.
@@ -680,6 +772,45 @@ impl RedisEndpointConfig {
         self.reconnect = defaults.reconnect.clone();
         // Connection timeout from global config
         self.connection_timeout_secs = defaults.connection_timeout_secs;
+    }
+
+    /// Apply the sentinel topology from the global TOML config.
+    ///
+    /// This is the TOML counterpart to the `redis-sentinel://` URI branch in
+    /// [`RedisEndpointConfig::from_uri`]. When the URI did not select a topology
+    /// (still `Standalone`) and the global config carries a non-empty
+    /// `[components.redis.sentinel]` block, this switches the endpoint to
+    /// `TopologyKind::Sentinel` and validates it.
+    ///
+    /// Fail-closed (ADR-0033): a non-empty sentinel block is rejected when the
+    /// `sentinel` cargo feature is disabled, and a sentinel block combined with
+    /// cluster nodes is rejected as a mutual-exclusion conflict.
+    pub fn apply_topology_defaults(&mut self, defaults: &RedisConfig) -> Result<(), CamelError> {
+        // URI topology (e.g. a `redis-sentinel://` scheme) wins over global config.
+        if self.topology_kind != TopologyKind::Standalone {
+            return Ok(());
+        }
+
+        // Empty sentinel block = standalone mode (no-op).
+        if defaults.sentinel.is_empty() {
+            return Ok(());
+        }
+
+        // Fail-closed: sentinel block present but the feature is off.
+        if cfg!(not(feature = "sentinel")) {
+            return Err(CamelError::Config(
+                "redis-sentinel requires the 'sentinel' cargo feature".into(),
+            ));
+        }
+
+        self.topology_kind = TopologyKind::Sentinel(defaults.sentinel.clone());
+
+        // Validate: mutual exclusion with cluster nodes, non-empty master_name/nodes.
+        #[cfg(feature = "cluster")]
+        let cluster_nodes_present = !defaults.cluster_nodes.is_empty();
+        #[cfg(not(feature = "cluster"))]
+        let cluster_nodes_present = false;
+        crate::sentinel_config::validate_topology(&self.topology_kind, cluster_nodes_present)
     }
 
     /// Resolve any remaining `None` fields to hardcoded defaults.
@@ -778,6 +909,8 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
         || msg.contains("connection reset")
         || msg.contains("eof")
         || msg.contains("refused")
+        || msg.contains("readonly")
+        || msg.contains("read only")
 }
 
 // ── Command idempotency classification ──────────────────────────────────────
@@ -948,6 +1081,7 @@ mod tests {
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let url = c.redis_url();
         assert!(
@@ -976,6 +1110,7 @@ mod tests {
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let url = c.redis_url();
         assert!(
@@ -999,6 +1134,7 @@ mod tests {
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let url = c.redis_url();
         assert!(
@@ -1043,6 +1179,7 @@ mod tests {
             ssl: Some(true),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let url = c.redis_url();
         assert!(
@@ -1066,6 +1203,7 @@ mod tests {
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let url = c.redis_url();
         assert!(
@@ -1089,6 +1227,7 @@ mod tests {
             ssl: Some(true),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let safe = c_ssl.redis_url_safe();
         assert!(
@@ -1113,6 +1252,7 @@ mod tests {
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let safe = c_no_ssl.redis_url_safe();
         assert!(
@@ -1137,6 +1277,7 @@ mod tests {
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let endpoint = c.safe_endpoint();
         assert!(
@@ -1167,6 +1308,7 @@ mod tests {
             ssl: Some(true),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         assert!(c_ssl.safe_endpoint().starts_with("rediss://"));
 
@@ -1182,6 +1324,7 @@ mod tests {
             ssl: Some(false),
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         assert!(c_plain.safe_endpoint().starts_with("redis://"));
     }
@@ -1370,6 +1513,69 @@ mod tests {
     }
 
     #[test]
+    fn global_password_propagates_to_endpoint() {
+        // GIVEN a global config with a password + an endpoint URI without one.
+        let mut config = RedisEndpointConfig::from_uri("redis://?command=GET").unwrap();
+        assert_eq!(config.password, None);
+
+        let defaults = RedisConfig::default().with_password("node-pass");
+        config.apply_defaults(&defaults);
+
+        assert_eq!(
+            config.password,
+            Some("node-pass".to_string()),
+            "global [components.redis] password should propagate to the endpoint"
+        );
+    }
+
+    #[test]
+    fn global_password_does_not_override_uri_password() {
+        // The endpoint URI password wins over the global config password.
+        let mut config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&password=uri-pass")
+                .unwrap();
+        assert_eq!(config.password, Some("uri-pass".to_string()));
+
+        let defaults = RedisConfig::default().with_password("global-pass");
+        config.apply_defaults(&defaults);
+
+        assert_eq!(
+            config.password,
+            Some("uri-pass".to_string()),
+            "explicit URI password must not be overridden by the global config"
+        );
+    }
+
+    #[cfg(feature = "sentinel")]
+    #[test]
+    fn global_password_propagates_to_sentinel_endpoint() {
+        // Sentinel endpoints have no URI slot for the node password; it must
+        // come from the global [components.redis] password and then flow into
+        // sentinel_node_conn_info (topology.rs) as the node credential.
+        let cfg = RedisConfig {
+            password: Some("node-pass".into()),
+            sentinel: SentinelConfig::default()
+                .with_nodes(vec!["redis://s-a:26379".into()])
+                .with_master_name("orders"),
+            ..RedisConfig::default()
+        };
+
+        let mut config = RedisEndpointConfig::from_uri("redis://?command=GET").unwrap();
+        config.apply_defaults(&cfg);
+        config.apply_topology_defaults(&cfg).unwrap();
+
+        assert_eq!(
+            config.password,
+            Some("node-pass".to_string()),
+            "global password should reach the sentinel endpoint"
+        );
+        match config.topology_kind {
+            TopologyKind::Sentinel(_) => {}
+            other => panic!("expected Sentinel topology, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_apply_defaults_preserves_explicit_ssl_false() {
         // When ssl is explicitly set via URI (ssl=false), global tls default should NOT override
         let mut config =
@@ -1522,6 +1728,20 @@ mod tests {
         )));
         assert!(is_transient_redis_error(&CamelError::ProcessorError(
             "EOF".into()
+        )));
+    }
+
+    #[test]
+    fn is_transient_redis_error_detects_readonly_role() {
+        assert!(is_transient_redis_error(&CamelError::ProcessorError(
+            "READONLY: You can't write against a read only replica".into()
+        )));
+    }
+
+    #[test]
+    fn is_transient_redis_error_detects_read_only_with_space() {
+        assert!(is_transient_redis_error(&CamelError::ProcessorError(
+            "You can't write against a read only replica".into()
         )));
     }
 
@@ -1709,6 +1929,7 @@ mod tests {
             ssl: None,
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
+            topology_kind: TopologyKind::Standalone,
         };
         let debug = format!("{:?}", config);
         assert!(
@@ -1871,5 +2092,144 @@ mod tests {
                 ClusterConfig::new(vec!["redis://node1:6379".to_string()]).with_readonly_replicas();
             assert!(cfg.readonly_replicas);
         }
+    }
+
+    // --- Sentinel topology tests ---
+
+    #[test]
+    fn standalone_redis_uri_unchanged() {
+        // Regression: redis:// URIs must keep Standalone topology and existing behavior.
+        let c = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=GET").unwrap();
+        assert_eq!(c.topology_kind, TopologyKind::Standalone);
+        assert_eq!(c.command, RedisCommand::Get);
+        assert_eq!(c.host, Some("127.0.0.1".to_string()));
+        assert_eq!(c.port, Some(6379));
+    }
+
+    #[cfg(feature = "sentinel")]
+    #[test]
+    fn redis_sentinel_uri_extracts_db() {
+        let c = RedisEndpointConfig::from_uri("redis-sentinel://s-a:26379/orders/5?command=GET")
+            .unwrap();
+        assert_eq!(
+            c.db, 5,
+            "db should be parsed from the second path segment onto the endpoint"
+        );
+        match c.topology_kind {
+            TopologyKind::Sentinel(s) => assert_eq!(s.master_name, "orders"),
+            other => panic!("expected Sentinel topology, got {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "sentinel")]
+    #[test]
+    fn redis_sentinel_uri_rejects_invalid_db() {
+        let result = RedisEndpointConfig::from_uri("redis-sentinel://s-a:26379/orders/abc");
+        assert!(result.is_err(), "non-numeric db should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid db"),
+            "error should mention invalid db: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "sentinel"))]
+    #[test]
+    fn sentinel_scheme_rejected_without_feature() {
+        let result = RedisEndpointConfig::from_uri("redis-sentinel://s-a:26379/orders/0");
+        assert!(
+            result.is_err(),
+            "sentinel scheme should be rejected without feature"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires the 'sentinel' cargo feature"),
+            "error should mention sentinel feature: {err}"
+        );
+    }
+
+    // --- TOML `[components.redis.sentinel]` block tests ---
+
+    #[cfg(feature = "sentinel")]
+    #[test]
+    fn toml_sentinel_block_builds_sentinel_topology() {
+        let cfg: RedisConfig = toml::from_str(
+            r#"
+            host = "localhost"
+
+            [sentinel]
+            nodes = ["redis://s-a:26379", "redis://s-b:26379"]
+            master_name = "orders"
+            "#,
+        )
+        .expect("sentinel TOML should deserialize into RedisConfig");
+
+        let mut config = RedisEndpointConfig::from_uri("redis://?command=GET").unwrap();
+        config.apply_topology_defaults(&cfg).unwrap();
+
+        match config.topology_kind {
+            TopologyKind::Sentinel(s) => {
+                assert_eq!(s.nodes, vec!["redis://s-a:26379", "redis://s-b:26379"]);
+                assert_eq!(s.master_name, "orders");
+            }
+            other => panic!("expected Sentinel topology, got {:?}", other),
+        }
+    }
+
+    #[cfg(not(feature = "sentinel"))]
+    #[test]
+    fn toml_sentinel_block_feature_disabled_fail_closed() {
+        let cfg = RedisConfig {
+            sentinel: SentinelConfig::default()
+                .with_nodes(vec!["redis://s-a:26379".into()])
+                .with_master_name("orders"),
+            ..RedisConfig::default()
+        };
+
+        let mut config = RedisEndpointConfig::from_uri("redis://?command=GET").unwrap();
+        let result = config.apply_topology_defaults(&cfg);
+
+        assert!(
+            result.is_err(),
+            "non-empty sentinel block should fail closed"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires the 'sentinel' cargo feature"),
+            "error should mention sentinel feature: {err}"
+        );
+    }
+
+    #[cfg(all(feature = "cluster", feature = "sentinel"))]
+    #[test]
+    fn toml_sentinel_and_cluster_mutual_exclusion() {
+        let cfg = RedisConfig {
+            sentinel: SentinelConfig::default()
+                .with_nodes(vec!["redis://s-a:26379".into()])
+                .with_master_name("orders"),
+            cluster_nodes: vec!["redis://node1:6379".into()],
+            ..RedisConfig::default()
+        };
+
+        let mut config = RedisEndpointConfig::from_uri("redis://?command=GET").unwrap();
+        let result = config.apply_topology_defaults(&cfg);
+
+        assert!(result.is_err(), "sentinel + cluster should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("mutually exclusive"),
+            "error should mention mutual exclusion: {err}"
+        );
+    }
+
+    #[test]
+    fn toml_empty_sentinel_defaults_to_standalone() {
+        let cfg = RedisConfig::default();
+        assert!(cfg.sentinel.is_empty());
+
+        let mut config = RedisEndpointConfig::from_uri("redis://?command=GET").unwrap();
+        config.apply_topology_defaults(&cfg).unwrap();
+
+        assert_eq!(config.topology_kind, TopologyKind::Standalone);
     }
 }

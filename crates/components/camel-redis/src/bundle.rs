@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use camel_component_api::{CamelError, ComponentBundle, ComponentRegistrar};
 
-use crate::{RedisComponent, config::RedisConfig};
+use crate::{RedisComponent, RedisConfig, RedisSentinelComponent, RedissSentinelComponent};
 
 pub struct RedisBundle {
     config: RedisConfig,
@@ -21,7 +21,13 @@ impl ComponentBundle for RedisBundle {
     }
 
     fn register_all(self, ctx: &mut dyn ComponentRegistrar) {
-        ctx.register_component_dyn(Arc::new(RedisComponent::with_config(self.config)));
+        // The registry resolves route URIs by scheme, so the sentinel URI
+        // schemes need their own registered components.
+        ctx.register_component_dyn(Arc::new(RedisComponent::with_config(self.config.clone())));
+        ctx.register_component_dyn(Arc::new(RedisSentinelComponent::with_config(
+            self.config.clone(),
+        )));
+        ctx.register_component_dyn(Arc::new(RedissSentinelComponent::with_config(self.config)));
     }
 }
 
@@ -61,7 +67,10 @@ mod tests {
 
         bundle.register_all(&mut registrar);
 
-        assert_eq!(registrar.schemes, vec!["redis"]);
+        assert_eq!(
+            registrar.schemes,
+            vec!["redis", "redis-sentinel", "rediss-sentinel"]
+        );
     }
 
     #[test]

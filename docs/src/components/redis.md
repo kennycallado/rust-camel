@@ -135,12 +135,86 @@ The component redacts passwords in `Debug` output. Passwords with special charac
 
 ## Connection handling
 
-The Producer holds a single multiplexed connection per Endpoint. The Consumer holds one connection for Pub/Sub mode and one for queue mode. Each connection has a 10-second timeout by default. Transient transport errors trigger reconnect with the configured `NetworkRetryPolicy`. The route `ErrorHandler` owns the operational signal for non-transient errors.
+The Producer holds a single multiplexed connection per Endpoint. It opens lazily on the first call, and a reconnect drops the cached connection and re-resolves the master through the topology — that re-resolution is where a sentinel failover is picked up. The producer does not re-resolve on every command.
+
+Each Consumer mode — Pub/Sub and queue — holds ONE persistent connection per session. Every message or popped item is delivered over that same connection; the consumer does not reconnect between messages. A blocking-pop timeout (`BLPOP`/`BRPOP` returning nil) keeps the connection. The consumer reconnects only when the Pub/Sub stream ends or a transient transport error strikes, and a Pub/Sub reconnect replays all subscriptions. Reconnects are bounded by the configured `NetworkRetryPolicy`: when the budget is exhausted the consumer returns an error and Route supervision restarts the Route (ADR-0007).
+
+Connections have a 10-second connect timeout by default (`connection_timeout_secs` in the config block). The route `ErrorHandler` owns the operational signal for non-transient errors.
 
 The component registers an async health check that sends a `PING` command. The probe is healthy when Redis responds with `PONG` and degraded when PING fails or times out.
+
+## Sentinel / failover
+
+Redis Sentinel gives Redis high availability. Sentinel nodes monitor a master and its replicas. When the master fails, the sentinels elect a replica and promote it to master. Clients must re-discover the new master to keep working.
+
+The component connects to a Sentinel topology with the `redis-sentinel://` scheme:
+
+```text
+redis-sentinel://sentinel-a:26379,sentinel-b:26379/<master-name>/<db>?command=<cmd>[&key=<key>][&channels=<list>]
+```
+
+The authority holds the comma-separated sentinel node list. The first path segment is the master group name. The second path segment is the optional database number. It defaults to `0`. The `rediss-sentinel://` scheme is the TLS variant. It enables TLS on the sentinel and the resolved master connections.
+
+The runtime resolves a route URI by scheme. Register `RedisSentinelComponent` for `redis-sentinel://` routes and `RedissSentinelComponent` for `rediss-sentinel://` routes. Register them next to `RedisComponent`:
+
+```rust,ignore
+ctx.register_component(RedisComponent::new());
+ctx.register_component(RedisSentinelComponent::new());
+// Only for rediss-sentinel:// (TLS) routes:
+ctx.register_component(RedissSentinelComponent::new());
+```
+
+`RedisBundle::register_all` registers all three schemes from the `[components.redis]` block.
+
+You can also select Sentinel with the `[components.redis.sentinel]` config block:
+
+```toml
+[components.redis.sentinel]
+nodes = ["redis://sentinel-a:26379", "redis://sentinel-b:26379"]
+master_name = "mymaster"
+# Optional sentinel credentials.
+# username = "sentinel-user"
+# password = "sentinel-pass"
+```
+
+`nodes` holds the sentinel node URLs. `master_name` is the master group name. The optional `username` and `password` authenticate the sentinel connections. The node password stays in the top-level `[components.redis]` block. The two credential sets are separate.
+
+```rust,ignore
+// Producer: timer writes a key every 3s through Sentinel.
+let producer = RouteBuilder::from("timer:tick?period=3000&repeatCount=3")
+    .route_id("redis-sentinel-producer")
+    .set_header("CamelRedis.Key", Value::String("greeting".into()))
+    .set_header(
+        "CamelRedis.Value",
+        Value::String("hello via redis sentinel!".into()),
+    )
+    .to("redis-sentinel://127.0.0.1:26379/mymaster/0?command=SET")
+    .to("log:info?showHeaders=true")
+    .build()?;
+```
+
+### Failover behavior
+
+On a transport error, the producer and consumer reconnect loops re-resolve the current master through the sentinel nodes. The resolved master is never cached. Every reconnect asks the sentinels again. This is bounded transport reconnect, not consumer self-supervision. The retry budget comes from `NetworkRetryPolicy`. When the budget runs out, the consumer returns `Err` and Route supervision takes over ([ADR-0007](../adr/0007-route-supervised-consumer-failure.md)).
+
+The health check also re-resolves the master through the sentinel nodes on each check. After a failover, the check reports the new master, not a cached address.
+
+### Best-effort Pub/Sub
+
+Pub/Sub delivery is best-effort. When a sentinel-triggered stream ends, the consumer re-subscribes to the new master. Messages published during the failover gap are lost. Duplicates are possible on reconnect. Do not use Pub/Sub for workloads that need durability.
+
+### Feature flag
+
+The `sentinel` cargo feature on `camel-component-redis` enables Sentinel topology construction. Enable it in your manifest:
+
+```toml
+camel-component-redis = { workspace = true, features = ["sentinel"] }
+```
+
+Without the feature, the component recognizes `redis-sentinel://` and a non-empty `[components.redis.sentinel]` block and rejects them at startup with a clear error. It fails closed. It does not fall back to a standalone connection.
 
 ## Error handling
 
 The Consumer logs at `error!` for channel-closed conditions on Pub/Sub and BLPOP send paths and for retry-exhaustion. Each site reports a typed metric before the log line. The Producer logs send failures at `warn!`. Per-message non-transient Redis errors log at `error!` with a typed metric. The route handler owns the operational signal for transient producer errors.
 
-**Reference**: [Redis crate CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-redis/CONTEXT.md). Example source: [`examples/redis-example`](https://github.com/kennycallado/rust-camel/tree/main/examples/redis-example).
+**Reference**: [Redis crate CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-redis/CONTEXT.md). Example sources: [`examples/redis-example`](https://github.com/kennycallado/rust-camel/tree/main/examples/redis-example), [`examples/redis-sentinel`](https://github.com/kennycallado/rust-camel/tree/main/examples/redis-sentinel).
