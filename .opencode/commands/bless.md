@@ -34,10 +34,11 @@ Read every artifact file in `openspec/changes/$1/`:
 ### 3. Compute artifact hash
 
 ```bash
-cargo run -p xtask -- hash-artifacts --change-dir "openspec/changes/$1"
+bash scripts/bless-hash.sh "openspec/changes/$1"
 ```
 
-Store the output (format: `sha256:<hash>`).
+Store the output (format: `sha256:<hash>`). The wrapper execs the
+prebuilt xtask binary directly — no cargo lock (see `scripts/bless-hash.sh`).
 
 ### 4. Dispatch expert for blessing
 

@@ -70,8 +70,8 @@ Implement tasks from an OpenSpec change.
    c. **If verdict != "BLESSED"** → STOP. Show required fixes:
       "Blessing verdict: <verdict>. Fixes needed: <list>. Run `/bless <name>` after addressing."
    d. **Verify hash freshness**:
-      ```bash
-      cargo run -p xtask -- hash-artifacts --change-dir "openspec/changes/<name>"
+       ```bash
+       bash scripts/bless-hash.sh "openspec/changes/<name>"
        ```
        Compare output to `bless.json`'s `hash` field.
    e. **If hash mismatch** → STOP. Tell user:

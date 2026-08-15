@@ -38,10 +38,10 @@ Trivial change — no spec breakdown needed.
 Compute artifact hash:
 
 ```bash
-cargo run -p xtask -- hash-artifacts --change-dir openspec/changes/$1
+bash scripts/bless-hash.sh "openspec/changes/$1"
 ```
 
-Store the output hash. Then write `openspec/changes/$1/.bless.json`:
+Store the output hash (wrapper execs prebuilt xtask; no cargo lock). Then write `openspec/changes/$1/.bless.json`:
 
 ```json
 {
