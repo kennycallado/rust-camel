@@ -9,7 +9,7 @@ route-level `circuit_breaker` configuration (with its `fallback:` sub-pipeline) 
 end-to-end from YAML. A fallback that stops (peek MISS with the default `on_miss: stop`
 policy) SHALL surface as a clean outcome, not an error.
 
-#### Scenario: circuit breaker fallback serves cached stale entry on upstream failure
+#### Scenario: circuitBreaker fallback serves cached stale entry on upstream failure
 
 - **GIVEN** a route of the shape `from: ...` with route-level
   `circuit_breaker: { failure_threshold: 1, open_duration_ms: 60000, fallback: [
