@@ -34,6 +34,12 @@ verification only when an operator sets `tls.insecure=true` or
 `tls.verify_peer=false`, and it emits a warning. The Consumer rejects a partial
 server TLS configuration that supplies only a certificate or only a key.
 
+The Producer attaches the exchange body only for entity-enclosing methods
+(POST, PUT, PATCH). GET, HEAD, DELETE, OPTIONS, and TRACE send no body and log
+one `warn!` when a non-empty body (or any stream body) is dropped. The body
+stays consumed. No configuration override exists (Apache Camel
+`HttpMethods.isEntityEnclosing` parity).
+
 ## Log-level policy
 
 Per ADR-0012, this component's `error!` sites are categorized as:
@@ -49,7 +55,8 @@ Per ADR-0012, this component's `error!` sites are categorized as:
 
 ### warn! sites (ADR-0012 advisory)
 
-- **(a) handler-owned** (lib.rs L1380): TLS verification disabled via `insecure=true` or `verify_peer=false` in `TlsConfig`. Emitted during `build_client()` when the caller opts out of certificate validation. `warn!` with `// log-policy: handler-owned`. No metric call — the operator is responsible for this config.
+- **(a) handler-owned** (lib.rs, `build_client()`, warn "HTTP TLS verification disabled"): TLS verification disabled via `insecure=true` or `verify_peer=false` in `TlsConfig`. `warn!` with `// log-policy: handler-owned`. No metric call — the operator is responsible for this config.
+- **(a) handler-owned** (lib.rs, `HttpProducer::call`, warn "dropping request body" x2, stream arm and non-empty-bytes arm): request body dropped for a non-entity-enclosing HTTP method (GET, HEAD, DELETE, OPTIONS, TRACE) in the Producer send path. Emitted when the exchange body is non-empty (or any stream body) for such a method. `warn!` with `// log-policy: handler-owned`. No metric call — the route author controls the method and body.
 
 Reviewer: r_glm5.1 verifies these classifications against source at Phase C review time.
 

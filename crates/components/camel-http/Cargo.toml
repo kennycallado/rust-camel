@@ -47,6 +47,7 @@ camel-component-api = { workspace = true, features = ["test-support"] }
 camel-core = { workspace = true }
 tempfile = { workspace = true }
 flate2 = { workspace = true }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [lints]
 workspace = true

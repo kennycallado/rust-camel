@@ -2000,6 +2000,14 @@ impl HttpProducer {
     fn is_ok_status(status: u16, range: (u16, u16)) -> bool {
         status >= range.0 && status <= range.1
     }
+
+    /// Whether the HTTP method is entity-enclosing (may carry a request
+    /// body). Follows Apache Camel's `HttpMethods` set: POST, PUT, PATCH are
+    /// entity-enclosing; GET, HEAD, DELETE, OPTIONS, TRACE are not (RFC 9110
+    /// §9.3.1/§9.3.2).
+    fn is_entity_enclosing(method: &str) -> bool {
+        matches!(method, "POST" | "PUT" | "PATCH")
+    }
 }
 
 impl Service<Exchange> for HttpProducer {
@@ -2018,6 +2026,11 @@ impl Service<Exchange> for HttpProducer {
 
         Box::pin(async move {
             let method_str = HttpProducer::resolve_method(&exchange, &config);
+            // Entity-enclosing gate (RFC 9110 §9.3.1/§9.3.2): only POST, PUT
+            // and PATCH may carry a request body. Any other resolved method
+            // drops the exchange body before the request is built (Apache
+            // Camel `HttpMethods` parity).
+            let suppress_body = !HttpProducer::is_entity_enclosing(&method_str);
             let url = HttpProducer::resolve_url(&exchange, &config);
 
             // SECURITY: Validate URL for SSRF
@@ -2135,11 +2148,36 @@ impl Service<Exchange> for HttpProducer {
             // Materialize body
             let is_stream_body = matches!(exchange.input.body, Body::Stream(_));
             let materialized_body: Option<Vec<u8>> = if is_stream_body {
+                if suppress_body {
+                    // A stream body dropped under a non-entity-enclosing
+                    // method always warns (its emptiness is unknowable) and
+                    // stays consumed (mem::take). The stream attach arm below
+                    // still runs its outer flag check, but the inner `if let
+                    // Body::Stream` re-match fails on the now-Empty body, so
+                    // no stream is attached and no AlreadyConsumed error can
+                    // fire.
+                    std::mem::take(&mut exchange.input.body);
+                    // log-policy: handler-owned
+                    tracing::warn!(
+                        correlation_id = %exchange.correlation_id(),
+                        method = %method_str,
+                        "dropping request body for non-entity-enclosing HTTP method"
+                    );
+                }
                 None // Streams can't be replayed on redirect
             } else {
                 let body = std::mem::take(&mut exchange.input.body);
                 let bytes = body.into_bytes(config.max_body_size).await?;
                 if bytes.is_empty() {
+                    // Empty body: nothing to send and nothing to warn about.
+                    None
+                } else if suppress_body {
+                    // log-policy: handler-owned
+                    tracing::warn!(
+                        correlation_id = %exchange.correlation_id(),
+                        method = %method_str,
+                        "dropping request body for non-entity-enclosing HTTP method"
+                    );
                     None
                 } else {
                     Some(bytes.to_vec())
@@ -3183,6 +3221,551 @@ mod tests {
         });
 
         (url, handle)
+    }
+
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        body: Vec<u8>,
+        content_length: Option<String>,
+        transfer_encoding: Option<String>,
+    }
+
+    /// Parse a request head plus its Content-Length-driven body from a freshly
+    /// accepted connection. Returns `None` if the client closes before sending
+    /// a complete request head. Does NOT read until EOF/shutdown (reqwest pools
+    /// keep-alive connections and never sends FIN) and does NOT rely on a
+    /// single fixed-size read (a segmented small body would flake).
+    async fn capture_request(stream: &mut tokio::net::TcpStream) -> Option<CapturedRequest> {
+        use tokio::io::AsyncReadExt;
+
+        // Read the request head (up to and including the terminating CRLF CRLF).
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let head_end: usize;
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                head_end = pos + 4;
+                break;
+            }
+        }
+
+        // Parse the request head.
+        let head = String::from_utf8_lossy(&buf[..head_end]);
+        let mut lines = head.split("\r\n");
+        let request_line = lines.next().unwrap_or("");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or("").to_string();
+        let path = parts.next().unwrap_or("").to_string();
+
+        let mut content_length: Option<String> = None;
+        let mut transfer_encoding: Option<String> = None;
+        for line in lines {
+            if let Some((name, value)) = line.split_once(':') {
+                let name = name.trim().to_ascii_lowercase();
+                let value = value.trim().to_string();
+                if name == "content-length" {
+                    content_length = Some(value);
+                } else if name == "transfer-encoding" {
+                    transfer_encoding = Some(value);
+                }
+            }
+        }
+
+        // Content-Length-driven exact read. A missing header means a 0-length body.
+        let body_len: usize = content_length
+            .as_deref()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let mut body: Vec<u8> = buf[head_end..].to_vec();
+        while body.len() < body_len {
+            let n = stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        body.truncate(body_len);
+
+        Some(CapturedRequest {
+            method,
+            path,
+            body,
+            content_length,
+            transfer_encoding,
+        })
+    }
+
+    /// A raw-TCP capture server. Each connection parses the request head, then
+    /// performs a Content-Length-driven exact read of the body (see
+    /// [`capture_request`]). Each connection is dropped after the response so
+    /// every hop opens a fresh connection.
+    async fn start_capture_server() -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        Arc<Mutex<Vec<CapturedRequest>>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_return = Arc::clone(&captured);
+
+        let handle = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let captured = Arc::clone(&captured);
+                    tokio::spawn(async move {
+                        let Some(req) = capture_request(&mut stream).await else {
+                            return;
+                        };
+                        captured.lock().unwrap().push(req);
+
+                        // 200 OK with Content-Length: 0 and no body, then drop
+                        // the stream so the client opens a fresh connection.
+                        let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        });
+
+        (url, handle, captured_for_return)
+    }
+
+    /// A raw-TCP capture server whose `/hop307` and `/hop308` paths answer with
+    /// `307 Temporary Redirect` / `308 Permanent Redirect` to `/final`, and
+    /// whose `/final` path answers `200 OK` with an empty body. Every hop
+    /// records a `CapturedRequest` (Content-Length-driven exact read) and drops
+    /// the connection after responding so each hop is a fresh connection.
+    async fn start_redirect_capture_server() -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        Arc<Mutex<Vec<CapturedRequest>>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_return = Arc::clone(&captured);
+
+        let handle = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let captured = Arc::clone(&captured);
+                    tokio::spawn(async move {
+                        let Some(req) = capture_request(&mut stream).await else {
+                            return;
+                        };
+                        let path = req.path.clone();
+                        captured.lock().unwrap().push(req);
+
+                        let (status_line, location) = match path.as_str() {
+                            "/hop307" => ("HTTP/1.1 307 Temporary Redirect", Some("/final")),
+                            "/hop308" => ("HTTP/1.1 308 Permanent Redirect", Some("/final")),
+                            "/final" => ("HTTP/1.1 200 OK", None),
+                            _ => ("HTTP/1.1 404 Not Found", None),
+                        };
+
+                        let response = match location {
+                            Some(loc) => format!(
+                                "{status_line}\r\nLocation: {loc}\r\nContent-Length: 0\r\n\r\n"
+                            ),
+                            None => format!("{status_line}\r\nContent-Length: 0\r\n\r\n"),
+                        };
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        });
+
+        (url, handle, captured_for_return)
+    }
+
+    #[tokio::test]
+    async fn test_get_with_body_sends_no_body_and_no_framing_headers() {
+        use tower::ServiceExt;
+
+        let (url, _handle, captured) = start_capture_server().await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::with_config(HttpConfig::default());
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}?httpMethod=GET&allowInternal=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "expected exactly one captured request");
+        let req = &captured[0];
+        assert_eq!(req.method, "GET");
+        // `httpMethod`/`allowInternal` are URI options, not request-target
+        // query params, so the origin-form target is just "/".
+        assert_eq!(req.path, "/");
+        assert!(req.body.is_empty(), "GET must not carry a body");
+        assert!(
+            req.content_length.is_none(),
+            "suppressed request must not carry Content-Length"
+        );
+        assert!(
+            req.transfer_encoding.is_none(),
+            "suppressed request must not carry Transfer-Encoding"
+        );
+
+        // The exchange body is consumed by the producer (std::mem::take).
+        assert!(
+            result.input.body.is_empty(),
+            "exchange body must be consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_head_with_body_suppressed_via_header() {
+        use tower::ServiceExt;
+
+        let (url, _handle, captured) = start_capture_server().await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::with_config(HttpConfig::default());
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}?allowInternal=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpMethod",
+            serde_json::Value::String("HEAD".to_string()),
+        );
+        exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+
+        let result = producer.oneshot(exchange).await.unwrap();
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let req = &captured[0];
+        assert_eq!(req.method, "HEAD");
+        assert!(req.body.is_empty(), "HEAD must not carry a body");
+    }
+
+    #[tokio::test]
+    async fn test_delete_options_trace_with_body_suppressed() {
+        use tower::ServiceExt;
+
+        let (url, _handle, captured) = start_capture_server().await;
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::with_config(HttpConfig::default());
+        let endpoint_ctx = NoOpComponentContext;
+
+        for method in ["DELETE", "OPTIONS", "TRACE"] {
+            let endpoint = component
+                .create_endpoint(
+                    &format!("{url}?httpMethod={method}&allowInternal=true"),
+                    &endpoint_ctx,
+                )
+                .unwrap();
+            let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+            let mut exchange = Exchange::new(Message::default());
+            exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+
+            let result = producer.oneshot(exchange).await.unwrap();
+            let status = result
+                .input
+                .header("CamelHttpResponseCode")
+                .and_then(|v| v.as_u64())
+                .unwrap();
+            assert_eq!(status, 200, "method {method} should succeed");
+        }
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 3, "expected three captured requests");
+        for method in ["DELETE", "OPTIONS", "TRACE"] {
+            let req = captured
+                .iter()
+                .find(|r| r.method == method)
+                .unwrap_or_else(|| panic!("missing captured request for {method}"));
+            assert!(req.body.is_empty(), "{} must not carry a body", req.method);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_post_put_patch_with_body_still_sent() {
+        use tower::ServiceExt;
+
+        let (url, _handle, captured) = start_capture_server().await;
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::with_config(HttpConfig::default());
+        let endpoint_ctx = NoOpComponentContext;
+
+        for method in ["POST", "PUT", "PATCH"] {
+            let endpoint = component
+                .create_endpoint(
+                    &format!("{url}?httpMethod={method}&allowInternal=true"),
+                    &endpoint_ctx,
+                )
+                .unwrap();
+            let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+            let payload = format!("body-for-{method}");
+            let mut exchange = Exchange::new(Message::default());
+            exchange.input.body = Body::Bytes(bytes::Bytes::from(payload.as_bytes().to_vec()));
+
+            let result = producer.oneshot(exchange).await.unwrap();
+            let status = result
+                .input
+                .header("CamelHttpResponseCode")
+                .and_then(|v| v.as_u64())
+                .unwrap();
+            assert_eq!(status, 200, "method {method} should succeed");
+        }
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 3, "expected three captured requests");
+        for method in ["POST", "PUT", "PATCH"] {
+            let req = captured
+                .iter()
+                .find(|r| r.method == method)
+                .unwrap_or_else(|| panic!("missing captured request for {method}"));
+            let expected = format!("body-for-{method}");
+            assert!(!req.body.is_empty(), "{method} must still carry its body");
+            assert_eq!(req.body, expected.as_bytes(), "{method} body mismatch");
+        }
+    }
+
+    /// A GET with a stream body must not attach the stream: the entity-enclosing
+    /// gate drops the stream (mem::take) before the request is built, leaving
+    /// the exchange body Empty instead of a partially-consumed Body::Stream.
+    #[tokio::test]
+    async fn test_stream_body_under_get_not_attached() {
+        use tower::ServiceExt;
+
+        let (url, _handle, captured) = start_capture_server().await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::with_config(HttpConfig::default());
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}?httpMethod=GET&allowInternal=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let chunks: Vec<Result<bytes::Bytes, CamelError>> =
+            vec![Ok(bytes::Bytes::from_static(b"stream-body"))];
+        let stream = Box::pin(futures::stream::iter(chunks));
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.body = Body::Stream(StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(Some(stream))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "expected exactly one captured request");
+        assert!(
+            captured[0].body.is_empty(),
+            "GET must not carry a stream body"
+        );
+        assert!(
+            captured[0].transfer_encoding.is_none(),
+            "suppressed request must not carry Transfer-Encoding"
+        );
+        assert!(
+            captured[0].content_length.is_none(),
+            "suppressed request must not carry Content-Length"
+        );
+        assert!(
+            result.input.body.is_empty(),
+            "exchange body must be consumed to Empty, not left as a stream"
+        );
+    }
+
+    /// A suppressed body must never be replayed across 307/308 redirect hops:
+    /// the gate empties `materialized_body` before the redirect loop runs, so
+    /// neither the first hop nor the final hop carries the body.
+    #[tokio::test]
+    async fn test_redirect_hops_never_replay_suppressed_body() {
+        use tower::ServiceExt;
+
+        let (url, _handle, captured) = start_redirect_capture_server().await;
+        let ctx = test_producer_ctx();
+
+        let component =
+            HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+        let endpoint_ctx = NoOpComponentContext;
+
+        for path in ["/hop307", "/hop308"] {
+            let endpoint = component
+                .create_endpoint(
+                    &format!("{url}{path}?httpMethod=GET&allowInternal=true"),
+                    &endpoint_ctx,
+                )
+                .unwrap();
+            let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+            let mut exchange = Exchange::new(Message::default());
+            exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+
+            let result = producer.oneshot(exchange).await.unwrap();
+            let status = result
+                .input
+                .header("CamelHttpResponseCode")
+                .and_then(|v| v.as_u64())
+                .unwrap();
+            assert_eq!(
+                status, 200,
+                "redirect chain for {path} should end at /final"
+            );
+        }
+
+        // Two chains (307 and 308), each with two hops (redirect + final).
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 4, "expected 2 chains × 2 hops");
+        for req in captured.iter() {
+            assert!(
+                req.body.is_empty(),
+                "hop {} {} must not carry a body",
+                req.method,
+                req.path
+            );
+        }
+    }
+
+    /// The warn! emitted on a suppressed body renders three distinguishable
+    /// substrings in the log line (tracing-subscriber default field format):
+    ///   - the message:       "dropping request body ..."
+    ///   - `method = %method_str`            → `method=GET`
+    ///   - `correlation_id = %exchange.correlation_id()` → `correlation_id=<uuid>`
+    /// The closure matches all three so exactly one warn per suppressed
+    /// request is required (the "HTTP request" debug! also carries
+    /// `method=GET` and the same `correlation_id=`, but not the message).
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn test_suppressed_body_logs_exactly_one_warn() {
+        use tower::ServiceExt;
+
+        let (url, _handle, _captured) = start_capture_server().await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::with_config(HttpConfig::default());
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}?httpMethod=GET&allowInternal=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+        let correlation_id = exchange.correlation_id().to_string();
+
+        let result = producer.oneshot(exchange).await.unwrap();
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+
+        logs_assert(|lines: &[&str]| {
+            let hits = lines
+                .iter()
+                .filter(|l| {
+                    l.contains("dropping request body")
+                        && l.contains("method=GET")
+                        && l.contains(&format!("correlation_id={correlation_id}"))
+                })
+                .count();
+            match hits {
+                1 => Ok(()),
+                n => Err(format!("expected exactly one body-drop warn, found {n}")),
+            }
+        });
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn test_empty_body_get_emits_no_warn() {
+        use tower::ServiceExt;
+
+        let (url, _handle, _captured) = start_capture_server().await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::with_config(HttpConfig::default());
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}?httpMethod=GET&allowInternal=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+
+        logs_assert(|lines: &[&str]| {
+            let hits = lines
+                .iter()
+                .filter(|l| l.contains("dropping request body"))
+                .count();
+            match hits {
+                0 => Ok(()),
+                n => Err(format!("expected no body-drop warn, found {n}")),
+            }
+        });
     }
 
     #[tokio::test]
