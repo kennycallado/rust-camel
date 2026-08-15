@@ -16,7 +16,7 @@ use camel_core::route::RouteDefinition;
 
 use crate::compile::{
     compile_declarative_route, compile_declarative_route_to_canonical,
-    compile_declarative_route_with_stream_cache_threshold,
+    compile_declarative_route_with_stream_cache_threshold, parse_peek_stale_on_miss,
 };
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::input_format::{InputFormat, annotate_format};
@@ -1309,6 +1309,8 @@ pub(crate) fn route_step_to_declarative_step(
                     "cache_peek_stale: key is required".into(),
                 ));
             }
+            // Single source of validation with the compile path (compile.rs).
+            parse_peek_stale_on_miss(body.on_miss.as_deref())?;
             Ok(DeclarativeStep::CachePeekStale(CachePeekStaleStepDef {
                 repository: body.repository,
                 key: LanguageExpressionDef {
@@ -4818,6 +4820,46 @@ routes:
             }
             other => panic!("expected CachePeekStale, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cache_peek_stale_on_miss_null_yaml_defaults() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache_peek_stale:
+          key: "${header.k2}"
+          on_miss: null
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::CachePeekStale(def) => {
+                assert_eq!(def.on_miss, None);
+            }
+            other => panic!("expected CachePeekStale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_peek_stale_on_miss_invalid_yaml_rejected() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache_peek_stale:
+          key: "${header.k2}"
+          on_miss: skip
+"#;
+        let err = parse_yaml_to_declarative(yaml)
+            .expect_err("invalid on_miss value must fail YAML conversion");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("'skip'") && msg.contains("stop") && msg.contains("continue"),
+            "error should name the invalid value and the allowed set, got: {msg}"
+        );
     }
 
     #[test]

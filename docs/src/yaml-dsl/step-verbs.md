@@ -666,6 +666,8 @@ Serve a cached entry, ignoring its in-band expiry. Used as a stale-read fallback
 | `key` | string | yes | Cache key expression |
 | `on_miss` | string | no | On-miss policy: `"stop"` (default) or `"continue"` |
 
+`on_miss` does not have the same meaning as the `on_miss` field of `cache`. In `cache`, the field holds a sub-pipeline. In `cache_peek_stale`, the field holds a policy word. Do not write a step list under `cache_peek_stale.on_miss`.
+
 ```yaml
 - cache_peek_stale:
     key: "${header.cacheKey}"

@@ -844,7 +844,7 @@ fn compile_circuit_breaker(def: DeclarativeCircuitBreaker) -> CircuitBreakerConf
 /// Absent or `"stop"` → [`PeekStaleMissPolicy::Stop`] (default); `"continue"` →
 /// [`PeekStaleMissPolicy::Continue`]. Any other value fails closed with a
 /// [`CamelError::RouteError`] naming the invalid value and the allowed set.
-fn parse_peek_stale_on_miss(
+pub(crate) fn parse_peek_stale_on_miss(
     raw: Option<&str>,
 ) -> Result<camel_processor::PeekStaleMissPolicy, CamelError> {
     match raw {

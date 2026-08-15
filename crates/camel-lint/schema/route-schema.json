@@ -221,7 +221,12 @@
           "type": "string"
         },
         "on_miss": {
-          "description": "On-miss policy: `\"stop\"` (default) or `\"continue\"`, validated at compile.",
+          "description": "On-miss policy: `\"stop\"` (default) or `\"continue\"`. Invalid values fail YAML\nconversion (named value) and compile (canonical/programmatic path).\n`null` is valid and means the default.",
+          "enum": [
+            "stop",
+            "continue",
+            null
+          ],
           "type": [
             "string",
             "null"

@@ -5,6 +5,8 @@ use noyalib::compat::serde_yaml as serde_yml;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+#[cfg(feature = "schema")]
+use serde_json::json;
 
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -1040,7 +1042,13 @@ pub struct CachePeekStaleBody {
     pub repository: Option<String>,
     /// Simple-language expression for the cache key to peek.
     pub key: String,
-    /// On-miss policy: `"stop"` (default) or `"continue"`, validated at compile.
+    /// On-miss policy: `"stop"` (default) or `"continue"`. Invalid values fail YAML
+    /// conversion (named value) and compile (canonical/programmatic path).
+    /// `null` is valid and means the default.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(extend("enum" = json!(["stop", "continue", null])))
+    )]
     pub on_miss: Option<String>,
 }
 
