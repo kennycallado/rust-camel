@@ -225,8 +225,16 @@ pub fn compile_declarative_route_with_stream_cache_threshold(
         definition = definition.with_error_handler(compile_error_handler(error_handler)?);
     }
 
-    if let Some(circuit_breaker) = route.circuit_breaker {
-        definition = definition.with_circuit_breaker(compile_circuit_breaker(circuit_breaker));
+    if let Some(mut circuit_breaker) = route.circuit_breaker {
+        // Fallback steps stay UNRESOLVED (Vec<BuilderStep>) on the sidecar —
+        // camel-core compiles them at route-compile time (registry monopoly).
+        let fallback_steps = compile_declarative_steps(
+            std::mem::take(&mut circuit_breaker.fallback),
+            stream_cache_threshold,
+        )?;
+        definition = definition
+            .with_circuit_breaker_fallback(fallback_steps)
+            .with_circuit_breaker(compile_circuit_breaker(circuit_breaker));
     }
 
     if let Some(sp) = route.security_policy {
@@ -285,10 +293,16 @@ pub fn compile_declarative_route_to_canonical(
         }
     }
 
-    let circuit_breaker = route.circuit_breaker.map(|cb| CanonicalCircuitBreakerSpec {
-        failure_threshold: cb.failure_threshold,
-        open_duration_ms: cb.open_duration_ms,
-    });
+    let circuit_breaker = route
+        .circuit_breaker
+        .map(|cb| {
+            Ok::<_, CamelError>(CanonicalCircuitBreakerSpec {
+                failure_threshold: cb.failure_threshold,
+                open_duration_ms: cb.open_duration_ms,
+                fallback: compile_declarative_steps_to_canonical(cb.fallback)?,
+            })
+        })
+        .transpose()?;
 
     let concurrency = match route.concurrency {
         Some(DeclarativeConcurrency::Sequential) => Some(CanonicalConcurrencySpec::Sequential),
@@ -364,11 +378,16 @@ pub fn compile_canonical_route(
     }
 
     if let Some(cb) = spec.circuit_breaker {
-        definition = definition.with_circuit_breaker(
-            CircuitBreakerConfig::new()
-                .failure_threshold(cb.failure_threshold)
-                .open_duration(Duration::from_millis(cb.open_duration_ms)),
-        );
+        definition = definition
+            .with_circuit_breaker_fallback(compile_canonical_steps(
+                cb.fallback,
+                stream_cache_threshold,
+            )?)
+            .with_circuit_breaker(
+                CircuitBreakerConfig::new()
+                    .failure_threshold(cb.failure_threshold)
+                    .open_duration(Duration::from_millis(cb.open_duration_ms)),
+            );
     }
 
     Ok(definition)
@@ -2950,6 +2969,7 @@ mod tests {
         let def = DeclarativeCircuitBreaker {
             failure_threshold: 3,
             open_duration_ms: 5000,
+            fallback: vec![],
         };
         let config = compile_circuit_breaker(def);
         assert_eq!(config.failure_threshold, 3);
@@ -3561,6 +3581,7 @@ mod tests {
             circuit_breaker: Some(DeclarativeCircuitBreaker {
                 failure_threshold: 3,
                 open_duration_ms: 5000,
+                fallback: vec![],
             }),
             security_policy: None,
             unit_of_work: None,
@@ -3990,6 +4011,7 @@ mod tests {
         route.circuit_breaker = Some(DeclarativeCircuitBreaker {
             failure_threshold: 0,
             open_duration_ms: 5000,
+            fallback: vec![],
         });
         assert_config_error(compile_declarative_route(route), "failure_threshold");
     }
@@ -4000,6 +4022,7 @@ mod tests {
         route.circuit_breaker = Some(DeclarativeCircuitBreaker {
             failure_threshold: 3,
             open_duration_ms: 0,
+            fallback: vec![],
         });
         assert_config_error(compile_declarative_route(route), "open_duration_ms");
     }

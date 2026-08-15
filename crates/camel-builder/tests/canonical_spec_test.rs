@@ -1,4 +1,6 @@
+use camel_api::BoxProcessor;
 use camel_api::CircuitBreakerConfig;
+use camel_api::IdentityProcessor;
 use camel_api::runtime::CanonicalStepSpec;
 use camel_builder::RouteBuilder;
 use camel_builder::StepAccumulator;
@@ -86,4 +88,42 @@ fn builder_canonical_rejects_closure_filter_with_explicit_subset_reason() {
         err.contains("declarative"),
         "expected explicit declarative-subset reason, got: {err}"
     );
+}
+
+#[test]
+fn builder_rejects_opaque_circuit_breaker_fallback() {
+    let err = RouteBuilder::from("direct:start")
+        .route_id("r5")
+        .circuit_breaker(
+            CircuitBreakerConfig::new()
+                .failure_threshold(3)
+                .open_duration(std::time::Duration::from_millis(250))
+                .fallback(BoxProcessor::new(IdentityProcessor)),
+        )
+        .build_canonical()
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        err.contains("fallback"),
+        "expected error to name the fallback processor, got: {err}"
+    );
+}
+
+#[test]
+fn builder_canonicalizes_circuit_breaker_without_fallback() {
+    let spec = RouteBuilder::from("direct:start")
+        .route_id("r6")
+        .circuit_breaker(
+            CircuitBreakerConfig::new()
+                .failure_threshold(3)
+                .open_duration(std::time::Duration::from_millis(250)),
+        )
+        .build_canonical()
+        .unwrap();
+
+    let cb = spec.circuit_breaker.expect("circuit breaker expected");
+    assert_eq!(cb.failure_threshold, 3);
+    assert_eq!(cb.open_duration_ms, 250);
+    assert!(cb.fallback.is_empty());
 }

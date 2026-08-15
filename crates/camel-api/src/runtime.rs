@@ -290,6 +290,8 @@ pub struct CanonicalCircuitBreakerSpec {
     pub failure_threshold: u32,
     #[ts(type = "number")]
     pub open_duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback: Vec<CanonicalStepSpec>,
 }
 
 #[derive(
@@ -369,6 +371,7 @@ impl CanonicalRouteSpec {
                         .to_string(),
                 ));
             }
+            validate_steps(&cb.fallback)?;
         }
         if let Some(CanonicalConcurrencySpec::Concurrent { max: 0 }) = &self.concurrency {
             return Err(CamelError::RouteError(
@@ -845,6 +848,7 @@ mod tests {
         spec.circuit_breaker = Some(CanonicalCircuitBreakerSpec {
             failure_threshold: 0,
             open_duration_ms: 10,
+            fallback: vec![],
         });
         let err = spec.validate_contract().unwrap_err().to_string();
         assert!(err.contains("failure_threshold must be > 0"));
@@ -852,9 +856,24 @@ mod tests {
         spec.circuit_breaker = Some(CanonicalCircuitBreakerSpec {
             failure_threshold: 1,
             open_duration_ms: 0,
+            fallback: vec![],
         });
         let err = spec.validate_contract().unwrap_err().to_string();
         assert!(err.contains("open_duration_ms must be > 0"));
+    }
+
+    #[test]
+    fn canonical_contract_rejects_invalid_fallback_step() {
+        let mut spec = CanonicalRouteSpec::new("r1", "timer:tick");
+        spec.circuit_breaker = Some(CanonicalCircuitBreakerSpec {
+            failure_threshold: 1,
+            open_duration_ms: 10,
+            fallback: vec![CanonicalStepSpec::To {
+                uri: "   ".to_string(),
+            }],
+        });
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("endpoint uri cannot be empty"));
     }
 
     #[test]
@@ -989,6 +1008,39 @@ mod tests {
         );
         let back: CanonicalStepSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(none, back);
+    }
+
+    #[test]
+    fn canonical_circuit_breaker_fallback_roundtrip() {
+        let mut spec = CanonicalRouteSpec::new("cb-fallback", "direct:start");
+        spec.circuit_breaker = Some(CanonicalCircuitBreakerSpec {
+            failure_threshold: 1,
+            open_duration_ms: 60000,
+            fallback: vec![CanonicalStepSpec::CachePeekStale {
+                repository: Some("persistent".into()),
+                key: "tile-xyz".into(),
+                on_miss: None,
+            }],
+        });
+
+        let json = serde_json::to_string(&spec).unwrap();
+        let back: CanonicalRouteSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, back);
+        assert_eq!(back.circuit_breaker.as_ref().unwrap().fallback.len(), 1);
+
+        // A spec serialized without the fallback key deserializes with empty fallback.
+        let without = CanonicalCircuitBreakerSpec {
+            failure_threshold: 1,
+            open_duration_ms: 60000,
+            fallback: vec![],
+        };
+        let json = serde_json::to_string(&without).unwrap();
+        assert!(
+            !json.contains("fallback"),
+            "empty fallback must omit the key from JSON, got: {json}"
+        );
+        let back: CanonicalCircuitBreakerSpec = serde_json::from_str(&json).unwrap();
+        assert!(back.fallback.is_empty());
     }
 
     #[test]

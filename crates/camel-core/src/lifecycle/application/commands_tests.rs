@@ -605,6 +605,7 @@ fn canonical_route_conversion_with_circuit_breaker() {
         circuit_breaker: Some(CanonicalCircuitBreakerSpec {
             failure_threshold: 3,
             open_duration_ms: 500,
+            fallback: Vec::new(),
         }),
         auto_startup: None,
         startup_order: None,
@@ -615,6 +616,68 @@ fn canonical_route_conversion_with_circuit_breaker() {
     let route = canonical_to_route_definition(spec).unwrap();
     assert_eq!(route.route_id(), "route-x");
     assert_eq!(route.from_uri(), "timer:tick");
+}
+
+#[test]
+fn canonical_route_conversion_threads_circuit_breaker_fallback() {
+    use camel_api::runtime::{CanonicalCircuitBreakerSpec, CanonicalRouteSpec, CanonicalStepSpec};
+
+    let spec = CanonicalRouteSpec {
+        route_id: "route-fb".into(),
+        from: "timer:tick".into(),
+        steps: vec![CanonicalStepSpec::Stop],
+        circuit_breaker: Some(CanonicalCircuitBreakerSpec {
+            failure_threshold: 3,
+            open_duration_ms: 500,
+            fallback: vec![CanonicalStepSpec::To {
+                uri: "log:fallback".into(),
+            }],
+        }),
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let route = canonical_to_route_definition(spec).unwrap();
+    assert!(route.circuit_breaker_config().is_some());
+    assert_eq!(route.circuit_breaker_fallback.len(), 1);
+    assert!(matches!(
+        &route.circuit_breaker_fallback[0],
+        BuilderStep::To(uri) if uri == "log:fallback"
+    ));
+}
+
+#[test]
+fn canonical_route_conversion_rejects_unsupported_fallback_step() {
+    use camel_api::runtime::{CanonicalCircuitBreakerSpec, CanonicalRouteSpec, CanonicalStepSpec};
+
+    let spec = CanonicalRouteSpec {
+        route_id: "route-fb-bad".into(),
+        from: "timer:tick".into(),
+        steps: vec![CanonicalStepSpec::Stop],
+        circuit_breaker: Some(CanonicalCircuitBreakerSpec {
+            failure_threshold: 3,
+            open_duration_ms: 500,
+            fallback: vec![CanonicalStepSpec::CachePeekStale {
+                repository: None,
+                key: "k".into(),
+                on_miss: None,
+            }],
+        }),
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let err = match canonical_to_route_definition(spec) {
+        Ok(_) => panic!("unsupported fallback step must fail"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("circuit_breaker fallback"), "got: {msg}");
+    assert!(msg.contains("CachePeekStale"), "got: {msg}");
 }
 
 #[tokio::test]

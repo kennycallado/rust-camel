@@ -71,3 +71,35 @@ routes:
           otherwise:
             - log: "Serving cached body: ${body}"
       # ANCHOR_END: swr-cache-route
+
+  # ===========================================================================
+  # Route 5: Circuit breaker fallback — serve stale data on upstream failure
+  # ===========================================================================
+  # Composes route-level circuit_breaker.fallback with cache_peek_stale for
+  # stale-on-error resilience. The `cache` step wraps the upstream fetch: on a
+  # miss it computes the body (standing in for the real upstream call) and
+  # stores it under the static key `user-profile-42`. In a real deployment the
+  # upstream call fails; after `failure_threshold` consecutive failures the
+  # circuit opens. While open, the fallback peeks the SAME static key and
+  # serves the last cached (possibly stale) entry instead of failing with
+  # CircuitOpen. On a peek MISS (no entry), the default `on_miss: stop` policy
+  # stops the fallback cleanly.
+  #
+  - id: "cb-fallback-stale-demo"
+    from: "timer:tick?period=12000&repeatCount=1"
+    # ANCHOR: cb-fallback-stale-route
+    circuit_breaker:
+      failure_threshold: 1
+      open_duration_ms: 60000
+      fallback:
+        - cache_peek_stale:
+            key: "user-profile-42"
+    # ANCHOR_END: cb-fallback-stale-route
+    steps:
+      - cache:
+          key: "user-profile-42"
+          ttl: "5s"
+          on_miss:
+            - set_body: "computed-fresh-data"
+            - log: "Cache MISS — body computed and stored"
+      - log: "After cache body is: ${body}"

@@ -79,3 +79,58 @@ fn negative_test_rejects_malformed_route() {
         "malformed route should be rejected by schema, but validation passed"
     );
 }
+
+#[test]
+fn schema_validation_accepts_circuit_breaker_fallback() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    let valid: serde_json::Value = serde_json::json!({
+        "routes": [
+            {
+                "id": "cb-fallback-demo",
+                "from": "timer:tick?period=8000&repeatCount=1",
+                "circuit_breaker": {
+                    "failure_threshold": 1,
+                    "open_duration_ms": 60000,
+                    "fallback": [
+                        { "cache_peek_stale": { "key": "tile-xyz" } }
+                    ]
+                },
+                "steps": [
+                    { "log": "upstream fetch" }
+                ]
+            }
+        ]
+    });
+
+    let errors: Vec<_> = validator.iter_errors(&valid).collect();
+    assert!(
+        errors.is_empty(),
+        "route with circuit_breaker.fallback should validate, got: {errors:?}"
+    );
+}
+
+#[test]
+fn schema_validation_rejects_unknown_circuit_breaker_field() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    let invalid: serde_json::Value = serde_json::json!({
+        "routes": [
+            {
+                "id": "cb-unknown-field",
+                "from": "timer:tick",
+                "circuit_breaker": {
+                    "failure_threshold": 1,
+                    "unknown_key": 1
+                }
+            }
+        ]
+    });
+
+    assert!(
+        validator.validate(&invalid).is_err(),
+        "unknown field under circuit_breaker must be rejected by schema, but validation passed"
+    );
+}

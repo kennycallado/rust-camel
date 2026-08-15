@@ -178,6 +178,8 @@ pub struct RouteDslCircuitBreaker {
     pub failure_threshold: u32,
     #[serde(default = "default_open_duration_ms")]
     pub open_duration_ms: u64,
+    #[serde(default)]
+    pub fallback: Vec<RouteDslStep>,
 }
 
 fn default_true() -> bool {

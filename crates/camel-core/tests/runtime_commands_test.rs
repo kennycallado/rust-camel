@@ -784,6 +784,7 @@ async fn register_route_accepts_advanced_canonical_steps() {
         circuit_breaker: Some(CanonicalCircuitBreakerSpec {
             failure_threshold: 3,
             open_duration_ms: 250,
+            fallback: Vec::new(),
         }),
         auto_startup: None,
         startup_order: None,

@@ -34,7 +34,19 @@ On a hit the step sets `CamelCachePeekHit=true`. It sets `CamelCachePeekStale=tr
       - log: "Serving cached body: ${body}"
 ```
 
-Use the Cache pattern when a route computes the same result more than once. API responses, database lookups, and transform-heavy pipelines benefit from caching. Pair `cache_peek_stale` with a [Circuit Breaker](circuit-breaker.md) to serve stale data when the downstream service is open.
+## Stale-on-error with a circuit breaker
+
+Compose `cache_peek_stale` with a route-level `circuit_breaker` to serve a stale entry when the downstream service fails. The `fallback` list holds a sub-pipeline. The breaker runs the fallback only while the circuit is open.
+
+```yaml
+{{#include ../../../examples/cache-example/routes.yaml:cb-fallback-stale-route}}
+```
+
+The route body wraps the upstream fetch in a `cache` step that stores the result under a static key. When the fetch fails `failure_threshold` times in a row, the circuit opens. While open, the fallback runs `cache_peek_stale` against the same static key and serves the last cached entry, even when that entry is past its TTL. On a miss (no entry), the default `on_miss: stop` policy stops the fallback cleanly. The exchange completes without a `CircuitOpen` error.
+
+The fallback runs on routes with and without an `error_handler`. A failing fallback step follows the route's error handling. A route with an `error_handler` routes the failure through the handler. A route without one surfaces the raw error. See [Circuit Breaker](circuit-breaker.md) for the breaker states and [Route structure](../yaml-dsl/route-structure.md) for the `fallback` field.
+
+Use the Cache pattern when a route computes the same result more than once. API responses, database lookups, and transform-heavy pipelines benefit from caching.
 
 The default repository is `"memory"` (moka-backed, size-eviction only). A persistent `"persistent"` repository (redb-backed) is available when `[default.cache_repo] backend = "redb"` is set. The redb backend survives process restarts. Its sweep task reclaims entries whose `expires_at + stale_retention` has passed. The memory backend does not run a sweep. Expired entries stay in memory until size pressure evicts them.
 

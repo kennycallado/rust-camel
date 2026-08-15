@@ -5,6 +5,7 @@
 //! - `cache`: lookup by key, run `on_miss` on miss, write back the result
 //! - `cache_invalidate`: remove a single key from the cache
 //! - `cache_peek_stale`: serve a post-expiry entry (stale-read fallback)
+//! - `circuit_breaker.fallback`: serve a stale entry when the circuit opens
 //!
 //! The default `"memory"` cache repository (moka-backed, size-eviction)
 //! is registered automatically by `CamelContext::builder().build()`.
@@ -48,6 +49,7 @@ async fn main() -> Result<(), CamelError> {
     println!("Route 1: caches a computed body with 5s TTL.");
     println!("Route 2: invalidates the cached entry.");
     println!("Route 3: serves a stale entry after TTL expiry.");
+    println!("Route 5: serves a stale entry when the circuit opens.");
     println!("Press Ctrl+C to stop...");
 
     tokio::signal::ctrl_c()

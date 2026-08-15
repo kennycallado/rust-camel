@@ -334,18 +334,66 @@ async fn multiple_routes() {
 // Error-handling integration tests (Tasks 4 + 5)
 // ---------------------------------------------------------------------------
 
-use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, CircuitBreakerConfig};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, CircuitBreakerConfig, Exchange};
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
 };
 use std::time::Duration;
+use tower::ServiceExt;
 
 /// A processor that always fails with the given message.
 fn failing_step(msg: &'static str) -> BoxProcessor {
     BoxProcessor::from_fn(move |_ex| {
         Box::pin(async move { Err(CamelError::ProcessorError(msg.into())) })
     })
+}
+
+/// No-op runtime observability for direct producers in CB fallback tests.
+fn test_rt() -> Arc<dyn camel_component_api::RuntimeObservability> {
+    Arc::new(camel_component_api::NoOpComponentContext)
+}
+
+/// Send an exchange to a direct endpoint and return the route's reply.
+///
+/// Unlike the tolerant variants used by failure-path tests, a non-race
+/// `Err` reply is RETURNED (not accepted) so callers can assert on it:
+/// only the consumer-startup race is retried.
+async fn send_await_reply(
+    h: &CamelTestContext,
+    endpoint_uri: &str,
+    exchange: Exchange,
+    timeout: Duration,
+) -> Result<Exchange, CamelError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let producer = {
+            let ctx = h.ctx().lock().await;
+            let producer_ctx = ctx.producer_context();
+            let registry = ctx.registry();
+            let component = registry
+                .get("direct")
+                .expect("direct component not registered");
+            let endpoint = component
+                .create_endpoint(endpoint_uri, &*ctx)
+                .expect("failed to create direct endpoint");
+            endpoint
+                .create_producer(test_rt(), &producer_ctx)
+                .expect("failed to create direct producer")
+        };
+        match producer.oneshot(exchange.clone()).await {
+            Ok(ex) => return Ok(ex),
+            Err(e) => {
+                let is_startup_race = matches!(e, CamelError::EndpointCreationFailed(_))
+                    || e.to_string().contains("not registered");
+                if is_startup_race && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -735,6 +783,491 @@ async fn circuit_breaker_with_error_handler() {
             "mock:sink should receive zero exchanges"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test 14b: Circuit breaker fallback serves stale body via the gate path
+// ---------------------------------------------------------------------------
+
+/// Verifies the CB `fallback:` sub-pipeline end-to-end on the gate branch
+/// (`eh_config = Some` → `RouteChannelService` + `CircuitBreakerGate`):
+///
+/// - The route body fails on an unresolvable recipient; the error handler's
+///   on-exception clause is `handled: false` (Propagate), so the pipeline
+///   replies `Err` and the gate's `after_result` counts the failure — with
+///   `failure_threshold: 1` the circuit opens.
+/// - The next exchange hits the open circuit. With a fallback compiled into
+///   `CircuitBreakerConfig.fallback`, the gate serves the fallback
+///   (`cache_peek_stale` on a seeded "persistent" repository) instead of
+///   rejecting with `CircuitOpen`.
+///
+/// Without fallback compilation the second request is rejected with
+/// `CircuitOpen` — the assertions below fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn circuit_breaker_fallback_gate_path_serves_body() {
+    use camel_api::{CacheEntry, CacheRepository, ContentType, Message};
+    use camel_core::cache::MemoryCacheRepository;
+
+    let h = CamelTestContext::builder().with_direct().build().await;
+
+    // Register a named "persistent" repository and seed it with a PAST-EXPIRY
+    // entry: `set` computes `expires_at = now + ttl` (memory repo test
+    // `get_returns_none_after_expiry_peek_stale_returns_entry` pins that
+    // `get` then misses while `peek_stale` still serves the entry).
+    {
+        let mut ctx = h.ctx().lock().await;
+        let repo = Arc::new(MemoryCacheRepository::new("persistent", 16));
+        ctx.register_cache_repository(
+            "persistent",
+            Arc::clone(&repo) as Arc<dyn camel_api::CacheRepository>,
+        )
+        .expect("persistent cache repository must register");
+        repo.set(
+            "tile-xyz",
+            CacheEntry {
+                bytes: b"tile-stale-value".to_vec(),
+                content_type: ContentType::Text,
+                expires_at: None,
+            },
+            Some(Duration::from_millis(1)),
+        )
+        .await
+        .expect("seed entry must store");
+    }
+    // Let the 1ms TTL lapse: get → MISS, peek_stale → Some (stale).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let yaml = r#"
+routes:
+  - id: "cb-fallback-gate"
+    from: "direct:gate"
+    circuit_breaker:
+      failure_threshold: 1
+      open_duration_ms: 60000
+      fallback:
+        - cache_peek_stale:
+            repository: "persistent"
+            key: "tile-xyz"
+    error_handler:
+      on_exceptions:
+        - kind: "ComponentNotFound"
+          handled: false
+    steps:
+      - recipient_list:
+          simple: "bogus-fail:nowhere"
+"#;
+
+    for route in camel_dsl::parse_yaml(yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    // Request 1: circuit closed → body fails → Propagate → Err reply → the
+    // gate counts the failure → circuit OPENS. The failure must be the
+    // upstream error, not CircuitOpen (the circuit was closed here).
+    match send_await_reply(
+        &h,
+        "direct:gate",
+        Exchange::new(Message::new("req-1")),
+        Duration::from_secs(2),
+    )
+    .await
+    {
+        Err(e) => assert!(
+            !matches!(e, CamelError::CircuitOpen(_)),
+            "first request must fail upstream, not on an open circuit: {e}"
+        ),
+        Ok(_) => panic!("first request must fail (recipient is unresolvable)"),
+    }
+
+    // Request 2: circuit open + fallback → the gate serves the stale body.
+    let reply = send_await_reply(
+        &h,
+        "direct:gate",
+        Exchange::new(Message::new("req-2")),
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("open circuit must serve the fallback, not reject");
+    assert_eq!(
+        reply.input.body.as_text(),
+        Some("tile-stale-value"),
+        "fallback must serve the stale cached body"
+    );
+    assert!(
+        !reply.has_error(),
+        "fallback reply must not carry an error: {:?}",
+        reply.error
+    );
+
+    h.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 14c: Circuit breaker fallback serves stale body via the layer path
+// ---------------------------------------------------------------------------
+
+/// Verifies the CB `fallback:` sub-pipeline end-to-end on the layer branch
+/// (`eh_config = None` → Tower `CircuitBreakerLayer`/`CircuitBreakerService`):
+///
+/// - The route has NO error handler, so the Tower `CircuitBreakerService`
+///   wraps the pipeline directly and serves `config.fallback` when the
+///   circuit is open (`camel-processor` `circuit_breaker.rs`,
+///   `CircuitBreakerService::call`).
+/// - Request 1 fails upstream (`recipient_list` to an unresolvable
+///   recipient), opening the circuit (`failure_threshold: 1`).
+/// - Request 2 hits the open circuit; the service serves the fallback
+///   (`cache_peek_stale` on a seeded past-expiry entry) instead of rejecting
+///   with `CircuitOpen`.
+#[tokio::test(flavor = "multi_thread")]
+async fn circuit_breaker_fallback_layer_path_serves_body() {
+    use camel_api::{CacheEntry, CacheRepository, ContentType, Message};
+    use camel_core::cache::MemoryCacheRepository;
+
+    let h = CamelTestContext::builder().with_direct().build().await;
+
+    // Seed the "persistent" repository with a past-expiry entry (same pattern
+    // as the gate test): after the 1ms TTL lapses, `peek_stale` still serves
+    // the entry while a normal `get` would miss.
+    {
+        let mut ctx = h.ctx().lock().await;
+        let repo = Arc::new(MemoryCacheRepository::new("persistent", 16));
+        ctx.register_cache_repository(
+            "persistent",
+            Arc::clone(&repo) as Arc<dyn camel_api::CacheRepository>,
+        )
+        .expect("persistent cache repository must register");
+        repo.set(
+            "tile-xyz",
+            CacheEntry {
+                bytes: b"tile-stale-value".to_vec(),
+                content_type: ContentType::Text,
+                expires_at: None,
+            },
+            Some(Duration::from_millis(1)),
+        )
+        .await
+        .expect("seed entry must store");
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let yaml = r#"
+routes:
+  - id: "cb-fallback-layer"
+    from: "direct:layer"
+    circuit_breaker:
+      failure_threshold: 1
+      open_duration_ms: 60000
+      fallback:
+        - cache_peek_stale:
+            repository: "persistent"
+            key: "tile-xyz"
+    steps:
+      - recipient_list:
+          simple: "bogus-fail:nowhere"
+"#;
+
+    for route in camel_dsl::parse_yaml(yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    // Request 1: circuit closed → body fails → Err reply → the Tower service
+    // counts the failure → circuit OPENS.
+    match send_await_reply(
+        &h,
+        "direct:layer",
+        Exchange::new(Message::new("req-1")),
+        Duration::from_secs(2),
+    )
+    .await
+    {
+        Err(e) => assert!(
+            !matches!(e, CamelError::CircuitOpen(_)),
+            "first request must fail upstream, not on an open circuit: {e}"
+        ),
+        Ok(_) => panic!("first request must fail (recipient is unresolvable)"),
+    }
+
+    // Request 2: circuit open + fallback → the Tower service serves the stale
+    // body.
+    let reply = send_await_reply(
+        &h,
+        "direct:layer",
+        Exchange::new(Message::new("req-2")),
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("open circuit must serve the fallback, not reject");
+    assert_eq!(
+        reply.input.body.as_text(),
+        Some("tile-stale-value"),
+        "fallback must serve the stale cached body"
+    );
+    assert!(
+        !reply.has_error(),
+        "fallback reply must not carry an error: {:?}",
+        reply.error
+    );
+
+    h.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 14d: CB fallback peek-MISS stops cleanly on both branches
+// ---------------------------------------------------------------------------
+
+/// Verifies the `cache_peek_stale` fallback on a key with NO entry (default
+/// `on_miss: "stop"`) returns `Ok(exchange)` with the exchange state intact on
+/// BOTH runtime branches:
+///
+/// - Gate variant (`eh_config = Some` → `RouteChannelService` +
+///   `CircuitBreakerGate`): the fallback's `Stopped(ex)` maps to `Ok(ex)` via
+///   `into_tower_result`, so the gate returns `Ok`, not a boundary error.
+/// - Layer variant (`eh_config = None` → Tower `CircuitBreakerService`): the
+///   same fallback maps `Stopped` → `Ok`.
+///
+/// Each route opens its circuit with one failing warm-up exchange; one probe
+/// exchange then hits the open circuit and surfaces `Ok(ex)` with the original
+/// body intact — no `CircuitOpen`, no error.
+#[tokio::test(flavor = "multi_thread")]
+async fn circuit_breaker_fallback_miss_stops_cleanly_per_branch() {
+    use camel_api::Message;
+
+    let h = CamelTestContext::builder().with_direct().build().await;
+
+    // Gate variant: an error handler is present, forcing the
+    // RouteChannelService + CircuitBreakerGate branch.
+    let gate_yaml = r#"
+routes:
+  - id: "cb-miss-gate"
+    from: "direct:miss-gate"
+    circuit_breaker:
+      failure_threshold: 1
+      open_duration_ms: 60000
+      fallback:
+        - cache_peek_stale:
+            repository: "memory"
+            key: "never-set-key"
+    error_handler:
+      on_exceptions:
+        - kind: "ComponentNotFound"
+          handled: false
+    steps:
+      - recipient_list:
+          simple: "bogus-fail:nowhere"
+"#;
+
+    // Layer variant: no error handler at all, forcing the Tower
+    // CircuitBreakerService branch.
+    let layer_yaml = r#"
+routes:
+  - id: "cb-miss-layer"
+    from: "direct:miss-layer"
+    circuit_breaker:
+      failure_threshold: 1
+      open_duration_ms: 60000
+      fallback:
+        - cache_peek_stale:
+            repository: "memory"
+            key: "never-set-key"
+    steps:
+      - recipient_list:
+          simple: "bogus-fail:nowhere"
+"#;
+
+    for route in camel_dsl::parse_yaml(gate_yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    for route in camel_dsl::parse_yaml(layer_yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    for (endpoint, variant) in [("direct:miss-gate", "gate"), ("direct:miss-layer", "layer")] {
+        // Warm-up: fail the upstream to open the circuit.
+        match send_await_reply(
+            &h,
+            endpoint,
+            Exchange::new(Message::new("warmup")),
+            Duration::from_secs(2),
+        )
+        .await
+        {
+            Err(e) => assert!(
+                !matches!(e, CamelError::CircuitOpen(_)),
+                "[{variant}] warm-up must fail upstream, not on an open circuit: {e}"
+            ),
+            Ok(_) => panic!("[{variant}] warm-up must fail (recipient is unresolvable)"),
+        }
+
+        // Probe: open circuit + fallback peek-MISS → Stop → Ok(exchange) with
+        // the body intact.
+        let reply = send_await_reply(
+            &h,
+            endpoint,
+            Exchange::new(Message::new("probe")),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("[{variant}] open circuit must surface Ok(exchange), got Err: {e}")
+        });
+        assert_eq!(
+            reply.input.body.as_text(),
+            Some("probe"),
+            "[{variant}] peek-MISS stop must preserve the exchange body"
+        );
+        assert!(
+            !reply.has_error(),
+            "[{variant}] peek-MISS stop must not carry an error: {:?}",
+            reply.error
+        );
+    }
+
+    h.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 14e: CB failing fallback asymmetry (gate → DLC, layer → raw Err)
+// ---------------------------------------------------------------------------
+
+/// Pins the documented asymmetry when the CB fallback ITSELF fails:
+///
+/// - Gate variant (DLC error handler → `RouteChannelService` +
+///   `CircuitBreakerGate`): a failing fallback surfaces through
+///   `handle_boundary` — the error reaches the DLC (`mock:dlc`), and the
+///   exchange completes via the handler (`Ok`, not a raw `Err`).
+/// - Layer variant (no error handler → Tower `CircuitBreakerService`): the
+///   same failing fallback returns a raw `Err` to the caller.
+///
+/// Each route opens its circuit with one warm-up exchange; the probe exchange
+/// then trips the failing fallback (`recipient_list` to an unresolvable
+/// recipient inside the fallback).
+#[tokio::test(flavor = "multi_thread")]
+async fn circuit_breaker_failing_fallback_asymmetry() {
+    use camel_api::Message;
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let gate_yaml = r#"
+routes:
+  - id: "cb-failing-gate"
+    from: "direct:ff-gate"
+    circuit_breaker:
+      failure_threshold: 1
+      open_duration_ms: 60000
+      fallback:
+        - recipient_list:
+            simple: "bogus-fallback:nowhere"
+    error_handler:
+      dead_letter_channel: "mock:dlc"
+      on_exceptions:
+        - kind: "ComponentNotFound"
+          handled: false
+    steps:
+      - recipient_list:
+          simple: "bogus-fail:nowhere"
+"#;
+
+    let layer_yaml = r#"
+routes:
+  - id: "cb-failing-layer"
+    from: "direct:ff-layer"
+    circuit_breaker:
+      failure_threshold: 1
+      open_duration_ms: 60000
+      fallback:
+        - recipient_list:
+            simple: "bogus-fallback:nowhere"
+    steps:
+      - recipient_list:
+          simple: "bogus-fail:nowhere"
+"#;
+
+    for route in camel_dsl::parse_yaml(gate_yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    for route in camel_dsl::parse_yaml(layer_yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    // ── Gate variant ──
+    match send_await_reply(
+        &h,
+        "direct:ff-gate",
+        Exchange::new(Message::new("gate-warmup")),
+        Duration::from_secs(2),
+    )
+    .await
+    {
+        Err(e) => assert!(
+            !matches!(e, CamelError::CircuitOpen(_)),
+            "gate warm-up must fail upstream, not on an open circuit: {e}"
+        ),
+        Ok(_) => panic!("gate warm-up must fail (recipient is unresolvable)"),
+    }
+
+    // Probe: open circuit + failing fallback → error reaches the DLC, and the
+    // exchange completes via the handler (Ok, not a raw Err).
+    let reply = send_await_reply(
+        &h,
+        "direct:ff-gate",
+        Exchange::new(Message::new("gate-probe")),
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("gate: failing fallback must complete via handler (Ok), not raw Err");
+    assert!(
+        reply.has_error(),
+        "gate: reply must carry the fallback error: {:?}",
+        reply.error
+    );
+
+    let dlc = h.mock().get_endpoint("dlc").expect("mock:dlc endpoint");
+    let dlc_exchanges = dlc.get_received_exchanges().await;
+    assert!(
+        dlc_exchanges
+            .iter()
+            .any(|ex| ex.has_error() && ex.input.body.as_text() == Some("gate-probe")),
+        "gate: mock:dlc must receive the fallback error carrying the probe body"
+    );
+
+    // ── Layer variant ──
+    match send_await_reply(
+        &h,
+        "direct:ff-layer",
+        Exchange::new(Message::new("layer-warmup")),
+        Duration::from_secs(2),
+    )
+    .await
+    {
+        Err(e) => assert!(
+            !matches!(e, CamelError::CircuitOpen(_)),
+            "layer warm-up must fail upstream, not on an open circuit: {e}"
+        ),
+        Ok(_) => panic!("layer warm-up must fail (recipient is unresolvable)"),
+    }
+
+    // Probe: open circuit + failing fallback → raw Err surfaces to the caller.
+    let result = send_await_reply(
+        &h,
+        "direct:ff-layer",
+        Exchange::new(Message::new("layer-probe")),
+        Duration::from_secs(2),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "layer: failing fallback must surface a raw Err, got Ok: {result:?}"
+    );
+
+    h.stop().await;
 }
 
 // ---------------------------------------------------------------------------

@@ -52,10 +52,11 @@ pub enum DeclarativeConcurrency {
     Concurrent { max: Option<usize> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeclarativeCircuitBreaker {
     pub failure_threshold: u32,
     pub open_duration_ms: u64,
+    pub fallback: Vec<DeclarativeStep>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -797,6 +798,7 @@ mod tests {
         let cb = DeclarativeCircuitBreaker {
             failure_threshold: 3,
             open_duration_ms: 5000,
+            fallback: vec![],
         };
         assert_eq!(cb.failure_threshold, 3);
         assert_eq!(cb.open_duration_ms, 5000);

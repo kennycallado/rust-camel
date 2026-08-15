@@ -258,6 +258,10 @@ pub(crate) fn build_eh_config_pipeline(
 
 // ── RouteCompilerExt ──
 
+/// `StepLifecycle` handles harvested from a compiled fallback sidecar;
+/// callers merge them into the route's lifecycle vec.
+pub(crate) type FallbackLifecycle = Vec<Arc<dyn StepLifecycle>>;
+
 /// A borrowed-context struct that holds references to the fields needed for
 /// route compilation. Created transiently inside `DefaultRouteController` methods.
 pub(crate) struct RouteCompilerExt<'a> {
@@ -330,6 +334,83 @@ impl RouteCompilerExt<'_> {
             self.claim_check_repositories.as_ref(),
             self.cache_repositories.as_ref(),
         )
+    }
+
+    /// Compile the circuit breaker fallback sidecar into a `BoxProcessor`.
+    ///
+    /// Mirrors the `cache_peek_stale.on_miss` precedent: the DSL layers thread
+    /// UNRESOLVED steps and camel-core resolves them via the
+    /// `StepCompilerRegistry` (processor-construction monopoly). The fallback
+    /// lifecycle handles are returned separately so callers merge them into
+    /// the route lifecycle vec — nothing harvests them automatically because
+    /// the fallback is not part of the route's `processors_with_contracts`.
+    ///
+    /// Composition uses `compose_traced_pipeline_with_contracts` for
+    /// body-contract coercion parity with `on_miss` sub-pipelines. The
+    /// in-pipeline error handler is `None`: fallback errors surface at the
+    /// circuit-breaker boundary, never inside the fallback.
+    pub(crate) fn compile_cb_fallback(
+        &self,
+        steps: Vec<BuilderStep>,
+        producer_ctx: &ProducerContext,
+        route_id: &str,
+        staging_mode: &super::step_resolution::FunctionStagingMode,
+    ) -> Result<(BoxProcessor, Vec<Arc<dyn StepLifecycle>>), CamelError> {
+        let compiled = self.resolve_steps(
+            steps,
+            producer_ctx,
+            self.registry,
+            Some(route_id),
+            staging_mode,
+        )?;
+        let lifecycle = super::route_helpers::collect_lifecycle(&compiled);
+        let fallback = compose_traced_pipeline_with_contracts(
+            compiled,
+            route_id,
+            self.tracing_enabled,
+            self.tracer_detail_level.clone(),
+            self.tracer_metrics.clone(),
+            None,
+            build_pipeline_ctx(self.tracer_metrics, route_id),
+        );
+        Ok((fallback, lifecycle))
+    }
+
+    /// Attach the CB fallback sidecar to the circuit-breaker config.
+    ///
+    /// Single shared attach point for [`compile_route_impl`] and
+    /// [`super::route_controller::DefaultRouteController::build_managed_route`]:
+    /// when a CB config is present AND the sidecar is non-empty, compiles the
+    /// fallback processor and attaches it via
+    /// [`CircuitBreakerConfig::fallback`] — the one attach point feeding both
+    /// the CircuitBreakerGate (eh_config = Some) and the Tower
+    /// CircuitBreakerService (eh_config = None) branches. Otherwise the config
+    /// is returned unchanged.
+    ///
+    /// Returns the fallback's [`FallbackLifecycle`] handles alongside the
+    /// config; callers MUST merge them into the route lifecycle vec — nothing
+    /// harvests them automatically because the fallback is not part of the
+    /// route's `processors_with_contracts` (see [`Self::compile_cb_fallback`]).
+    pub(crate) fn attach_cb_fallback(
+        &self,
+        cfg: Option<CircuitBreakerConfig>,
+        sidecar: Vec<BuilderStep>,
+        producer_ctx: &ProducerContext,
+        route_id: &str,
+        staging_mode: &super::step_resolution::FunctionStagingMode,
+    ) -> Result<(Option<CircuitBreakerConfig>, FallbackLifecycle), CamelError> {
+        match cfg {
+            Some(cfg) if !sidecar.is_empty() => {
+                let (fallback, lifecycle) =
+                    self.compile_cb_fallback(sidecar, producer_ctx, route_id, staging_mode)?;
+                Ok((Some(cfg.fallback(fallback)), lifecycle))
+            }
+            Some(cfg) => Ok((Some(cfg), Vec::new())),
+            None if sidecar.is_empty() => Ok((None, Vec::new())),
+            None => Err(CamelError::Config(
+                "circuit_breaker_fallback requires circuit_breaker to be configured".into(),
+            )),
+        }
     }
 
     /// Detect whether a route definition contains a top-level aggregate or
@@ -562,6 +643,11 @@ impl RouteCompilerExt<'_> {
 
         let producer_ctx = self.build_producer_context(&route_id)?;
 
+        // CB fallback sidecar: extracted before `def.steps` partially moves
+        // `def` below. Resolution happens after the aggregate-split check.
+        let circuit_breaker_fallback = def.circuit_breaker_fallback;
+        let circuit_breaker_cfg = def.circuit_breaker;
+
         let (aggregate_split, processors_with_contracts) = self.detect_and_validate_route_split(
             def.steps,
             &producer_ctx,
@@ -579,7 +665,19 @@ impl RouteCompilerExt<'_> {
             )));
         }
 
-        let lifecycle = super::route_helpers::collect_lifecycle(&processors_with_contracts);
+        let mut lifecycle = super::route_helpers::collect_lifecycle(&processors_with_contracts);
+
+        // CB fallback (mirrors on_miss lifecycle packing): attach via the
+        // shared helper, then merge the fallback lifecycle handles into the
+        // route vec.
+        let (circuit_breaker, fallback_lifecycle) = self.attach_cb_fallback(
+            circuit_breaker_cfg,
+            circuit_breaker_fallback,
+            &producer_ctx,
+            &route_id,
+            staging_mode,
+        )?;
+        lifecycle.extend(fallback_lifecycle);
 
         let eh_config = def
             .error_handler
@@ -599,7 +697,7 @@ impl RouteCompilerExt<'_> {
             self.tracing_enabled,
             self.tracer_detail_level.clone(),
             def.security_policy,
-            def.circuit_breaker,
+            circuit_breaker,
         )?;
 
         // Apply UoW layer outermost

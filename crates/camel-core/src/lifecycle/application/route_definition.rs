@@ -319,6 +319,14 @@ pub struct RouteDefinition {
     pub(crate) error_handler: Option<ErrorHandlerConfig>,
     /// Optional circuit breaker config. Applied between error handler and step pipeline.
     pub(crate) circuit_breaker: Option<CircuitBreakerConfig>,
+    /// Circuit breaker fallback sub-pipeline, as UNRESOLVED steps.
+    ///
+    /// Sibling of [`RouteDefinition::circuit_breaker`]: the DSL layers thread
+    /// `Vec<BuilderStep>` here (same rule as `cache_peek_stale.on_miss`) and
+    /// camel-core compiles it via the `StepCompilerRegistry` when the route is
+    /// compiled. The resolved `CircuitBreakerConfig.fallback` (`BoxProcessor`)
+    /// stays `None` until that compile — the DSL never constructs processors.
+    pub(crate) circuit_breaker_fallback: Vec<BuilderStep>,
     pub(crate) security_policy: Option<SecurityPolicyConfig>,
     /// Optional token authenticator for validating JWT/OAuth tokens.
     pub(crate) security_authenticator: Option<Arc<dyn TokenAuthenticator>>,
@@ -344,6 +352,7 @@ impl RouteDefinition {
             steps,
             error_handler: None,
             circuit_breaker: None,
+            circuit_breaker_fallback: Vec::new(),
             security_policy: None,
             security_authenticator: None,
             unit_of_work: None,
@@ -388,6 +397,17 @@ impl RouteDefinition {
     /// Set a circuit breaker for this route.
     pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker = Some(config);
+        self
+    }
+
+    /// Set the circuit breaker fallback sub-pipeline (unresolved steps).
+    ///
+    /// Mirror of [`RouteDefinition::with_circuit_breaker`]: the steps are
+    /// compiled by camel-core at route-compile time (registry monopoly) and
+    /// attached to the resolved `CircuitBreakerConfig.fallback`. Empty when no
+    /// CB is configured or the CB has no fallback.
+    pub fn with_circuit_breaker_fallback(mut self, steps: Vec<BuilderStep>) -> Self {
+        self.circuit_breaker_fallback = steps;
         self
     }
 

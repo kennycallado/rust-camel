@@ -893,6 +893,11 @@ fn canonical_to_route_definition(
                 .failure_threshold(cb.failure_threshold)
                 .open_duration(Duration::from_millis(cb.open_duration_ms)),
         );
+        if !cb.fallback.is_empty() {
+            let fallback = canonical_steps_to_builder_steps(cb.fallback)
+                .map_err(|e| CamelError::Config(format!("circuit_breaker fallback: {e}")))?;
+            definition = definition.with_circuit_breaker_fallback(fallback);
+        }
     }
 
     Ok(definition)
@@ -1069,7 +1074,9 @@ fn canonical_step_to_builder_step(
                 max_delay_ms: camel_api::DEFAULT_MAX_DELAY_MS,
             },
         }),
-        _ => Err(CamelError::Config("unsupported canonical step".into())),
+        _ => Err(CamelError::Config(format!(
+            "unsupported canonical step: {step:?}"
+        ))),
     }
 }
 

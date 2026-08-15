@@ -1375,6 +1375,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "fallback": {
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
         "open_duration_ms": {
           "default": 30000,
           "format": "uint64",

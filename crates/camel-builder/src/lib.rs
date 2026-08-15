@@ -802,7 +802,8 @@ impl RouteBuilder {
         let steps = canonicalize_steps(self.steps)?;
         let circuit_breaker = self
             .circuit_breaker_config
-            .map(canonicalize_circuit_breaker);
+            .map(canonicalize_circuit_breaker)
+            .transpose()?;
 
         if self.security_policy_config.is_some() {
             return Err(CamelError::RouteError(
@@ -1104,11 +1105,21 @@ fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregate
     })
 }
 
-fn canonicalize_circuit_breaker(config: CircuitBreakerConfig) -> CanonicalCircuitBreakerSpec {
-    CanonicalCircuitBreakerSpec {
+fn canonicalize_circuit_breaker(
+    config: CircuitBreakerConfig,
+) -> Result<CanonicalCircuitBreakerSpec, CamelError> {
+    if config.fallback.is_some() {
+        return Err(CamelError::RouteError(
+            "canonical v2 does not support circuit breaker `fallback` (opaque BoxProcessor \
+             cannot reverse-map to canonical steps); build the canonical spec directly"
+                .to_string(),
+        ));
+    }
+    Ok(CanonicalCircuitBreakerSpec {
         failure_threshold: config.failure_threshold,
         open_duration_ms: u64::try_from(config.open_duration.as_millis()).unwrap_or(u64::MAX),
-    }
+        fallback: Vec::new(),
+    })
 }
 
 fn canonical_step_name(step: &BuilderStep) -> &'static str {

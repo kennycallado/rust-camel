@@ -389,6 +389,7 @@ impl DefaultRouteController {
             steps,
             error_handler,
             circuit_breaker,
+            circuit_breaker_fallback,
             security_policy,
             security_authenticator,
             unit_of_work,
@@ -404,7 +405,19 @@ impl DefaultRouteController {
         let (aggregate_split, processors_with_contracts) = self
             .route_compiler_ext()
             .detect_and_validate_route_split(steps, &producer_ctx, &route_id, staging_mode)?;
-        let lifecycle = super::route_helpers::collect_lifecycle(&processors_with_contracts);
+        let mut lifecycle = super::route_helpers::collect_lifecycle(&processors_with_contracts);
+
+        // CB fallback (mirrors on_miss lifecycle packing): attach via the
+        // shared helper, then merge the fallback lifecycle handles into the
+        // route vec.
+        let (circuit_breaker, fallback_lifecycle) = self.route_compiler_ext().attach_cb_fallback(
+            circuit_breaker,
+            circuit_breaker_fallback,
+            &producer_ctx,
+            &route_id,
+            staging_mode,
+        )?;
+        lifecycle.extend(fallback_lifecycle);
         let route_id_for_tracing = route_id.clone();
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
 

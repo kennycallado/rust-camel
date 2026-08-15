@@ -153,6 +153,12 @@
           "format": "uint32",
           "minimum": 0
         },
+        "fallback": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CanonicalStepSpec"
+          }
+        },
         "open_duration_ms": {
           "type": "integer",
           "format": "uint64",

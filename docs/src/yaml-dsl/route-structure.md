@@ -18,8 +18,9 @@ forwards the exchange to the `log:info` endpoint.
 ## Route fields
 
 Each route object accepts these top-level fields. Only `id` and `from` are
-required. The nested config objects (`error_handler`, `circuit_breaker`,
-`security_policy`) are documented in the [step verbs reference](step-verbs.md).
+required. The `error_handler` and `circuit_breaker` objects are documented
+below. The `security_policy` object is documented in
+[Authorization](../services/auth.md).
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -31,7 +32,7 @@ required. The nested config objects (`error_handler`, `circuit_breaker`,
 | `sequential` | bool | no | `false` | Process exchanges one at a time |
 | `concurrent` | integer | no | — | Maximum concurrent exchanges |
 | `error_handler` | object | no | — | Per-route error handler |
-| `circuit_breaker` | object | no | — | Route-level circuit breaker |
+| `circuit_breaker` | object | no | — | Route-level circuit breaker with optional fallback sub-pipeline |
 | `security_policy` | object | no | — | Route-level authorization |
 | `on_complete` | string | no | — | Producer URI for the success hook |
 | `on_failure` | string | no | — | Producer URI for the failure hook |
@@ -48,6 +49,34 @@ Set `error_handler` to retry failed exchanges and send them to a dead letter
 channel when retries run out. The handler holds a redelivery policy and optional
 per-exception clauses. The full field set lives on the
 [step verbs reference](step-verbs.md).
+
+## Circuit breaker
+
+Set `circuit_breaker` to protect a route from a failing downstream service. The
+breaker opens after `failure_threshold` consecutive failures. While open, it
+rejects exchanges for `open_duration_ms`. See [Circuit
+breaker](../eip/circuit-breaker.md) for the breaker states.
+
+The optional `fallback` list holds a sub-pipeline. The breaker runs the
+sub-pipeline instead of rejecting the exchange while the circuit is open. An
+absent or empty `fallback` keeps the existing behavior: the breaker returns
+`CircuitOpen`.
+
+```yaml
+{{#include ../../../examples/cache-example/routes.yaml:cb-fallback-stale-route}}
+```
+
+The fallback runs on routes with and without an `error_handler`. A fallback
+step that stops cleanly (for example, a `cache_peek_stale` MISS with the
+default `on_miss: stop`) surfaces `Ok(exchange)` with the exchange state
+intact. No `CircuitOpen` escapes.
+
+A failing fallback step follows the route's error handling. A route with an
+`error_handler` routes the failure through the handler. A route without one
+surfaces the raw error to the caller.
+
+The [Cache](../eip/cache.md) page shows the stale-on-error composition with
+`cache_peek_stale`.
 
 ## List-form variant
 

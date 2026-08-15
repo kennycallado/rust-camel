@@ -769,6 +769,11 @@ where each one goes.
 |---|---|---|---|---|
 | `failure_threshold` | integer | no | `5` | Failures before opening |
 | `open_duration_ms` | integer | no | `30000` | Duration in the open state |
+| `fallback` | list | no | — | Sub-pipeline executed while the circuit is open |
+
+The `fallback` list holds a sub-pipeline of steps. The breaker runs it instead of
+rejecting the exchange while the circuit is open. See
+[Circuit breaker](route-structure.md#circuit-breaker) for the full surface.
 
 ### Security policy config
 

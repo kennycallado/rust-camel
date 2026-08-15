@@ -334,9 +334,15 @@ pub(crate) fn route_dsl_to_declarative_route(
                     "circuit_breaker: failure_threshold must be > 0".into(),
                 ));
             }
+            let fallback = cb
+                .fallback
+                .into_iter()
+                .map(route_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeCircuitBreaker {
                 failure_threshold: cb.failure_threshold,
                 open_duration_ms: cb.open_duration_ms,
+                fallback,
             })
         })
         .transpose()?;
@@ -3652,6 +3658,56 @@ routes:
         assert!(
             err.contains("failure_threshold must be > 0"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn yaml_circuit_breaker_fallback_parses() {
+        let yaml = r#"
+routes:
+  - id: "cb-fallback"
+    from: "direct:start"
+    circuit_breaker:
+      failure_threshold: 1
+      open_duration_ms: 60000
+      fallback:
+        - cache_peek_stale:
+            repository: persistent
+            key: "tile-xyz"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        let cb = routes[0]
+            .circuit_breaker
+            .as_ref()
+            .expect("circuit breaker should be present");
+        assert_eq!(cb.fallback.len(), 1);
+        match &cb.fallback[0] {
+            DeclarativeStep::CachePeekStale(def) => {
+                assert_eq!(def.repository.as_deref(), Some("persistent"));
+                assert_eq!(def.key.language, "simple");
+                assert_eq!(def.key.source, "tile-xyz");
+            }
+            other => panic!("expected CachePeekStale fallback step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn yaml_circuit_breaker_unknown_field_rejected() {
+        let yaml = r#"
+routes:
+  - id: "cb-unknown"
+    from: "direct:start"
+    circuit_breaker:
+      failure_threshold: 1
+      unknown_key: 1
+"#;
+        let err = parse_yaml_to_declarative(yaml)
+            .expect_err("unknown circuit_breaker field must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown field"),
+            "expected 'unknown field' in error, got: {msg}"
         );
     }
 
