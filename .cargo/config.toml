@@ -6,3 +6,9 @@ registry = "sparse+https://index.crates.io/"
 
 [alias]
 xtask = "run --package xtask --"
+
+# Build-once-gate agent workflow: incremental caches are dead weight
+# (measured 2.2G in the shared target dir) and their mtime-heavy
+# fingerprint files misbehave on ntfs3 target dirs.
+[build]
+incremental = false
