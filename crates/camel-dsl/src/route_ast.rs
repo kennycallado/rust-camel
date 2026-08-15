@@ -1040,6 +1040,8 @@ pub struct CachePeekStaleBody {
     pub repository: Option<String>,
     /// Simple-language expression for the cache key to peek.
     pub key: String,
+    /// On-miss policy: `"stop"` (default) or `"continue"`, validated at compile.
+    pub on_miss: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

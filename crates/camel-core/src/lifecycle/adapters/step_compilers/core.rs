@@ -184,7 +184,11 @@ impl StepCompiler for CoreCompiler {
             }
 
             // ── Cache Peek Stale (Segment-mode) ──
-            BuilderStep::CachePeekStale { repository, key } => {
+            BuilderStep::CachePeekStale {
+                repository,
+                key,
+                on_miss,
+            } => {
                 let repo_name = repository.as_deref().unwrap_or("memory");
                 let repo = ctx.cache_repositories.get(repo_name).ok_or_else(|| {
                     CamelError::ComponentNotFound(format!(
@@ -192,7 +196,7 @@ impl StepCompiler for CoreCompiler {
                     ))
                 })?;
                 let key_expr = compile_message_id_expression(ctx.languages, &key)?;
-                let svc = camel_processor::CachePeekStaleService::new(repo, key_expr);
+                let svc = camel_processor::CachePeekStaleService::new(repo, key_expr, on_miss);
                 Ok(CompileOutcome::Matched(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,

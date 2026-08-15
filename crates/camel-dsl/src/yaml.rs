@@ -1315,6 +1315,7 @@ pub(crate) fn route_step_to_declarative_step(
                     language: "simple".into(),
                     source: body.key,
                 },
+                on_miss: body.on_miss,
             }))
         }
         RouteDslStep::ClaimCheck(ClaimCheckStep {
@@ -4794,6 +4795,26 @@ routes:
             DeclarativeStep::CachePeekStale(def) => {
                 assert!(def.repository.is_none());
                 assert_eq!(def.key.source, "${header.k2}");
+            }
+            other => panic!("expected CachePeekStale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_peek_stale_on_miss_yaml_parses() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache_peek_stale:
+          key: "${header.k2}"
+          on_miss: continue
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::CachePeekStale(def) => {
+                assert_eq!(def.on_miss.as_deref(), Some("continue"));
             }
             other => panic!("expected CachePeekStale, got {other:?}"),
         }

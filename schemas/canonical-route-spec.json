@@ -607,6 +607,13 @@
                 "key": {
                   "type": "string"
                 },
+                "on_miss": {
+                  "description": "On-miss policy: `\"stop\"` (default) or `\"continue\"`. Absent/null means `\"stop\"`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "repository": {
                   "type": [
                     "string",

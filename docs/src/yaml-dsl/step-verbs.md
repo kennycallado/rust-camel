@@ -664,10 +664,12 @@ Serve a cached entry, ignoring its in-band expiry. Used as a stale-read fallback
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `key` | string | yes | Cache key expression |
+| `on_miss` | string | no | On-miss policy: `"stop"` (default) or `"continue"` |
 
 ```yaml
 - cache_peek_stale:
     key: "${header.cacheKey}"
+    on_miss: continue
 ```
 
 ### `sampling`

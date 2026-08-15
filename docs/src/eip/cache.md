@@ -10,6 +10,30 @@ The `cache` step evaluates a `key` expression against each exchange. If the repo
 
 The `cache_invalidate` step removes a single key from the repository. Use it when an upstream event makes a cached entry stale. The `cache_peek_stale` step reads a cached entry and ignores its in-band expiry. This serves a post-expiry entry as a fallback when the source is unavailable.
 
+## cache_peek_stale `on_miss` policy
+
+The `cache_peek_stale` step accepts an `on_miss` policy. The value `"stop"` is the default. On a miss the step sets `PipelineOutcome::Stopped` and the branch stops. The value `"continue"` passes the exchange through unchanged. Both values set the `CamelCachePeekHit=false` and `CamelCachePeekStale=false` exchange properties on a miss.
+
+On a hit the step sets `CamelCachePeekHit=true`. It sets `CamelCachePeekStale=true` when the served entry is past its `expires_at`. A fresh entry sets `CamelCachePeekStale=false`. The properties enable a stale-while-revalidate (SWR) route: peek with `on_miss: continue`, branch on `CamelCachePeekHit`, fetch and cache on a miss, and serve the peeked body otherwise.
+
+```yaml
+- cache_peek_stale:
+    key: "${header.cacheKey}"
+    on_miss: continue
+- choice:
+    when:
+      - simple: "${exchangeProperty.CamelCachePeekHit} == false"
+        steps:
+          - set_body: "fresh-data"
+          - cache:
+              key: "${header.cacheKey}"
+              ttl: "5s"
+              on_miss:
+                - log: "SWR miss — fresh body stored"
+    otherwise:
+      - log: "Serving cached body: ${body}"
+```
+
 Use the Cache pattern when a route computes the same result more than once. API responses, database lookups, and transform-heavy pipelines benefit from caching. Pair `cache_peek_stale` with a [Circuit Breaker](circuit-breaker.md) to serve stale data when the downstream service is open.
 
 The default repository is `"memory"` (moka-backed, size-eviction only). A persistent `"persistent"` repository (redb-backed) is available when `[default.cache_repo] backend = "redb"` is set. The redb backend survives process restarts. Its sweep task reclaims entries whose `expires_at + stale_retention` has passed. The memory backend does not run a sweep. Expired entries stay in memory until size pressure evicts them.

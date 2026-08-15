@@ -3,7 +3,9 @@
 # after its TTL expires.
 #
 # Demonstrates cache (lookup → on-miss → write-back), cache_invalidate
-# (remove a single key), and cache_peek_stale (serve a post-expiry entry).
+# (remove a single key), cache_peek_stale (serve a post-expiry entry),
+# and stale-while-revalidate (peek with on_miss: continue, then branch
+# on CamelCachePeekHit to fetch and cache on a miss).
 
 routes:
   - id: "cache-demo"
@@ -45,3 +47,27 @@ routes:
           key: "${header.cacheKey}"
       - log: "After peek_stale body is: ${body}"
       # ANCHOR_END: cache-peek-stale-route
+
+  - id: "swr-cache-route"
+    from: "timer:tick?period=10000&repeatCount=1"
+    steps:
+      - set_header:
+          key: "cacheKey"
+          value: "user-profile-42"
+      # ANCHOR: swr-cache-route
+      - cache_peek_stale:
+          key: "${header.cacheKey}"
+          on_miss: continue
+      - choice:
+          when:
+            - simple: "${exchangeProperty.CamelCachePeekHit} == false"
+              steps:
+                - set_body: "fresh-data"
+                - cache:
+                    key: "${header.cacheKey}"
+                    ttl: "5s"
+                    on_miss:
+                      - log: "SWR miss — fresh body stored"
+          otherwise:
+            - log: "Serving cached body: ${body}"
+      # ANCHOR_END: swr-cache-route

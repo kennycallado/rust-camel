@@ -465,12 +465,17 @@ pub fn compile_canonical_step(
                 },
             })
         }
-        CanonicalStepSpec::CachePeekStale { repository, key } => Ok(BuilderStep::CachePeekStale {
+        CanonicalStepSpec::CachePeekStale {
+            repository,
+            key,
+            on_miss,
+        } => Ok(BuilderStep::CachePeekStale {
             repository,
             key: LanguageExpressionDef {
                 language: "simple".into(),
                 source: key,
             },
+            on_miss: parse_peek_stale_on_miss(on_miss.as_deref())?,
         }),
         _ => Err(CamelError::RouteError(
             "unsupported canonical step".to_string(),
@@ -832,6 +837,23 @@ fn compile_circuit_breaker(def: DeclarativeCircuitBreaker) -> CircuitBreakerConf
     CircuitBreakerConfig::new()
         .failure_threshold(def.failure_threshold)
         .open_duration(Duration::from_millis(def.open_duration_ms))
+}
+
+/// Parse the DSL `on_miss` string for `cache_peek_stale` into a miss policy.
+///
+/// Absent or `"stop"` → [`PeekStaleMissPolicy::Stop`] (default); `"continue"` →
+/// [`PeekStaleMissPolicy::Continue`]. Any other value fails closed with a
+/// [`CamelError::RouteError`] naming the invalid value and the allowed set.
+fn parse_peek_stale_on_miss(
+    raw: Option<&str>,
+) -> Result<camel_processor::PeekStaleMissPolicy, CamelError> {
+    match raw {
+        None | Some("stop") => Ok(camel_processor::PeekStaleMissPolicy::Stop),
+        Some("continue") => Ok(camel_processor::PeekStaleMissPolicy::Continue),
+        Some(other) => Err(CamelError::RouteError(format!(
+            "cache_peek_stale: invalid on_miss '{other}'; must be \"stop\" or \"continue\""
+        ))),
+    }
 }
 
 fn compile_declarative_steps(
@@ -1201,6 +1223,7 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::CachePeekStale(def) => Ok(BuilderStep::CachePeekStale {
             repository: def.repository,
             key: def.key,
+            on_miss: parse_peek_stale_on_miss(def.on_miss.as_deref())?,
         }),
         DeclarativeStep::ClaimCheck(ClaimCheckStepDef {
             repository,
@@ -1439,6 +1462,7 @@ fn compile_declarative_step_to_canonical(
         DeclarativeStep::CachePeekStale(def) => Ok(CanonicalStepSpec::CachePeekStale {
             repository: def.repository,
             key: def.key.source,
+            on_miss: def.on_miss,
         }),
         DeclarativeStep::ClaimCheck(_) => Err(CamelError::RouteError(
             "canonical v2 does not support step `claim_check`".into(),
@@ -4784,12 +4808,72 @@ mod tests {
                 language: "simple".into(),
                 source: "${header.key}".into(),
             },
+            on_miss: None,
         });
         let canonical = compile_declarative_step_to_canonical(peek).unwrap();
         assert!(matches!(
             canonical,
             CanonicalStepSpec::CachePeekStale { .. }
         ));
+    }
+
+    #[test]
+    fn cache_peek_stale_on_miss_default_is_stop() {
+        let step = DeclarativeStep::CachePeekStale(CachePeekStaleStepDef {
+            repository: None,
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${header.key}".into(),
+            },
+            on_miss: None,
+        });
+        let compiled = compile_declarative_step(step).unwrap();
+        match compiled {
+            BuilderStep::CachePeekStale { on_miss, .. } => {
+                assert_eq!(on_miss, camel_processor::PeekStaleMissPolicy::Stop);
+            }
+            other => panic!("expected CachePeekStale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_peek_stale_on_miss_continue_compiles() {
+        let step = DeclarativeStep::CachePeekStale(CachePeekStaleStepDef {
+            repository: None,
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${header.key}".into(),
+            },
+            on_miss: Some("continue".into()),
+        });
+        let compiled = compile_declarative_step(step).unwrap();
+        match compiled {
+            BuilderStep::CachePeekStale { on_miss, .. } => {
+                assert_eq!(on_miss, camel_processor::PeekStaleMissPolicy::Continue);
+            }
+            other => panic!("expected CachePeekStale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cache_peek_stale_on_miss_invalid_rejected() {
+        let step = DeclarativeStep::CachePeekStale(CachePeekStaleStepDef {
+            repository: None,
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${header.key}".into(),
+            },
+            on_miss: Some("skip".into()),
+        });
+        let err = compile_declarative_step(step).unwrap_err().to_string();
+        assert!(
+            err.contains("must be \"stop\" or \"continue\""),
+            "error should name allowed set, got: {err}"
+        );
+        assert!(
+            err.contains("'skip'"),
+            "error should name the offending on_miss value, got: {err}"
+        );
     }
 
     #[test]

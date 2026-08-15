@@ -502,6 +502,8 @@ pub struct CachePeekStaleStepDef {
     pub repository: Option<String>,
     /// Expression that extracts the cache key to peek.
     pub key: LanguageExpressionDef,
+    /// On-miss policy: `"stop"` (default) or `"continue"`, validated at compile.
+    pub on_miss: Option<String>,
 }
 
 /// Sampling EIP step definition.

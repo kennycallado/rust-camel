@@ -296,6 +296,7 @@ pub enum BuilderStep {
     CachePeekStale {
         repository: Option<String>,
         key: LanguageExpressionDef,
+        on_miss: camel_processor::PeekStaleMissPolicy,
     },
     /// Declarative doTry/doCatch/doFinally, resolved at route-add time.
     DeclarativeDoTry {

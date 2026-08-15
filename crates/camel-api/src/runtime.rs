@@ -164,6 +164,9 @@ pub enum CanonicalStepSpec {
     CachePeekStale {
         repository: Option<String>,
         key: String,
+        /// On-miss policy: `"stop"` (default) or `"continue"`. Absent/null means `"stop"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_miss: Option<String>,
     },
 }
 
@@ -960,6 +963,32 @@ mod tests {
         let json = serde_json::to_string_pretty(&steps).unwrap();
         let back: Vec<CanonicalStepSpec> = serde_json::from_str(&json).unwrap();
         assert_eq!(steps, back);
+    }
+
+    #[test]
+    fn canonical_cache_peek_stale_on_miss_round_trip() {
+        let some = CanonicalStepSpec::CachePeekStale {
+            repository: None,
+            key: "k".into(),
+            on_miss: Some("continue".into()),
+        };
+        let json = serde_json::to_string(&some).unwrap();
+        assert!(json.contains("continue"));
+        let back: CanonicalStepSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(some, back);
+
+        let none = CanonicalStepSpec::CachePeekStale {
+            repository: None,
+            key: "k".into(),
+            on_miss: None,
+        };
+        let json = serde_json::to_string(&none).unwrap();
+        assert!(
+            !json.contains("on_miss"),
+            "on_miss: None must omit the key from JSON, got: {json}"
+        );
+        let back: CanonicalStepSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(none, back);
     }
 
     #[test]

@@ -220,6 +220,13 @@
           "description": "Simple-language expression for the cache key to peek.",
           "type": "string"
         },
+        "on_miss": {
+          "description": "On-miss policy: `\"stop\"` (default) or `\"continue\"`, validated at compile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "repository": {
           "description": "Name of the registered CacheRepository (optional; defaults to system default).",
           "type": [

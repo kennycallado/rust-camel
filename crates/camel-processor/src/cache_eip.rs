@@ -23,7 +23,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 
@@ -415,25 +415,59 @@ impl OutcomePipeline for CacheInvalidateService {
 // CachePeekStaleService — serve a stale entry after expiry
 // ===========================================================================
 
+/// Exchange property set to `true` when a `cache_peek_stale` HIT occurred.
+pub const CAMEL_CACHE_PEEK_HIT: &str = "CamelCachePeekHit";
+/// Exchange property set to `true` when the served entry was stale (post-expiry).
+pub const CAMEL_CACHE_PEEK_STALE: &str = "CamelCachePeekStale";
+
+/// On-miss policy for [`CachePeekStaleService`].
+///
+/// - [`Stop`](PeekStaleMissPolicy::Stop) (default) preserves the
+///   `CircuitBreaker.fallback` absence-Stops contract.
+/// - [`Continue`](PeekStaleMissPolicy::Continue) leaves the body untouched on
+///   MISS so `choice` can branch on [`CAMEL_CACHE_PEEK_HIT`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeekStaleMissPolicy {
+    /// MISS Stops the branch (no stale available — `CircuitBreaker.fallback`).
+    Stop,
+    /// MISS continues with the body unchanged.
+    Continue,
+}
+
 /// Outcome-aware segment that serves a stale (post-expiry) cache entry.
 ///
 /// Evaluates `key_expr`:
-/// - `None` → `Stopped(exchange)` (no key = no stale available).
+/// - `None` → `Stopped(exchange)` with a `debug` log (an anomalous key
+///   resolution is fail-closed, not a miss).
 /// - `Some(key)` → `repository.peek_stale(&key).await`.
 ///   - `Err(e)` → `Failed(e)`.
-///   - `Ok(Some(entry))` → reconstruct body from entry, set on exchange,
-///     return `Completed(exchange)`.
-///   - `Ok(None)` → `Stopped(exchange)` (absence = no stale available — spec R6).
+///   - `Ok(Some(entry))` → reconstruct body from entry, set
+///     `CamelCachePeekHit=true` and `CamelCachePeekStale` (true when the
+///     entry's `expires_at` has elapsed at evaluation time; false when absent
+///     or not elapsed), return `Completed(exchange)`.
+///   - `Ok(None)` → MISS (absence), governed by [`PeekStaleMissPolicy`]:
+///     - `Stop` (default): set `CamelCachePeekHit=false` and
+///       `CamelCachePeekStale=false`, log at `debug`, return `Stopped(exchange)`
+///       (absence in `CircuitBreaker.fallback` means "no stale available").
+///     - `Continue`: set `CamelCachePeekHit=false` and
+///       `CamelCachePeekStale=false`, leave the body unchanged, return
+///       `Completed(exchange)` so `choice` can branch on `CamelCachePeekHit`.
 pub struct CachePeekStaleService {
     repository: Arc<dyn CacheRepository>,
     key_expr: MessageIdExpression,
+    miss_policy: PeekStaleMissPolicy,
 }
 
 impl CachePeekStaleService {
-    pub fn new(repository: Arc<dyn CacheRepository>, key_expr: MessageIdExpression) -> Self {
+    pub fn new(
+        repository: Arc<dyn CacheRepository>,
+        key_expr: MessageIdExpression,
+        miss_policy: PeekStaleMissPolicy,
+    ) -> Self {
         Self {
             repository,
             key_expr,
+            miss_policy,
         }
     }
 }
@@ -443,8 +477,16 @@ impl Clone for CachePeekStaleService {
         Self {
             repository: Arc::clone(&self.repository),
             key_expr: Arc::clone(&self.key_expr),
+            miss_policy: self.miss_policy,
         }
     }
+}
+
+/// Write the peek-result exchange properties under [`CAMEL_CACHE_PEEK_HIT`] and
+/// [`CAMEL_CACHE_PEEK_STALE`] as `serde_json::Value::Bool` values.
+fn set_peek_properties(exchange: &mut Exchange, hit: bool, stale: bool) {
+    exchange.set_property(CAMEL_CACHE_PEEK_HIT, serde_json::Value::Bool(hit));
+    exchange.set_property(CAMEL_CACHE_PEEK_STALE, serde_json::Value::Bool(stale));
 }
 
 impl OutcomePipeline for CachePeekStaleService {
@@ -459,19 +501,50 @@ impl OutcomePipeline for CachePeekStaleService {
         Box::pin(async move {
             let key = match (self.key_expr)(&exchange) {
                 Some(k) => k,
-                None => return PipelineOutcome::Stopped(exchange),
+                None => {
+                    tracing::debug!(
+                        step = "cache_peek_stale",
+                        repository = %self.repository.name(),
+                        "key expression resolved to None; stopping branch"
+                    );
+                    return PipelineOutcome::Stopped(exchange);
+                }
             };
             match self.repository.peek_stale(&key).await {
                 Err(e) => PipelineOutcome::Failed(e),
-                Ok(Some(entry)) => match reconstruct_body(&entry) {
-                    Ok(body) => {
+                Ok(Some(entry)) => {
+                    // Staleness read before body reconstruction; reconstruct_body borrows the entry, so ordering is stylistic.
+                    let stale = entry
+                        .expires_at
+                        .map(|t| t <= SystemTime::now())
+                        .unwrap_or(false);
+                    match reconstruct_body(&entry) {
+                        Ok(body) => {
+                            let mut exchange = exchange;
+                            exchange.input.body = body;
+                            set_peek_properties(&mut exchange, true, stale);
+                            PipelineOutcome::Completed(exchange)
+                        }
+                        Err(e) => PipelineOutcome::Failed(e),
+                    }
+                }
+                Ok(None) => match self.miss_policy {
+                    PeekStaleMissPolicy::Stop => {
                         let mut exchange = exchange;
-                        exchange.input.body = body;
+                        set_peek_properties(&mut exchange, false, false);
+                        tracing::debug!(
+                            step = "cache_peek_stale",
+                            repository = %self.repository.name(),
+                            "peek miss; stopping branch per on_miss=stop"
+                        );
+                        PipelineOutcome::Stopped(exchange)
+                    }
+                    PeekStaleMissPolicy::Continue => {
+                        let mut exchange = exchange;
+                        set_peek_properties(&mut exchange, false, false);
                         PipelineOutcome::Completed(exchange)
                     }
-                    Err(e) => PipelineOutcome::Failed(e),
                 },
-                Ok(None) => PipelineOutcome::Stopped(exchange),
             }
         })
     }
@@ -609,6 +682,7 @@ mod tests {
     use futures::stream;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::SystemTime;
 
     /// Minimal no-op RuntimeObservability for tests that don't need OTel.
     #[derive(Clone)]
@@ -1113,7 +1187,7 @@ mod tests {
             },
         )
         .await;
-        let mut svc = CachePeekStaleService::new(repo, fixed_key());
+        let mut svc = CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop);
 
         let outcome = svc.run(exchange()).await;
 
@@ -1127,7 +1201,7 @@ mod tests {
     #[tokio::test]
     async fn cache_peek_stale_on_absence_stops_branch() {
         let repo = Arc::new(MockCacheRepository::new("mock"));
-        let mut svc = CachePeekStaleService::new(repo, fixed_key());
+        let mut svc = CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop);
 
         let outcome = svc.run(exchange()).await;
 
@@ -1140,13 +1214,221 @@ mod tests {
     #[tokio::test]
     async fn cache_peek_stale_none_key_stops() {
         let repo = Arc::new(MockCacheRepository::new("mock"));
-        let mut svc = CachePeekStaleService::new(repo, none_key());
+        let mut svc = CachePeekStaleService::new(repo, none_key(), PeekStaleMissPolicy::Stop);
 
         let outcome = svc.run(exchange()).await;
 
         assert!(
             matches!(outcome, PipelineOutcome::Stopped(_)),
             "expected Stopped when key_expr returns None, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_stale_miss_stop_sets_properties_and_stops() {
+        let repo = Arc::new(MockCacheRepository::new("mock"));
+        let mut svc = CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop);
+
+        let outcome = svc.run(exchange()).await;
+
+        let ex = match outcome {
+            PipelineOutcome::Stopped(ex) => ex,
+            other => panic!("expected Stopped, got {other:?}"),
+        };
+        assert_eq!(ex.property(CAMEL_CACHE_PEEK_HIT), Some(&Value::Bool(false)));
+        assert_eq!(
+            ex.property(CAMEL_CACHE_PEEK_STALE),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_stale_miss_continue_completes_with_body_untouched() {
+        let repo = Arc::new(MockCacheRepository::new("mock"));
+        let mut svc = CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Continue);
+
+        let mut ex = exchange();
+        ex.input.body = Body::Text("orig".into());
+
+        let outcome = svc.run(ex).await;
+
+        let ex = match outcome {
+            PipelineOutcome::Completed(ex) => ex,
+            other => panic!("expected Completed, got {other:?}"),
+        };
+        assert_eq!(ex.input.body, Body::Text("orig".into()));
+        assert_eq!(ex.property(CAMEL_CACHE_PEEK_HIT), Some(&Value::Bool(false)));
+        assert_eq!(
+            ex.property(CAMEL_CACHE_PEEK_STALE),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_stale_hit_sets_hit_and_stale_properties() {
+        let repo = Arc::new(MockCacheRepository::new("mock"));
+        repo.seed(
+            "cache-key",
+            CacheEntry {
+                bytes: b"stale-payload".to_vec(),
+                content_type: ContentType::Bytes,
+                expires_at: Some(SystemTime::now() - Duration::from_millis(1)),
+            },
+        )
+        .await;
+        let mut svc = CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop);
+
+        let outcome = svc.run(exchange()).await;
+
+        let ex = match outcome {
+            PipelineOutcome::Completed(ex) => ex,
+            other => panic!("expected Completed, got {other:?}"),
+        };
+        assert_eq!(
+            ex.input.body,
+            Body::Bytes(Bytes::from_static(b"stale-payload"))
+        );
+        assert_eq!(ex.property(CAMEL_CACHE_PEEK_HIT), Some(&Value::Bool(true)));
+        assert_eq!(
+            ex.property(CAMEL_CACHE_PEEK_STALE),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_stale_hit_fresh_sets_stale_false() {
+        let repo = Arc::new(MockCacheRepository::new("mock"));
+        repo.seed(
+            "cache-key",
+            CacheEntry {
+                bytes: b"fresh-payload".to_vec(),
+                content_type: ContentType::Bytes,
+                expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+            },
+        )
+        .await;
+        let mut svc = CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop);
+
+        let outcome = svc.run(exchange()).await;
+
+        let ex = match outcome {
+            PipelineOutcome::Completed(ex) => ex,
+            other => panic!("expected Completed, got {other:?}"),
+        };
+        assert_eq!(ex.property(CAMEL_CACHE_PEEK_HIT), Some(&Value::Bool(true)));
+        assert_eq!(
+            ex.property(CAMEL_CACHE_PEEK_STALE),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    // --- Tracing capture helper for debug-log assertions ---
+
+    /// `MakeWriter` that appends formatted events to a shared `Vec<u8>` sink.
+    #[derive(Clone)]
+    struct CapturingWriter {
+        sink: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sink.lock().unwrap().extend_from_slice(buf); // allow-unwrap: test-only
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn debug_sink() -> (Arc<Mutex<Vec<u8>>>, impl tracing::Subscriber) {
+        let sink: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturingWriter {
+            sink: Arc::clone(&sink),
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .finish();
+        (sink, subscriber)
+    }
+
+    #[tokio::test]
+    async fn peek_stale_miss_stop_emits_debug_log() {
+        let repo = Arc::new(MockCacheRepository::new("mock"));
+        let mut svc = CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop);
+
+        let (sink, subscriber) = debug_sink();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let outcome = svc.run(exchange()).await;
+        drop(_guard);
+
+        assert!(matches!(outcome, PipelineOutcome::Stopped(_)));
+
+        let captured = String::from_utf8(sink.lock().unwrap().clone()).unwrap(); // allow-unwrap: test-only
+        let miss_records: Vec<&str> = captured
+            .lines()
+            .filter(|l| l.contains("peek miss"))
+            .collect();
+        assert_eq!(
+            miss_records.len(),
+            1,
+            "expected exactly one DEBUG record containing \"peek miss\"; got: {captured}"
+        );
+        assert!(
+            miss_records[0].contains("DEBUG"),
+            "expected DEBUG level record; got: {captured}"
+        );
+        assert!(
+            miss_records[0].contains("repository=mock"),
+            "expected repository field in record; got: {captured}"
+        );
+        assert!(
+            miss_records[0].contains("step=\"cache_peek_stale\""),
+            "expected step field in record; got: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_stale_key_none_stops_with_debug_log() {
+        let repo = Arc::new(MockCacheRepository::new("mock"));
+        let mut svc = CachePeekStaleService::new(repo, none_key(), PeekStaleMissPolicy::Stop);
+
+        let (sink, subscriber) = debug_sink();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let outcome = svc.run(exchange()).await;
+        drop(_guard);
+
+        assert!(matches!(outcome, PipelineOutcome::Stopped(_)));
+
+        let captured = String::from_utf8(sink.lock().unwrap().clone()).unwrap(); // allow-unwrap: test-only
+        let none_records: Vec<&str> = captured
+            .lines()
+            .filter(|l| l.contains("resolved to None"))
+            .collect();
+        assert_eq!(
+            none_records.len(),
+            1,
+            "expected exactly one DEBUG record containing \"resolved to None\"; got: {captured}"
+        );
+        assert!(
+            none_records[0].contains("DEBUG"),
+            "expected DEBUG level record; got: {captured}"
+        );
+        assert!(
+            none_records[0].contains("repository=mock"),
+            "expected repository field in record; got: {captured}"
+        );
+        assert!(
+            none_records[0].contains("step=\"cache_peek_stale\""),
+            "expected step field in record; got: {captured}"
         );
     }
 
