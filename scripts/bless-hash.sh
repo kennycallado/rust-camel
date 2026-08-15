@@ -23,15 +23,21 @@ bin="$target/debug/xtask"
 stamp="$target/.xtask-src.sha"
 
 # Content hash of xtask sources — immune to NTFS mtime coarseness.
+# Strip the file paths ('awk {print $1}') so the stamp is identical from
+# the main root and from any worktree (paths differ, contents don't).
 cur="$(find "$repo_root/scripts/xtask/src" -name '*.rs' -type f -print0 \
-        | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+        | sort -z | xargs -0 sha256sum | awk '{print $1}' | sha256sum | cut -d' ' -f1)"
 
 if [[ ! -x "$bin" || ! -f "$stamp" || "$(cat "$stamp" 2>/dev/null)" != "$cur" ]]; then
   # Cold/stale path only: pay the cargo lock ONCE per source change, not
   # per hash. flock serializes concurrent cold rebuilds by peer agents.
+  # TMPDIR is scoped to the target partition: cc-rs spills its .s temp
+  # files to /tmp, which lives on the small root partition.
+  mkdir -p "$target"
   (
     flock 9
-    CARGO_INCREMENTAL=0 cargo build -p xtask \
+    mkdir -p "$target/tmp"
+    TMPDIR="$target/tmp" CARGO_INCREMENTAL=0 cargo build -p xtask \
       --manifest-path "$repo_root/scripts/xtask/Cargo.toml" >&2
     printf '%s' "$cur" > "$stamp"
   ) 9>"$target/.xtask-build.lock"

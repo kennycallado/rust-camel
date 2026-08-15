@@ -137,18 +137,19 @@
           BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
           shellHook = ''
             export RUSTC_WRAPPER=sccache
-            sccache --stop-server 2>/dev/null || true
-            sccache --start-server
             if [ -d "/home/shared" ] && [ -w "/home/shared" ]; then
               # Per-checkout lock isolation on the big partition:
               # worktrees use their own $WT/target; the main checkout
               # resolves ./target (symlink to the shared dir).
               # CARGO_TARGET_DIR stays deliberately unset here.
+              # Export BEFORE start-server: the server caches its dir.
               export SCCACHE_DIR="/home/shared/sccache"
               export SCCACHE_CACHE_SIZE="16G"
             else
               export CARGO_TARGET_DIR="$HOME/.cache/rust-camel-target"
             fi
+            sccache --stop-server 2>/dev/null || true
+            sccache --start-server
 
             # JMS bridge: auto-detect native binary
             BRIDGE_BIN="$PWD/bridges/jms/build/native/jms-bridge"

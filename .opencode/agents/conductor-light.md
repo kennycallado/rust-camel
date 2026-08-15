@@ -133,7 +133,7 @@ If delta-structure errors are found, fix the spec format before
 blessing. Do not proceed to blessing with unparseable deltas.
 
 **SPEC BLESSING**: dispatch `@experts/e_gpt` WITHOUT task_id:
-- Compute hash: `bash "$WT/scripts/bless-hash.sh" "$WT/openspec/changes/<name>"` (execs prebuilt xtask binary; cargo lock stays off the blessing path)
+- Compute hash: `bash "$ROOT/scripts/bless-hash.sh" "$WT/openspec/changes/<name>"` (execs prebuilt xtask binary; cargo lock stays off the blessing path. Use the ROOT copy — old worktrees cut before this script existed don't carry it.)
 - Pass artifact paths (from `$WT`) + hash + "Bless this spec for planning?"
 - Expert loads `self-grill-proposals`, grills artifacts, produces verdict
 - Write `.bless.json` (verdict + hash + expert + kind: "spec") inside `$WT`
