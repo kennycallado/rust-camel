@@ -244,11 +244,32 @@ the **write-back materialization policy** to the resulting body:
   the consumed stream cannot be recovered).
 
 `cache_invalidate` SHALL accept a `repository:` and `key:` and SHALL remove the key.
-`cache_peek_stale` SHALL accept a `repository:` and `key:`; on entry present (ignoring
-expiry) it SHALL replace the body with the reconstructed `Body`; on absence it SHALL set
-`PipelineOutcome::Stopped` for the current branch (the step is used in
-`CircuitBreaker.fallback` where absence means "no stale available" — silently passing
-through would mask the missing fallback). All three steps SHALL use `OutcomeSegment`
+
+`cache_peek_stale` SHALL accept a `repository:`, a `key:`, and an optional `on_miss:`
+policy (`"stop"` — the default — or `"continue"`; any other value SHALL be rejected at
+route compile time). The step SHALL evaluate the key expression first:
+
+- Key expression resolves to `None`: the step SHALL set `PipelineOutcome::Stopped` for
+  the current branch (an anomalous key resolution is fail-closed, not a miss) and SHALL
+  emit one `debug`-level log record naming the step and repository.
+- `peek_stale` returns `Err`: the step SHALL propagate `Err`.
+- Entry present (ignoring expiry): the step SHALL replace the body with the
+  reconstructed `Body`, SHALL set the exchange properties `CamelCachePeekHit=true` and
+  `CamelCachePeekStale` (true when the entry's `expires_at` has elapsed at evaluation
+  time; false when absent or not elapsed), and SHALL continue the pipeline.
+- Entry absent (MISS):
+  - `on_miss="stop"`: the step SHALL set `CamelCachePeekHit=false` and
+    `CamelCachePeekStale=false` on the exchange, SHALL emit one `debug`-level log
+    record naming the step and repository (raw keys SHALL NOT be logged — key
+    expressions may resolve credential-bearing exchange data), and SHALL set
+    `PipelineOutcome::Stopped` for the current branch (the step is used in
+    `CircuitBreaker.fallback` where absence means "no stale available" — silently passing
+    through would mask the missing fallback).
+  - `on_miss="continue"`: the step SHALL set `CamelCachePeekHit=false` and
+    `CamelCachePeekStale=false` on the exchange, SHALL leave the body unchanged, and
+    SHALL continue the pipeline.
+
+All three steps SHALL use `OutcomeSegment`
 (Segment-not-Process per ADR-0023) so that `PipelineOutcome` propagates correctly through
 sub-pipelines. If `on_miss` returns `PipelineOutcome::Stopped`, the cache step SHALL
 propagate `Stopped` WITHOUT writing back to the repository (no point caching a stopped
@@ -319,13 +340,47 @@ back. If the repository `get` or `set` returns `Err`, the step SHALL propagate `
 - **WHEN** the route executes
 - **THEN** the exchange body is the post-expiry cached entry
 
+#### Scenario: cache_peek_stale HIT sets peek properties
+
+- **GIVEN** a repository holding a post-expiry entry under `"k"` and a route step
+  `cache_peek_stale: { repository: memory, key: "k" }`
+- **WHEN** the route executes
+- **THEN** the exchange properties `CamelCachePeekHit=true` and `CamelCachePeekStale=true`
+  are set and the body is the stale entry
+
 #### Scenario: cache_peek_stale on absence Stops the branch
 
 - **GIVEN** an empty repository and a route step
   `cache_peek_stale: { repository: memory, key: "absent" }`
 - **WHEN** the route executes
 - **THEN** the step sets `PipelineOutcome::Stopped` for the current branch (does NOT
-  pass through with an unchanged body)
+  pass through with an unchanged body), `CamelCachePeekHit=false` and
+  `CamelCachePeekStale=false` are set on the exchange, and one `debug`-level log record
+  naming the step and repository is emitted
+
+#### Scenario: cache_peek_stale on_miss continue passes through on absence
+
+- **GIVEN** an empty repository and a route step
+  `cache_peek_stale: { repository: memory, key: "absent", on_miss: continue }` followed
+  by a `log` step
+- **WHEN** the route executes
+- **THEN** the pipeline reaches the `log` step with the body unchanged,
+  `CamelCachePeekHit=false` and `CamelCachePeekStale=false` are set, and no
+  `PipelineOutcome::Stopped` is returned
+
+#### Scenario: cache_peek_stale on_miss invalid value fails compile
+
+- **GIVEN** a route step `cache_peek_stale: { repository: memory, key: "k", on_miss: skip }`
+- **WHEN** the route compiles
+- **THEN** compilation fails with an error naming the invalid `on_miss` value
+
+#### Scenario: cache_peek_stale key expression None Stops with debug log
+
+- **GIVEN** a route step `cache_peek_stale: { repository: memory, key: <expression that
+  resolves to None> }`
+- **WHEN** the route executes
+- **THEN** the step sets `PipelineOutcome::Stopped` for the current branch and one
+  `debug`-level log record naming the step and repository is emitted
 
 #### Scenario: cache_invalidate removes the key
 
