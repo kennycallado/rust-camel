@@ -107,15 +107,14 @@ controls the selection order through a synchronization primitive
 
 `multicast` is governed by the zero-success invariant and the Stopped-wins rule.
 When at least one branch returns `Stopped`, `multicast` propagates `Stopped`
-(ADR-0025 section 3). When zero branches return `Stopped` and zero branches
-return `Completed`, `multicast` reports `Failed(last_error)`.
+(ADR-0025 section 3).
 
-The partial-success aggregation policy is out of scope for this ADR. The current
-`multicast` returns `Failed` when any branch fails, even when other branches
-succeed. This is inconsistent with `recipient_list`, which aggregates the
-successful results on partial success. The inconsistency is tracked as bd
-rc-b41j. A future change that reconciles the two siblings SHALL update this
-section.
+With `stop_on_exception=false`, zero success reports `Failed(last_error)`.
+The error is the highest-branch-index representative in the parallel arm.
+It is the iteration-last error in the sequential arm. Partial success
+aggregates successful branch outputs only. `multicast` reports `Completed`
+with the aggregated outputs. Discarded failures are logged at warn. This
+resolves the `recipient_list` inconsistency tracked as bd rc-b41j.
 
 ### Governed Segments
 
@@ -131,8 +130,11 @@ capability cover the first four (delivered by the `outcome-aware-segment-composi
 `multicast` already complies with the zero-success invariant. Verified in
 `crates/camel-processor/src/multicast_segment.rs`: `sequential_multicast` and
 `parallel_multicast` track `last_error`, return `Stopped` on the first
-`Stopped` branch, and return `Failed(last_error)` when `outputs` is empty and
-`last_error` is set.
+`Stopped` branch, and return `Failed(last_error)` when the success set is empty
+and `last_error` is set. Both arms enforce the partial-success guard per bd
+rc-b41j. The guard checks `outputs.is_empty()` in `sequential_multicast` and
+`completed.is_empty()` in `parallel_multicast`. Partial success aggregates the
+successful branches and logs discarded failures at warn.
 
 `recipient_list` is the non-compliant Segment. It is corrected in
 `outcome-aware-segment-composition` Task 2.1, with this ADR as authority. The

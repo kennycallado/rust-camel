@@ -36,10 +36,11 @@ pub struct MulticastSegment {
     /// Whether to stop processing on the first exception.
     ///
     /// When `true`, a `Failed` outcome from any branch halts processing
-    /// immediately (sequential) or is propagated after all in-flight branches
-    /// complete (parallel). When `false`, failures are collected and processing
-    /// continues; the last error (last-wins, matching legacy `LastWins` aggregation)
-    /// is propagated after all branches complete.
+    /// immediately (sequential) or propagates the first `Failed` branch
+    /// (lowest branch index, parallel). When `false`, failures are collected and
+    /// processing continues: a zero-success run propagates the representative
+    /// error (last-wins), while a partial-success run aggregates the successful
+    /// branches' outputs only and discards the failed outcomes (logged at warn).
     ///
     /// `Stopped` outcomes always propagate per ADR-0025 §7 regardless of this flag.
     pub stop_on_exception: bool,
@@ -96,7 +97,15 @@ async fn sequential_multicast(
         }
     }
     if let Some(err) = last_error {
-        return camel_api::PipelineOutcome::Failed(err);
+        if outputs.is_empty() {
+            return camel_api::PipelineOutcome::Failed(err);
+        }
+        // log-policy: handler-owned
+        tracing::warn!(
+            failed_branches = total - outputs.len(),
+            branch_count = total,
+            "multicast partial success: discarding failed branch outcomes"
+        );
     }
     camel_api::PipelineOutcome::Completed((seg.aggregator)(outputs))
 }
@@ -243,8 +252,10 @@ async fn parallel_multicast(
 
     // Check for Failed outcomes.
     // stop_on_exception=true: propagate first Failed (lowest branch index).
-    // stop_on_exception=false: collect last error (last-wins) and propagate at end.
+    // stop_on_exception=false: collect last error (last-wins) and defer to the
+    // shared-tail guard after aggregation.
     results.sort_by_key(|(idx, _)| *idx);
+    let mut last_error: Option<camel_api::CamelError> = None;
     if stop_on_exception {
         let mut first_failed: Option<(usize, camel_api::CamelError)> = None;
         for (idx, o) in &results {
@@ -262,18 +273,21 @@ async fn parallel_multicast(
         }
     } else {
         // Collect last error (last-wins, matching legacy LastWins semantics).
-        let mut last_error: Option<camel_api::CamelError> = None;
         for (_, o) in &results {
             if let camel_api::PipelineOutcome::Failed(err) = o {
                 last_error = Some(err.clone());
             }
         }
-        if let Some(err) = last_error {
-            return camel_api::PipelineOutcome::Failed(err);
-        }
     }
 
-    // All Completed — aggregate.
+    // Count actual Failed slots (not pre-start-gate-skipped None slots) before
+    // `results` is consumed below.
+    let failed_branches = results
+        .iter()
+        .filter(|(_, o)| matches!(o, camel_api::PipelineOutcome::Failed(_)))
+        .count();
+
+    // Single aggregation point — Completed outcomes only.
     let completed: Vec<Exchange> = results
         .into_iter()
         .filter_map(|(_, o)| match o {
@@ -281,6 +295,18 @@ async fn parallel_multicast(
             _ => None,
         })
         .collect();
+
+    if let Some(err) = last_error {
+        if completed.is_empty() {
+            return camel_api::PipelineOutcome::Failed(err);
+        }
+        // log-policy: handler-owned
+        tracing::warn!(
+            failed_branches,
+            branch_count = total,
+            "multicast partial success: discarding failed branch outcomes"
+        );
+    }
     camel_api::PipelineOutcome::Completed((seg.aggregator)(completed))
 }
 
@@ -359,10 +385,10 @@ mod tests {
         assert_eq!(invocations.load(Ordering::SeqCst), 2);
     }
 
-    // ── Test B: sequential stop_on_exception=false ───────────────────
+    // ── Test B: sequential partial-success aggregation ───────────────
 
     #[tokio::test]
-    async fn multicast_sequential_stop_on_exception_false() {
+    async fn multicast_sequential_partial_success_aggregates_successes() {
         let invocations = Arc::new(AtomicUsize::new(0));
         let mut seg = MulticastSegment {
             branches: vec![
@@ -375,18 +401,25 @@ mod tests {
             stop_on_exception: false,
             timeout: None,
             aggregator: Arc::new(|exchanges: Vec<Exchange>| {
-                exchanges.into_iter().last().unwrap_or_default()
+                Exchange::new(Message::new(format!("n={}", exchanges.len())))
             }),
         };
 
         let ex = Exchange::new(Message::new("test"));
         let result = OutcomePipeline::run(&mut seg, ex).await;
 
-        // With stop_on_exception=false, error propagated at end, all branches execute.
-        assert!(
-            matches!(result, PipelineOutcome::Failed(_)),
-            "should propagate error at end"
-        );
+        // With stop_on_exception=false, partial success aggregates the successful
+        // branches only; the failed branch's output is discarded.
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                let body = ex.body_as::<String>().unwrap_or_default();
+                assert_eq!(
+                    body, "n=2",
+                    "should aggregate the 2 successful branches only"
+                );
+            }
+            other => panic!("expected Completed with body n=2, got {other:?}"),
+        }
         assert_eq!(invocations.load(Ordering::SeqCst), 3);
     }
 
@@ -508,55 +541,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn multicast_parallel_stop_on_exception_false_propagates_last_error() {
-        // Deterministic bodies: always-pass, always-fail-err1, always-fail-err2.
-        fn always_pass_body() -> OutcomeSegment {
-            #[derive(Clone)]
-            struct PassBody;
-            impl camel_api::OutcomePipeline for PassBody {
-                fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
-                    Box::new(PassBody)
-                }
-                fn run<'a>(
-                    &'a mut self,
-                    exchange: Exchange,
-                ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
-                    Box::pin(async move { PipelineOutcome::Completed(exchange) })
-                }
-            }
-            OutcomeSegment::new(Box::new(PassBody))
-        }
-        fn always_fail_body(msg: &'static str) -> OutcomeSegment {
-            #[derive(Clone)]
-            struct FailBody {
-                msg: &'static str,
-            }
-            impl camel_api::OutcomePipeline for FailBody {
-                fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
-                    Box::new(self.clone())
-                }
-                fn run<'a>(
-                    &'a mut self,
-                    _exchange: Exchange,
-                ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
-                    let msg = self.msg;
-                    Box::pin(async move {
-                        PipelineOutcome::Failed(camel_api::CamelError::ProcessorError(
-                            msg.to_string(),
-                        ))
-                    })
-                }
-            }
-            OutcomeSegment::new(Box::new(FailBody { msg }))
-        }
-
         let target: Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> =
             Arc::new(|exchanges: Vec<Exchange>| exchanges.into_iter().last().unwrap_or_default());
 
         let mut seg = MulticastSegment {
             branches: vec![
-                always_fail_body("err1"), // branch 0 fails with err1
-                always_pass_body(),       // branch 1 completes
-                always_fail_body("err2"), // branch 2 fails with err2
+                always_failed_body("err1"), // branch 0 fails with err1
+                always_failed_body("err2"), // branch 1 fails with err2
             ],
             parallel: true,
             parallel_limit: None,
@@ -568,7 +559,7 @@ mod tests {
         let ex = Exchange::new(Message::new("test"));
         let result = OutcomePipeline::run(&mut seg, ex).await;
 
-        // stop_on_exception=false → last error (highest idx) propagated.
+        // stop_on_exception=false, zero-success → last error (highest idx) propagated.
         match result {
             PipelineOutcome::Failed(err) => {
                 let msg = format!("{err}");
@@ -602,16 +593,20 @@ mod tests {
             }
         }
         #[derive(Clone)]
-        struct FastPassBody;
-        impl camel_api::OutcomePipeline for FastPassBody {
+        struct FastFailBody;
+        impl camel_api::OutcomePipeline for FastFailBody {
             fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
-                Box::new(FastPassBody)
+                Box::new(FastFailBody)
             }
             fn run<'a>(
                 &'a mut self,
-                exchange: Exchange,
+                _exchange: Exchange,
             ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
-                Box::pin(async move { PipelineOutcome::Completed(exchange) })
+                Box::pin(async move {
+                    PipelineOutcome::Failed(camel_api::CamelError::ProcessorError(
+                        "fast-fail".into(),
+                    ))
+                })
             }
         }
 
@@ -620,8 +615,8 @@ mod tests {
 
         let mut seg = MulticastSegment {
             branches: vec![
-                OutcomeSegment::new(Box::new(SlowBody)), // branch 0: 200ms (times out)
-                OutcomeSegment::new(Box::new(FastPassBody)), // branch 1: completes
+                OutcomeSegment::new(Box::new(FastFailBody)), // branch 0: fails fast
+                OutcomeSegment::new(Box::new(SlowBody)),     // branch 1: 200ms (times out)
             ],
             parallel: true,
             parallel_limit: None,
@@ -633,12 +628,64 @@ mod tests {
         let ex = Exchange::new(Message::new("test"));
         let result = OutcomePipeline::run(&mut seg, ex).await;
 
-        // With stop_on_exception=false and timeout, timeout error is collected
-        // as last_error and propagated.
-        assert!(
-            matches!(result, PipelineOutcome::Failed(_)),
-            "Expected Failed due to timeout with stop_on_exception=false, got {result:?}"
-        );
+        // With stop_on_exception=false and a timeout, the timeout error from
+        // branch 1 (highest-index failure) is the last-wins error and propagates.
+        match result {
+            PipelineOutcome::Failed(err) => {
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("timed out"),
+                    "Expected timeout error from highest-index branch, got: {msg}"
+                );
+            }
+            other => {
+                panic!("Expected Failed due to timeout with stop_on_exception=false, got {other:?}")
+            }
+        }
+    }
+
+    // ── Test G: parallel partial-success aggregation ───────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multicast_parallel_partial_success_aggregates_successes() {
+        // Delta-spec scenario: branches 0 and 2 Completed, branch 1 Failed.
+        let mut seg = MulticastSegment {
+            branches: vec![
+                tagged_completed_body("b0", std::time::Duration::from_millis(10)),
+                always_failed_body("err-mid"),
+                tagged_completed_body("b2", std::time::Duration::ZERO),
+            ],
+            parallel: true,
+            parallel_limit: None,
+            stop_on_exception: false,
+            timeout: None,
+            aggregator: Arc::new(|exchanges: Vec<Exchange>| {
+                let bodies: Vec<String> = exchanges
+                    .iter()
+                    .map(|ex| ex.body_as::<String>().unwrap_or_default())
+                    .collect();
+                Exchange::new(Message::new(bodies.join("|")))
+            }),
+        };
+
+        let ex = Exchange::new(Message::new("inbound"));
+        let result = OutcomePipeline::run(&mut seg, ex).await;
+
+        // With stop_on_exception=false, partial success aggregates the successful
+        // branches only, in branch-index order (pinned by the body tags): the
+        // failed branch's output is discarded. Branch 2 completes first (no
+        // delay), so without the index-order sort the aggregator would see
+        // "b2|b0" — the "b0|b2" assertion pins results.sort_by_key.
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                let body = ex.body_as::<String>().unwrap_or_default();
+                assert_eq!(
+                    body, "b0|b2",
+                    "should aggregate only branches 0 and 2, in branch-index order"
+                );
+            }
+            other => panic!("expected Completed with body b0|b2, got {other:?}"),
+        }
     }
 
     // ── ADR-0058 regression: zero-success + Stopped-wins (multicast already complies) ─
@@ -683,6 +730,36 @@ mod tests {
         OutcomeSegment::new(Box::new(AlwaysCompleted))
     }
 
+    fn tagged_completed_body(tag: &str, delay: std::time::Duration) -> OutcomeSegment {
+        let tag = String::from(tag);
+        #[derive(Clone)]
+        struct TaggedCompleted {
+            tag: String,
+            delay: std::time::Duration,
+        }
+        impl camel_api::OutcomePipeline for TaggedCompleted {
+            fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                mut exchange: Exchange,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+            {
+                let tag = self.tag.clone();
+                let delay = self.delay;
+                Box::pin(async move {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    exchange.input.body = tag.into();
+                    PipelineOutcome::Completed(exchange)
+                })
+            }
+        }
+        OutcomeSegment::new(Box::new(TaggedCompleted { tag, delay }))
+    }
+
     fn always_stopped_body() -> OutcomeSegment {
         #[derive(Clone)]
         struct AlwaysStopped;
@@ -692,10 +769,13 @@ mod tests {
             }
             fn run<'a>(
                 &'a mut self,
-                exchange: Exchange,
+                mut exchange: Exchange,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
             {
-                Box::pin(async move { PipelineOutcome::Stopped(exchange) })
+                Box::pin(async move {
+                    exchange.input.body = "stop-body".into();
+                    PipelineOutcome::Stopped(exchange)
+                })
             }
         }
         OutcomeSegment::new(Box::new(AlwaysStopped))
@@ -723,10 +803,42 @@ mod tests {
         let ex = Exchange::new(Message::new("inbound"));
         let result = OutcomePipeline::run(&mut seg, ex).await;
 
-        assert!(
-            matches!(result, PipelineOutcome::Failed(_)),
-            "zero-success multicast must return Failed, got: {result:?}"
-        );
+        match result {
+            PipelineOutcome::Failed(err) => {
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("branch-b-failed"),
+                    "zero-success must carry the iteration-last error (branch-b-failed), got: {msg}"
+                );
+            }
+            other => panic!("zero-success multicast must return Failed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multicast_sequential_partial_success_two_branches() {
+        // Delta-spec scenario: branch 0 Completed, branch 1 Failed, no Stopped.
+        let mut seg = MulticastSegment {
+            branches: vec![always_completed_body(), always_failed_body("boom")],
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: false,
+            timeout: None,
+            aggregator: Arc::new(|exchanges: Vec<Exchange>| {
+                Exchange::new(Message::new(format!("n={}", exchanges.len())))
+            }),
+        };
+
+        let ex = Exchange::new(Message::new("inbound"));
+        let result = OutcomePipeline::run(&mut seg, ex).await;
+
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                let body = ex.body_as::<String>().unwrap_or_default();
+                assert_eq!(body, "n=1", "should aggregate the 1 successful branch only");
+            }
+            other => panic!("expected Completed with body n=1, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -752,9 +864,51 @@ mod tests {
         let ex = Exchange::new(Message::new("inbound"));
         let result = OutcomePipeline::run(&mut seg, ex).await;
 
-        assert!(
-            matches!(result, PipelineOutcome::Stopped(_)),
-            "Stopped branch must win over Completed and Failed, got: {result:?}"
-        );
+        match result {
+            PipelineOutcome::Stopped(ex) => {
+                let body = ex.body_as::<String>().unwrap_or_default();
+                assert_eq!(
+                    body, "stop-body",
+                    "Stopped must carry the stopped branch's exchange body"
+                );
+            }
+            other => panic!("Stopped branch must win over Completed and Failed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multicast_parallel_stopped_branch_wins_over_failed() {
+        // ADR-0058 Stopped-wins in parallel mode: the lowest-index CAS
+        // selection picks the stopped branch (only one Stopped branch, so the
+        // winner is deterministic), in-flight tasks run to completion, and the
+        // stopped exchange propagates — not Failed or Completed.
+        let mut seg = MulticastSegment {
+            branches: vec![
+                always_completed_body(),
+                always_failed_body("branch-b-failed"),
+                always_stopped_body(),
+            ],
+            parallel: true,
+            parallel_limit: None,
+            stop_on_exception: false,
+            timeout: None,
+            aggregator: Arc::new(|exchanges: Vec<Exchange>| {
+                exchanges.into_iter().last().unwrap_or_default()
+            }),
+        };
+
+        let ex = Exchange::new(Message::new("inbound"));
+        let result = OutcomePipeline::run(&mut seg, ex).await;
+
+        match result {
+            PipelineOutcome::Stopped(ex) => {
+                let body = ex.body_as::<String>().unwrap_or_default();
+                assert_eq!(
+                    body, "stop-body",
+                    "Stopped must carry the stopped branch's exchange body"
+                );
+            }
+            other => panic!("Stopped branch must win over Completed and Failed, got: {other:?}"),
+        }
     }
 }

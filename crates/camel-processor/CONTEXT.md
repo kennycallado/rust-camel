@@ -65,7 +65,7 @@ Phase 4 (ADR-0025) migrated structural EIPs from Tower services returning `Err(C
 | `DoTrySegment` | `do_try` | Error-handling block — runs body; on error, matches `catch` clauses. Stop from body or catch propagates. |
 | `SplitSegment` | `split_segment` | Splitting / aggregation — splits Exchange by expression, runs body per fragment, aggregates results. Stop from body returns `Stopped(fragment_ex)`, skips aggregation. `SplitterService` (Tower wrapper) delegates to this. |
 | `StreamingSplitSegment` | `streaming_split_segment` | Streaming split — same semantics as `SplitSegment` but processes a lazy byte stream. Stop drops the underlying stream and returns `Stopped(fragment_ex)`. |
-| `MulticastSegment` | `multicast` | Fan-out routing — sends Exchange to multiple endpoints in parallel or sequentially. Stop from any branch propagates to outer pipeline. |
+| `MulticastSegment` | `multicast` | Fan-out routing — sends Exchange to multiple endpoints in parallel or sequentially. Stop from any branch propagates to outer pipeline. Partial success (stopOnException=false) aggregates successful branches only; zero-success returns Failed (ADR-0058). |
 | `LoadBalanceSegment` | `load_balancer` | Load balancing / failover — selects one endpoint per strategy (round-robin, random, failover). Stop from selected branch propagates. |
 | `IdempotentConsumerSegment` | `idempotent_consumer` | Dedup — backed by `Arc<dyn IdempotentRepository>` (`camel-api/src/idempotent.rs:21`); computes message id via `MessageIdExpression`, checks `contains(key)`, runs body + records key on first sighting, skips body on duplicate. Stop from body propagates. |
 
@@ -217,7 +217,7 @@ If a concrete design question about divergence from Camel emerges for either EIP
 
 ## ADR-0012 log-policy sites
 
-The crate has 11 annotated log-policy sites. Seven **(a) handler-owned** sites use `warn!` because
+The crate has 13 annotated log-policy sites. Nine **(a) handler-owned** sites use `warn!` because
 the route ErrorHandler owns ERROR responsibility. Three **system-broken** sites use `error!`. One
 post-ack best-effort site uses `warn!` and reports a metric under ADR-0029.
 
@@ -230,6 +230,8 @@ post-ack best-effort site uses `warn!` and reports a metric under ADR-0029.
 | `wire_tap.rs` | `WireTapService::call` | (a) handler-owned | `// log-policy: handler-owned` — processing error |
 | `resequencer/batch.rs` | `BatchPolicy::accept` | (a) handler-owned | `// log-policy: handler-owned` — correlation expression failed |
 | `error_handler.rs` | `fn execute_on_steps` | (a) handler-owned | `// log-policy: handler-owned` — on-steps pipeline failed |
+| `multicast_segment.rs` | `sequential_multicast` partial-success discard | (a) handler-owned | `// log-policy: handler-owned` — partial success discards failed branch outcomes |
+| `multicast_segment.rs` | `parallel_multicast` partial-success discard | (a) handler-owned | `// log-policy: handler-owned` — partial success discards failed branch outcomes |
 | `resequencer/mod.rs` | `ResequencerService::with_config` post-driver task | post-ack best-effort | `// log-policy: post-ack failure (ADR-0012 best-effort, ADR-0029 I7)` — continuation call failed |
 | `error_handler.rs` | `fn send_to_handler`, no producer | system-broken | `// log-policy: system-broken` — no error handler configured |
 | `error_handler.rs` | `fn send_to_handler`, producer not ready | system-broken | `// log-policy: system-broken` — DLC/handler not ready |
