@@ -92,12 +92,12 @@ async fn main() -> Result<(), CamelError> {
 
 fn print_banner() {
     println!("==========================================================");
-    println!(" credential-sources example");
+    println!(" credential-sources example"); // allow-secret: banner names the example, carries no secret
     println!("==========================================================");
     println!("GET http://127.0.0.1:8090/tiles  (role required: {TILE_ROLE})");
     println!();
     println!("  cookie    : curl -H 'Cookie: session={DEMO_TOKEN}' http://127.0.0.1:8090/tiles");
-    println!("  query     : curl 'http://127.0.0.1:8090/tiles?token={DEMO_TOKEN}'");
+    println!("  query     : curl 'http://127.0.0.1:8090/tiles?token={DEMO_TOKEN}'"); // allow-secret: banner prints the demo token, never a real secret
     println!("  header    : curl -H 'X-Api-Key: {DEMO_TOKEN}' http://127.0.0.1:8090/tiles");
     println!(
         "  bearer    : curl -H 'Authorization: Bearer {DEMO_TOKEN}' http://127.0.0.1:8090/tiles"
