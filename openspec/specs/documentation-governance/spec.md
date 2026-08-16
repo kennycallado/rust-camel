@@ -55,59 +55,59 @@ This rule is recorded in `docs/src/contributing.md` (the Documentation workflow 
 
 ### Requirement: Guide glossary is a curated projection of CONTEXT-MAP
 
-The guide glossary (`docs/src/concepts/glossary.md`) SHALL be a curated subset of CONTEXT-MAP Key Terms. Every bold canonical term (`**Term**`) in the glossary SHALL match a CONTEXT-MAP Key Term — either exactly, or as the first component of a compound Key Term (so `**ErrorHandler**` matches the `ErrorHandler / ErrorHandlerConfig / ExceptionPolicy` entry). The `lint-glossary` xtask SHALL enforce this: it reports a violation for any glossary bold term whose first component is not any Key Term's first component. The glossary MAY rephrase a definition for users (wording drift is acceptable); it SHALL NOT invent terms (vocabulary drift is blocked).
+The guide glossary (`docs/src/concepts/glossary.md`) SHALL be a curated subset of CONTEXT-MAP Key Terms. Every bold canonical term (`**Term**`) in the glossary SHALL match a CONTEXT-MAP Key Term — either exactly, or as the first component of a compound Key Term (so `**ErrorHandler**` matches the `ErrorHandler / ErrorHandlerConfig / ExceptionPolicy` entry). This is enforced by review under the two-source rule: a bold glossary term whose first component is not any Key Term's first component is a vocabulary-drift defect. The glossary MAY rephrase a definition for users (wording drift is acceptable); it SHALL NOT invent terms (vocabulary drift is blocked).
 
 #### Scenario: glossary term exists in CONTEXT-MAP
 
 - **GIVEN** the glossary contains `**PollingConsumer**` as a bold term
-- **WHEN** `cargo xtask lint-glossary` runs
-- **THEN** it exits 0, because `PollingConsumer` is a Key Term in `CONTEXT-MAP.md`
+- **WHEN** the glossary is reviewed
+- **THEN** the term is accepted, because `PollingConsumer` is a Key Term in `CONTEXT-MAP.md`
 
 #### Scenario: glossary term matches a compound Key Term by first component
 
 - **GIVEN** the glossary contains `**ErrorHandler**` as a bold term
-- **WHEN** `cargo xtask lint-glossary` runs
-- **THEN** it exits 0, because `ErrorHandler` is the first component of the compound Key Term `ErrorHandler / ErrorHandlerConfig / ExceptionPolicy`
+- **WHEN** the glossary is reviewed
+- **THEN** the term is accepted, because `ErrorHandler` is the first component of the compound Key Term `ErrorHandler / ErrorHandlerConfig / ExceptionPolicy`
 
 #### Scenario: glossary term absent from CONTEXT-MAP
 
 - **GIVEN** the glossary contains `**FooBar**` as a bold term that is not any Key Term or any compound Key Term's first component
-- **WHEN** `cargo xtask lint-glossary` runs
-- **THEN** it reports a violation naming `FooBar` and exits non-zero under `--deny` (advisory exit 0 by default)
+- **WHEN** the glossary is reviewed
+- **THEN** the term is flagged as a vocabulary-drift defect naming `FooBar`
 
-#### Scenario: foundational primitives are cited, not lint-checked
+#### Scenario: foundational primitives are cited, not term-checked
 
 - **GIVEN** the glossary lists `Route` as a non-bold entry citing `crates/camel-core/CONTEXT.md`
-- **WHEN** `cargo xtask lint-glossary` runs
-- **THEN** it does NOT flag `Route` (non-bold primitives are exempt; they are crate-local terms owned by contract/runtime crates, not CONTEXT-MAP cross-cutting Key Terms)
+- **WHEN** the glossary is reviewed
+- **THEN** the entry is NOT flagged (non-bold primitives are exempt; they are crate-local terms owned by contract/runtime crates, not CONTEXT-MAP cross-cutting Key Terms)
 
 ### Requirement: ADR citations in the guide are valid
 
-Every `ADR-00NN` reference in `docs/src/**/*.md` SHALL resolve to an existing file `docs/adr/00NN-*.md` whose status is not `Retired` or `Superseded`. The `lint-adr-cite` xtask SHALL determine status by parsing any status line in the supported on-disk formats (`Status:`, `**Status:**`, `**Status**:`, `## Status`); a statusless legacy ADR (no status line) SHALL be treated as active and not a violation. A retired ADR (notably ADR-0048) SHALL NOT be cited as active guidance.
+Every `ADR-00NN` reference in `docs/src/**/*.md` SHALL resolve to an existing file `docs/adr/00NN-*.md` whose status is not `Retired` or `Superseded`. A statusless legacy ADR (no status line) SHALL be treated as active. A retired ADR (notably ADR-0048) SHALL NOT be cited as active guidance. This is enforced by review under the two-source rule.
 
 #### Scenario: cited ADR exists and is active
 
 - **GIVEN** a guide page cites `ADR-0024`
-- **WHEN** `cargo xtask lint-adr-cite` runs
-- **THEN** it exits 0, because `docs/adr/0024-*.md` exists and its Status is not Retired/Superseded
+- **WHEN** the page is reviewed
+- **THEN** the citation is accepted, because `docs/adr/0024-*.md` exists and its Status is not Retired/Superseded
 
 #### Scenario: cited ADR is retired
 
 - **GIVEN** a guide page cites `ADR-0048` (Retired)
-- **WHEN** `cargo xtask lint-adr-cite` runs
-- **THEN** it reports a violation naming ADR-0048 as retired
+- **WHEN** the page is reviewed
+- **THEN** the citation is flagged as a violation naming ADR-0048 as retired
 
 #### Scenario: cited ADR file is missing
 
 - **GIVEN** a guide page cites `ADR-0099` and no `docs/adr/0099-*.md` exists
-- **WHEN** `cargo xtask lint-adr-cite` runs
-- **THEN** it reports a violation naming ADR-0099 as unresolved
+- **WHEN** the page is reviewed
+- **THEN** the citation is flagged as a violation naming ADR-0099 as unresolved
 
 #### Scenario: statusless legacy ADR is treated as active
 
 - **GIVEN** a guide page cites `ADR-0001`, whose file has no `Status:` line (legacy format)
-- **WHEN** `cargo xtask lint-adr-cite` runs
-- **THEN** it does NOT report a violation (statusless ADRs are treated as active; the linter logs a note)
+- **WHEN** the page is reviewed
+- **THEN** the citation is NOT flagged (statusless ADRs are treated as active)
 
 ### Requirement: Guide prose follows ASD-STE100
 
