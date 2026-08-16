@@ -2974,12 +2974,10 @@ fn line_col_to_byte(content: &str, line_starts: &[usize], lc: proc_macro2::LineC
     let line_end = content[start..]
         .find('\n')
         .map_or(content.len(), |i| start + i);
-    let mut char_count = 0usize;
-    for (i, _ch) in content[start..line_end].char_indices() {
+    for (char_count, (i, _ch)) in content[start..line_end].char_indices().enumerate() {
         if char_count >= lc.column {
             return start + i;
         }
-        char_count += 1;
     }
     line_end
 }
