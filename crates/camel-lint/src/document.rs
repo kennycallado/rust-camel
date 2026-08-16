@@ -52,10 +52,15 @@ impl Document {
                 // path) never conflict with a held borrow.
                 let root: Value = (*noya_doc.as_value()).clone();
                 let mut from = None;
-                let nodes = walk(&root, "", &noya_doc, &mut from);
+                let mut from_parameters = Vec::new();
+                let nodes = walk(&root, "", &noya_doc, &mut from, &mut from_parameters, &[]);
                 Document {
                     raw,
-                    route_view: LintRoute { from, nodes },
+                    route_view: LintRoute {
+                        from,
+                        from_parameters,
+                        nodes,
+                    },
                     parse_failure: None,
                 }
             }
@@ -331,19 +336,46 @@ fn is_container(node: &serde_json::Value, root: &serde_json::Value) -> bool {
 /// Build the spanned node list for `value`, emitting endpoints for [`URI_KEYS`]
 /// and recursing through container keys discovered from the schema. `from`
 /// captures the route-level `from` URI (first occurrence wins) so it is not
-/// also emitted as a step node.
+/// also emitted as a step node; `from_parameters` captures the sibling
+/// `parameters:` entries attached to that `from`. `inherited` carries any
+/// step-level `parameters:` entries into an object-form URI key (e.g.
+/// `enrich: { uri: ... }`) and is CONCATENATED with the inner config's own
+/// `parameters:` map, so entries from both reach the nested `uri` endpoint
+/// (the DSL lowerer merges disjoint keys, so dropping either side would miss
+/// rules and could false-flag `MissingRequiredOption`).
 fn walk(
     value: &Value,
     path: &str,
     doc: &cst::Document,
     from_slot: &mut Option<Spanned<String>>,
+    from_parameters: &mut Vec<LintOption>,
+    inherited: &[LintOption],
 ) -> Vec<Spanned<LintNode>> {
     let mut nodes = Vec::new();
     match value {
         Value::Mapping(m) => {
+            // Collect the sibling `parameters:` map (if any) into spanned
+            // options. They attach to every endpoint URI key emitted from this
+            // mapping (or, for the route-level `from`, into `from_parameters`).
+            let local: Vec<LintOption> = m
+                .get("parameters")
+                .map(|pv| collect_parameters(pv, &child_path(path, "parameters"), doc))
+                .unwrap_or_default();
+            // Concatenate, never replace: step-level `parameters:` (inherited)
+            // and the inner config map (`local`) both reach the endpoint.
+            // Containers/sequences reset `inherited` to `[]`, so the concat is
+            // safe at every call site; the root call passes `&[]`.
+            let effective: Vec<LintOption> = inherited.iter().cloned().chain(local).collect();
+
             for (key, child) in m.iter() {
                 let cpath = child_path(path, key);
                 let k = key.as_str();
+                // The parameters map is consumed above; never treat it as a
+                // container (which would emit a spurious empty Branch) or a
+                // URI key.
+                if k == "parameters" {
+                    continue;
+                }
                 // Route 1's scalar `from` is captured in the dedicated slot.
                 // Routes 2..N (from_slot already set) and the object form
                 // (child.as_str() returns None) fall through to the URI_KEYS
@@ -358,18 +390,28 @@ fn walk(
                         value: s.to_string(),
                         span: Span::new(start, end),
                     });
+                    *from_parameters = effective.clone();
                     continue;
                 }
                 if URI_KEYS.contains(&k) {
                     if matches!(child, Value::Mapping(_)) {
                         // Object form (e.g. enrich: { uri: ... }): recurse to
-                        // find the nested `uri`, which is itself a URI key.
-                        nodes.extend(walk(child, &cpath, doc, from_slot));
+                        // find the nested `uri`, which is itself a URI key,
+                        // carrying the step-level parameters alongside the
+                        // inner config's own `parameters:` map.
+                        nodes.extend(walk(
+                            child,
+                            &cpath,
+                            doc,
+                            from_slot,
+                            from_parameters,
+                            &effective,
+                        ));
                     } else {
-                        emit_endpoints(child, &cpath, doc, &mut nodes);
+                        emit_endpoints(child, &cpath, doc, &mut nodes, &effective);
                     }
                 } else if CONTAINER_KEYS.contains(k) {
-                    let children = walk(child, &cpath, doc, from_slot);
+                    let children = walk(child, &cpath, doc, from_slot, from_parameters, &[]);
                     let kind = Spanned {
                         value: key.clone(),
                         span: key_span_for(doc, &cpath),
@@ -386,7 +428,7 @@ fn walk(
         Value::Sequence(seq) => {
             for (i, item) in seq.iter().enumerate() {
                 let ipath = format!("{path}[{i}]");
-                nodes.extend(walk(item, &ipath, doc, from_slot));
+                nodes.extend(walk(item, &ipath, doc, from_slot, from_parameters, &[]));
             }
         }
         _ => {}
@@ -394,17 +436,52 @@ fn walk(
     nodes
 }
 
+/// Collect the entries of a `parameters:` mapping into [`LintOption`]s, each
+/// key and value carrying a byte-exact span into the original source.
+///
+/// A non-string value (rejected by the schema as `additionalProperties: string`)
+/// yields an option with `value: None`; the key is still captured so R-URI-known
+/// can resolve it.
+fn collect_parameters(value: &Value, path: &str, doc: &cst::Document) -> Vec<LintOption> {
+    let Value::Mapping(m) = value else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (key, val) in m.iter() {
+        let entry_path = child_path(path, key.as_str());
+        let key_span = doc
+            .key_span(&entry_path)
+            .map(|(s, e)| Span::new(s, e))
+            .unwrap_or_else(|| value_span_for(doc, &entry_path));
+        let value_span = value_span_for(doc, &entry_path);
+        let value = val.as_str().map(|s| Spanned {
+            value: s.to_string(),
+            span: value_span,
+        });
+        out.push(LintOption {
+            key: Spanned {
+                value: key.clone(),
+                span: key_span,
+            },
+            value,
+        });
+    }
+    out
+}
+
 /// Emit one [`Endpoint`] per string value: a single string (SCALAR-URI) yields
-/// one endpoint; a sequence of strings (URI-ARRAY) yields one per item.
+/// one endpoint; a sequence of strings (URI-ARRAY) yields one per item. `params`
+/// are the sibling `parameters:` entries appended to each endpoint's options.
 fn emit_endpoints(
     value: &Value,
     path: &str,
     doc: &cst::Document,
     nodes: &mut Vec<Spanned<LintNode>>,
+    params: &[LintOption],
 ) {
     match value {
         Value::String(s) => {
-            if let Some(ep) = endpoint_for(s, path, doc) {
+            if let Some(ep) = endpoint_for(s, path, doc, params) {
                 nodes.push(ep);
             }
         }
@@ -412,7 +489,7 @@ fn emit_endpoints(
             for (i, item) in seq.iter().enumerate() {
                 if let Value::String(s) = item {
                     let ipath = format!("{path}[{i}]");
-                    if let Some(ep) = endpoint_for(s, &ipath, doc) {
+                    if let Some(ep) = endpoint_for(s, &ipath, doc, params) {
                         nodes.push(ep);
                     }
                 }
@@ -423,11 +500,18 @@ fn emit_endpoints(
 }
 
 /// Build an [`Endpoint`] node for a single URI string at `path`, parsing its
-/// query-string options against the original source.
-fn endpoint_for(uri: &str, path: &str, doc: &cst::Document) -> Option<Spanned<LintNode>> {
+/// query-string options against the original source and appending `params`
+/// (the sibling `parameters:` entries) after them.
+fn endpoint_for(
+    uri: &str,
+    path: &str,
+    doc: &cst::Document,
+    params: &[LintOption],
+) -> Option<Spanned<LintNode>> {
     let (start, end) = doc.span_at(path)?;
     let span = Span::new(start, end);
-    let options = LintOption::parse_from_query(uri, span.clone());
+    let mut options = LintOption::parse_from_query(uri, span.clone());
+    options.extend(params.iter().cloned());
     Some(Spanned {
         value: LintNode::Endpoint(Endpoint {
             uri: Spanned {
@@ -940,5 +1024,247 @@ steps:
         spans.sort_by_key(|s| (s.start, s.end));
         let dupes = spans.windows(2).filter(|w| w[0] == w[1]).count();
         assert_eq!(dupes, 0, "endpoint spans must not duplicate");
+    }
+
+    // ---- Task 3.1: `parameters:` map entries become spanned options ----
+
+    /// Stub catalog where `direct` is minimal (silent) and `scheme` carries the
+    /// given `uri_options`.
+    fn catalog_with(
+        scheme: &str,
+        opts: Vec<camel_api::component_metadata::UriOption>,
+    ) -> crate::test_support::StubCatalog {
+        use crate::test_support::StubCatalog;
+        use camel_api::component_metadata::ComponentMetadata;
+
+        StubCatalog::empty()
+            .with("direct", ComponentMetadata::minimal("direct"))
+            .with(
+                scheme,
+                ComponentMetadata::minimal(scheme).with_uri_options(opts),
+            )
+    }
+
+    #[test]
+    fn parameters_entries_become_options_with_spans() {
+        let source = "from: direct:start\nsteps:\n  - to: kafka:orders\n    parameters:\n      brokers: my-host:9092\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        assert_eq!(endpoints.len(), 2, "expected from + one to endpoint");
+        let to_ep = &endpoints[1];
+        assert_eq!(to_ep.uri.value, "kafka:orders");
+
+        let brokers = to_ep
+            .options
+            .iter()
+            .find(|o| o.key.value == "brokers")
+            .expect("parameters entry `brokers` must appear as an option");
+        let key_start = source.find("brokers:").expect("brokers key present");
+        assert_eq!(brokers.key.span.start, key_start);
+        assert_eq!(slice_at(&doc.raw, &brokers.key.span), "brokers");
+
+        let val = brokers.value.as_ref().expect("brokers has a value span");
+        let val_start = source.find("my-host:9092").expect("value present");
+        assert_eq!(val.span.start, val_start);
+        assert_eq!(val.value, "my-host:9092");
+        assert_eq!(slice_at(&doc.raw, &val.span), "my-host:9092");
+    }
+
+    #[test]
+    fn both_maps_enrich_merge_step_and_inner_parameters() {
+        // Full-form enrich with BOTH a step-level `parameters:` map and an
+        // inner config `parameters:` map: the endpoint must carry entries from
+        // both (regression: the inner map used to shadow the step-level one).
+        let source = "from: direct:start\nsteps:\n  - enrich:\n      uri: db:query\n      parameters:\n        dataSource: customers\n    parameters:\n      timeoutS: \"5000\"\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        assert_eq!(endpoints.len(), 2, "expected from + one enrich endpoint");
+        let enrich_ep = &endpoints[1];
+        assert_eq!(enrich_ep.uri.value, "db:query");
+
+        let opt = |key: &str| enrich_ep.options.iter().find(|o| o.key.value == key);
+        let data_source =
+            opt("dataSource").expect("inner config parameter `dataSource` must reach the endpoint");
+        assert_eq!(
+            data_source.value.as_ref().expect("value span").value,
+            "customers"
+        );
+        let timeout =
+            opt("timeoutS").expect("step-level parameter `timeoutS` must reach the endpoint");
+        assert_eq!(timeout.value.as_ref().expect("value span").value, "5000");
+    }
+
+    #[test]
+    fn both_maps_poll_enrich_merge_step_and_inner_parameters() {
+        // Same regression for poll_enrich, whose full form reuses EnrichConfig.
+        let source = "from: direct:start\nsteps:\n  - poll_enrich:\n      uri: db:query\n      parameters:\n        dataSource: customers\n    parameters:\n      timeoutS: \"5000\"\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        assert_eq!(
+            endpoints.len(),
+            2,
+            "expected from + one poll_enrich endpoint"
+        );
+        let enrich_ep = &endpoints[1];
+        assert_eq!(enrich_ep.uri.value, "db:query");
+
+        let opt = |key: &str| enrich_ep.options.iter().find(|o| o.key.value == key);
+        let data_source =
+            opt("dataSource").expect("inner config parameter `dataSource` must reach the endpoint");
+        assert_eq!(
+            data_source.value.as_ref().expect("value span").value,
+            "customers"
+        );
+        let timeout =
+            opt("timeoutS").expect("step-level parameter `timeoutS` must reach the endpoint");
+        assert_eq!(timeout.value.as_ref().expect("value span").value, "5000");
+    }
+
+    #[test]
+    fn from_parameters_entries_become_options() {
+        let source = "from: timer:tick\nparameters:\n  period: 1s\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        assert_eq!(endpoints.len(), 1, "expected exactly the from endpoint");
+        let from_ep = &endpoints[0];
+        assert_eq!(from_ep.uri.value, "timer:tick");
+
+        let period = from_ep
+            .options
+            .iter()
+            .find(|o| o.key.value == "period")
+            .expect("route-level parameters entry `period` must appear as an option");
+        assert_eq!(slice_at(&doc.raw, &period.key.span), "period");
+        let val = period.value.as_ref().expect("period has a value span");
+        assert_eq!(val.value, "1s");
+        assert_eq!(slice_at(&doc.raw, &val.span), "1s");
+    }
+
+    #[test]
+    fn unknown_param_in_parameters_flagged() {
+        use crate::diagnostic::{DiagnosticCode, UriKnownSubCode};
+        use crate::engine::LintEngine;
+        use camel_api::component_metadata::{OptionKind, UriOption};
+        use std::sync::Arc;
+
+        let catalog = catalog_with(
+            "timer",
+            vec![UriOption::new("period", "period", OptionKind::Duration)],
+        );
+        let engine = LintEngine::new(Arc::new(catalog)).with_default_rules();
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo\n    parameters:\n      perod: \"1\"\n";
+        let diags = engine.lint(source);
+        let unknown: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::UnknownOption))
+            .collect();
+        assert_eq!(
+            unknown.len(),
+            1,
+            "expected one UnknownOption; got: {diags:?}"
+        );
+        assert_eq!(slice_at(source, &unknown[0].span), "perod");
+    }
+
+    #[test]
+    fn missing_required_in_parameters_flagged() {
+        use crate::diagnostic::{DiagnosticCode, UriKnownSubCode};
+        use crate::engine::LintEngine;
+        use camel_api::component_metadata::{OptionKind, UriOption};
+        use std::sync::Arc;
+
+        let catalog = catalog_with(
+            "timer",
+            vec![
+                UriOption::new("period", "period", OptionKind::Duration).required(),
+                UriOption::new("delay", "delay", OptionKind::Duration),
+            ],
+        );
+        let engine = LintEngine::new(Arc::new(catalog)).with_default_rules();
+        // `period` is required and omitted; `delay` (non-required) is provided
+        // via `parameters:` — so the map must resolve `delay` (not unknown) and
+        // must NOT suppress the missing-required error for `period`.
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo\n    parameters:\n      delay: 500ms\n";
+        let diags = engine.lint(source);
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::MissingRequiredOption))
+            .collect();
+        assert_eq!(
+            missing.len(),
+            1,
+            "expected one MissingRequiredOption; got: {diags:?}"
+        );
+        assert_eq!(slice_at(source, &missing[0].span), "timer:foo");
+        let unknown = diags
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::UnknownOption))
+            .count();
+        assert_eq!(unknown, 0, "delay must resolve, not be unknown: {diags:?}");
+
+        // Complementary case: when the required option IS provided via
+        // `parameters:`, `option_present` must see it and the missing-required
+        // error must NOT fire.
+        let source2 = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo\n    parameters:\n      period: 1s\n";
+        let diags2 = engine.lint(source2);
+        let missing2 = diags2
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::MissingRequiredOption))
+            .count();
+        assert_eq!(
+            missing2, 0,
+            "period provided via parameters must satisfy the requirement: {diags2:?}"
+        );
+    }
+
+    #[test]
+    fn deprecated_in_parameters_flagged() {
+        use crate::diagnostic::DiagnosticCode;
+        use crate::engine::LintEngine;
+        use camel_api::component_metadata::{OptionKind, UriOption};
+        use std::sync::Arc;
+
+        let catalog = catalog_with(
+            "timer",
+            vec![
+                UriOption::new("oldFreq", "old frequency", OptionKind::Duration)
+                    .deprecated("use `period` instead"),
+            ],
+        );
+        let engine = LintEngine::new(Arc::new(catalog)).with_default_rules();
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo\n    parameters:\n      oldFreq: 1s\n";
+        let diags = engine.lint(source);
+        let dep: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::RDeprecated)
+            .collect();
+        assert_eq!(dep.len(), 1, "expected one RDeprecated; got: {diags:?}");
+        assert_eq!(slice_at(source, &dep[0].span), "oldFreq");
+    }
+
+    #[test]
+    fn secret_in_parameters_flagged() {
+        use crate::diagnostic::DiagnosticCode;
+        use crate::engine::LintEngine;
+        use camel_api::component_metadata::{OptionKind, UriOption};
+        use std::sync::Arc;
+
+        let catalog = catalog_with(
+            "http",
+            vec![UriOption::new("password", "password", OptionKind::String).secret()],
+        );
+        let engine = LintEngine::new(Arc::new(catalog)).with_default_rules();
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: http:srv\n    parameters:\n      password: hunter2\n";
+        let diags = engine.lint(source);
+        let secret: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::RSecret)
+            .collect();
+        assert_eq!(secret.len(), 1, "expected one RSecret; got: {diags:?}");
+        assert_eq!(slice_at(source, &secret[0].span), "hunter2");
     }
 }

@@ -82,4 +82,22 @@
         "examples/wasm-source-webhook/routes/webhook.yaml",
         [("R-URI-known:unverified-scheme", "info")],
     ),
+
+    // parameters.json (added by add-endpoint-parameters Task 2.3). The
+    // `kafka:`/`db:` schemes are not registered by
+    // `register_builtin_components_for_lint`, so unverified-scheme Info is
+    // by-design, matching the env-interpolation/wasm-webhook precedents.
+    (
+        "examples/json-dsl/config/parameters.json",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+
+    // R-SECRET: `authPassword` (catalog-secret http option) supplied as a
+    // literal via the sibling `parameters:` map instead of the query string.
+    // Span slices to the secret value — asserted by `secret_in_parameters_flagged`
+    // (crates/camel-lint/src/document.rs) — the merge-gate fixture from Task 3.2.
+    (
+        "crates/camel-cli/tests/fixtures/lint-corpus/parameters-secret.yaml",
+        [("R-SECRET", "warning")],
+    ),
 ]

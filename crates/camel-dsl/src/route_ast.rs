@@ -10,6 +10,115 @@ use serde_json::json;
 
 use crate::mcp::RouteDslMcp;
 
+// ---------------------------------------------------------------------------
+// `parameters` map deserialization
+//
+// Endpoint-bearing DSL structs accept a `parameters: BTreeMap<String, String>`
+// map. A non-string value (e.g. YAML `retries: 3`) must be rejected with an
+// error that NAMES the offending key, so authors get an actionable message
+// instead of a generic type error. The plain `BTreeMap<String, String>`
+// deserialize path cannot do this — its "invalid type" errors carry no key.
+// ---------------------------------------------------------------------------
+
+/// A string-only value guard used inside `deserialize_string_parameters`.
+/// Accepts only `str`/`String` values; anything else fails deserialization,
+/// which the map visitor turns into a key-naming error.
+struct ParameterValue(String);
+
+impl<'de> Deserialize<'de> for ParameterValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ParameterValueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ParameterValueVisitor {
+            type Value = ParameterValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ParameterValue(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ParameterValue(value))
+            }
+        }
+
+        deserializer.deserialize_any(ParameterValueVisitor)
+    }
+}
+
+/// Deserializes a `parameters` map whose values must all be strings.
+///
+/// On a non-string value, returns an error naming the offending key:
+/// `parameter \`retries\` must be a string; quote the value (e.g. `retries:
+/// "3"`)`. Absent fields are handled by `#[serde(default)]` (the function
+/// only runs when the field is present); `visit_unit`/`visit_none` accept
+/// `null` as an empty map where the format's `deserialize_map` routes it
+/// there (noyalib/serde_json currently reject `null` up front).
+fn deserialize_string_parameters<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringParametersVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StringParametersVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map of string parameter values")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut parameters = BTreeMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                match map.next_value::<ParameterValue>() {
+                    Ok(ParameterValue(value)) => {
+                        parameters.insert(key, value);
+                    }
+                    Err(_) => {
+                        return Err(serde::de::Error::custom(format!(
+                            "parameter `{key}` must be a string; quote the value (e.g. `{key}: \"3\"`)"
+                        )));
+                    }
+                }
+            }
+            Ok(parameters)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(BTreeMap::new())
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(BTreeMap::new())
+        }
+    }
+
+    deserializer.deserialize_map(StringParametersVisitor)
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RouteDslRoutes {
@@ -35,6 +144,8 @@ pub struct RouteDslRoutes {
 pub struct RouteDslRoute {
     pub id: String,
     pub from: String,
+    #[serde(default, deserialize_with = "deserialize_string_parameters")]
+    pub parameters: BTreeMap<String, String>,
     #[serde(default)]
     pub steps: Vec<RouteDslStep>,
     #[serde(default = "default_true")]
@@ -394,8 +505,11 @@ pub struct FunctionData {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ToStep {
     pub to: String,
+    #[serde(default, deserialize_with = "deserialize_string_parameters")]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -772,8 +886,11 @@ fn default_aggregate_strategy() -> String {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct WireTapStep {
     pub wire_tap: String,
+    #[serde(default, deserialize_with = "deserialize_string_parameters")]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -1087,15 +1204,21 @@ pub struct CachePeekStaleBody {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct EnrichStep {
     pub enrich: EnrichBody,
+    #[serde(default, deserialize_with = "deserialize_string_parameters")]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct PollEnrichStep {
     pub poll_enrich: EnrichBody,
+    #[serde(default, deserialize_with = "deserialize_string_parameters")]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -1112,12 +1235,15 @@ pub enum EnrichBody {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct EnrichConfig {
     pub uri: String,
     #[serde(default)]
     pub strategy: Option<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_string_parameters")]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

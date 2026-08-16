@@ -3,6 +3,8 @@
 //! Main types: `RouteBuilder`, `StepAccumulator`, `SplitBuilder`, `ChoiceBuilder`, `MulticastBuilder`,
 //! `ThrottleBuilder`, `LoopBuilder`, `LoadBalancerBuilder`, `OnExceptionBuilder`.
 
+use std::collections::BTreeMap;
+
 use camel_api::DelayConfig;
 use camel_api::aggregator::{
     AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode, CorrelationStrategy,
@@ -20,8 +22,8 @@ use camel_api::routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
 use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
 use camel_api::{
-    BoxProcessor, CamelError, CanonicalRouteSpec, Exchange, FilterPredicate, IdentityProcessor,
-    LanguageExpressionDef, OpaqueProcessor, ProcessorFn, Value,
+    BoxProcessor, CamelError, CanonicalRouteSpec, EndpointUri, Exchange, FilterPredicate,
+    IdentityProcessor, LanguageExpressionDef, OpaqueProcessor, ProcessorFn, Value,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
@@ -341,6 +343,15 @@ pub trait StepAccumulator: Sized {
     }
 }
 
+/// Identifies the endpoint slot a `.parameters()` call attaches to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EndpointSlot {
+    /// The route's `from` endpoint.
+    From,
+    /// A step in `RouteBuilder::steps`, by index.
+    Step(usize),
+}
+
 /// A fluent builder for constructing routes.
 ///
 /// # Example
@@ -360,6 +371,10 @@ pub trait StepAccumulator: Sized {
 pub struct RouteBuilder {
     from_uri: String,
     steps: Vec<BuilderStep>,
+    /// Pending `.parameters()` maps, each attached to a specific endpoint slot.
+    parameter_assignments: Vec<(EndpointSlot, BTreeMap<String, String>)>,
+    /// Misuse recorded at `.parameters()` call time and surfaced at `build()`.
+    parameter_misuse: Option<String>,
     error_handler: Option<ErrorHandlerConfig>,
     error_handler_mode: ErrorHandlerMode,
     circuit_breaker_config: Option<CircuitBreakerConfig>,
@@ -396,6 +411,8 @@ impl RouteBuilder {
         Self {
             from_uri: endpoint.to_string(),
             steps: Vec::new(),
+            parameter_assignments: Vec::new(),
+            parameter_misuse: None,
             error_handler: None,
             error_handler_mode: ErrorHandlerMode::None,
             circuit_breaker_config: None,
@@ -442,6 +459,36 @@ impl RouteBuilder {
         self.steps.push(BuilderStep::WireTap {
             uri: endpoint.to_string(),
         });
+        self
+    }
+
+    /// Attach a `parameters:` map to the most recent endpoint slot — the `from`
+    /// endpoint when called before any step, otherwise the last added step.
+    ///
+    /// Parameters on different endpoints each persist independently; none
+    /// overwrites another. Misuse (a second `.parameters()` on the same slot,
+    /// or a call with no pending endpoint step) is deferred and surfaced as a
+    /// `CamelError::RouteError` at `build()` / `build_canonical()`, never a panic.
+    pub fn parameters(mut self, params: BTreeMap<String, String>) -> Self {
+        let slot = if self.steps.is_empty() {
+            EndpointSlot::From
+        } else {
+            EndpointSlot::Step(self.steps.len() - 1)
+        };
+
+        if self
+            .parameter_assignments
+            .iter()
+            .any(|(existing, _)| *existing == slot)
+        {
+            self.parameter_misuse =
+                Some("multiple .parameters() calls attached to the same endpoint".to_string());
+        } else if !endpoint_slot_bears_uri(&slot, &self.steps) {
+            self.parameter_misuse =
+                Some(".parameters() called with no pending endpoint step".to_string());
+        }
+
+        self.parameter_assignments.push((slot, params));
         self
     }
 
@@ -694,7 +741,7 @@ impl RouteBuilder {
     /// Consume the builder and produce a [`RouteDefinition`].
     // Duplicate route IDs are detected at `CamelContext::add_route_definition` time
     // (RouteController rejects atomically with CamelError::RouteError).
-    pub fn build(self) -> Result<RouteDefinition, CamelError> {
+    pub fn build(mut self) -> Result<RouteDefinition, CamelError> {
         validate_uri(&self.from_uri)?;
         let route_id = self
             .route_id
@@ -746,6 +793,15 @@ impl RouteBuilder {
             }
         };
 
+        // Deferred `.parameters()` validation and merge: misuse is a RouteError,
+        // URI merge failures surface as CamelError::EndpointUri via `?`.
+        apply_parameter_assignments(
+            &mut self.from_uri,
+            &mut self.steps,
+            std::mem::take(&mut self.parameter_assignments),
+            std::mem::take(&mut self.parameter_misuse),
+        )?;
+
         let definition = RouteDefinition::new(self.from_uri, self.steps);
         let definition = if let Some(eh) = resolved_error_handler {
             definition.with_error_handler(eh)
@@ -787,7 +843,7 @@ impl RouteBuilder {
     }
 
     /// Compile this builder route into canonical spec.
-    pub fn build_canonical(self) -> Result<CanonicalRouteSpec, CamelError> {
+    pub fn build_canonical(mut self) -> Result<CanonicalRouteSpec, CamelError> {
         validate_uri(&self.from_uri)?;
         let route_id = self
             .route_id
@@ -798,6 +854,14 @@ impl RouteBuilder {
                         .to_string(),
                 )
             })?;
+
+        // Deferred `.parameters()` validation and merge (same path as `build()`).
+        apply_parameter_assignments(
+            &mut self.from_uri,
+            &mut self.steps,
+            std::mem::take(&mut self.parameter_assignments),
+            std::mem::take(&mut self.parameter_misuse),
+        )?;
 
         let steps = canonicalize_steps(self.steps)?;
         let circuit_breaker = self
@@ -874,6 +938,76 @@ impl OnExceptionBuilder {
         }
         self.parent
     }
+}
+
+/// True when `slot` names an endpoint-bearing position: the `from` endpoint, or
+/// a step of one of the endpoint kinds (`To`, `WireTap`, `Enrich`, `PollEnrich`).
+fn endpoint_slot_bears_uri(slot: &EndpointSlot, steps: &[BuilderStep]) -> bool {
+    match slot {
+        EndpointSlot::From => true,
+        EndpointSlot::Step(i) => steps.get(*i).is_some_and(|step| {
+            matches!(
+                step,
+                BuilderStep::To(_)
+                    | BuilderStep::WireTap { .. }
+                    | BuilderStep::Enrich { .. }
+                    | BuilderStep::PollEnrich { .. }
+            )
+        }),
+    }
+}
+
+/// Merge each pending `.parameters()` assignment into its endpoint slot's URI.
+///
+/// A recorded misuse flag aborts first (builder misuse → `RouteError`). Each
+/// endpoint slot is then verified endpoint-bearing and its URI re-rendered via
+/// [`EndpointUri::try_from_uri_and_params`]; URI merge failures propagate as
+/// `CamelError::EndpointUri` (never folded into `RouteError`). Empty parameter
+/// maps are skipped entirely, preserving URI bytes (parity with the DSL
+/// lowering); misuse for such calls is still surfaced via `misuse`.
+fn apply_parameter_assignments(
+    from_uri: &mut String,
+    steps: &mut [BuilderStep],
+    assignments: Vec<(EndpointSlot, BTreeMap<String, String>)>,
+    misuse: Option<String>,
+) -> Result<(), CamelError> {
+    if let Some(reason) = misuse {
+        return Err(CamelError::RouteError(reason));
+    }
+
+    for (slot, params) in assignments {
+        // Empty maps are no-ops: re-rendering would still route through
+        // `EndpointUri` and could normalize URI bytes, diverging from the DSL
+        // lowering which skips empty maps for byte-identity/passthrough.
+        if params.is_empty() {
+            continue;
+        }
+
+        let uri = match slot {
+            EndpointSlot::From => &mut *from_uri,
+            EndpointSlot::Step(i) => match steps.get_mut(i) {
+                Some(BuilderStep::To(uri)) => uri,
+                Some(BuilderStep::WireTap { uri, .. }) => uri,
+                Some(BuilderStep::Enrich { uri, .. }) => uri,
+                Some(BuilderStep::PollEnrich { uri, .. }) => uri,
+                Some(other) => {
+                    return Err(CamelError::RouteError(format!(
+                        ".parameters() attached to a non-endpoint step (`{}`)",
+                        canonical_step_name(other)
+                    )));
+                }
+                None => {
+                    return Err(CamelError::RouteError(
+                        ".parameters() attached to an out-of-range step index".to_string(),
+                    ));
+                }
+            },
+        };
+        let merged = EndpointUri::try_from_uri_and_params(uri, params)?.to_canonical_string();
+        *uri = merged;
+    }
+
+    Ok(())
 }
 
 /// Validate that a URI is non-empty and contains a scheme component.

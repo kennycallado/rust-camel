@@ -19,6 +19,7 @@ pub mod declarative;
 pub mod delayer;
 pub mod dynamic_router;
 pub mod endpoint_pipeline;
+pub mod endpoint_uri;
 pub mod error;
 pub mod error_handler;
 pub mod exchange;
@@ -72,7 +73,8 @@ pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use delayer::{DEFAULT_MAX_DELAY_MS, DelayConfig};
 pub use dynamic_router::{DynamicRouterConfig, RouterExpression};
 pub use endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, EndpointResolver};
-pub use error::{CamelError, ConfigValidationError};
+pub use endpoint_uri::EndpointUri;
+pub use error::{CamelError, ConfigValidationError, EndpointUriError};
 pub use error_handler::{
     BoundaryKind, ErrorHandlerConfig, ExceptionDisposition, ExceptionPolicy,
     ExceptionPolicyBuilder, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER,

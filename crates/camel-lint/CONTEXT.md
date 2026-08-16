@@ -27,6 +27,15 @@ The engine ships with 5 rules:
 **Document** wraps `noyalib` parse output with `parse_failure`, the route view (`LintRoute` /
 `Endpoint` / `LintOption`), and an `apply_fix` hook.
 
+**Endpoint options come from three sources** — query string, `parameters:` maps, and (for
+object-form `enrich`/`poll_enrich`) the inner config map. `parameters:` entries are captured
+with byte-exact key/value spans, indistinguishable from query-string options for rule
+purposes. Step-level `parameters:` inherit into object-form URI keys and are CONCATENATED
+with the inner map (never either/or — dropping a side would hide entries from rules and
+false-flag `MissingRequiredOption`). A same key carried both in the query string and in
+`parameters:` reaches rules twice; the DSL lowering rejects that overlap (fail-closed) —
+pre-lowering overlap flagging is tracked in bd rc-j9v8.
+
 ## Catalog injection
 
 `LintEngine` takes `Arc<dyn ComponentMetadataCatalog>` at construction. The production catalog

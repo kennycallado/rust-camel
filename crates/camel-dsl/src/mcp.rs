@@ -11,6 +11,7 @@
 use camel_api::CamelError;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 use crate::route_ast::{RouteDslRoute, RouteDslSecurityPolicy};
 
@@ -192,6 +193,7 @@ fn consumer_route(
     RouteDslRoute {
         id: id.to_string(),
         from,
+        parameters: BTreeMap::new(),
         steps: Vec::new(),
         auto_startup: true,
         startup_order: 0,
@@ -361,6 +363,7 @@ mcp:
         RouteDslRoute {
             id: "existing".to_string(),
             from: "direct:existing".to_string(),
+            parameters: BTreeMap::new(),
             steps: vec![],
             auto_startup: true,
             startup_order: 0,

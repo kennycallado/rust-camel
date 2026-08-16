@@ -4,13 +4,15 @@
 // Module alias preserves call-site paths byte-for-byte.
 use noyalib::compat::serde_yaml as serde_yml;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use tracing::{debug, error, info};
 
 use camel_api::error_handler::ExceptionDisposition;
 use camel_api::{
-    CamelError, CanonicalLossReport, CanonicalRouteSpec, StreamSplitConfig, StreamSplitFormat,
+    CamelError, CanonicalLossReport, CanonicalRouteSpec, EndpointUri, EndpointUriError,
+    StreamSplitConfig, StreamSplitFormat,
 };
 use camel_core::route::RouteDefinition;
 
@@ -528,8 +530,10 @@ pub(crate) fn route_dsl_to_declarative_route(
         .map(route_step_to_declarative_step)
         .collect::<Result<Vec<_>, _>>()?;
 
+    let from = merge_endpoint_uri(&route.from, route.parameters)?;
+
     Ok(DeclarativeRoute {
-        from: route.from,
+        from,
         route_id: route.id,
         auto_startup: route.auto_startup,
         startup_order: route.startup_order,
@@ -598,23 +602,66 @@ fn parse_multicast_aggregation(s: &str) -> Result<MulticastAggregationDef, Camel
     }
 }
 
+/// Merge a raw endpoint URI with its `parameters:` map into the canonical
+/// merged URI. An empty map passes the raw URI through byte-identical (no
+/// parse/render round-trip), preserving existing routes exactly. A non-empty
+/// map goes through [`EndpointUri`]'s fail-closed merge; duplicate keys across
+/// the query and the map surface as `CamelError::EndpointUri` (its `Display`
+/// names the offending key).
+fn merge_endpoint_uri(
+    raw_uri: &str,
+    params: BTreeMap<String, String>,
+) -> Result<String, CamelError> {
+    if params.is_empty() {
+        return Ok(raw_uri.to_string());
+    }
+    EndpointUri::try_from_uri_and_params(raw_uri, params)
+        .map(|uri| uri.to_canonical_string())
+        .map_err(CamelError::EndpointUri)
+}
+
+/// Combine the full-form `config.parameters` map with the step-level
+/// `parameters` map. A key declared in both maps fails closed with the
+/// duplicate-key error naming the first colliding key (BTreeMap iteration
+/// order = the smallest colliding key); disjoint maps merge.
+fn combine_params(
+    config: BTreeMap<String, String>,
+    step: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, CamelError> {
+    let mut merged = config;
+    for key in step.keys() {
+        if merged.contains_key(key) {
+            return Err(CamelError::EndpointUri(EndpointUriError::DuplicateKey {
+                key: key.clone(),
+            }));
+        }
+    }
+    merged.extend(step);
+    Ok(merged)
+}
+
 pub(crate) fn route_step_to_declarative_step(
     step: RouteDslStep,
 ) -> Result<DeclarativeStep, CamelError> {
     match step {
-        RouteDslStep::To(ToStep { to }) => {
+        RouteDslStep::To(ToStep { to, parameters }) => {
             if to.trim().is_empty() {
                 return Err(CamelError::RouteError("to: URI must not be empty".into()));
             }
-            Ok(DeclarativeStep::To(ToStepDef::new(to)))
+            let uri = merge_endpoint_uri(&to, parameters)?;
+            Ok(DeclarativeStep::To(ToStepDef::new(uri)))
         }
-        RouteDslStep::WireTap(WireTapStep { wire_tap }) => {
+        RouteDslStep::WireTap(WireTapStep {
+            wire_tap,
+            parameters,
+        }) => {
             if wire_tap.trim().is_empty() {
                 return Err(CamelError::RouteError(
                     "wire_tap: URI must not be empty".into(),
                 ));
             }
-            Ok(DeclarativeStep::WireTap(WireTapStepDef { uri: wire_tap }))
+            let uri = merge_endpoint_uri(&wire_tap, parameters)?;
+            Ok(DeclarativeStep::WireTap(WireTapStepDef { uri }))
         }
         RouteDslStep::Stop(StopStep { stop }) => {
             if stop {
@@ -1281,16 +1328,23 @@ pub(crate) fn route_step_to_declarative_step(
                 predicate: expr,
             }))
         }
-        RouteDslStep::Enrich(EnrichStep { enrich }) => {
-            let (uri, strategy) = unpack_enrich_body(enrich)?;
+        RouteDslStep::Enrich(EnrichStep { enrich, parameters }) => {
+            let (uri, strategy, config_params) = unpack_enrich_body(enrich)?;
+            let params = combine_params(config_params, parameters)?;
+            let uri = merge_endpoint_uri(&uri, params)?;
             Ok(DeclarativeStep::Enrich(EnrichStepDef {
                 uri,
                 strategy,
                 timeout_ms: None,
             }))
         }
-        RouteDslStep::PollEnrich(PollEnrichStep { poll_enrich }) => {
-            let (uri, strategy, timeout) = unpack_poll_enrich_body(poll_enrich)?;
+        RouteDslStep::PollEnrich(PollEnrichStep {
+            poll_enrich,
+            parameters,
+        }) => {
+            let (uri, strategy, timeout, config_params) = unpack_poll_enrich_body(poll_enrich)?;
+            let params = combine_params(config_params, parameters)?;
+            let uri = merge_endpoint_uri(&uri, params)?;
             Ok(DeclarativeStep::PollEnrich(EnrichStepDef {
                 uri,
                 strategy,
@@ -1663,7 +1717,18 @@ pub(crate) fn route_step_to_declarative_step(
     }
 }
 
-fn unpack_enrich_body(body: EnrichBody) -> Result<(String, Option<String>), CamelError> {
+/// Unpacked `enrich` body: `(uri, strategy, full_form_parameters)`.
+type EnrichParts = (String, Option<String>, BTreeMap<String, String>);
+
+/// Unpacked `poll_enrich` body: `(uri, strategy, timeout, full_form_parameters)`.
+type PollEnrichParts = (
+    String,
+    Option<String>,
+    Option<u64>,
+    BTreeMap<String, String>,
+);
+
+fn unpack_enrich_body(body: EnrichBody) -> Result<EnrichParts, CamelError> {
     match body {
         EnrichBody::Uri(uri) => {
             if uri.trim().is_empty() {
@@ -1671,7 +1736,7 @@ fn unpack_enrich_body(body: EnrichBody) -> Result<(String, Option<String>), Came
                     "enrich: URI must not be empty".into(),
                 ));
             }
-            Ok((uri, None))
+            Ok((uri, None, BTreeMap::new()))
         }
         EnrichBody::Full(config) => {
             if config.uri.trim().is_empty() {
@@ -1679,14 +1744,12 @@ fn unpack_enrich_body(body: EnrichBody) -> Result<(String, Option<String>), Came
                     "enrich: URI must not be empty".into(),
                 ));
             }
-            Ok((config.uri, config.strategy))
+            Ok((config.uri, config.strategy, config.parameters))
         }
     }
 }
 
-fn unpack_poll_enrich_body(
-    body: EnrichBody,
-) -> Result<(String, Option<String>, Option<u64>), CamelError> {
+fn unpack_poll_enrich_body(body: EnrichBody) -> Result<PollEnrichParts, CamelError> {
     match body {
         EnrichBody::Uri(uri) => {
             if uri.trim().is_empty() {
@@ -1694,7 +1757,7 @@ fn unpack_poll_enrich_body(
                     "poll_enrich: URI must not be empty".into(),
                 ));
             }
-            Ok((uri, None, None))
+            Ok((uri, None, None, BTreeMap::new()))
         }
         EnrichBody::Full(config) => {
             if config.uri.trim().is_empty() {
@@ -1702,7 +1765,12 @@ fn unpack_poll_enrich_body(
                     "poll_enrich: URI must not be empty".into(),
                 ));
             }
-            Ok((config.uri, config.strategy, config.timeout))
+            Ok((
+                config.uri,
+                config.strategy,
+                config.timeout,
+                config.parameters,
+            ))
         }
     }
 }

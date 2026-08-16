@@ -16,6 +16,14 @@ Crate-specific vocabulary. Cross-cutting terms (Exchange, Message, RouteDefiniti
 CanonicalRouteSpec, ErrorHandler) live in CONTEXT-MAP.md and `camel-dsl/CONTEXT.md` and are not
 redefined here.
 
+**`.parameters(map)`**:
+RouteBuilder-only method attaching a `BTreeMap<String, String>` to the most recent endpoint
+slot (`From` before any step, else the last step). Errors are DEFERRED to `build()` /
+`build_canonical()`: authoring misuse (no pending endpoint, double call on a slot) surfaces as
+`CamelError::RouteError`; URI merge failures (duplicate key vs the query string, key-policy
+violations) surface as `CamelError::EndpointUri` — same taxonomy as the DSL lowering. Empty
+maps are skipped, so URIs pass through byte-identical (DSL parity).
+
 **RouteBuilder**:
 The fluent entry point (`struct RouteBuilder`, `crates/camel-builder/src/lib.rs:358`). `RouteBuilder::from(uri)`
 opens a route; chained methods take `mut self` / `self` and return `Self` or a child builder,
@@ -77,7 +85,7 @@ camel-config (DP-9, `0a720767`) and camel-dsl (DP-8, `98ace84e`).
 | `pub struct` (16: 13 in `lib.rs`, 3 in `do_try.rs`) | **No** | Builder structs are constructed only through the fluent API (`RouteBuilder::from(...)` + child-builder accessors), never as external struct literals, so `#[non_exhaustive]` would add no forward-compat value. |
 
 Counts (verified mechanically, HEAD `7f9d8a03`): **16** `pub struct`, **1** `pub trait`
-(`StepAccumulator`), **0** `pub enum`; **4520** LOC in `src/` (`lib.rs` 4211, `do_try.rs`
+(`StepAccumulator`), **0** `pub enum`; **4520** LOC in `src/` (`lib.rs` 4404, `do_try.rs`
 309); **160** tests pass (151 inline + 4 `canonical_spec_test` + 5 `log_eip_test`).
 
 ## Architecture notes

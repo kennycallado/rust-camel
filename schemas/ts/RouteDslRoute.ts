@@ -4,4 +4,4 @@ import type { RouteDslErrorHandler } from "./RouteDslErrorHandler";
 import type { RouteDslSecurityPolicy } from "./RouteDslSecurityPolicy";
 import type { RouteDslStep } from "./RouteDslStep";
 
-export type RouteDslRoute = { id: string, from: string, steps: Array<RouteDslStep>, auto_startup: boolean, startup_order: number, sequential: boolean, concurrent: number | null, error_handler: RouteDslErrorHandler | null, circuit_breaker: RouteDslCircuitBreaker | null, security_policy: RouteDslSecurityPolicy | null, on_complete: string | null, on_failure: string | null, };
+export type RouteDslRoute = { id: string, from: string, parameters: { [key in string]: string }, steps: Array<RouteDslStep>, auto_startup: boolean, startup_order: number, sequential: boolean, concurrent: number | null, error_handler: RouteDslErrorHandler | null, circuit_breaker: RouteDslCircuitBreaker | null, security_policy: RouteDslSecurityPolicy | null, on_complete: string | null, on_failure: string | null, };

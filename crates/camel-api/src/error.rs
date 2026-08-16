@@ -45,6 +45,33 @@ pub enum ConfigValidationError {
     SqlDynamicQueryWithoutAllowDynamic,
 }
 
+/// Typed error for constructing an [`EndpointUri`](crate::EndpointUri) from a base URI
+/// plus a `parameters:` map.
+///
+/// Every variant names the offending key or input in its `Display` text so failures
+/// are diagnosable without losing the context of what was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum EndpointUriError {
+    /// A `parameters:` key collides with a key already present in the base URI query.
+    #[error(
+        "endpoint URI parameter `{key}` duplicates a key already present in the base URI query"
+    )]
+    DuplicateKey { key: String },
+
+    /// The base URI has no non-empty scheme (no `:` before the path).
+    #[error("endpoint URI is missing a scheme (expected `scheme:path`)")]
+    MissingScheme,
+
+    /// The base URI query contains a pair with an empty key (e.g. `?=value`).
+    #[error("endpoint URI query contains a pair with an empty key")]
+    EmptyQueryKey,
+
+    /// A `parameters:` key is empty or contains a reserved/unsafe character.
+    #[error("endpoint URI parameter key `{key}` is empty or contains a reserved character")]
+    InvalidParamKey { key: String },
+}
+
 /// Core error type for the Camel framework.
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
@@ -125,6 +152,12 @@ pub enum CamelError {
 
     #[error("Template reload failed: {0}")]
     TemplateReload(String),
+
+    /// Typed endpoint-URI construction error (see [`EndpointUriError`]). Promotes the
+    /// fail-closed `EndpointUri` merge failures from stringly-typed errors to a matchable
+    /// variant so operators can discriminate programmatically.
+    #[error("Endpoint URI error: {0}")]
+    EndpointUri(EndpointUriError),
 }
 
 impl CamelError {
@@ -132,7 +165,9 @@ impl CamelError {
         #[allow(unreachable_patterns)]
         match self {
             Self::ComponentNotFound(_) => "component",
-            Self::EndpointCreationFailed(_) | Self::InvalidUri(_) => "endpoint",
+            Self::EndpointCreationFailed(_) | Self::InvalidUri(_) | Self::EndpointUri(_) => {
+                "endpoint"
+            }
             Self::ProcessorError(_) | Self::ProcessorErrorWithSource(_, _) => "processor",
             Self::TypeConversionFailed(_) | Self::AlreadyConsumed => "type_conversion",
             Self::Io(_) => "io",
@@ -183,6 +218,7 @@ impl CamelError {
             Self::Unauthorized(_) => "Unauthorized",
             Self::ValidationError(_) => "ValidationError",
             Self::TemplateReload(_) => "TemplateReload",
+            Self::EndpointUri(_) => "EndpointUri",
         }
     }
 }
@@ -202,6 +238,12 @@ impl From<crate::template::TemplateError> for CamelError {
 impl From<ConfigValidationError> for CamelError {
     fn from(e: ConfigValidationError) -> Self {
         CamelError::ConfigValidation(e)
+    }
+}
+
+impl From<EndpointUriError> for CamelError {
+    fn from(e: EndpointUriError) -> Self {
+        CamelError::EndpointUri(e)
     }
 }
 
@@ -241,6 +283,7 @@ mod tests {
             CamelError::Unauthorized("missing admin role".to_string()),
             CamelError::ValidationError("body does not match schema".to_string()),
             CamelError::TemplateReload("reload failed".to_string()),
+            CamelError::EndpointUri(EndpointUriError::MissingScheme),
         ]
     }
 
@@ -390,7 +433,7 @@ mod tests {
 
 #[cfg(test)]
 mod variant_name_tests {
-    use super::{CamelError, ConfigValidationError};
+    use super::{CamelError, ConfigValidationError, EndpointUriError};
     use std::sync::Arc;
 
     /// Representative value for each enum variant. This test fails to compile
@@ -450,6 +493,10 @@ mod variant_name_tests {
             (CamelError::Unauthorized("x".into()), "Unauthorized"),
             (CamelError::ValidationError("bad".into()), "ValidationError"),
             (CamelError::TemplateReload("x".into()), "TemplateReload"),
+            (
+                CamelError::EndpointUri(EndpointUriError::MissingScheme),
+                "EndpointUri",
+            ),
         ];
 
         for (err, expected) in cases {

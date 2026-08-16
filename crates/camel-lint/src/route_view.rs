@@ -31,7 +31,7 @@ pub struct Spanned<T> {
 // ---------------------------------------------------------------------------
 
 /// An option key-value pair extracted from a URI query string (`?k=v`) or
-/// from a step's sibling option-map keys.
+/// from an endpoint's sibling `parameters:` map entry.
 #[derive(Clone, Debug)]
 pub struct LintOption {
     pub key: Spanned<String>,
@@ -126,21 +126,24 @@ pub enum LintNode {
 #[derive(Clone, Debug, Default)]
 pub struct LintRoute {
     pub from: Option<Spanned<String>>,
+    /// Route-level `parameters:` entries (spanned options) attached to `from`.
+    pub from_parameters: Vec<LintOption>,
     pub nodes: Vec<Spanned<LintNode>>,
 }
 
 impl LintRoute {
-    /// Flattened endpoint list covering the route-level `from` (with empty
-    /// options) FOLLOWED BY every [`LintNode::Endpoint`] at any depth —
-    /// including those nested inside [`LintNode::Branch`] containers — in
-    /// source order.
+    /// Flattened endpoint list covering the route-level `from` (with its
+    /// query-string options plus the route-level `parameters:` entries)
+    /// FOLLOWED BY every [`LintNode::Endpoint`] at any depth — including
+    /// those nested inside [`LintNode::Branch`] containers — in source order.
     ///
     /// Rules iterate this flat list to cover `from` + all `to`/`uri` at any
     /// nesting depth without walking the tree themselves.
     pub fn endpoints(&self) -> Vec<Endpoint> {
         let mut out = Vec::new();
         if let Some(f) = &self.from {
-            let options = LintOption::parse_from_query(&f.value, f.span.clone());
+            let mut options = LintOption::parse_from_query(&f.value, f.span.clone());
+            options.extend(self.from_parameters.iter().cloned());
             out.push(Endpoint {
                 uri: Spanned {
                     value: f.value.clone(),

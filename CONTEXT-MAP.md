@@ -171,6 +171,7 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **open namespace** — A URI query-key namespace of the form `<prefix>.<name>` where any non-empty `<name>` is valid. Modeled by `UriOptionMatch::Prefix`. (camel-api + camel-lint)
 - **UriOptionMatch** — `#[non_exhaustive]` enum in `camel-api` describing how a `UriOption` with `pattern: Some(_)` matches URI query keys. Initial variant: `Prefix { separator }`. (camel-api)
 - **pattern prefix** — The compile-time guarantee that a `#[uri_param(pattern = "..")]` separator ends with `.`; runtime matching uses `starts_with(separator)` plus a non-empty-suffix check. (camel-endpoint-macros + camel-lint)
+- **EndpointUri** — Authoring-boundary value type in camel-api (`scheme`/`path`/`params` + raw query). Owns fail-closed uri+parameters merging, deterministic canonical rendering (source_hash stability), and ADR-0051 redacting-wrapper secret redaction. Collapses to String at the yaml.rs compile boundary; CanonicalStepSpec stays `uri: String`. (camel-api + camel-dsl)
 
 ## Documentation Authority & Refresh
 

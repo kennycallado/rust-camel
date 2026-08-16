@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use camel_api::CamelError;
 
 use crate::route_ast::{
@@ -287,7 +289,10 @@ fn lower_operation(
 
     // 2. User steps (either `to` shorthand or explicit `steps`)
     if let Some(ref to_uri) = op.to {
-        steps.push(RouteDslStep::To(ToStep { to: to_uri.clone() }));
+        steps.push(RouteDslStep::To(ToStep {
+            to: to_uri.clone(),
+            parameters: BTreeMap::new(),
+        }));
     } else {
         steps.extend(op.steps.iter().cloned());
     }
@@ -341,6 +346,7 @@ fn lower_operation(
     Ok(RouteDslRoute {
         id: route_id,
         from,
+        parameters: BTreeMap::new(),
         steps,
         auto_startup: true,
         startup_order: 0,
@@ -590,6 +596,7 @@ mod tests {
                     }),
                     RouteDslStep::To(ToStep {
                         to: "bean:updateUser".into(),
+                        parameters: BTreeMap::new(),
                     }),
                 ],
                 consumes: "application/json".to_string(),
@@ -615,6 +622,7 @@ mod tests {
         let mut rest = make_rest("op", "get", "/", "bean:svc");
         rest.operations[0].steps = vec![RouteDslStep::To(crate::route_ast::ToStep {
             to: "bean:other".into(),
+            parameters: BTreeMap::new(),
         })];
         let result = lower_all_rest_to_routes(&[rest]);
         assert!(result.is_err());

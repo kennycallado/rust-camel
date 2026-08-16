@@ -171,6 +171,14 @@ _Avoid_: claim store, payload cache, idempotent repository (that is the key-only
 TTL cache port for the Caching EIP (`trait CacheRepository`). Stores `CacheEntry { bytes: Vec<u8>, content_type, expires_at }` — materialized bytes, not `Body` (which is not Serialize and includes the un-cacheable `Stream` variant). `get` returns `Ok(None)` on miss OR in-band expiry (never silent on backend failure — Contract C1). `peek_stale` ignores in-band expiry. `set` computes `expires_at` from `ttl`. Distinct from `IdempotentRepository` (key-only) and `ClaimCheckRepository` (payload-owning, no expiry). Canonical impls: `MemoryCacheRepository` (moka) and `RedbCacheRepository` in camel-core. Established by ADR-0056.
 _Avoid_: cache store, payload cache, idempotent repository (that is the key-only trait)
 
+**EndpointUri**:
+Authoring-boundary value type holding `scheme`, `path`, `params: BTreeMap<String,String>` and the raw query bytes. Constructed via `try_from_uri_and_params` (fail-closed on duplicate keys across query and params); `to_canonical_string` renders deterministically (raw query byte-for-byte first, params appended sorted, pinned percent-encoding); `to_redacted_string` masks secret-flagged, unresolved, and unknown-scheme options plus userinfo credentials. Never serialized across the persistence boundary; `Debug` is redacting (ADR-0051 `redacting-wrapper`).
+_Avoid_: URI wrapper (vague), parsed URL (implies full RFC 3986 semantics)
+
+**EndpointUriError**:
+Typed error for `EndpointUri` construction: `DuplicateKey`, `MissingScheme`, `EmptyQueryKey`, `InvalidParamKey`. Converts into `CamelError::EndpointUri`.
+_Avoid_: stringly Config errors for URI merge failures
+
 ## Example dialogue
 
 > "Where is `Exchange` defined, and where is its lifecycle?"

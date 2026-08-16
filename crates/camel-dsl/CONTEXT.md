@@ -47,6 +47,15 @@ so all six are `#[non_exhaustive]: yes`.
 
 ## Language
 
+**parameters map**:
+The `parameters:` authoring surface on from/to/wire_tap/enrich/poll_enrich. On the AST it is
+held as a raw `BTreeMap<String, String>` (keys are NOT validated at deserialization beyond
+string-ness — non-string values are rejected naming the key). The merge into the URI happens
+at lowering (`yaml.rs`, via `camel_api::EndpointUri::try_from_uri_and_params`): an empty map
+passes the URI through byte-identical; a key overlapping the query string or (for enrich full
+form) the inner config map fails closed with `EndpointUriError::DuplicateKey`.
+_Avoid_: endpoint options (that is the lint/runtime concept), query params
+
 **RouteDefinition**:
 The structured representation of a Route — produced by RouteBuilder or by parsing a YAML/JSON file. CamelContext consumes RouteDefinitions to build and start Routes.
 _Avoid_: route spec, route config, route descriptor

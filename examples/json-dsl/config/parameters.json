@@ -1,0 +1,63 @@
+{
+  "routes": [
+    {
+      "id": "parameters-from-to",
+      "from": "timer:tick",
+      "parameters": {
+        "period": "5000",
+        "repeatCount": "3"
+      },
+      "auto_startup": true,
+      "startup_order": 100,
+      "steps": [
+        { "log": "Parameters JSON DSL pipeline" },
+        {
+          "to": "kafka:orders",
+          "parameters": {
+            "brokers": "my-host:9092",
+            "acks": "all"
+          }
+        },
+        {
+          "enrich": "db:query",
+          "parameters": {
+            "dataSource": "customers"
+          }
+        },
+        { "to": "log:info?showBody=true" }
+      ]
+    },
+    {
+      "id": "parameters-enrich-full-and-poll",
+      "from": "timer:params",
+      "parameters": {
+        "period": "3000"
+      },
+      "startup_order": 150,
+      "steps": [
+        {
+          "enrich": {
+            "uri": "db:query",
+            "parameters": {
+              "dataSource": "customers"
+            }
+          }
+        },
+        {
+          "poll_enrich": "file:inbox",
+          "parameters": {
+            "delay": "500",
+            "maxDepth": "1"
+          }
+        },
+        {
+          "wire_tap": "log:audit",
+          "parameters": {
+            "showBody": "true"
+          }
+        },
+        { "to": "log:params-done" }
+      ]
+    }
+  ]
+}
