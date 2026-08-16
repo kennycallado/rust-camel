@@ -1407,6 +1407,10 @@ mod tests {
 
         let (sink, subscriber) = debug_sink();
         let _guard = tracing::subscriber::set_default(subscriber);
+        // Parallel tests race tracing's per-callsite interest cache against
+        // this thread-local subscriber; force a rebuild so the callsites
+        // below re-evaluate against it (bd rc-u9hs).
+        tracing::callsite::rebuild_interest_cache();
         let outcome = svc.run(exchange()).await;
         drop(_guard);
 
@@ -1443,6 +1447,10 @@ mod tests {
 
         let (sink, subscriber) = debug_sink();
         let _guard = tracing::subscriber::set_default(subscriber);
+        // Parallel tests race tracing's per-callsite interest cache against
+        // this thread-local subscriber; force a rebuild so the callsites
+        // below re-evaluate against it (bd rc-u9hs).
+        tracing::callsite::rebuild_interest_cache();
         let outcome = svc.run(exchange()).await;
         drop(_guard);
 

@@ -974,6 +974,10 @@ mod tests {
 
         // set_default propagates to tasks spawned via tokio within this scope.
         let _guard = tracing::subscriber::set_default(subscriber);
+        // Parallel tests race tracing's per-callsite interest cache against
+        // this thread-local subscriber; force a rebuild so the callsites
+        // below re-evaluate against it (bd rc-u9hs).
+        tracing::callsite::rebuild_interest_cache();
         let result = svc.ready().await.unwrap().call(exchange).await;
 
         assert!(result.is_ok(), "tap readiness error must be suppressed");
@@ -1001,6 +1005,10 @@ mod tests {
         let exchange = Exchange::new(Message::new("main"));
 
         let _guard = tracing::subscriber::set_default(subscriber);
+        // Parallel tests race tracing's per-callsite interest cache against
+        // this thread-local subscriber; force a rebuild so the callsites
+        // below re-evaluate against it (bd rc-u9hs).
+        tracing::callsite::rebuild_interest_cache();
         let result = svc.ready().await.unwrap().call(exchange).await;
 
         assert!(result.is_ok(), "tap processing error must be suppressed");

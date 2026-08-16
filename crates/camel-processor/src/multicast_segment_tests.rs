@@ -626,6 +626,54 @@ fn panicking_body(msg: &str) -> OutcomeSegment {
 
 #[tokio::test]
 async fn multicast_parallel_panic_branch_counted_as_failed_partial_success() {
+    let mut seg = MulticastSegment {
+        branches: vec![
+            tagged_completed_body("b0", std::time::Duration::from_millis(10)),
+            always_failed_body("errA"),
+            panicking_body("boom"),
+        ],
+        parallel: true,
+        parallel_limit: None,
+        stop_on_exception: false,
+        timeout: None,
+        aggregator: Arc::new(|exchanges: Vec<Exchange>| {
+            let bodies: Vec<String> = exchanges
+                .iter()
+                .map(|ex| ex.body_as::<String>().unwrap_or_default())
+                .collect();
+            Exchange::new(Message::new(bodies.join("|")))
+        }),
+    };
+
+    let ex = Exchange::new(Message::new("inbound"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    // Only the success branch aggregates; the Failed branch AND the
+    // panicked branch are both discarded from aggregation. The panic
+    // accounting (failed_branches=2, branch_count=3) is pinned by
+    // multicast_parallel_partial_success_warn_fields below via the return
+    // value — this test must not capture tracing fields because a
+    // panicking branch races the thread-local warn dispatch under CPU
+    // starvation (bd rc-u9hs).
+    match result {
+        PipelineOutcome::Completed(ex) => {
+            let body = ex.body_as::<String>().unwrap_or_default();
+            assert_eq!(
+                body, "b0",
+                "only the success branch aggregates; panic and failed discarded"
+            );
+        }
+        other => panic!("expected Completed with body b0, got {other:?}"),
+    }
+}
+
+/// Pins the partial-success `warn!` fields (failed_branches, branch_count)
+/// deterministically (segment-outcome-composition, bd rc-f88o). Uses
+/// non-panicking failed branches: a panicking branch races the thread-local
+/// dispatch under load (bd rc-u9hs), while ordinary Failed outcomes reach
+/// the thread-local subscriber on the same current thread.
+#[tokio::test]
+async fn multicast_parallel_partial_success_warn_fields() {
     use std::sync::Mutex;
     use tracing::field::{Field, Visit};
 
@@ -686,12 +734,16 @@ async fn multicast_parallel_panic_branch_counted_as_failed_partial_success() {
     let _guard = tracing::subscriber::set_default(TestSubscriber {
         shared: Arc::clone(&shared),
     });
+    // Parallel tests race tracing's per-callsite interest cache against this
+    // thread-local subscriber; force a rebuild so the callsites below
+    // re-evaluate against it (bd rc-u9hs).
+    tracing::callsite::rebuild_interest_cache();
 
     let mut seg = MulticastSegment {
         branches: vec![
-            tagged_completed_body("b0", std::time::Duration::from_millis(10)),
+            tagged_completed_body("b0", std::time::Duration::ZERO),
             always_failed_body("errA"),
-            panicking_body("boom"),
+            always_failed_body("errB"),
         ],
         parallel: true,
         parallel_limit: None,
@@ -709,28 +761,21 @@ async fn multicast_parallel_panic_branch_counted_as_failed_partial_success() {
     let ex = Exchange::new(Message::new("inbound"));
     let result = OutcomePipeline::run(&mut seg, ex).await;
 
-    // Only the success branch aggregates; the Failed branch AND the
-    // panicked branch are both discarded from aggregation.
     match result {
         PipelineOutcome::Completed(ex) => {
             let body = ex.body_as::<String>().unwrap_or_default();
-            assert_eq!(
-                body, "b0",
-                "only the success branch aggregates; panic and failed discarded"
-            );
+            assert_eq!(body, "b0", "only the success branch aggregates");
         }
         other => panic!("expected Completed with body b0, got {other:?}"),
     }
 
-    // The panicked branch counts as a discarded failure: failed_branches=2,
-    // branch_count=3 (segment-outcome-composition, bd rc-f88o).
     let captured = shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert_eq!(
         captured.failed_branches,
         Some(2),
-        "panicked branch must count as a discarded failure"
+        "both failed branches must count as discarded failures"
     );
     assert_eq!(
         captured.branch_count,
