@@ -188,8 +188,8 @@ the decision or crate that defines it.
 ## Foundational primitives
 
 Crate-local building blocks. The owning crate's `CONTEXT.md` is the
-canonical definition. These terms are intentionally not bold, so they stay
-out of the `lint-glossary` vocabulary check.
+canonical definition. These terms are intentionally not bold: the glossary
+tracks Key Terms only.
 
 - Component — factory for Endpoints, identified by a URI scheme, registered
   into `CamelContext`. [Components & endpoints](components-endpoints.md),

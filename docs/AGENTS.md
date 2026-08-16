@@ -7,12 +7,11 @@
 - **Include-driven pages**: use `{{#include ../../../examples/<dir>/<file>:<anchor>}}` to pull code from compiled examples. Do NOT write inline code snippets for patterns that have runnable examples. Anchor the example source with `// ANCHOR: <id>` / `// ANCHOR_END: <id>` (Rust) or `# ANCHOR: <id>` / `# ANCHOR_END: <id>` (YAML).
 - **Never add content inside fenced code blocks that changes the included code**. The include directive replaces the block at build time.
 
-## Structural linters (deterministic, run these)
+## Structural checks (deterministic, run these)
 
-- `cargo run -p xtask -- lint-adr-cite --deny docs/src/` — verifies every ADR citation points to a file that exists in `docs/adr/`.
-- `cargo run -p xtask -- lint-glossary` — verifies the glossary is consistent with CONTEXT-MAP Key Terms.
+- `nix shell nixpkgs#mdbook -c mdbook build docs` — verifies every include directive, link, and page resolves. Must exit 0.
 
-These are link/structure validators. They are deterministic and valuable. Run them before committing.
+ADR citation validity (`docs/src` → `docs/adr/`) and glossary consistency with CONTEXT-MAP Key Terms have no xtask lint. They are enforced by review under the two-source rule.
 
 ## Prose quality
 
@@ -50,5 +49,4 @@ Section hub pages (index.md) group pages by family with one-line descriptions an
 Before committing documentation changes:
 ```bash
 nix shell nixpkgs#mdbook -c mdbook build docs    # must exit 0
-cargo run -p xtask -- lint-adr-cite --deny docs/src/   # must be clean
 ```

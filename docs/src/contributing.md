@@ -83,17 +83,15 @@ concrete examples over abstractions. The full rules, including banned words and
 the em-dash policy, are in [`VOICE.md`](https://github.com/kennycallado/rust-camel/blob/main/docs/VOICE.md). Read it before you write
 prose.
 
-## Linters
+## Structural checks
 
-Two structural linters run over the guide. Run them before you commit:
+The mdBook build is the structural check for the guide. Run it before you commit:
 
-- `cargo run -p xtask -- lint-adr-cite --deny docs/src/` verifies every ADR
-  citation resolves to a file under `docs/adr/`.
-- `cargo run -p xtask -- lint-glossary` verifies the glossary stays consistent
-  with the Key Terms in [`CONTEXT-MAP.md`](https://github.com/kennycallado/rust-camel/blob/main/CONTEXT-MAP.md).
+```bash
+nix shell nixpkgs#mdbook -c mdbook build docs
+```
 
-These are link and structure checks. They do not assess prose quality. Prose
-quality depends on the `ste-writing` skill and human review.
+The build verifies every include directive, link, and page. It does not assess prose quality. Prose quality depends on the `ste-writing` skill and human review. ADR citation validity and glossary consistency with the Key Terms in [`CONTEXT-MAP.md`](https://github.com/kennycallado/rust-camel/blob/main/CONTEXT-MAP.md) are also review-enforced; no xtask lint covers them.
 
 ## Two-source rule
 
