@@ -1647,8 +1647,12 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
         {
             continue;
         }
-        // Skip target and worktree directories
-        if path.components().any(|c| {
+        // Skip target and worktree directories.
+        // Use strip_prefix so we don't skip files when the workspace root
+        // itself lives inside a worktree (see is_nested_worktree): an
+        // absolute-path check would vacuously skip the whole scan set.
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        if rel.components().any(|c| {
             c == Component::Normal("target".as_ref())
                 || c == Component::Normal(".worktrees".as_ref())
         }) {
@@ -2720,7 +2724,11 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
         {
             continue;
         }
-        if path.components().any(|c| {
+        // Use strip_prefix so we don't skip files when the workspace root
+        // itself lives inside a worktree (see is_nested_worktree): an
+        // absolute-path check would vacuously skip the whole scan set.
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        if rel.components().any(|c| {
             c == Component::Normal("target".as_ref())
                 || c == Component::Normal(".worktrees".as_ref())
         }) {
@@ -4263,6 +4271,31 @@ mod tests {
             let violations = lint_unwrap(&ws).unwrap();
             assert!(violations.is_empty());
             fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // Regression for rc-9z9h: an absolute-path .worktrees skip made the
+        // scan vacuous when the workspace root itself lived inside a
+        // worktree — every path matched, so nothing was scanned.
+        #[test]
+        fn scans_files_when_root_lives_inside_worktrees_dir() {
+            let ws = tmp_workspace(&[(
+                "crates/foo/src/lib.rs",
+                "fn run() {\n    let x = something().unwrap();\n}\n",
+            )]);
+            // The fixture root must sit under a parent named exactly
+            // `.worktrees`, mirroring <repo>/.worktrees/<name>.
+            let parent = ws.parent().unwrap().join(".worktrees");
+            fs::create_dir_all(&parent).unwrap();
+            let nested = parent.join("wt");
+            fs::rename(&ws, &nested).unwrap();
+
+            let violations = lint_unwrap(&nested).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "root inside .worktrees must still scan its own files"
+            );
+            fs::remove_dir_all(&parent).unwrap();
         }
 
         #[test]
