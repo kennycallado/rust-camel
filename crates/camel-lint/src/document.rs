@@ -445,7 +445,7 @@ fn child_path(parent: &str, key: &str) -> String {
     if parent.is_empty() {
         key.to_string()
     } else {
-        format!("{parent}.{key}") // allow-secret
+        format!("{parent}.{key}")
     }
 }
 

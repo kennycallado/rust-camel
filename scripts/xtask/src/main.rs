@@ -2685,12 +2685,20 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
 
 /// Scan all workspace `src/**/*.rs` files for potential secret leakage patterns.
 ///
-/// Uses whole-file regex scanning (not per-line) so multiline macro calls like:
-///   format!(
-///       "password={}",
-///       self.password
-///   )
-/// are correctly detected. Match positions are mapped back to line numbers.
+/// Detection is bounded to the true extent of each macro invocation: the file
+/// is parsed with `syn`, every macro's argument span is collected, and the
+/// keyword forms of [`SECRET_PATTERNS`] run inside those spans. This keeps the
+/// multiline awareness of the original whole-file regex while eliminating its
+/// cross-item false positives: the `[^;]{0,300}?` window used `;` as a
+/// practical terminator, which fails for macros in expression-tail position
+/// (no semicolon), letting the window leak into adjacent items' doc comments
+/// (rc-58aq).
+///
+/// A whole-file regex pass still runs as a safety net so true positives in
+/// constructs the visitor cannot see (e.g. `macro_rules!` bodies) are not
+/// lost: a raw match is accepted only when its keyword position falls inside
+/// a collected macro span. Files that fail to parse fall back entirely to
+/// the raw regex (behaviour unchanged for them).
 pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, String> {
     use regex::Regex;
     use std::path::Component;
@@ -2704,6 +2712,30 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
                 .map_err(|e| format!("Invalid secret pattern '{pat}': {e}")) // allow-secret
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    // Keyword forms applied INSIDE a macro's argument span. The bodies are
+    // byte-identical to SECRET_PATTERNS minus the macro-name prefix and the
+    // [^;]{0,300}? window, so detection semantics inside a macro are
+    // unchanged from the original scanner.
+    let format_kw = Regex::new(
+        r"(?i)\b(password|secret|token|credential|api_key|auth_token|access_token|refresh_token|client_secret|private_key|bearer_token)\b",
+    )
+    .map_err(|e| format!("Invalid secret keyword pattern: {e}"))?; // allow-secret
+    let tracing_kw_value = Regex::new(
+        r"(?i)\b(password|secret|token|credential|api_key|auth_token|access_token|refresh_token|client_secret|private_key|bearer_token)\s*[=%?]",
+    )
+    .map_err(|e| format!("Invalid secret keyword pattern: {e}"))?; // allow-secret
+    let tracing_kw_shorthand = Regex::new(
+        r"(?i)[%?]\s*(password|secret|token|credential|api_key|auth_token|access_token|refresh_token|client_secret|private_key|bearer_token)\b",
+    )
+    .map_err(|e| format!("Invalid secret keyword pattern: {e}"))?; // allow-secret
+    let tracing_kw_bare = Regex::new(
+        r"(?i)\b(password|secret|token|credential|api_key|auth_token|access_token|refresh_token|client_secret|private_key|bearer_token)\s*,",
+    )
+    .map_err(|e| format!("Invalid secret keyword pattern: {e}"))?; // allow-secret
+
+    const FORMAT_MACROS: &[&str] = &["format", "println", "eprintln", "print", "writeln", "write"];
+    const TRACING_MACROS: &[&str] = &["warn", "error", "info", "debug", "trace"];
 
     let mut violations = Vec::new();
 
@@ -2747,43 +2779,123 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
         let byte_to_line =
             |offset: usize| -> usize { line_starts.partition_point(|&s| s <= offset) };
 
-        for (re, rule) in &compiled {
-            let mut search_from = 0;
-            while let Some(m) = re.find_at(&content, search_from) {
-                let line_num = byte_to_line(m.start());
-                let line_start = line_starts[line_num - 1];
-                let line_end = content[line_start..]
-                    .find('\n')
-                    .map(|i| line_start + i)
-                    .unwrap_or(content.len());
-                let first_line = &content[line_start..line_end];
+        // Shared escape-hatch + violation push for a match at `keyword_byte`.
+        // `anchor_line` is the 1-based line of the macro invocation start (or
+        // of the raw-regex match start on the fallback paths). The
+        // `// allow-secret` hatch may sit anywhere from two lines above the
+        // macro start down to the keyword's own line: cargo fmt reflows
+        // trailing comments, multiline macros push the keyword several lines
+        // below the invocation, and statement-leading comments (a chain's
+        // `.get(` line) sit above the macro start itself.
+        let mut push_violation = |keyword_byte: usize, rule: &str, anchor_line: usize| {
+            let line_num = byte_to_line(keyword_byte);
+            let line_start = line_starts[line_num - 1];
+            let line_end = content[line_start..]
+                .find('\n')
+                .map(|i| line_start + i)
+                .unwrap_or(content.len());
+            let first_line = &content[line_start..line_end];
 
-                // Also check the previous line for the escape hatch
-                // (cargo fmt may reflow trailing comments onto other lines).
-                let prev_line = if line_num > 1 {
-                    let prev_start = line_starts[line_num - 2];
-                    let prev_end = line_starts[line_num - 1].saturating_sub(1);
-                    &content[prev_start..prev_end]
-                } else {
-                    ""
-                };
+            let window_start_line = anchor_line.saturating_sub(2).max(1);
+            let window_start = line_starts[window_start_line - 1];
+            let window = &content[window_start..line_end];
+            let suppressed = window.contains("// allow-secret");
 
-                // Skip comment-only lines and lines (or their preceding line)
-                // carrying the `// allow-secret` escape hatch.
-                if !first_line.trim().starts_with("//")
-                    && !first_line.contains("// allow-secret")
-                    && !prev_line.contains("// allow-secret")
-                {
-                    violations.push(SecretViolation {
-                        file: path.to_string_lossy().to_string(),
-                        line: line_num,
-                        snippet: first_line.to_string(),
-                        rule: rule.to_string(),
-                    });
+            // Skip comment-only lines and suppressed matches.
+            if !first_line.trim().starts_with("//") && !suppressed {
+                violations.push(SecretViolation {
+                    file: path.to_string_lossy().to_string(),
+                    line: line_num,
+                    snippet: first_line.to_string(),
+                    rule: rule.to_string(),
+                });
+            }
+        };
+
+        let syntax = syn::parse_file(&content);
+        match syntax {
+            Ok(file) => {
+                // Collect (macro name, byte extent of its argument tokens)
+                // for EVERY macro invocation, any name.
+                let mut collector = MacroSpanCollector::new(&content);
+                syn::visit::visit_file(&mut collector, &file);
+                let spans = collector.finish();
+
+                // Primary detection: keyword forms inside family macros'
+                // argument spans. Anchor = the macro invocation's start
+                // line, for the escape-hatch window.
+                for (name, start, end) in &spans {
+                    let is_format = FORMAT_MACROS.contains(&name.as_str());
+                    let is_tracing = TRACING_MACROS.contains(&name.as_str());
+                    if !is_format && !is_tracing {
+                        continue;
+                    }
+                    let Some(slice) = content.get(*start..*end) else {
+                        continue;
+                    };
+                    let anchor = byte_to_line(*start);
+                    if is_format && let Some(m) = format_kw.find(slice) {
+                        push_violation(
+                            start + m.start(),
+                            "sensitive field name in format macro",
+                            anchor,
+                        );
+                    } else if is_tracing {
+                        if let Some(m) = tracing_kw_value.find(slice) {
+                            push_violation(
+                                start + m.start(),
+                                "sensitive structured field in tracing macro",
+                                anchor,
+                            );
+                        } else if let Some(m) = tracing_kw_shorthand.find(slice) {
+                            push_violation(
+                                start + m.start(),
+                                "sensitive shorthand field in tracing macro",
+                                anchor,
+                            );
+                        } else if let Some(m) = tracing_kw_bare.find(slice) {
+                            push_violation(
+                                start + m.start(),
+                                "sensitive bare field in tracing macro",
+                                anchor,
+                            );
+                        }
+                    }
                 }
 
-                // Advance past this match; guard against zero-length matches.
-                search_from = m.end().max(m.start() + 1);
+                // Safety net for constructs the visitor does not enter
+                // (macro_rules! bodies, cfg'd-out code): accept a raw-regex
+                // match only when its keyword END lies inside a collected
+                // macro span that is NOT a family macro (family macros are
+                // handled — with better bounds — above, so this branch
+                // would only duplicate them).
+                for (re, rule) in &compiled {
+                    let mut search_from = 0;
+                    while let Some(m) = re.find_at(&content, search_from) {
+                        let inside_non_family = spans.iter().any(|(name, s, e)| {
+                            !FORMAT_MACROS.contains(&name.as_str())
+                                && !TRACING_MACROS.contains(&name.as_str())
+                                && m.end() > *s
+                                && m.end() <= *e
+                        });
+                        if inside_non_family {
+                            push_violation(m.start(), rule, byte_to_line(m.start()));
+                        }
+                        search_from = m.end().max(m.start() + 1);
+                    }
+                }
+            }
+            Err(_) => {
+                // Unparseable file: raw whole-file regex, behaviour
+                // unchanged (the conservative direction for a secrets
+                // scanner).
+                for (re, rule) in &compiled {
+                    let mut search_from = 0;
+                    while let Some(m) = re.find_at(&content, search_from) {
+                        push_violation(m.start(), rule, byte_to_line(m.start()));
+                        search_from = m.end().max(m.start() + 1);
+                    }
+                }
             }
         }
     }
@@ -2800,6 +2912,76 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
     violations.extend(lint_credential_derives(workspace_root)?);
 
     Ok(violations)
+}
+
+/// Collects the byte extent of every macro invocation's argument tokens
+/// (`name!(...)` → the `...`), via `syn::visit`. With the `span-locations`
+/// feature, proc-macro2 fallback spans carry 1-based line / char-based
+/// column positions that are mapped to byte offsets against the file text.
+struct MacroSpanCollector<'a> {
+    content: &'a str,
+    line_starts: Vec<usize>,
+    spans: Vec<(String, usize, usize)>,
+}
+
+impl<'a> MacroSpanCollector<'a> {
+    fn new(content: &'a str) -> Self {
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(content.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        Self {
+            content,
+            line_starts,
+            spans: Vec::new(),
+        }
+    }
+
+    fn finish(self) -> Vec<(String, usize, usize)> {
+        self.spans
+    }
+}
+
+impl syn::visit::Visit<'_> for MacroSpanCollector<'_> {
+    fn visit_macro(&mut self, mac: &syn::Macro) {
+        let tokens: Vec<proc_macro2::TokenTree> = mac.tokens.clone().into_iter().collect();
+        if let (Some(first), Some(last)) = (tokens.first(), tokens.last()) {
+            let start = line_col_to_byte(self.content, &self.line_starts, first.span().start());
+            let end = line_col_to_byte(self.content, &self.line_starts, last.span().end());
+            let name = mac
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
+            if end > start {
+                self.spans.push((name, start, end));
+            }
+        }
+        // Recurse so nested macros inside the argument tokens are collected.
+        syn::visit::visit_macro(self, mac);
+    }
+}
+
+/// Convert a proc-macro2 `LineColumn` (1-based line, char-based column) to a
+/// byte offset in `content`, using the precomputed `line_starts` table.
+/// Clamps to the end of the referenced line.
+fn line_col_to_byte(content: &str, line_starts: &[usize], lc: proc_macro2::LineColumn) -> usize {
+    let line_idx = lc.line.saturating_sub(1);
+    if line_idx >= line_starts.len() {
+        return content.len();
+    }
+    let start = line_starts[line_idx];
+    let line_end = content[start..]
+        .find('\n')
+        .map_or(content.len(), |i| start + i);
+    let mut char_count = 0usize;
+    for (i, _ch) in content[start..line_end].char_indices() {
+        if char_count >= lc.column {
+            return start + i;
+        }
+        char_count += 1;
+    }
+    line_end
 }
 
 /// ADR-0051 credential-boundary classification for a struct or enum.
@@ -4506,6 +4688,97 @@ mod tests {
             assert!(
                 violations.is_empty(),
                 "expected no violations, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // ---- rc-58aq regression tests: macro-span bounded detection ----
+
+        // The original scanner's [^;]{0,300}? window used `;` as a practical
+        // terminator, which fails for macros in expression-tail position (no
+        // semicolon): the window leaked past the item boundary into adjacent
+        // doc comments and matched keywords there. The syn-bounded scanner
+        // must not reproduce that false positive.
+        #[test]
+        fn expression_tail_macro_does_not_leak_into_next_item() {
+            let source = r#"fn f(mode: &str) -> Result<(), E> {
+    g(mode).ok_or_else(|| {
+        E::Msg(format!(
+            "policy with {} requires configuration",
+            mode
+        ))
+    })
+}
+
+/// Map the DSL credential-source list to the contract form.
+fn next_item() {}"#;
+            let ws = tmp_workspace_secrets(&[("crates/foo/src/lib.rs", source)]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "keyword in a doc comment after an expression-tail format! must not fire: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // Multiline awareness (the design goal of the original whole-file
+        // regex) must be preserved: a keyword on any line inside the macro's
+        // arguments is detected.
+        #[test]
+        fn multiline_macro_keyword_still_detected() {
+            let source = "fn log(pw: &str) {\n    let msg = format!(\n        \"password={}\",\n        pw\n    );\n}\n"; // allow-secret
+            let ws = tmp_workspace_secrets(&[("crates/foo/src/lib.rs", source)]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "multiline format! keyword must be detected: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // A `;` INSIDE a string literal used to truncate the old scan window
+        // (false negative). The syn-bounded scanner sees the whole argument
+        // span regardless of punctuation inside literals.
+        #[test]
+        fn semicolon_inside_literal_does_not_truncate_detection() {
+            let source = r#"fn s() { let msg = format!("import as m; m::secret"); }"#; // allow-secret
+            let ws = tmp_workspace_secrets(&[("crates/foo/src/lib.rs", source)]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "keyword after a literal ';' inside the macro must be detected: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // macro_rules! bodies are token streams the visitor does not enter;
+        // the raw-regex safety net (with span containment) must keep
+        // detecting keywords inside them.
+        #[test]
+        fn macro_rules_body_still_detected_via_safety_net() {
+            let source = "macro_rules! leak {\n    () => {\n        let msg = format!(\"password {}\", pw);\n    };\n}\nfn use_it(pw: &str) { leak!(); }\n";
+            let ws = tmp_workspace_secrets(&[("crates/foo/src/lib.rs", source)]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "keyword inside a macro_rules body must stay detected: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        // The escape hatch may sit on a statement-leading comment above the
+        // macro start (e.g. above a `.get(format!(...))` chain line).
+        #[test]
+        fn escape_hatch_above_macro_start_suppresses() {
+            let source = "fn send(q: &str) {\n    client\n        // allow-secret: token is the param name, not a credential\n        .get(format!(\"http://x/?token={q}\"))\n        .send();\n}\n";
+            let ws = tmp_workspace_secrets(&[("crates/foo/src/lib.rs", source)]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "hatch two lines above the macro start must suppress: {violations:?}"
             );
             fs::remove_dir_all(&ws).unwrap();
         }

@@ -50,7 +50,6 @@ fn require_authenticator(
     mode: &str,
 ) -> Result<std::sync::Arc<dyn camel_auth::TokenAuthenticator>, CamelError> {
     ctx.authenticator.clone().ok_or_else(|| {
-        // allow-secret: message text names the policy config, not a credential
         CamelError::RouteError(format!(
             "security_policy with {} requires a JWT authenticator (configure [security] in Camel.toml)",
             mode

@@ -1127,6 +1127,7 @@ mod tests {
         fs::write(tmp.path(), format!("export const secret = \"{canary}\";")) // allow-secret
             .expect("write tmp .rhai");
 
+        // allow-secret: fixture script names a Rhai module member, not a credential
         let script = format!("import \"{path_str}\" as m; m::secret");
 
         let lang = RhaiLanguage::new();
