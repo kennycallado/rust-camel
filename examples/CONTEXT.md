@@ -6,3 +6,11 @@ Sites:
 - `examples/container-hot-reload/src/main.rs`
 - `examples/hot-reload-yaml/src/main.rs`
 - `examples/hot-reload/src/main.rs`
+
+## credential-sources
+
+`examples/credential-sources` has no `error!` sites. It returns
+`Result<(), CamelError>` from `main`, so bootstrap failures print through
+the runtime exit path. Authentication failures log `warn!` from
+`camel-auth` (policy-owned, transient caller condition — not an example
+site).

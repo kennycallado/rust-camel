@@ -1,0 +1,22 @@
+# Browser tile-service shape: an `<img src>` request cannot set the
+# `Authorization` header, so the credential travels in a cookie. Extraction
+# runs in the declared order; the first source that supplies a credential
+# wins (ADR-0059).
+routes:
+  - id: tile-service
+    from: "http://0.0.0.0:8090/tiles"
+    security_policy:
+      roles: ["tile-user"]
+      credential_sources:
+        - cookie: { name: session }
+        - query_param: { param: token }
+        - header: { name: X-Api-Key }
+        - authorization_header
+    steps:
+      - set_header:
+          key: CamelHttpResponseCode
+          value: 200
+      - set_header:
+          key: Content-Type
+          value: "application/json"
+      - set_body: '{"layer":"streets","status":"authenticated"}'

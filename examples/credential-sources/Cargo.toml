@@ -1,0 +1,17 @@
+[package]
+name = "credential-sources"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-auth.workspace = true
+camel-component-http.workspace = true
+camel-core.workspace = true
+camel-dsl.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
