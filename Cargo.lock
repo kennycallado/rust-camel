@@ -3371,6 +3371,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "credential-sources"
+version = "0.28.0"
+dependencies = [
+ "camel-api",
+ "camel-auth",
+ "camel-component-http",
+ "camel-core",
+ "camel-dsl",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "criterion"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
