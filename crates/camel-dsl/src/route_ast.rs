@@ -8,6 +8,8 @@ use serde::Deserialize;
 #[cfg(feature = "schema")]
 use serde_json::json;
 
+use crate::mcp::RouteDslMcp;
+
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RouteDslRoutes {
@@ -23,6 +25,8 @@ pub struct RouteDslRoutes {
     pub templated_routes: Vec<RouteDslTemplatedRoute>,
     #[serde(default)]
     pub rest: Vec<RouteDslRest>,
+    #[serde(default)]
+    pub mcp: Vec<RouteDslMcp>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

@@ -41,6 +41,7 @@ fn parse_json_to_declarative_inner(
     // (ADR-0026), so it lowers `rest:` exactly like the YAML path — via the
     // shared helper that also runs cross-block validation.
     crate::rest::expand_rest_into(&mut dsl.routes, &dsl.rest)?;
+    crate::mcp::expand_mcp_into(&mut dsl.routes, &dsl.mcp)?;
     crate::rest::check_duplicate_route_ids(&dsl.routes)?;
 
     dsl.routes

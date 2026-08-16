@@ -127,6 +127,7 @@ camel-component-opensearch = { path = "crates/components/camel-opensearch", vers
 camel-wit = { path = "crates/camel-wit", version = "=0.28.0" }
 camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.28.0" }
 camel-component-llm = { path = "crates/components/camel-component-llm", version = "=0.28.0" }
+camel-component-mcp = { path = "crates/components/camel-component-mcp", version = "=0.28.0" }
 camel-component-exec = { path = "crates/components/camel-component-exec", version = "=0.28.0" }
 camel-component-cron = { path = "crates/components/camel-cron", version = "=0.28.0" }
 camel-component-surrealdb = { path = "crates/components/camel-component-surrealdb", version = "=0.28.0" }
@@ -144,6 +145,8 @@ tower-lsp = "0.20"
 tower-http = { version = "0.7", features = ["fs"] }
 async-trait = "0.1"
 thiserror = "2"
+# MCP component (ADR-0060): Streamable HTTP only — no transport-sse-* feature.
+rmcp = { version = "3", features = ["client", "server", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 surrealdb = { version = "3", default-features = false, features = ["protocol-ws", "protocol-http", "rustls"] }
 anyhow = "1"
 bytes = "1"

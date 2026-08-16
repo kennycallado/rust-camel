@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod env_interpolation;
 mod input_format;
 pub mod json;
+pub mod mcp;
 pub mod model;
 pub mod openapi;
 #[cfg(test)]

@@ -137,8 +137,8 @@ See [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for all commands.
 **Components:** `timer`, `cron`, `log`, `direct`, `seda`, `file`, `http`,
 `ws`/`wss`, `kafka`, `mqtt`, `redis`, `sql`, `surrealdb`, `opensearch`, `jms`,
 `grpc`, `cxf` (SOAP), `xslt`, `xj` (XML↔JSON), `validator`, `container`
-(Docker), `controlbus`, `master`, `exec`, `keycloak`, `wasm`, `llm`. See
-[`crates/components/`](crates/components/) for the full set of
+(Docker), `controlbus`, `master`, `exec`, `keycloak`, `wasm`, `llm`, `mcp`.
+See [`crates/components/`](crates/components/) for the full set of
 implementations.
 
 **Enterprise Integration Patterns** (all chainable as Tower layers):

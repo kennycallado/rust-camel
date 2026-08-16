@@ -27,6 +27,7 @@ Components connect routes to external systems. Each Component owns a URI scheme 
 | `master` | consumer | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
 | `container` | both | [camel-container](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-container/CONTEXT.md) |
 | `llm` | producer | [camel-component-llm](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-llm/CONTEXT.md) |
+| `mcp` | both | [camel-component-mcp](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-mcp/CONTEXT.md) |
 | `exec` | producer | [camel-component-exec](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-exec/CONTEXT.md) |
 | `validator` | producer | [camel-validator](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-validator/CONTEXT.md) |
 | `xslt` | producer | [camel-xslt](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-xslt/CONTEXT.md) |
@@ -59,6 +60,7 @@ The table covers every crate under `crates/components/`. The contract crate `cam
 - [SurrealDB](surrealdb.md). Multi-model database.
 - [OpenSearch](opensearch.md). Search and indexing.
 - [LLM](llm.md). Chat completions and embeddings.
+- [MCP](mcp.md). Model Context Protocol server and client.
 - [WASM](wasm.md). Sandboxed plugins with capability model.
 - [Cron](cron.md). Scheduled message generation.
 - [Direct](direct.md). Synchronous in-process routing.

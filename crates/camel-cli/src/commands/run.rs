@@ -420,6 +420,9 @@ pub async fn run(
     #[cfg(feature = "llm")]
     register_bundle!(ctx, camel_config, camel_component_llm::LlmBundle);
 
+    #[cfg(feature = "mcp")]
+    register_bundle!(ctx, camel_config, camel_component_mcp::McpBundle);
+
     #[cfg(feature = "wasm")]
     {
         let base_dir = std::path::Path::new(&config_path)

@@ -76,6 +76,10 @@ _Avoid_: direct route call, external queue, channel (too vague)
 SEDA mode enabled by `multipleConsumers=true`; the Producer clones each Exchange to every active subscriber on the same SEDA name. Fanout is fire-and-forget only: waiting for replies is rejected because one request cannot have N valid replies without aggregator semantics.
 _Avoid_: load balancing, competing consumers, broadcast queue
 
+**MCP**:
+First-class MCP (Model Context Protocol) Component, scheme `mcp:`. Owns both MCP roles, disambiguated by consumer-vs-producer creation: the Consumer (server) role exposes tools and resources through one shared Streamable-HTTP listener per bind, and the Producer (client) role dispatches `mcp:call?server=<remote>&tool=<name>` / `mcp:read?server=<remote>&uri=<uri>` to remote MCP servers. Tool dispatch is route-owned — the component never auto-loops an LLM call. Protocol baseline is `2026-07-28` (stateless: no `initialize` handshake, no sessions, per-request `_meta`). A `mcp:` DSL block lowers each tool to an `mcp:<server>/tool/<name>` consumer route and each resource to an `mcp:<server>/resource/<name>` consumer route (a step-less catalog-declaration analogue of `rest:` → `http:`; tool/resource behavior lives in explicit `mcp:`-consuming routes). A server bind refuses to start without a `security_policy` (ADR-0033); catalog caps (`max_tools` / `max_resources`) ride the ADR-0038 per-item channel. rmcp is confined to `src/adapter/` (ADR-0020). Charter: ADR-0060.
+_Avoid_: LLM tool executor, MCP gateway, agent runtime
+
 **ComponentContext**:
 Runtime context passed to Components during Endpoint and Consumer/Producer creation. Provides
 access to other components (`resolve_component`), languages (`resolve_language`), metrics

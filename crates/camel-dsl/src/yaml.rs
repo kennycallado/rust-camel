@@ -114,6 +114,7 @@ fn parse_yaml_to_declarative_inner(yaml: &str) -> Result<Vec<DeclarativeRoute>, 
     // (duplicate method+path tuples, ambiguous templates per spec §6.3/§7.2).
     let prior_count = dsl.routes.len();
     crate::rest::expand_rest_into(&mut dsl.routes, &dsl.rest)?;
+    crate::mcp::expand_mcp_into(&mut dsl.routes, &dsl.mcp)?;
     if prior_count != dsl.routes.len() {
         debug!(
             routes_before = prior_count,

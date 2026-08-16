@@ -27,6 +27,7 @@ camel-component-api.workspace = true
 camel-endpoint.workspace = true
 glob = { workspace = true }
 regex.workspace = true
+percent-encoding.workspace = true
 schemars = { workspace = true, optional = true }
 ts-rs = { workspace = true, optional = true }
 

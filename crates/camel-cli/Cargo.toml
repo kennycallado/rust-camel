@@ -65,6 +65,7 @@ camel-xj = { workspace = true }
 camel-template = { workspace = true }
 camel-component-wasm = { workspace = true, optional = true }
 camel-component-llm = { workspace = true, optional = true }
+camel-component-mcp = { workspace = true, optional = true }
 camel-component-cxf = { workspace = true }
 camel-function = { workspace = true }
 camel-wit.workspace = true
@@ -103,6 +104,9 @@ wasm = ["dep:camel-component-wasm"]
 # For real providers: --features "llm,camel-component-llm/openai"
 # or "llm,camel-component-llm/ollama" or "llm,camel-component-llm/all-providers".
 llm = ["dep:camel-component-llm"]
+# MCP component (Model Context Protocol, scheme `mcp:`): Consumer (server)
+# tool/resource routes + Producer (client) call/read dispatch.
+mcp = ["dep:camel-component-mcp"]
 http-static = []
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]

@@ -191,6 +191,39 @@ camel openapi generate routes.yaml --title "My API"
 
 Missing schemas produce weak stubs (`type: object`) with generation warnings.
 
+## MCP DSL
+
+The `mcp:` top-level block declares an MCP server catalog. It lowers each tool
+to an `mcp:<server>/tool/<name>` consumer route and each resource to an
+`mcp:<server>/resource/<name>` consumer route (ADR-0060):
+
+```yaml
+mcp:
+  server:
+    name: crm
+    bind: 127.0.0.1:9100
+    security_policy: { roles: [mcp-client] }
+  tools:
+    - name: lookup
+      input_schema:
+        type: object
+        properties:
+          id: { type: string }
+        required: [id]
+  resources:
+    - name: customers
+      uri: crm://customers
+```
+
+The input schema and resource URI travel percent-encoded on the lowered
+route's query string, never in Exchange headers or bodies. Server runtime
+config (bind, TLS, caps) is owned by `Camel.toml` (`mcp.servers.<name>`); the
+block's server `name` must match a TOML key or the consumer start fails. The
+block's server `security_policy` propagates to every lowered tool and
+resource route, where the route-level `SecurityPolicy` enforces it per
+request. The block is a step-less catalog declaration; tool and resource
+behavior lives in explicit routes that consume from the lowered `mcp:` URIs.
+
 ## Installation
 Add to your `Cargo.toml`:
 

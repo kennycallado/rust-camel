@@ -69,6 +69,7 @@
   - [SurrealDB](components/surrealdb.md)
   - [OpenSearch](components/opensearch.md)
   - [LLM](components/llm.md)
+  - [MCP](components/mcp.md)
   - [WASM](components/wasm.md)
   - [Cron](components/cron.md)
   - [Direct](components/direct.md)
