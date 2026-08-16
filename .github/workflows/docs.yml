@@ -19,6 +19,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/docs.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -67,3 +68,39 @@ jobs:
           mdbook test docs
       - name: Check rendered guide links
         run: lychee --offline --no-progress docs/book
+
+  # Deploy gates on validate: a red validation run can never publish a
+  # broken site (fixes the 2026-08-10 incident class where the old
+  # pages.yml deployed while docs.yml was red). Builds the guide from the
+  # same commit that passed validation.
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install mdBook
+        uses: taiki-e/install-action@eba66cc6f87204a1e73f96e528e759b6c1fcf573 # cargo-binstall
+        with:
+          tool: mdbook@0.4.52
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Build guide
+        run: mdbook build docs
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/book
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
