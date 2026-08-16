@@ -51,7 +51,12 @@ def main():
         return
 
     # Find Architecture chapter and its number
-    sections = book.get("sections", [])
+    # mdbook 0.5.x renamed Book.sections to Book.items (the legacy
+    # "sections" key still deserializes as an alias but the renderer reads
+    # the canonical key, so writing it silently drops the injected
+    # chapters). Operate on whichever key the input carries.
+    list_keys = [k for k in ("items", "sections") if k in book] or ["sections"]
+    sections = book[list_keys[0]]
     arch_number = None
     arch_index = None
 
@@ -121,7 +126,7 @@ def main():
         # No Architecture found — add as top-level
         sections.append(adr_hub)
 
-    book["sections"] = sections
+    book[list_keys[0]] = sections
     print(json.dumps(book))
 
 
