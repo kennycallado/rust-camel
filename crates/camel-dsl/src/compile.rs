@@ -494,7 +494,7 @@ pub fn compile_canonical_step(
                 language: "simple".into(),
                 source: key,
             },
-            on_miss: parse_peek_stale_on_miss(on_miss.as_deref())?,
+            on_miss: camel_processor::PeekStaleMissPolicy::parse_on_miss(on_miss.as_deref())?,
         }),
         _ => Err(CamelError::RouteError(
             "unsupported canonical step".to_string(),
@@ -856,23 +856,6 @@ fn compile_circuit_breaker(def: DeclarativeCircuitBreaker) -> CircuitBreakerConf
     CircuitBreakerConfig::new()
         .failure_threshold(def.failure_threshold)
         .open_duration(Duration::from_millis(def.open_duration_ms))
-}
-
-/// Parse the DSL `on_miss` string for `cache_peek_stale` into a miss policy.
-///
-/// Absent or `"stop"` → [`PeekStaleMissPolicy::Stop`] (default); `"continue"` →
-/// [`PeekStaleMissPolicy::Continue`]. Any other value fails closed with a
-/// [`CamelError::RouteError`] naming the invalid value and the allowed set.
-pub(crate) fn parse_peek_stale_on_miss(
-    raw: Option<&str>,
-) -> Result<camel_processor::PeekStaleMissPolicy, CamelError> {
-    match raw {
-        None | Some("stop") => Ok(camel_processor::PeekStaleMissPolicy::Stop),
-        Some("continue") => Ok(camel_processor::PeekStaleMissPolicy::Continue),
-        Some(other) => Err(CamelError::RouteError(format!(
-            "cache_peek_stale: invalid on_miss '{other}'; must be \"stop\" or \"continue\""
-        ))),
-    }
 }
 
 fn compile_declarative_steps(
@@ -1242,7 +1225,7 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::CachePeekStale(def) => Ok(BuilderStep::CachePeekStale {
             repository: def.repository,
             key: def.key,
-            on_miss: parse_peek_stale_on_miss(def.on_miss.as_deref())?,
+            on_miss: camel_processor::PeekStaleMissPolicy::parse_on_miss(def.on_miss.as_deref())?,
         }),
         DeclarativeStep::ClaimCheck(ClaimCheckStepDef {
             repository,

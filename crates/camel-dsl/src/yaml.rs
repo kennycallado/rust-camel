@@ -16,7 +16,7 @@ use camel_core::route::RouteDefinition;
 
 use crate::compile::{
     compile_declarative_route, compile_declarative_route_to_canonical,
-    compile_declarative_route_with_stream_cache_threshold, parse_peek_stale_on_miss,
+    compile_declarative_route_with_stream_cache_threshold,
 };
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::input_format::{InputFormat, annotate_format};
@@ -1316,7 +1316,7 @@ pub(crate) fn route_step_to_declarative_step(
                 ));
             }
             // Single source of validation with the compile path (compile.rs).
-            parse_peek_stale_on_miss(body.on_miss.as_deref())?;
+            camel_processor::PeekStaleMissPolicy::parse_on_miss(body.on_miss.as_deref())?;
             Ok(DeclarativeStep::CachePeekStale(CachePeekStaleStepDef {
                 repository: body.repository,
                 key: LanguageExpressionDef {

@@ -46,6 +46,8 @@ The route body wraps the upstream fetch in a `cache` step that stores the result
 
 The fallback runs on routes with and without an `error_handler`. A failing fallback step follows the route's error handling. A route with an `error_handler` routes the failure through the handler. A route without one surfaces the raw error. See [Circuit Breaker](circuit-breaker.md) for the breaker states and [Route structure](../yaml-dsl/route-structure.md) for the `fallback` field.
 
+The control plane also accepts the three cache steps. A `CanonicalRouteSpec` sent through `RuntimeCommand::RegisterRoute` supports `cache`, `cache_invalidate`, and `cache_peek_stale` in the route body and in `circuit_breaker.fallback`. An unknown step still fails with an error that names the step. See [Control Bus](../components/controlbus.md) and [ADR-0016](../adr/0016-canonical-route-spec-v2-contract.md).
+
 Use the Cache pattern when a route computes the same result more than once. API responses, database lookups, and transform-heavy pipelines benefit from caching.
 
 The default repository is `"memory"` (moka-backed, size-eviction only). A persistent `"persistent"` repository (redb-backed) is available when `[default.cache_repo] backend = "redb"` is set. The redb backend survives process restarts. Its sweep task reclaims entries whose `expires_at + stale_retention` has passed. The memory backend does not run a sweep. Expired entries stay in memory until size pressure evicts them.

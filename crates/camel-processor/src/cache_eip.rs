@@ -434,6 +434,22 @@ pub enum PeekStaleMissPolicy {
     Continue,
 }
 
+impl PeekStaleMissPolicy {
+    /// Parses the canonical/DSL `cache_peek_stale.on_miss` knob:
+    /// absent or `"stop"` → [`Stop`](Self::Stop), `"continue"` →
+    /// [`Continue`](Self::Continue). Any other value fails closed naming
+    /// the step.
+    pub fn parse_on_miss(raw: Option<&str>) -> Result<Self, CamelError> {
+        match raw {
+            None | Some("stop") => Ok(Self::Stop),
+            Some("continue") => Ok(Self::Continue),
+            Some(other) => Err(CamelError::Config(format!(
+                "cache_peek_stale: invalid on_miss '{other}'; must be \"stop\" or \"continue\""
+            ))),
+        }
+    }
+}
+
 /// Outcome-aware segment that serves a stale (post-expiry) cache entry.
 ///
 /// Evaluates `key_expr`:
@@ -683,6 +699,30 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::SystemTime;
+
+    #[test]
+    fn parse_on_miss_maps_absent_stop_and_continue() {
+        assert_eq!(
+            PeekStaleMissPolicy::parse_on_miss(None).unwrap(),
+            PeekStaleMissPolicy::Stop
+        );
+        assert_eq!(
+            PeekStaleMissPolicy::parse_on_miss(Some("stop")).unwrap(),
+            PeekStaleMissPolicy::Stop
+        );
+        assert_eq!(
+            PeekStaleMissPolicy::parse_on_miss(Some("continue")).unwrap(),
+            PeekStaleMissPolicy::Continue
+        );
+    }
+
+    #[test]
+    fn parse_on_miss_rejects_unknown_value_naming_the_step() {
+        let err = PeekStaleMissPolicy::parse_on_miss(Some("explode")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("cache_peek_stale"), "got: {msg}");
+        assert!(msg.contains("explode"), "got: {msg}");
+    }
 
     /// Minimal no-op RuntimeObservability for tests that don't need OTel.
     #[derive(Clone)]

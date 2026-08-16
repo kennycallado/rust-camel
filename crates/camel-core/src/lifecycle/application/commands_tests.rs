@@ -390,6 +390,17 @@ fn build_test_deps_no_execution() -> CommandDeps {
     }
 }
 
+fn build_test_deps_with_execution(execution: Arc<dyn RuntimeExecutionPort>) -> CommandDeps {
+    CommandDeps {
+        repo: Arc::new(InMemoryTestRepo::default()),
+        projections: Arc::new(InMemoryTestProjectionStore::default()),
+        events: Arc::new(InMemoryTestEventPublisher::default()),
+        uow: None,
+        execution: Some(execution),
+        health_registry: None,
+    }
+}
+
 fn build_test_deps_with_failing_repo(execution: Arc<TrackingExecutionPort>) -> CommandDeps {
     let repo: Arc<dyn RouteRepositoryPort> = Arc::new(FailingSaveRepository::default());
     let projections: Arc<dyn ProjectionStorePort> =
@@ -595,6 +606,211 @@ fn canonical_step_conversion_covers_common_variants() {
 }
 
 #[test]
+fn canonical_step_to_builder_step_maps_cache_with_nested_on_miss() {
+    use camel_api::runtime::CanonicalStepSpec;
+
+    let cache = canonical_step_to_builder_step(CanonicalStepSpec::Cache {
+        repository: Some("default".into()),
+        key: "${body.id}".into(),
+        ttl: Some("60s".into()),
+        max_entry_bytes: Some(1024),
+        on_miss: vec![CanonicalStepSpec::To {
+            uri: "log:miss".into(),
+        }],
+    })
+    .unwrap();
+
+    let BuilderStep::Cache {
+        repository,
+        key,
+        ttl,
+        max_entry_bytes,
+        on_miss,
+    } = cache
+    else {
+        panic!("expected BuilderStep::Cache");
+    };
+    assert_eq!(repository.as_deref(), Some("default"));
+    assert_eq!(key.language, "simple");
+    assert_eq!(key.source, "${body.id}");
+    assert_eq!(ttl.as_deref(), Some("60s"));
+    assert_eq!(max_entry_bytes, Some(1024));
+    assert_eq!(on_miss.len(), 1);
+    assert!(matches!(on_miss[0], BuilderStep::To(_)));
+}
+
+#[test]
+fn canonical_step_to_builder_step_maps_cache_invalidate() {
+    use camel_api::runtime::CanonicalStepSpec;
+
+    let invalidate = canonical_step_to_builder_step(CanonicalStepSpec::CacheInvalidate {
+        repository: None,
+        key: "${body.id}".into(),
+    })
+    .unwrap();
+
+    let BuilderStep::CacheInvalidate { repository, key } = invalidate else {
+        panic!("expected BuilderStep::CacheInvalidate");
+    };
+    assert_eq!(repository, None);
+    assert_eq!(key.language, "simple");
+    assert_eq!(key.source, "${body.id}");
+}
+
+#[test]
+fn canonical_step_to_builder_step_maps_cache_peek_stale_policies() {
+    use camel_api::runtime::CanonicalStepSpec;
+
+    let peek_default = canonical_step_to_builder_step(CanonicalStepSpec::CachePeekStale {
+        repository: Some("persistent".into()),
+        key: "last-good".into(),
+        on_miss: None,
+    })
+    .unwrap();
+    let BuilderStep::CachePeekStale { on_miss, .. } = peek_default else {
+        panic!("expected BuilderStep::CachePeekStale");
+    };
+    assert_eq!(on_miss, camel_processor::PeekStaleMissPolicy::Stop);
+
+    let peek_continue = canonical_step_to_builder_step(CanonicalStepSpec::CachePeekStale {
+        repository: None,
+        key: "last-good".into(),
+        on_miss: Some("continue".into()),
+    })
+    .unwrap();
+    let BuilderStep::CachePeekStale { on_miss, .. } = peek_continue else {
+        panic!("expected BuilderStep::CachePeekStale");
+    };
+    assert_eq!(on_miss, camel_processor::PeekStaleMissPolicy::Continue);
+
+    let peek_stop = canonical_step_to_builder_step(CanonicalStepSpec::CachePeekStale {
+        repository: None,
+        key: "last-good".into(),
+        on_miss: Some("stop".into()),
+    })
+    .unwrap();
+    let BuilderStep::CachePeekStale { on_miss, .. } = peek_stop else {
+        panic!("expected BuilderStep::CachePeekStale");
+    };
+    assert_eq!(on_miss, camel_processor::PeekStaleMissPolicy::Stop);
+}
+
+#[test]
+fn canonical_step_to_builder_step_rejects_invalid_peek_stale_on_miss() {
+    use camel_api::runtime::CanonicalStepSpec;
+
+    let err = canonical_step_to_builder_step(CanonicalStepSpec::CachePeekStale {
+        repository: None,
+        key: "last-good".into(),
+        on_miss: Some("explode".into()),
+    })
+    .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("cache_peek_stale"),
+        "error must name the step: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn register_route_accepts_cache_steps_in_body() {
+    use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
+
+    // TrackingExecutionPort (register succeeds) forces canonical -> builder
+    // conversion; with execution: None the spec never compiles.
+    let execution: Arc<dyn RuntimeExecutionPort> = Arc::new(TrackingExecutionPort::new());
+    let deps = build_test_deps_with_execution(execution);
+    let spec = CanonicalRouteSpec {
+        route_id: "route-cache-body".into(),
+        from: "timer:test".into(),
+        steps: vec![
+            CanonicalStepSpec::Cache {
+                repository: Some("memory".into()),
+                key: "${body.id}".into(),
+                ttl: Some("60s".into()),
+                max_entry_bytes: None,
+                on_miss: vec![CanonicalStepSpec::To {
+                    uri: "log:miss".into(),
+                }],
+            },
+            CanonicalStepSpec::CacheInvalidate {
+                repository: None,
+                key: "${body.id}".into(),
+            },
+        ],
+        circuit_breaker: None,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let result = execute_command(
+        &deps,
+        RuntimeCommand::RegisterRoute {
+            spec,
+            command_id: "test".to_string(),
+            causation_id: None,
+        },
+    )
+    .await;
+
+    result.unwrap();
+    let aggregate = deps.repo.load("route-cache-body").await.unwrap().unwrap();
+    assert_eq!(aggregate.state(), &RouteRuntimeState::Registered);
+}
+
+#[tokio::test]
+async fn register_route_accepts_cache_peek_stale_in_circuit_breaker_fallback() {
+    use camel_api::runtime::{CanonicalCircuitBreakerSpec, CanonicalRouteSpec, CanonicalStepSpec};
+
+    // TrackingExecutionPort (register succeeds) forces canonical -> builder
+    // conversion of circuit_breaker.fallback.
+    let execution: Arc<dyn RuntimeExecutionPort> = Arc::new(TrackingExecutionPort::new());
+    let deps = build_test_deps_with_execution(execution);
+    let spec = CanonicalRouteSpec {
+        route_id: "route-cache-fallback".into(),
+        from: "timer:test".into(),
+        steps: vec![CanonicalStepSpec::To {
+            uri: "log:out".into(),
+        }],
+        circuit_breaker: Some(CanonicalCircuitBreakerSpec {
+            failure_threshold: 2,
+            open_duration_ms: 1000,
+            fallback: vec![CanonicalStepSpec::CachePeekStale {
+                repository: Some("persistent".into()),
+                key: "last-good".into(),
+                on_miss: Some("stop".into()),
+            }],
+        }),
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let result = execute_command(
+        &deps,
+        RuntimeCommand::RegisterRoute {
+            spec,
+            command_id: "test".to_string(),
+            causation_id: None,
+        },
+    )
+    .await;
+
+    result.unwrap();
+    let aggregate = deps
+        .repo
+        .load("route-cache-fallback")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(aggregate.state(), &RouteRuntimeState::Registered);
+}
+
+#[test]
 fn canonical_route_conversion_with_circuit_breaker() {
     use camel_api::runtime::{CanonicalCircuitBreakerSpec, CanonicalRouteSpec, CanonicalStepSpec};
 
@@ -649,9 +865,12 @@ fn canonical_route_conversion_threads_circuit_breaker_fallback() {
 }
 
 #[test]
-fn canonical_route_conversion_rejects_unsupported_fallback_step() {
+fn canonical_route_conversion_rejects_invalid_fallback_step_config() {
     use camel_api::runtime::{CanonicalCircuitBreakerSpec, CanonicalRouteSpec, CanonicalStepSpec};
 
+    // All canonical step variants are now supported; fail-closed coverage
+    // continues through invalid step configuration (on_miss policy), which
+    // must error naming the step inside the circuit_breaker fallback path.
     let spec = CanonicalRouteSpec {
         route_id: "route-fb-bad".into(),
         from: "timer:tick".into(),
@@ -662,7 +881,7 @@ fn canonical_route_conversion_rejects_unsupported_fallback_step() {
             fallback: vec![CanonicalStepSpec::CachePeekStale {
                 repository: None,
                 key: "k".into(),
-                on_miss: None,
+                on_miss: Some("explode".into()),
             }],
         }),
         auto_startup: None,
@@ -672,12 +891,12 @@ fn canonical_route_conversion_rejects_unsupported_fallback_step() {
     };
 
     let err = match canonical_to_route_definition(spec) {
-        Ok(_) => panic!("unsupported fallback step must fail"),
+        Ok(_) => panic!("invalid fallback step config must fail"),
         Err(e) => e,
     };
     let msg = err.to_string();
     assert!(msg.contains("circuit_breaker fallback"), "got: {msg}");
-    assert!(msg.contains("CachePeekStale"), "got: {msg}");
+    assert!(msg.contains("cache_peek_stale"), "got: {msg}");
 }
 
 #[tokio::test]

@@ -1074,6 +1074,45 @@ fn canonical_step_to_builder_step(
                 max_delay_ms: camel_api::DEFAULT_MAX_DELAY_MS,
             },
         }),
+        camel_api::runtime::CanonicalStepSpec::Cache {
+            repository,
+            key,
+            ttl,
+            max_entry_bytes,
+            on_miss,
+        } => Ok(BuilderStep::Cache {
+            repository,
+            key: camel_api::LanguageExpressionDef {
+                language: "simple".into(),
+                source: key,
+            },
+            ttl,
+            max_entry_bytes,
+            on_miss: canonical_steps_to_builder_steps(on_miss)?,
+        }),
+        camel_api::runtime::CanonicalStepSpec::CacheInvalidate { repository, key } => {
+            Ok(BuilderStep::CacheInvalidate {
+                repository,
+                key: camel_api::LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: key,
+                },
+            })
+        }
+        camel_api::runtime::CanonicalStepSpec::CachePeekStale {
+            repository,
+            key,
+            on_miss,
+        } => Ok(BuilderStep::CachePeekStale {
+            repository,
+            key: camel_api::LanguageExpressionDef {
+                language: "simple".into(),
+                source: key,
+            },
+            on_miss: camel_processor::PeekStaleMissPolicy::parse_on_miss(on_miss.as_deref())?,
+        }),
+        // keep: reachable for future #[non_exhaustive] CanonicalStepSpec
+        // variants — the fail-closed step-naming contract depends on it.
         _ => Err(CamelError::Config(format!(
             "unsupported canonical step: {step:?}"
         ))),
