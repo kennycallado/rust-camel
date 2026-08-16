@@ -1224,6 +1224,7 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslRoute);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslStep);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslSecurityPolicy);
+    ts_export!(ts_config, camel_dsl::route_ast::CredentialSourceDsl);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslPermissionPolicy);
     ts_export!(
         ts_config,

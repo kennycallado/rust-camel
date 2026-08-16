@@ -668,6 +668,34 @@ routes:
 | `cache_ttl_secs` | u64 | no | Override positive cache TTL |
 | `cache_negative_ttl_secs` | u64 | no | Override negative cache TTL |
 
+### `credential_sources:` -- Credential Extraction Sources
+
+Declare where the route credential comes from. Sibling of the policy form (`roles`, `scopes`, `ref`, `wasm`, `permission`), not a policy itself. `http://` and `ws://` consumers support it.
+
+```yaml
+routes:
+  - id: "api-key-route"
+    from: "http://0.0.0.0:8080/api"
+    security_policy:
+      roles: ["api-user"]
+      credential_sources:
+        - header: { name: "X-API-Key" }
+        - authorization_header
+    steps:
+      - to: "log:info"
+```
+
+| Form | Type | Description |
+|------|------|-------------|
+| `authorization_header` | string (bare) | Bearer token in the `Authorization` header (the default when `credential_sources` is absent) |
+| `query_param` | `{ param: string }` | Token in a query parameter |
+| `cookie` | `{ name: string }` | Token in a cookie |
+| `header` | `{ name: string }` | API key in a named custom header |
+
+Sources are tried in declared order; the first one that supplies a credential wins. A missing credential on every source maps to `401` before policy evaluation.
+
+> **Note** -- Load-time validation rejects unknown forms, an empty cookie name, and header names that are not valid RFC 9110 tokens. On `ws://` routes, `roles`/`scopes` policies that use a non-header source require `trust_upstream_principal: true`. Diagnostic records never render a declared credential value (ADR-0051). See the [Authorization](../../docs/src/services/auth.md) page and ADR-0059 for the full contract.
+
 ### Limitations
 
 Routes that declare `security_policy` cannot currently use the canonical/hot-reload path. They must be loaded through the standard YAML/JSON DSL loader.

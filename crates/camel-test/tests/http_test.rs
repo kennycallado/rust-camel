@@ -13,10 +13,17 @@ use support::install_crypto_provider;
 use std::sync::Arc;
 use std::time::Duration;
 
+use camel_api::security_policy::{CredentialSource, Principal, SecurityPolicyConfig};
 use camel_api::{Exchange, Message, Value};
+use camel_auth::native_auth::NativeCredentialStore;
+use camel_auth::{
+    NativeCredential, NativeCredentialSecret, RolePolicy, StaticTokenAuthenticator,
+    TokenAuthenticator,
+};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::{CamelError, Component, ComponentBundle, NoOpComponentContext};
 use camel_component_http::{HttpBundle, HttpComponent, HttpsComponent};
+use camel_dsl::{SecurityCompileContext, parse_yaml_with_threshold_and_security};
 use camel_test::CamelTestContext;
 use tower::ServiceExt;
 
@@ -1144,6 +1151,450 @@ async fn http_producer_skip_request_headers() {
         request.to_lowercase().contains("x-visible"),
         "X-Visible should be forwarded, request: {request}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 26: Cookie credential source integration (credential-sources task 2.2)
+// ---------------------------------------------------------------------------
+
+const SENTINEL_CRED_1: &str = "SENTINEL_CRED_1";
+const SENTINEL_WRONG_1: &str = "SENTINEL_WRONG_1";
+const SENTINEL_COOKIE_NAME: &str = "session";
+const SENTINEL_HDR_9: &str = "SENTINEL_HDR_9";
+const SENTINEL_HEADER_NAME: &str = "X-API-Key";
+const SENTINEL_QUERY_PARAM: &str = "cred";
+const TILES_READER_ROLE: &str = "tiles-reader";
+
+// Mirrors compile_security_policy (crates/camel-dsl/src/compile.rs); the YAML end-to-end path is covered by yaml_compiled_cookie_route_authenticates.
+/// Build an HTTP route protected by a `RolePolicy` over a native store seeded
+/// with `SENTINEL_CRED_1` (principal role `tiles-reader`). `sources` selects
+/// the credential extraction sources; `None` means the fail-closed header-only
+/// default (ADR-0033), matching an absent `credential_sources` DSL key.
+async fn build_secure_route(
+    path: &str,
+    sources: Option<Vec<CredentialSource>>,
+) -> (CamelTestContext, u16) {
+    install_crypto_provider();
+    let port = find_free_port();
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
+
+    let principal = Principal {
+        subject: "tiles-user".into(),
+        issuer: "native".into(),
+        audience: vec![],
+        scopes: vec![],
+        roles: vec![TILES_READER_ROLE.to_string()],
+        claims: serde_json::json!({}),
+    };
+    let store = NativeCredentialStore::try_new(vec![NativeCredential {
+        secret: NativeCredentialSecret::Plaintext {
+            value: SENTINEL_CRED_1.to_string().into(),
+        },
+        principal,
+    }])
+    .unwrap();
+    let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
+
+    let sources = sources.unwrap_or_else(|| vec![CredentialSource::AuthorizationHeader]);
+    let policy = RolePolicy::new(
+        vec![TILES_READER_ROLE.to_string()],
+        true,
+        false,
+        Arc::clone(&authenticator),
+        sources.clone(),
+    );
+    let config = SecurityPolicyConfig::new(policy).with_credential_sources(sources);
+
+    let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/{path}"))
+        .route_id(format!("secure-http-{path}"))
+        .security_policy(config)
+        .security_authenticator(authenticator)
+        .set_body(Value::String("img-ok".into()))
+        .set_header("CamelHttpResponseCode", Value::Number(200.into()))
+        .to(format!("mock:{path}"))
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    (h, port)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cookie_source_authenticates_img_request() {
+    let (_h, port) = build_secure_route(
+        "img",
+        Some(vec![CredentialSource::Cookie {
+            name: SENTINEL_COOKIE_NAME.to_string(),
+        }]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/img"))
+        .header(
+            "Cookie",
+            format!("{SENTINEL_COOKIE_NAME}={SENTINEL_CRED_1}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cookie_miss_maps_401_not_500() {
+    let (_h, port) = build_secure_route(
+        "miss",
+        Some(vec![CredentialSource::Cookie {
+            name: SENTINEL_COOKIE_NAME.to_string(),
+        }]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/miss"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn absent_key_rejects_cookie_token() {
+    let (_h, port) = build_secure_route("absent", None).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/absent"))
+        .header(
+            "Cookie",
+            format!("{SENTINEL_COOKIE_NAME}={SENTINEL_CRED_1}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_source_first_match_wins() {
+    let (_h, port) = build_secure_route(
+        "multi",
+        Some(vec![
+            CredentialSource::AuthorizationHeader,
+            CredentialSource::Cookie {
+                name: SENTINEL_COOKIE_NAME.to_string(),
+            },
+        ]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/multi"))
+        .header("Authorization", format!("Bearer {SENTINEL_CRED_1}"))
+        .header(
+            "Cookie",
+            format!("{SENTINEL_COOKIE_NAME}={SENTINEL_WRONG_1}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fallback_to_second_source() {
+    let (_h, port) = build_secure_route(
+        "fallback",
+        Some(vec![
+            CredentialSource::AuthorizationHeader,
+            CredentialSource::Cookie {
+                name: SENTINEL_COOKIE_NAME.to_string(),
+            },
+        ]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/fallback"))
+        .header(
+            "Cookie",
+            format!("{SENTINEL_COOKIE_NAME}={SENTINEL_CRED_1}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_absent_key_bearer_identical() {
+    let (_h, port) = build_secure_route("bearer-default", None).await;
+
+    let client = reqwest::Client::new();
+    let ok = client
+        .get(format!("http://127.0.0.1:{port}/bearer-default"))
+        .header("Authorization", format!("Bearer {SENTINEL_CRED_1}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    let denied = client
+        .get(format!("http://127.0.0.1:{port}/bearer-default"))
+        .header("Authorization", format!("Bearer {SENTINEL_WRONG_1}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn all_sources_miss_maps_401() {
+    let (_h, port) = build_secure_route(
+        "allmiss",
+        Some(vec![
+            CredentialSource::AuthorizationHeader,
+            CredentialSource::Cookie {
+                name: SENTINEL_COOKIE_NAME.to_string(),
+            },
+        ]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/allmiss"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// Test 26b: Header credential source integration (credential-sources task 4.2)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn header_source_authenticates_api_key_http() {
+    let (_h, port) = build_secure_route(
+        "apikey",
+        Some(vec![CredentialSource::Header {
+            name: SENTINEL_HEADER_NAME.to_string(),
+        }]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/apikey"))
+        .header(SENTINEL_HEADER_NAME, SENTINEL_CRED_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn header_source_miss_maps_401_http() {
+    let (_h, port) = build_secure_route(
+        "apikey-miss",
+        Some(vec![CredentialSource::Header {
+            name: SENTINEL_HEADER_NAME.to_string(),
+        }]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/apikey-miss"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn query_source_authenticates_http() {
+    // Real HTTP consumer path: camel-http must carry the raw query string into
+    // the internal `CamelHttpQuery` header so camel-auth's query extraction can
+    // read it. No Authorization header — the URL query string is the only
+    // credential presented.
+    let (_h, port) = build_secure_route(
+        "qsrc",
+        Some(vec![CredentialSource::QueryParam {
+            param: SENTINEL_QUERY_PARAM.to_string(),
+        }]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/qsrc?{SENTINEL_QUERY_PARAM}={SENTINEL_CRED_1}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// Whether any tracing record captured into the shared buffer contains `needle`.
+/// The capturing subscriber is installed by `error_context_redacts_custom_header_sentinel`
+/// and writes process-wide (the request-handling task runs on a tokio worker thread).
+fn captured_logs_contain(buf: &std::sync::Mutex<Vec<u8>>, needle: &str) -> bool {
+    String::from_utf8_lossy(&buf.lock().unwrap()).contains(needle)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn error_context_redacts_custom_header_sentinel() {
+    // Install a global subscriber that writes every record into a shared buffer.
+    // Mirrors camel-http's task 2.3 redaction capture (per-crate env filter,
+    // shared buffer, positive control), without the tracing-test dependency.
+    struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = std::sync::Arc::clone(&buf);
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "camel_component_http=trace",
+        ))
+        .with_writer(move || SharedWriter(std::sync::Arc::clone(&writer)))
+        .try_init();
+
+    let (_h, port) = build_secure_route(
+        "redact-hdr",
+        Some(vec![CredentialSource::Header {
+            name: SENTINEL_HEADER_NAME.to_string(),
+        }]),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/redact-hdr"))
+        .header(SENTINEL_HEADER_NAME, SENTINEL_HDR_9)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains(SENTINEL_HDR_9),
+        "reply body must not contain the custom-header credential"
+    );
+    assert!(
+        !captured_logs_contain(&buf, SENTINEL_HDR_9),
+        "no tracing record during request handling may render the custom-header credential"
+    );
+    // Permanent positive control: the failed-auth warn! must be captured.
+    assert!(
+        captured_logs_contain(&buf, "Authentication failed"),
+        "positive control: the failed-auth warn! must be captured by the test subscriber"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 27: YAML→compile→policy seam — the real path, not the hand-built fixture
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn yaml_compiled_cookie_route_authenticates() {
+    install_crypto_provider();
+    let port = find_free_port();
+
+    let principal = Principal {
+        subject: "tiles-user".into(),
+        issuer: "native".into(),
+        audience: vec![],
+        scopes: vec![],
+        roles: vec![TILES_READER_ROLE.to_string()],
+        claims: serde_json::json!({}),
+    };
+    let store = NativeCredentialStore::try_new(vec![NativeCredential {
+        secret: NativeCredentialSecret::Plaintext {
+            value: SENTINEL_CRED_1.to_string().into(),
+        },
+        principal,
+    }])
+    .unwrap();
+    let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
+
+    let yaml = format!(
+        r#"
+routes:
+  - id: yaml-compiled-cookie
+    from: "http://0.0.0.0:{port}/yaml-compiled"
+    security_policy:
+      roles: ["{TILES_READER_ROLE}"]
+      credential_sources:
+        - cookie: {{name: "{SENTINEL_COOKIE_NAME}"}}
+    steps:
+      - set_header:
+          key: CamelHttpResponseCode
+          value: 200
+      - to: "mock:yaml-compiled"
+"#
+    );
+
+    let ctx = SecurityCompileContext::new(Some(authenticator), None);
+    let defs = parse_yaml_with_threshold_and_security(&yaml, 1024, ctx).unwrap();
+    assert_eq!(defs.len(), 1);
+
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
+    for def in defs {
+        h.add_route(def).await.unwrap();
+    }
+    h.start().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+
+    // Cookie carries the credential → 200
+    let ok = client
+        .get(format!("http://127.0.0.1:{port}/yaml-compiled"))
+        .header(
+            "Cookie",
+            format!("{SENTINEL_COOKIE_NAME}={SENTINEL_CRED_1}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    // No credential → 401
+    let denied = client
+        .get(format!("http://127.0.0.1:{port}/yaml-compiled"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 401);
 }
 
 // ---------------------------------------------------------------------------

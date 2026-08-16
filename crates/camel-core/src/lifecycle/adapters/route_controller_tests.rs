@@ -5,15 +5,19 @@ use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefiniti
 use crate::shared::components::domain::Registry;
 use arc_swap::ArcSwap;
 use camel_api::function::PrepareToken;
+use camel_api::security_policy::{
+    AuthorizationDecision, CredentialSource, Principal, SecurityPolicy, SecurityPolicyConfig,
+};
 use camel_api::{
     BoxProcessor, BoxProcessorExt, ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId,
     FunctionInvocationError, FunctionInvoker, FunctionInvokerSync, IdentityProcessor, Message,
     OpaqueProcessor, RuntimeCommand, StepLifecycle, StepShutdownReason, SyncBoxProcessor, Value,
     ValueSourceDef,
 };
+use camel_auth::TokenAuthenticator;
 use camel_component_api::{
     Component, ComponentContext, ConcurrencyModel, ConsumerStartupMode, Endpoint, ProducerContext,
-    RuntimeObservability,
+    RuntimeObservability, SecurityContext,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2960,5 +2964,163 @@ async fn adapter_remove_route_clears_endpoint() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+/// Regression guard for the credential-sources activation (Task 3.1): the
+/// route controller must pass the route-declared `credential_sources` into the
+/// consumer `SecurityContext`, not the hardcoded header-only default.
+///
+/// A capture component records the `SecurityContext` it receives in
+/// `set_security_context`, so the test asserts the wiring end-to-end without
+/// reaching into consumer internals.
+
+struct CaptureSecCtxPolicy;
+
+#[async_trait::async_trait]
+impl SecurityPolicy for CaptureSecCtxPolicy {
+    async fn evaluate(
+        &self,
+        _exchange: &mut camel_api::Exchange,
+    ) -> Result<AuthorizationDecision, CamelError> {
+        Ok(AuthorizationDecision::Granted {
+            principal: Principal {
+                subject: "test".into(),
+                issuer: "test".into(),
+                audience: vec![],
+                scopes: vec![],
+                roles: vec![],
+                claims: serde_json::Value::Null,
+            },
+        })
+    }
+}
+
+struct CaptureSecCtxAuthenticator;
+
+#[async_trait::async_trait]
+impl TokenAuthenticator for CaptureSecCtxAuthenticator {
+    async fn authenticate_bearer(&self, _token: &str) -> Result<Principal, CamelError> {
+        Ok(Principal {
+            subject: "test".into(),
+            issuer: "test".into(),
+            audience: vec![],
+            scopes: vec![],
+            roles: vec![],
+            claims: serde_json::Value::Null,
+        })
+    }
+}
+
+struct CaptureSecCtxConsumer {
+    captured: Arc<std::sync::Mutex<Option<SecurityContext>>>,
+}
+
+#[async_trait::async_trait]
+impl Consumer for CaptureSecCtxConsumer {
+    async fn start(&mut self, _ctx: ConsumerContext) -> Result<(), CamelError> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<(), CamelError> {
+        Ok(())
+    }
+    fn set_security_context(&mut self, ctx: SecurityContext) {
+        *self.captured.lock().expect("capture lock") = Some(ctx);
+    }
+}
+
+struct CaptureSecCtxEndpoint {
+    uri: String,
+    captured: Arc<std::sync::Mutex<Option<SecurityContext>>>,
+}
+
+impl Endpoint for CaptureSecCtxEndpoint {
+    fn uri(&self) -> &str {
+        &self.uri
+    }
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+    ) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(CaptureSecCtxConsumer {
+            captured: Arc::clone(&self.captured),
+        }))
+    }
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn RuntimeObservability>,
+        _ctx: &ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        Err(CamelError::ProcessorError(
+            "capturesec does not support producers".into(),
+        ))
+    }
+}
+
+struct CaptureSecCtxComponent {
+    captured: Arc<std::sync::Mutex<Option<SecurityContext>>>,
+}
+
+impl Component for CaptureSecCtxComponent {
+    fn scheme(&self) -> &str {
+        "capturesec"
+    }
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        Ok(Box::new(CaptureSecCtxEndpoint {
+            uri: uri.to_string(),
+            captured: Arc::clone(&self.captured),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn start_route_wires_declared_credential_sources() {
+    let captured: Arc<std::sync::Mutex<Option<SecurityContext>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::new(CaptureSecCtxComponent {
+            captured: Arc::clone(&captured),
+        }));
+    }
+    let mut controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    let sources = vec![CredentialSource::Cookie {
+        name: "session".into(),
+    }];
+    controller
+        .add_route(
+            RouteDefinition::new("capturesec:test", vec![])
+                .with_route_id("cred-sources-activation")
+                .with_security_policy(
+                    SecurityPolicyConfig::new(CaptureSecCtxPolicy)
+                        .with_credential_sources(sources.clone()),
+                )
+                .with_security_authenticator(Arc::new(CaptureSecCtxAuthenticator)),
+        )
+        .await
+        .expect("add_route");
+
+    controller
+        .start_route("cred-sources-activation")
+        .await
+        .expect("start_route");
+
+    let guard = captured.lock().expect("capture lock");
+    let sec_ctx = guard
+        .as_ref()
+        .expect("consumer received a security context");
+    assert_eq!(
+        sec_ctx.credential_sources, sources,
+        "route-declared credential_sources must reach the consumer SecurityContext"
     );
 }

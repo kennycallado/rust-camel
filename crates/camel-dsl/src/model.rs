@@ -1,5 +1,7 @@
 pub use camel_api::{LanguageExpressionDef, StreamSplitConfig, ValueSourceDef};
 
+use crate::route_ast::CredentialSourceDsl;
+
 #[derive(Default)]
 pub struct SecurityCompileContext {
     pub authenticator: Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
@@ -65,11 +67,13 @@ pub enum DeclarativeSecurityPolicy {
         roles: Vec<String>,
         all_required: bool,
         trust_upstream_principal: bool,
+        credential_sources: Option<Vec<CredentialSourceDsl>>,
     },
     Scopes {
         scopes: Vec<String>,
         all_required: bool,
         trust_upstream_principal: bool,
+        credential_sources: Option<Vec<CredentialSourceDsl>>,
     },
     Ref {
         name: String,

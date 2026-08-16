@@ -78,6 +78,32 @@ pub struct RouteDslSecurityPolicy {
     pub config: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub permission: Option<RouteDslPermissionPolicy>,
+    /// Declared extraction sources for the route's credential, in order.
+    /// Absent → compile-time default `[authorization_header]`. Valid only with
+    /// the `roles`/`scopes` forms (validated at load time in `yaml.rs`).
+    #[serde(default)]
+    pub credential_sources: Option<Vec<CredentialSourceDsl>>,
+}
+
+/// Extraction source for a route's credential, as declared in YAML.
+///
+/// Accepted forms: `authorization_header` (bare string),
+/// `{ query_param: { param: token } }`, `{ cookie: { name: session } }`,
+/// `{ header: { name: X-API-Key } }`. The field values are the user-declared
+/// parameter/cookie/header names; they must be non-empty after trimming and,
+/// for `header`, a valid RFC 9110 token (validated at load time in `yaml.rs`).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CredentialSourceDsl {
+    /// Extract the token from the `Authorization` header (Bearer scheme).
+    AuthorizationHeader,
+    /// Extract the token from a query parameter with the given name.
+    QueryParam { param: String },
+    /// Extract the token from a cookie with the given name.
+    Cookie { name: String },
+    /// Extract the token from a named request header (API-key style).
+    Header { name: String },
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

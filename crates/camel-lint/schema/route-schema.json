@@ -398,6 +398,82 @@
       ],
       "type": "object"
     },
+    "CredentialSourceDsl": {
+      "description": "Extraction source for a route's credential, as declared in YAML.\n\nAccepted forms: `authorization_header` (bare string),\n`{ query_param: { param: token } }`, `{ cookie: { name: session } }`,\n`{ header: { name: X-API-Key } }`. The field values are the user-declared\nparameter/cookie/header names; they must be non-empty after trimming and,\nfor `header`, a valid RFC 9110 token (validated at load time in `yaml.rs`).",
+      "oneOf": [
+        {
+          "const": "authorization_header",
+          "description": "Extract the token from the `Authorization` header (Bearer scheme).",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Extract the token from a query parameter with the given name.",
+          "properties": {
+            "query_param": {
+              "additionalProperties": false,
+              "properties": {
+                "param": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "param"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "query_param"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Extract the token from a cookie with the given name.",
+          "properties": {
+            "cookie": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "cookie"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Extract the token from a named request header (API-key style).",
+          "properties": {
+            "header": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "header"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "DelayBody": {
       "anyOf": [
         {
@@ -1741,6 +1817,16 @@
           "default": null,
           "type": [
             "object",
+            "null"
+          ]
+        },
+        "credential_sources": {
+          "description": "Declared extraction sources for the route's credential, in order.\nAbsent → compile-time default `[authorization_header]`. Valid only with\nthe `roles`/`scopes` forms (validated at load time in `yaml.rs`).",
+          "items": {
+            "$ref": "#/$defs/CredentialSourceDsl"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },

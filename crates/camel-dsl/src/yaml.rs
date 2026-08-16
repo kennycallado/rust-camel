@@ -251,6 +251,33 @@ fn yaml_source_to_value_source(
     }
 }
 
+/// Whether `name` is a valid HTTP field token per RFC 9110 §5.6.2 `tchar`:
+/// alphanumerics plus `!#$%&'*+-.^_`|~`, at least one char, no whitespace,
+/// no colons, no separators.
+fn valid_header_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '!' | '#'
+                        | '$'
+                        | '%'
+                        | '&'
+                        | '\''
+                        | '*'
+                        | '+'
+                        | '-'
+                        | '.'
+                        | '^'
+                        | '_'
+                        | '`'
+                        | '|'
+                        | '~'
+                )
+        })
+}
+
 pub(crate) fn route_dsl_to_declarative_route(
     route: RouteDslRoute,
 ) -> Result<DeclarativeRoute, CamelError> {
@@ -370,6 +397,44 @@ pub(crate) fn route_dsl_to_declarative_route(
                     "security_policy must specify exactly one of: roles, scopes, ref, wasm, permission (multiple forms found)".into(),
                 ));
             }
+            if let Some(sources) = &sp.credential_sources {
+                if sources.is_empty() {
+                    return Err(CamelError::RouteError(
+                        "security_policy credential_sources must not be empty".into(),
+                    ));
+                }
+                for source in sources {
+                    match source {
+                        crate::route_ast::CredentialSourceDsl::AuthorizationHeader => {}
+                        crate::route_ast::CredentialSourceDsl::QueryParam { param } => {
+                            if param.trim().is_empty() {
+                                return Err(CamelError::RouteError(
+                                    "security_policy credential_sources query_param 'param' must not be empty".into(),
+                                ));
+                            }
+                        }
+                        crate::route_ast::CredentialSourceDsl::Cookie { name } => {
+                            if name.trim().is_empty() {
+                                return Err(CamelError::RouteError(
+                                    "security_policy credential_sources cookie 'name' must not be empty".into(),
+                                ));
+                            }
+                        }
+                        crate::route_ast::CredentialSourceDsl::Header { name } => {
+                            if !valid_header_token(name) {
+                                return Err(CamelError::RouteError(format!(
+                                    "security_policy credential_sources header 'name' is not a valid HTTP header name: {name:?}"
+                                )));
+                            }
+                        }
+                    }
+                }
+                if sp.roles.is_none() && sp.scopes.is_none() {
+                    return Err(CamelError::RouteError(
+                        "security_policy credential_sources is only valid with the roles or scopes form".into(),
+                    ));
+                }
+            }
             if let Some(roles) = sp.roles {
                 if roles.is_empty() {
                     return Err(CamelError::RouteError(
@@ -380,6 +445,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                     roles,
                     all_required: sp.all_required.unwrap_or(true),
                     trust_upstream_principal: sp.trust_upstream_principal.unwrap_or(false),
+                    credential_sources: sp.credential_sources,
                 })
             } else if let Some(scopes) = sp.scopes {
                 if scopes.is_empty() {
@@ -391,6 +457,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                     scopes,
                     all_required: sp.all_required.unwrap_or(true),
                     trust_upstream_principal: sp.trust_upstream_principal.unwrap_or(false),
+                    credential_sources: sp.credential_sources,
                 })
             } else if let Some(name) = sp.r#ref {
                 if sp.all_required.is_some() {
@@ -2241,6 +2308,7 @@ routes:
                 roles,
                 all_required,
                 trust_upstream_principal,
+                credential_sources: _,
             } => {
                 assert_eq!(roles, &vec!["admin".to_string(), "superuser".to_string()]);
                 assert!(!all_required);
@@ -2268,6 +2336,7 @@ routes:
                 scopes,
                 all_required,
                 trust_upstream_principal,
+                credential_sources: _,
             } => {
                 assert_eq!(scopes, &vec!["read:api".to_string()]);
                 assert!(*all_required);
@@ -2534,6 +2603,200 @@ routes:
 "#;
         let result = parse_yaml_to_declarative(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_rejects_empty_source_list() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["r"]
+      credential_sources: []
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("credential_sources"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_empty_cookie_name() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["r"]
+      credential_sources:
+        - cookie: {name: ""}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("credential_sources") && err.contains("name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_empty_query_param() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["r"]
+      credential_sources:
+        - query_param: {param: "  "}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("credential_sources") && err.contains("param"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_invalid_header_token_name() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["r"]
+      credential_sources:
+        - header: {name: "Bad Header:"}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("credential_sources") && err.contains("header"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_malformed_source_form() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["r"]
+      credential_sources:
+        - cookie: {}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(err.contains("name"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn load_rejects_unknown_source_form() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["r"]
+      credential_sources:
+        - weird_source: {}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant") && err.contains("weird_source"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_unknown_source_payload_field() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["r"]
+      credential_sources:
+        - cookie: {name: session, typo: 1}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(err.contains("typo"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn load_rejects_wasm_only_with_sources() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      wasm: "plugins/my-policy.wasm"
+      credential_sources:
+        - cookie: {name: session}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("credential_sources") && err.contains("security_policy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_ref_only_with_sources() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      ref: "my-custom-policy"
+      credential_sources:
+        - cookie: {name: session}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("credential_sources") && err.contains("security_policy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_permission_only_with_sources() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+      credential_sources:
+        - cookie: {name: session}
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("credential_sources") && err.contains("security_policy"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

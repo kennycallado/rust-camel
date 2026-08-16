@@ -24,9 +24,9 @@ use async_trait::async_trait;
 use camel_api::security_policy::{AuthorizationDecision, SecurityPolicy, SecurityPolicyConfig};
 use camel_api::{CamelError, Exchange, Value};
 use camel_auth::{
-    ClaimPaths, JsonPointerClaimsMapper, LocalJwtValidator, M2mClient, M2mClientSecret,
-    M2mClientStore, NativeJwksProvider, NativeSigningKey, NativeTokenIssuer, RolePolicy,
-    TokenAuthenticator,
+    ClaimPaths, CredentialSource, JsonPointerClaimsMapper, LocalJwtValidator, M2mClient,
+    M2mClientSecret, M2mClientStore, NativeJwksProvider, NativeSigningKey, NativeTokenIssuer,
+    RolePolicy, TokenAuthenticator,
 };
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
@@ -152,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         true,
         false,
         validator.clone(),
+        vec![CredentialSource::AuthorizationHeader],
     ));
 
     let mut alice_exchange = Exchange::default();
@@ -204,7 +205,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
-    let role_policy = RolePolicy::new(vec!["admin".to_string()], true, false, validator.clone());
+    let role_policy = RolePolicy::new(
+        vec!["admin".to_string()],
+        true,
+        false,
+        validator.clone(),
+        vec![CredentialSource::AuthorizationHeader],
+    );
     let wrapped = BearerInjectingPolicy::new(alice_token.access_token.to_string(), role_policy);
 
     let secured_route = RouteBuilder::from("timer:tick?period=2000&repeatCount=2")

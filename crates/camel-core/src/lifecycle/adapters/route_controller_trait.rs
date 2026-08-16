@@ -159,7 +159,8 @@ impl camel_api::RouteController for DefaultRouteController {
         ) {
             use camel_component_api::SecurityContext;
             let sec_ctx =
-                SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator));
+                SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator))
+                    .with_credential_sources(sp_config.credential_sources.clone());
             consumer.set_security_context(sec_ctx);
         }
 
@@ -504,7 +505,8 @@ impl camel_api::RouteController for DefaultRouteController {
         ) {
             use camel_component_api::SecurityContext;
             let sec_ctx =
-                SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator));
+                SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator))
+                    .with_credential_sources(sp_config.credential_sources.clone());
             consumer.set_security_context(sec_ctx);
         }
 

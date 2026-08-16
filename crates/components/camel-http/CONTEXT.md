@@ -40,6 +40,38 @@ one `warn!` when a non-empty body (or any stream body) is dropped. The body
 stays consumed. No configuration override exists (Apache Camel
 `HttpMethods.isEntityEnclosing` parity).
 
+## Credential sources
+
+A `security_policy` block on a `from: http://` route may declare a
+`credential_sources` list. It names where the credential comes from:
+`authorization_header`, a query parameter, a cookie, or a named custom header
+(`header: {name: X-API-Key}`). The list threads through
+`SecurityPolicyConfig` into `RolePolicy`/`ScopePolicy`, whose `authenticate()`
+extracts via `extract_token_multi` (ADR-0059). When the key is absent, the
+default is `[authorization_header]` only (ADR-0033).
+
+### Redact-by-construction
+
+camel-http has no request access log. The diagnostic sinks that exist on the
+request path are the error-context logs around `pipeline_error_to_reply` and the
+error reply body. The contract is redact-by-construction: no diagnostic record
+emitted while handling a request renders a declared credential value (query
+parameter, cookie, or custom header). The 401/403 reply body carries a generic
+reason only. Any access log added later inherits the same obligation (ADR-0051).
+
+### Browser cookie guidance
+
+Cookies are the only transport for browser-facing tile services (`<img src>`
+from Leaflet, MapLibre, OpenLayers), which cannot attach custom headers.
+
+- `SameSite=Lax` (or stricter) and `HttpOnly` cookies are the operator's
+  responsibility. rust-camel does not set these attributes; the operator sets
+  them where the cookie is issued.
+- Cookie auth on state-changing verbs (POST, PUT, DELETE) requires CSRF
+  defense. SameSite does not remove the need for it.
+- GET-only tile services are the primary target. A read-only route serving
+  images carries no state-changing side effect, so the CSRF surface is minimal.
+
 ## Log-level policy
 
 Per ADR-0012, this component's `error!` sites are categorized as:

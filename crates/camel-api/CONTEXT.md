@@ -14,13 +14,13 @@ execution engine, no registries, no lifecycle implementation.
 ## `#[non_exhaustive]` posture
 
 ADR-0049 places this contract crate in its mandatory scope: every `pub enum` is
-`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 53 `pub enum`s
+`#[non_exhaustive]` or carries an `exhaustive-by-contract` exception note. The 56 `pub enum`s
 split into:
 
 | Category | Count | Posture |
 |---|---|---|
-| `#[non_exhaustive]` | 51 | 48 attributed by rc-3pw3 + 3 pre-existing (`CamelError`, `ConfigValidationError`, `TemplateError`). |
-| `exhaustive-by-contract` exception | 3 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), and `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
+| `#[non_exhaustive]` | 52 | 48 attributed by rc-3pw3; pre-existing exceptions include `CamelError`, `ConfigValidationError`, `TemplateError`. |
+| `exhaustive-by-contract` exception | 4 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService), and `CredentialSource` (the closed credential-source set; out-of-crate camel-auth extraction matches all variants). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
 
 New contract enums use `#[non_exhaustive]` from birth; a closed-set exception needs a
 `/// exhaustive-by-contract: <rationale>` note. ADR-0049 Rule 3 governs public structs (out of

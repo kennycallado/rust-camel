@@ -1,40 +1,13 @@
 use std::collections::HashMap;
 
-/// Source from which a token can be extracted.
-#[derive(Clone, PartialEq, Eq)]
-pub enum CredentialSource {
-    /// Extract from the `Authorization` header (Bearer scheme).
-    AuthorizationHeader,
-    /// Extract from a query parameter with the given name.
-    QueryParam { param: String },
-    /// Extract from a cookie with the given name.
-    Cookie { name: String },
-}
+use camel_api::Exchange;
+use camel_api::security_policy::CAMEL_HTTP_QUERY_HEADER;
 
-impl CredentialSource {
-    /// Returns the variant name without exposing sensitive values.
-    pub fn variant_name(&self) -> &'static str {
-        match self {
-            CredentialSource::AuthorizationHeader => "AuthorizationHeader",
-            CredentialSource::QueryParam { .. } => "QueryParam",
-            CredentialSource::Cookie { .. } => "Cookie",
-        }
-    }
-}
-
-impl std::fmt::Debug for CredentialSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CredentialSource::AuthorizationHeader => f.write_str("AuthorizationHeader"),
-            CredentialSource::QueryParam { param } => {
-                write!(f, "QueryParam {{ param: {:?} }}", param) // allow-secret
-            }
-            CredentialSource::Cookie { name } => {
-                write!(f, "Cookie {{ name: {:?} }}", name) // allow-secret
-            }
-        }
-    }
-}
+/// Re-export of the `CredentialSource` contract type, which now lives in
+/// camel-api so camel-core and camel-dsl can reference it without depending
+/// on this crate. Keeps every existing `camel_auth::CredentialSource` path
+/// (e.g. `camel-ws`, `camel-component-api`) compiling unchanged.
+pub use camel_api::security_policy::CredentialSource;
 
 /// A token extracted from a specific source.
 #[derive(Clone)]
@@ -93,6 +66,20 @@ pub fn extract_token_from_cookie(headers: &http::HeaderMap, cookie_name: &str) -
         .map(|v| percent_decode_str(v))
 }
 
+/// Extract a token from a named request header.
+///
+/// Looks up `name` case-insensitively, consistent with `Message::header_ic`.
+/// The whole header value is the token (no scheme prefix). Returns `None` if
+/// the header is absent, its value is not valid UTF-8, or `name` is not a
+/// valid HTTP header token.
+pub fn extract_token_from_named_header(headers: &http::HeaderMap, name: &str) -> Option<String> {
+    let header_name = http::header::HeaderName::try_from(name).ok()?;
+    headers
+        .get(&header_name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 /// Try each source in order, returning the first successful extraction.
 pub fn extract_token_multi(
     headers: &http::HeaderMap,
@@ -125,9 +112,74 @@ pub fn extract_token_multi(
                     });
                 }
             }
+            CredentialSource::Header { name } => {
+                if let Some(token) = extract_token_from_named_header(headers, name) {
+                    return Some(ExtractedToken {
+                        token,
+                        source: source.clone(),
+                    });
+                }
+            }
         }
     }
     None
+}
+
+/// Extract a token from the Exchange input using the route-declared sources.
+///
+/// Builds an `http::HeaderMap` view from the camel-api input headers, reads the
+/// raw query string from the `CAMEL_HTTP_QUERY_HEADER` input header, and
+/// delegates to `extract_token_multi`. A missing or malformed query header
+/// yields no query pairs. An absent source is never fatal (ADR-0032).
+pub fn extract_token_from_exchange(
+    exchange: &Exchange,
+    sources: &[CredentialSource],
+) -> Option<ExtractedToken> {
+    let headers = header_map_from_exchange(exchange);
+    let uri = query_uri_from_exchange(exchange);
+    extract_token_multi(&headers, &uri, sources)
+}
+
+/// Build an `http::HeaderMap` view from the camel-api input headers.
+///
+/// Only header entries whose name and value survive the `http` crate's
+/// validation become HTTP headers. Non-string `serde_json` values and names or
+/// values rejected by `HeaderName`/`HeaderValue` parsing are skipped — the
+/// source is treated as absent, never fatal.
+fn header_map_from_exchange(exchange: &Exchange) -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    for (name, value) in &exchange.input.headers {
+        let Ok(header_name) = http::header::HeaderName::try_from(name.as_str()) else {
+            continue;
+        };
+        let Some(value_str) = value.as_str() else {
+            continue;
+        };
+        let Ok(header_value) = http::header::HeaderValue::from_str(value_str) else {
+            continue;
+        };
+        headers.append(header_name, header_value);
+    }
+    headers
+}
+
+/// Build a synthetic URI carrying the raw query string from the input header.
+///
+/// `http::Uri` requires a path, so a minimal `/` is prepended. A missing, empty,
+/// or malformed query header yields a query-less URI (no query pairs).
+fn query_uri_from_exchange(exchange: &Exchange) -> http::Uri {
+    let Some(query) = exchange
+        .input
+        .header_ic(CAMEL_HTTP_QUERY_HEADER)
+        .and_then(|v| v.as_str())
+        .filter(|q| !q.is_empty())
+    else {
+        return http::Uri::from_static("/");
+    };
+    let query = query.strip_prefix('?').unwrap_or(query);
+    let raw = format!("/?{query}");
+    raw.parse::<http::Uri>()
+        .unwrap_or_else(|_| http::Uri::from_static("/"))
 }
 
 /// Replace sensitive query parameter values with `[REDACTED]`.
@@ -190,6 +242,16 @@ fn parse_cookie_header(cookie_str: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_source_reexport_path_stable() {
+        // The re-export keeps `camel_auth::CredentialSource` resolving to the
+        // camel-api contract type (pure move — same type identity).
+        let via_reexport = CredentialSource::AuthorizationHeader;
+        let canonical = camel_api::security_policy::CredentialSource::AuthorizationHeader;
+        assert_eq!(via_reexport, canonical);
+        assert_eq!(via_reexport.variant_name(), "AuthorizationHeader");
+    }
 
     // --- CredentialSource Debug ---
 

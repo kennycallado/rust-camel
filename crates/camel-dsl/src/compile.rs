@@ -50,11 +50,39 @@ fn require_authenticator(
     mode: &str,
 ) -> Result<std::sync::Arc<dyn camel_auth::TokenAuthenticator>, CamelError> {
     ctx.authenticator.clone().ok_or_else(|| {
+        // allow-secret: message text names the policy config, not a credential
         CamelError::RouteError(format!(
             "security_policy with {} requires a JWT authenticator (configure [security] in Camel.toml)",
             mode
         ))
     })
+}
+
+/// Map the DSL credential-source list to the `camel_api` contract form.
+/// An absent key defaults to header-only extraction (fail-closed, ADR-0033).
+fn map_credential_sources(
+    sources: Option<Vec<crate::route_ast::CredentialSourceDsl>>,
+) -> Vec<camel_api::security_policy::CredentialSource> {
+    match sources {
+        None => vec![camel_api::security_policy::CredentialSource::AuthorizationHeader],
+        Some(list) => list
+            .into_iter()
+            .map(|s| match s {
+                crate::route_ast::CredentialSourceDsl::AuthorizationHeader => {
+                    camel_api::security_policy::CredentialSource::AuthorizationHeader
+                }
+                crate::route_ast::CredentialSourceDsl::QueryParam { param } => {
+                    camel_api::security_policy::CredentialSource::QueryParam { param }
+                }
+                crate::route_ast::CredentialSourceDsl::Cookie { name } => {
+                    camel_api::security_policy::CredentialSource::Cookie { name }
+                }
+                crate::route_ast::CredentialSourceDsl::Header { name } => {
+                    camel_api::security_policy::CredentialSource::Header { name }
+                }
+            })
+            .collect(),
+    }
 }
 
 fn compile_security_policy(
@@ -72,16 +100,20 @@ fn compile_security_policy(
             roles,
             all_required,
             trust_upstream_principal,
+            credential_sources,
         } => {
             let auth = require_authenticator(ctx, "roles")?;
+            let sources = map_credential_sources(credential_sources);
             let policy = camel_auth::RolePolicy::new(
                 roles,
                 all_required,
                 trust_upstream_principal,
                 std::sync::Arc::clone(&auth),
+                sources.clone(),
             );
             Ok((
-                camel_api::security_policy::SecurityPolicyConfig::new(policy),
+                camel_api::security_policy::SecurityPolicyConfig::new(policy)
+                    .with_credential_sources(sources),
                 Some(auth),
             ))
         }
@@ -89,16 +121,20 @@ fn compile_security_policy(
             scopes,
             all_required,
             trust_upstream_principal,
+            credential_sources,
         } => {
             let auth = require_authenticator(ctx, "scopes")?;
+            let sources = map_credential_sources(credential_sources);
             let policy = camel_auth::ScopePolicy::new(
                 scopes,
                 all_required,
                 trust_upstream_principal,
                 std::sync::Arc::clone(&auth),
+                sources.clone(),
             );
             Ok((
-                camel_api::security_policy::SecurityPolicyConfig::new(policy),
+                camel_api::security_policy::SecurityPolicyConfig::new(policy)
+                    .with_credential_sources(sources),
                 Some(auth),
             ))
         }
@@ -4089,6 +4125,7 @@ mod tests {
             roles: vec!["admin".into()],
             all_required: true,
             trust_upstream_principal: false,
+            credential_sources: None,
         };
         let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
         assert!(returned_auth.is_some());
@@ -4102,6 +4139,7 @@ mod tests {
             scopes: vec!["read".into()],
             all_required: false,
             trust_upstream_principal: false,
+            credential_sources: None,
         };
         let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
         assert!(returned_auth.is_some());
@@ -4114,6 +4152,7 @@ mod tests {
             roles: vec!["admin".into()],
             all_required: true,
             trust_upstream_principal: false,
+            credential_sources: None,
         };
         let result = compile_security_policy(def, &ctx);
         assert!(result.is_err());
@@ -4296,6 +4335,7 @@ mod tests {
                 roles: vec!["admin".into()],
                 all_required: true,
                 trust_upstream_principal: false,
+                credential_sources: None,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {
@@ -4321,6 +4361,7 @@ mod tests {
                 roles: vec!["admin".into()],
                 all_required: true,
                 trust_upstream_principal: false,
+                credential_sources: None,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {

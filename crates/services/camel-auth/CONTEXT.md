@@ -48,6 +48,47 @@ Self-contained token issuer (`native_issuer.rs`) for the built-in (non-OIDC) aut
 issues/signs tokens via `NativeSigningKey` against an `M2mClientStore` of machine-to-machine clients.
 _Avoid_: OAuth server, identity provider (it is a minimal native issuer, not a full IdP)
 
+## Credential sources
+
+A route declares where its credential comes from via `credential_sources`.
+The list is part of the `security_policy` block. It maps to the
+`CredentialSource` enum (`camel_api::security_policy::CredentialSource`,
+re-exported here). The current variants:
+
+- `AuthorizationHeader` — the `Authorization` header, Bearer scheme.
+- `QueryParam { param }` — a named query parameter.
+- `Cookie { name }` — a named cookie.
+- `Header { name }` — an API key in a named custom header (name validated as an RFC 9110 token at load time).
+
+When the key is absent, the effective list is `[AuthorizationHeader]` only
+(fail-closed, ADR-0033). Extraction tries the declared sources in order; first
+match wins. A miss on every source maps to `Unauthenticated`, never a panic or
+a 500. Malformed input (a cookie without `name=`, a query value that fails to
+parse, a header value rejected by `http::HeaderValue::from_str`) is treated as
+an absent source (ADR-0032).
+
+Every extracted value flows through the same constant-time store lookup
+(`NativeCredentialStore::lookup`, `native_auth.rs`). Extraction differs per
+source; comparison does not. No source introduces an early-exit comparison path.
+
+**`trust_upstream_principal` semantics.** On a component-owned path (WS), the
+flag means "accept the principal the component authenticated". The component
+extracts the credential, validates it, stores the principal via
+`store_principal_properties`, then calls `policy.evaluate`. The spoof caveat
+(the property could be stamped by an upstream filter) applies only to the layer
+path, where a policy reads a principal that an arbitrary upstream step may have
+written. On the component path the component gates evaluation on successful
+authentication, so the caveat does not apply. The mechanism never sets the flag
+implicitly — only the route YAML does.
+
+The store/read pair for the preloaded principal is one format: a JSON string
+under `camel.auth.principal` (`store_principal_properties` writes it;
+`principal_from_exchange` reads it). The trust branch delegates to the canonical
+reader, so a component-stored principal round-trips (ADR-0059).
+
+The Bearer scheme is parsed per RFC 9110 (RFC 7235): case-insensitive and
+whitespace-tolerant. An empty token after the scheme is an absent source.
+
 ## Batch 6 — Security hardening
 
 ### JWKS body cap (`fn fetch_and_store`, jwks.rs:40)

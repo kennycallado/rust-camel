@@ -7940,4 +7940,226 @@ mod tests {
 
         token.cancel();
     }
+
+    // -----------------------------------------------------------------------
+    // credential-sources task 2.3: credential values stay out of diagnostics
+    // -----------------------------------------------------------------------
+    //
+    // camel-http has no request access log (design.md "Redaction sinks",
+    // ADR-0051). The only diagnostic sink on the failed-auth path is
+    // `pipeline_error_to_reply`, which renders the (generic) error message and
+    // the *configured* route path — never the request URI, query string, or
+    // extracted credential. These tests pin that redact-by-construction
+    // contract: a sentinel credential presented in a declared source must not
+    // appear in the reply body nor in any tracing record emitted while the
+    // request is handled.
+    //
+    // Capture scope: `#[traced_test]` installs a per-crate env filter
+    // (`camel_component_http=trace`), so records from OTHER targets
+    // (`camel_auth`, `camel_processor`, etc.) are NOT captured here. The
+    // redaction contract for those crates is guarded by their own tests.
+    // Revisit this capture scope if camel-auth ever logs on the auth path.
+    use camel_api::security_policy::{AuthorizationDecision, CredentialSource, SecurityPolicy};
+    use camel_auth::native_auth::NativeCredentialStore;
+    use camel_auth::{RolePolicy, StaticTokenAuthenticator, TokenAuthenticator};
+
+    // Sentinel credential values — test fixtures only, not real secrets.
+    const SENTINEL_QRY_42: &str = "SENTINEL_QRY_42"; // allow-secret
+    const SENTINEL_CKY_7: &str = "SENTINEL_CKY_7"; // allow-secret
+    const SENTINEL_BAD_1: &str = "SENTINEL_BAD_1"; // allow-secret
+
+    /// Build the exchange the consumer would build for a request envelope:
+    /// standard Camel HTTP headers plus title-cased forwarded request headers.
+    fn envelope_to_exchange(envelope: &RequestEnvelope) -> Exchange {
+        let mut msg = Message::default();
+        msg.set_header(
+            "CamelHttpMethod",
+            serde_json::Value::String(envelope.method.clone()),
+        );
+        msg.set_header(
+            "CamelHttpPath",
+            serde_json::Value::String(envelope.path.clone()),
+        );
+        msg.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String(envelope.query.clone()),
+        );
+        for (k, v) in &envelope.headers {
+            if let Ok(val_str) = v.to_str() {
+                msg.set_header(
+                    title_case_header(k.as_str()),
+                    serde_json::Value::String(val_str.to_string()),
+                );
+            }
+        }
+        Exchange::new(msg)
+    }
+
+    /// Register a route whose responder authenticates each request against a
+    /// `RolePolicy` with the given credential sources and an empty native
+    /// store (so every presented credential fails lookup). Mirrors the
+    /// `SecurityPolicyLayer` decision mapping onto `CamelError`.
+    async fn spawn_failing_auth_route(
+        registry: &HttpRouteRegistry,
+        path: &str,
+        sources: Vec<CredentialSource>,
+    ) {
+        let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(
+            NativeCredentialStore::try_new(vec![]).unwrap(),
+        ));
+        let policy = Arc::new(RolePolicy::new(
+            vec!["tiles-reader".to_string()],
+            true,
+            false,
+            authenticator,
+            sources,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+        registry.register_api_route(path.to_string(), tx).await;
+        let path_owned = path.to_string();
+        tokio::spawn(async move {
+            while let Some(envelope) = rx.recv().await {
+                let mut exchange = envelope_to_exchange(&envelope);
+                let reply_tx = envelope.reply_tx;
+                let result: Result<(), CamelError> = match policy.evaluate(&mut exchange).await {
+                    Ok(AuthorizationDecision::Granted { .. }) => Ok(()),
+                    Ok(AuthorizationDecision::Denied { reason, .. }) => {
+                        Err(CamelError::Unauthorized(format!("Access denied: {reason}")))
+                    }
+                    Err(e) => Err(e),
+                    _ => Err(CamelError::Unauthorized(
+                        "access denied by security policy".to_string(),
+                    )),
+                };
+                let reply = match result {
+                    Ok(()) => HttpReply {
+                        status: 200,
+                        headers: vec![],
+                        body: HttpReplyBody::Bytes(bytes::Bytes::from("ok")),
+                    },
+                    Err(e) => pipeline_error_to_reply(e, &path_owned),
+                };
+                let _ = reply_tx.send(reply);
+            }
+        });
+    }
+
+    /// Whether any tracing record captured so far (process-wide) contains
+    /// `needle`. `#[traced_test]` installs a global subscriber writing to a
+    /// shared buffer, so logs from spawned request-handling tasks are included.
+    fn captured_logs_contain(needle: &str) -> bool {
+        let buf = tracing_test::internal::global_buf().lock().unwrap();
+        String::from_utf8_lossy(&buf).contains(needle)
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn error_context_redacts_query_sentinel() {
+        let (port, registry) = spawn_test_server().await;
+        spawn_failing_auth_route(
+            &registry,
+            "/secure-query",
+            vec![CredentialSource::QueryParam {
+                param: "token".to_string(),
+            }],
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            // allow-secret: `token` is the declared query-source param name, not a credential
+            .get(format!(
+                "http://127.0.0.1:{port}/secure-query?token={SENTINEL_QRY_42}"
+            ))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "Unauthorized");
+        assert!(
+            !body.contains(SENTINEL_QRY_42),
+            "reply body must not contain the query credential"
+        );
+        assert!(
+            !captured_logs_contain(SENTINEL_QRY_42),
+            "no tracing record during request handling may render the query credential"
+        );
+        // Permanent positive control: the failed-auth warn! must be captured.
+        // If the per-crate env filter ever stops matching, this fails loudly
+        // instead of letting the sentinel assertions pass vacuously.
+        assert!(
+            captured_logs_contain("Authentication failed"),
+            "positive control: the failed-auth warn! must be captured by the test subscriber"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn error_context_redacts_cookie_sentinel() {
+        let (port, registry) = spawn_test_server().await;
+        spawn_failing_auth_route(
+            &registry,
+            "/secure-cookie",
+            vec![CredentialSource::Cookie {
+                name: "session".to_string(),
+            }],
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/secure-cookie"))
+            .header("Cookie", format!("session={SENTINEL_CKY_7}"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "Unauthorized");
+        assert!(
+            !body.contains(SENTINEL_CKY_7),
+            "reply body must not contain the cookie credential"
+        );
+        assert!(
+            !captured_logs_contain(SENTINEL_CKY_7),
+            "no tracing record during request handling may render the cookie credential"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn error_reply_no_credential_value() {
+        let (port, registry) = spawn_test_server().await;
+        spawn_failing_auth_route(
+            &registry,
+            "/secure-bad",
+            vec![CredentialSource::Cookie {
+                name: "session".to_string(),
+            }],
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/secure-bad"))
+            .header("Cookie", format!("session={SENTINEL_BAD_1}"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "Unauthorized");
+        assert!(
+            !body.contains(SENTINEL_BAD_1),
+            "reply body must not contain the credential value"
+        );
+        assert!(
+            !captured_logs_contain(SENTINEL_BAD_1),
+            "error logs must not render the credential value"
+        );
+    }
 }

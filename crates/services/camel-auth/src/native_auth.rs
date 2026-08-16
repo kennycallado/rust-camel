@@ -204,6 +204,7 @@ mod tests {
     use crate::TokenAuthenticator;
     use crate::built_in::RolePolicy;
     use crate::built_in::ScopePolicy;
+    use camel_api::security_policy::CredentialSource;
     use camel_api::security_policy::SecurityPolicy;
     use camel_api::{Exchange, Message};
 
@@ -423,7 +424,13 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = RolePolicy::new(vec!["admin".to_string()], true, false, authenticator);
+        let policy = RolePolicy::new(
+            vec!["admin".to_string()],
+            true,
+            false,
+            authenticator,
+            vec![CredentialSource::AuthorizationHeader],
+        );
         let mut exchange = Exchange::new(Message::default());
         exchange
             .input
@@ -446,7 +453,13 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = ScopePolicy::new(vec!["api:read".to_string()], true, false, authenticator);
+        let policy = ScopePolicy::new(
+            vec!["api:read".to_string()],
+            true,
+            false,
+            authenticator,
+            vec![CredentialSource::AuthorizationHeader],
+        );
         let mut exchange = Exchange::new(Message::default());
         exchange
             .input
@@ -469,7 +482,13 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = RolePolicy::new(vec!["admin".to_string()], true, false, authenticator);
+        let policy = RolePolicy::new(
+            vec!["admin".to_string()],
+            true,
+            false,
+            authenticator,
+            vec![CredentialSource::AuthorizationHeader],
+        );
         let mut exchange = Exchange::new(Message::default());
         exchange
             .input

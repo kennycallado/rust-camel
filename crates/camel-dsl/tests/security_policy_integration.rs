@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use camel_api::security_policy::{AuthorizationDecision, Principal, SecurityPolicy};
+use camel_api::security_policy::{
+    AuthorizationDecision, CredentialSource, Principal, SecurityPolicy,
+};
 use camel_api::{CamelError, Exchange};
 use camel_auth::{
     AuthError, PermissionDecision, PermissionEvaluator, PermissionEvaluatorRegistry,
@@ -187,6 +189,98 @@ routes:
     assert_eq!(defs.len(), 1);
     assert!(defs[0].security_policy_config().is_some());
     assert!(defs[0].security_authenticator().is_some());
+}
+
+#[test]
+fn compile_maps_sources_to_config() {
+    let yaml = r#"
+routes:
+  - id: sec-route
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+      credential_sources:
+        - cookie: {name: session}
+    steps:
+      - to: log:info
+"#;
+    let routes = parse_yaml_to_declarative(yaml).unwrap();
+    let auth = Arc::new(TestAuthenticator) as Arc<dyn camel_auth::TokenAuthenticator>;
+    let ctx = SecurityCompileContext::new(Some(auth), None);
+    let def = compile_declarative_route_with_stream_cache_threshold(
+        routes.into_iter().next().unwrap(),
+        1024,
+        ctx,
+    )
+    .unwrap();
+
+    let config = def.security_policy_config().expect("policy config present");
+    assert_eq!(
+        config.credential_sources,
+        vec![CredentialSource::Cookie {
+            name: "session".into()
+        }]
+    );
+}
+
+#[test]
+fn compile_maps_header_source_to_config() {
+    let yaml = r#"
+routes:
+  - id: sec-route
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+      credential_sources:
+        - header: {name: X-API-Key}
+    steps:
+      - to: log:info
+"#;
+    let routes = parse_yaml_to_declarative(yaml).unwrap();
+    let auth = Arc::new(TestAuthenticator) as Arc<dyn camel_auth::TokenAuthenticator>;
+    let ctx = SecurityCompileContext::new(Some(auth), None);
+    let def = compile_declarative_route_with_stream_cache_threshold(
+        routes.into_iter().next().unwrap(),
+        1024,
+        ctx,
+    )
+    .unwrap();
+
+    let config = def.security_policy_config().expect("policy config present");
+    assert_eq!(
+        config.credential_sources,
+        vec![CredentialSource::Header {
+            name: "X-API-Key".into()
+        }]
+    );
+}
+
+#[test]
+fn absent_key_compiles_to_header_default() {
+    let yaml = r#"
+routes:
+  - id: sec-route
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+    steps:
+      - to: log:info
+"#;
+    let routes = parse_yaml_to_declarative(yaml).unwrap();
+    let auth = Arc::new(TestAuthenticator) as Arc<dyn camel_auth::TokenAuthenticator>;
+    let ctx = SecurityCompileContext::new(Some(auth), None);
+    let def = compile_declarative_route_with_stream_cache_threshold(
+        routes.into_iter().next().unwrap(),
+        1024,
+        ctx,
+    )
+    .unwrap();
+
+    let config = def.security_policy_config().expect("policy config present");
+    assert_eq!(
+        config.credential_sources,
+        vec![CredentialSource::AuthorizationHeader]
+    );
 }
 
 struct TestPermissionEvaluator;

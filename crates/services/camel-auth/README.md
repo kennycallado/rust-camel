@@ -67,7 +67,7 @@ JWT validation with role-based access control:
 
 ```rust
 use camel_auth::{
-    LocalJwtValidator, JwtValidator, RolePolicy,
+    LocalJwtValidator, JwtValidator, RolePolicy, CredentialSource,
     ClaimsMapper, JsonPointerClaimsMapper, ClaimPaths,
     SecurityPolicyRegistry, BearerTokenLayer,
 };
@@ -79,8 +79,14 @@ let validator = LocalJwtValidator::from_jwks_url("https://auth.example.com/.well
 // Map claims from the token into roles used by policies
 let mapper = JsonPointerClaimsMapper::new(ClaimPaths::roles_from("/realm_access/roles"));
 
-// Register a role policy
-let role_policy = RolePolicy::new(vec!["admin".into()], mapper);
+// Register a role policy (all roles required, header-only credential source)
+let role_policy = RolePolicy::new(
+    vec!["admin".into()],
+    true,
+    false,
+    std::sync::Arc::new(validator),
+    vec![CredentialSource::AuthorizationHeader],
+);
 let mut registry = SecurityPolicyRegistry::new();
 registry.register("admin-only", role_policy);
 

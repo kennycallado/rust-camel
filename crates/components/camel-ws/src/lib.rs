@@ -424,8 +424,20 @@ pub async fn dispatch_handler(
                     extracted.source,
                     camel_auth::CredentialSource::QueryParam { .. }
                 ) {
-                    let redacted =
-                        camel_auth::redact_query_params(req.uri(), &["access_token", "token"]);
+                    // Redact the declared query-param names (from this route's
+                    // credential_sources) plus the historical defaults, so a
+                    // DSL-reachable `QueryParam { param: sess }` never logs its
+                    // value in the upgrade debug record (ADR-0051).
+                    let mut sensitive: Vec<&str> = vec!["access_token", "token"];
+                    sensitive.extend(sec_ctx.credential_sources.iter().filter_map(|source| {
+                        match source {
+                            camel_auth::CredentialSource::QueryParam { param } => {
+                                Some(param.as_str())
+                            }
+                            _ => None,
+                        }
+                    }));
+                    let redacted = camel_auth::redact_query_params(req.uri(), &sensitive);
                     tracing::debug!(path = %redacted, "WS upgrade with query token (redacted)");
                 }
                 match sec_ctx

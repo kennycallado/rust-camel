@@ -77,19 +77,90 @@ pub trait SecurityPolicy: Send + Sync {
     async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError>;
 }
 
+/// Name of the input header camel-http uses to carry the raw HTTP query string.
+///
+/// camel-http stores the request query (the part after `?`) as a string header
+/// under this exact name (`crates/components/camel-http/src/lib.rs`).
+/// camel-auth cannot depend on camel-http, so this contract constant lives in
+/// camel-api. `QueryParam` extraction reads the raw query from this header.
+pub const CAMEL_HTTP_QUERY_HEADER: &str = "CamelHttpQuery";
+
+/// Source from which a token can be extracted.
+///
+/// exhaustive-by-contract: closed source set; out-of-crate camel-auth
+/// extraction matches all variants, so adding a source must update every
+/// match site by review.
+#[derive(Clone, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// Extract from the `Authorization` header (Bearer scheme).
+    AuthorizationHeader,
+    /// Extract from a query parameter with the given name.
+    QueryParam { param: String },
+    /// Extract from a cookie with the given name.
+    Cookie { name: String },
+    /// Extract from a named request header (API-key style).
+    ///
+    /// The extracted value flows into the same constant-time
+    /// `NativeCredentialStore::lookup` as every other source.
+    /// `ApiKeyAuthenticator` is superseded for YAML use; its programmatic API
+    /// stays.
+    Header { name: String },
+}
+
+impl CredentialSource {
+    /// Returns the variant name without exposing sensitive values.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            CredentialSource::AuthorizationHeader => "AuthorizationHeader",
+            CredentialSource::QueryParam { .. } => "QueryParam",
+            CredentialSource::Cookie { .. } => "Cookie",
+            CredentialSource::Header { .. } => "Header",
+        }
+    }
+}
+
+impl std::fmt::Debug for CredentialSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialSource::AuthorizationHeader => f.write_str("AuthorizationHeader"),
+            CredentialSource::QueryParam { param } => {
+                write!(f, "QueryParam {{ param: {:?} }}", param) // allow-secret
+            }
+            CredentialSource::Cookie { name } => {
+                write!(f, "Cookie {{ name: {:?} }}", name) // allow-secret
+            }
+            CredentialSource::Header { name } => {
+                write!(f, "Header {{ name: {:?} }}", name) // allow-secret
+            }
+        }
+    }
+}
+
 pub struct SecurityPolicyConfig {
     pub policy: Arc<dyn SecurityPolicy>,
+    /// Extraction sources for the route's credential, in declared order.
+    /// Defaults to header-only (fail-closed, ADR-0033).
+    pub credential_sources: Vec<CredentialSource>,
 }
 
 impl SecurityPolicyConfig {
     pub fn new(policy: impl SecurityPolicy + 'static) -> Self {
         Self {
             policy: Arc::new(policy),
+            credential_sources: vec![CredentialSource::AuthorizationHeader],
         }
     }
 
     pub fn from_arc(policy: Arc<dyn SecurityPolicy>) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            credential_sources: vec![CredentialSource::AuthorizationHeader],
+        }
+    }
+
+    pub fn with_credential_sources(mut self, sources: Vec<CredentialSource>) -> Self {
+        self.credential_sources = sources;
+        self
     }
 }
 
@@ -97,6 +168,7 @@ impl Clone for SecurityPolicyConfig {
     fn clone(&self) -> Self {
         Self {
             policy: Arc::clone(&self.policy),
+            credential_sources: self.credential_sources.clone(),
         }
     }
 }
@@ -105,6 +177,7 @@ impl std::fmt::Debug for SecurityPolicyConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityPolicyConfig")
             .field("policy", &"<SecurityPolicy>")
+            .field("credential_sources", &self.credential_sources)
             .finish()
     }
 }
@@ -175,6 +248,25 @@ mod tests {
         }
     }
 
+    /// A `SecurityPolicy` that always grants to `test_principal(vec![], vec![])`.
+    fn test_policy() -> impl SecurityPolicy + 'static {
+        struct GrantPolicy;
+
+        #[async_trait]
+        impl SecurityPolicy for GrantPolicy {
+            async fn evaluate(
+                &self,
+                _exchange: &mut Exchange,
+            ) -> Result<AuthorizationDecision, CamelError> {
+                Ok(AuthorizationDecision::Granted {
+                    principal: test_principal(vec![], vec![]),
+                })
+            }
+        }
+
+        GrantPolicy
+    }
+
     #[test]
     fn principal_has_role_is_case_sensitive() {
         let p = test_principal(vec!["Admin", "User"], vec![]);
@@ -210,24 +302,19 @@ mod tests {
 
     #[test]
     fn security_policy_config_debug_redacts_policy() {
-        struct DummyPolicy;
-
-        #[async_trait]
-        impl SecurityPolicy for DummyPolicy {
-            async fn evaluate(
-                &self,
-                _exchange: &mut Exchange,
-            ) -> Result<AuthorizationDecision, CamelError> {
-                Ok(AuthorizationDecision::Granted {
-                    principal: test_principal(vec![], vec![]),
-                })
-            }
-        }
-
-        let config = SecurityPolicyConfig::new(DummyPolicy);
+        let config = SecurityPolicyConfig::new(test_policy());
         let debug = format!("{config:?}");
         assert!(debug.contains("SecurityPolicyConfig"));
         assert!(debug.contains("<SecurityPolicy>"));
+    }
+
+    #[test]
+    fn security_policy_config_new_is_header_only() {
+        let config = SecurityPolicyConfig::new(test_policy());
+        assert_eq!(
+            config.credential_sources,
+            vec![CredentialSource::AuthorizationHeader]
+        );
     }
 
     #[test]
@@ -295,21 +382,7 @@ mod tests {
 
     #[test]
     fn security_policy_config_clone() {
-        struct DummyPolicy;
-
-        #[async_trait]
-        impl SecurityPolicy for DummyPolicy {
-            async fn evaluate(
-                &self,
-                _exchange: &mut Exchange,
-            ) -> Result<AuthorizationDecision, CamelError> {
-                Ok(AuthorizationDecision::Granted {
-                    principal: test_principal(vec![], vec![]),
-                })
-            }
-        }
-
-        let config = SecurityPolicyConfig::new(DummyPolicy);
+        let config = SecurityPolicyConfig::new(test_policy());
         let cloned = config.clone();
         // Both point to same Arc
         assert!(Arc::ptr_eq(&config.policy, &cloned.policy));
