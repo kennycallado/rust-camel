@@ -11,9 +11,7 @@
 //! Requests are driven with raw JSON-RPC over HTTP (a minimal
 //! `Connection: close` client over `tokio::net::TcpStream`) so the
 //! `Authorization` header is controlled precisely — the same seam
-//! `server_protocol_test.rs` uses.
-
-mod common;
+//! `crates/components/camel-component-mcp/tests/server_protocol_test.rs` uses.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
