@@ -35,6 +35,7 @@ async fn main() -> Result<(), CamelError> {
     //   backend = "redb"
     //   path = "data/cache.redb"
     //   stale_retention = "168h"
+    //   cache_size = "256MiB"
 
     let routes_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("routes.yaml");
     let routes = load_from_file(&routes_path)?;

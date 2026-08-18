@@ -1,4 +1,7 @@
-use crate::config::{CamelConfig, KubernetesPlatformCamelConfig, PlatformCamelConfig};
+use crate::config::{
+    CacheRepoConfig, CamelConfig, KubernetesPlatformCamelConfig, PlatformCamelConfig,
+    parse_byte_size,
+};
 #[cfg(feature = "otel")]
 use crate::config::{OtelProtocol, OtelSampler};
 use crate::discovery::discover_routes_with_threshold;
@@ -21,6 +24,7 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -97,6 +101,71 @@ impl HealthSource for ContextHealthSource {
     async fn startup(&self) -> HealthStatus {
         HealthStatus::Healthy
     }
+}
+
+/// Build the redb-backed persistent cache repository from a validated
+/// `CacheRepoConfig`. Re-parses the byte-size and duration fields with strict
+/// error propagation — defense in depth for the (post-`validate()`) unreachable
+/// failure paths, so a malformed value is never silently coerced.
+async fn build_persistent_cache_repo(
+    ccfg: &CacheRepoConfig,
+    shutdown_token: CancellationToken,
+) -> Result<camel_core::cache::RedbCacheRepository, CamelError> {
+    let path: std::path::PathBuf = ccfg
+        .path
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CamelError::Config("cache_repo.path must be set when backend is \"redb\"".to_string())
+        })?
+        .into();
+
+    let cache_size = ccfg
+        .cache_size
+        .as_deref()
+        .ok_or_else(|| {
+            CamelError::Config(
+                "cache_repo.cache_size must be set when backend is \"redb\"".to_string(),
+            )
+        })
+        .and_then(|s| parse_byte_size(s).map_err(CamelError::Config))?;
+
+    let stale_retention = match ccfg.stale_retention.as_deref() {
+        None => std::time::Duration::from_secs(7 * 24 * 3600),
+        Some(s) => humantime::parse_duration(s).map_err(|_| {
+            CamelError::Config(format!(
+                "cache_repo.stale_retention: invalid duration '{s}'"
+            ))
+        })?,
+    };
+
+    let sweep_interval = match ccfg.sweep_interval.as_deref() {
+        None => std::time::Duration::from_secs(3600),
+        Some(s) => {
+            let parsed = humantime::parse_duration(s).map_err(|_| {
+                CamelError::Config(format!("cache_repo.sweep_interval: invalid duration '{s}'"))
+            })?;
+            if parsed.is_zero() {
+                return Err(CamelError::Config(
+                    "cache_repo.sweep_interval must be positive (greater than zero)".to_string(),
+                ));
+            }
+            parsed
+        }
+    };
+
+    let max_entries = ccfg.max_entries.unwrap_or(1_000_000);
+
+    camel_core::cache::RedbCacheRepository::new(
+        "persistent",
+        path,
+        stale_retention,
+        Some(max_entries),
+        cache_size,
+        sweep_interval,
+        shutdown_token,
+    )
+    .await
 }
 
 impl CamelConfig {
@@ -236,23 +305,7 @@ impl CamelConfig {
         if let Some(ref ccfg) = config.cache_repo {
             match ccfg.backend.as_str() {
                 "redb" => {
-                    let path: std::path::PathBuf = ccfg.path.as_deref().unwrap_or("").into();
-                    let stale_retention: std::time::Duration = ccfg
-                        .stale_retention
-                        .as_deref()
-                        .and_then(|s| humantime::parse_duration(s).ok())
-                        .unwrap_or(std::time::Duration::from_secs(7 * 24 * 3600));
-                    let sweep_interval = std::time::Duration::from_secs(3600); // 1h default
-                    let max_entries = ccfg.max_entries.unwrap_or(1_000_000);
-                    let repo = camel_core::cache::RedbCacheRepository::new(
-                        "persistent",
-                        path,
-                        stale_retention,
-                        Some(max_entries),
-                        sweep_interval,
-                        ctx.shutdown_token(),
-                    )
-                    .await?;
+                    let repo = build_persistent_cache_repo(ccfg, ctx.shutdown_token()).await?;
                     ctx.register_cache_repository("persistent", Arc::new(repo))
                         .map_err(|e| {
                             CamelError::Config(format!(
@@ -1547,5 +1600,174 @@ mod context_health_source_tests {
 
         assert_eq!(report.status, HealthStatus::Healthy);
         assert!(report.services.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_config(
+        path: String,
+        cache_size: Option<&str>,
+        sweep_interval: Option<&str>,
+        stale_retention: Option<&str>,
+    ) -> CacheRepoConfig {
+        CacheRepoConfig {
+            backend: "redb".to_string(),
+            max_capacity: None,
+            path: Some(path),
+            cache_size: cache_size.map(str::to_string),
+            stale_retention: stale_retention.map(str::to_string),
+            sweep_interval: sweep_interval.map(str::to_string),
+            max_entries: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn factory_passes_cache_size_and_sweep_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.redb").to_string_lossy().to_string();
+        let cfg = repo_config(path, Some("512MiB"), Some("30m"), None);
+
+        let repo = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(repo.cache_size(), 536_870_912);
+        assert_eq!(repo.sweep_interval(), Duration::from_secs(1800));
+    }
+
+    #[tokio::test]
+    async fn factory_defaults_sweep_interval_to_one_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.redb").to_string_lossy().to_string();
+        let cfg = repo_config(path, Some("512MiB"), None, None);
+
+        let repo = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(repo.sweep_interval(), Duration::from_secs(3600));
+    }
+
+    #[tokio::test]
+    async fn factory_defaults_stale_retention_to_seven_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.redb").to_string_lossy().to_string();
+        let cfg = repo_config(path, Some("512MiB"), Some("30m"), None);
+
+        let repo = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(repo.stale_retention(), Duration::from_secs(7 * 24 * 3600));
+    }
+
+    #[tokio::test]
+    async fn omitted_stale_retention_falls_back_in_wiring_for_redb() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.redb").to_string_lossy().to_string();
+        let cfg = repo_config(path, Some("256MiB"), None, None);
+
+        let repo = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(repo.stale_retention(), Duration::from_secs(7 * 24 * 3600));
+    }
+
+    #[tokio::test]
+    async fn factory_rejects_malformed_sweep_interval() {
+        let cfg = repo_config(
+            "/tmp/never-opened.redb".to_string(),
+            Some("512MiB"),
+            Some("1x"),
+            None,
+        );
+
+        let err = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CamelError::Config(_)));
+        assert!(
+            err.to_string().contains("cache_repo.sweep_interval"),
+            "error must name cache_repo.sweep_interval: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn factory_rejects_zero_sweep_interval() {
+        let cfg = repo_config(
+            "/tmp/never-opened.redb".to_string(),
+            Some("512MiB"),
+            Some("0s"),
+            None,
+        );
+
+        let err = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CamelError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn factory_rejects_malformed_cache_size() {
+        let cfg = repo_config(
+            "/tmp/never-opened.redb".to_string(),
+            Some("thirty"),
+            Some("30m"),
+            None,
+        );
+
+        let err = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CamelError::Config(_)));
+        assert!(
+            err.to_string().contains("cache_repo.cache_size"),
+            "error must name cache_repo.cache_size: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn factory_rejects_missing_cache_size() {
+        let cfg = repo_config(
+            "/tmp/never-opened.redb".to_string(),
+            None,
+            Some("30m"),
+            None,
+        );
+
+        let err = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CamelError::Config(_)));
+        assert!(
+            err.to_string().contains("cache_repo.cache_size"),
+            "error must name cache_repo.cache_size: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn factory_rejects_missing_path() {
+        let cfg = CacheRepoConfig {
+            backend: "redb".to_string(),
+            max_capacity: None,
+            path: None,
+            cache_size: Some("256MiB".to_string()),
+            stale_retention: None,
+            sweep_interval: None,
+            max_entries: None,
+        };
+
+        let err = build_persistent_cache_repo(&cfg, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CamelError::Config(_)));
+        assert!(
+            err.to_string().contains("cache_repo.path"),
+            "error must name cache_repo.path: {err}"
+        );
     }
 }

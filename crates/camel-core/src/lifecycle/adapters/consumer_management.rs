@@ -1024,18 +1024,39 @@ mod tests {
         // natural completion.
         use tracing_subscriber::prelude::*;
         let warn_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let warn_seen_clone = warn_seen.clone();
 
-        let layer = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::sink)
-            .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
-                if meta.level() == &tracing::Level::WARN {
-                    warn_seen_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Count only real dispatched warns from this module. A `filter_fn`
+        // side-effect is unusable here: filter callbacks also run during
+        // callsite interest registration, so any warn callsite visible in the
+        // process (other tests' emissions, incl. same-module ones) trips an
+        // unscoped or target-scoped level check (bd rc-u9hs family).
+        // `on_event` fires only for events actually dispatched to this layer.
+        struct WarnCounter {
+            seen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl<C> tracing_subscriber::Layer<C> for WarnCounter
+        where
+            C: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+        {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, C>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN
+                    && event.metadata().target()
+                        == "camel_core::lifecycle::adapters::consumer_management"
+                {
+                    self.seen.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
-                true
-            }));
+            }
+        }
 
-        let _guard = tracing_subscriber::registry().with(layer).set_default();
+        let _guard = tracing_subscriber::registry()
+            .with(WarnCounter {
+                seen: warn_seen.clone(),
+            })
+            .set_default();
 
         struct ImmediateOkConsumer;
         #[async_trait]

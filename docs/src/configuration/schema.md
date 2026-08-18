@@ -282,6 +282,22 @@ Persistent idempotent repository for the [Idempotent Consumer](../eip/idempotent
 | `path` | string | (required) | Path to the `.redb` file. Must not be empty. |
 | `durability` | string | `"immediate"` | `immediate` fsyncs on every key. `eventual` skips fsync. |
 
+## [cache_repo]
+
+Optional cache repository configuration. When unset, only the default `"memory"` cache repository is registered. With `backend = "redb"`, a persistent `"persistent"` repository (redb-backed) is registered alongside `"memory"`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backend` | string | `"memory"` | `"memory"` (moka-backed, size-eviction only) or `"redb"` (persistent, survives restarts). |
+| `path` | string | (required for redb) | Path to the `.redb` file. Created if it does not exist. Must not be empty. |
+| `stale_retention` | duration string | `7d` (wiring fallback) | How long after expiry a stale entry survives before the sweep reclaims it. Redb only. Accepts `"168h"`, `"7d"`, `"1w"`. |
+| `max_entries` | integer | `1000000` | Maximum entry count for the redb backend; new-key writes are rejected at the cap. Redb only. |
+| `cache_size` | byte-size string | (required for redb) | Bounds the redb page cache, e.g. `"384MB"`, `"256MiB"`, or plain bytes (`1073741824`). Decimal suffixes are powers of 1000, binary suffixes powers of 1024. Redb only. |
+| `sweep_interval` | duration string | `1h` | How often the redb background sweep runs. Must be positive. Redb only. |
+| `max_capacity` | integer | `10000` (default memory repo) | Entry cap for the memory backend. Memory only. |
+
+Fields that do not apply to the configured `backend` are rejected at validation (fail-closed), and a malformed `cache_size`, `sweep_interval`, or `stale_retention` fails validation with an error naming the field.
+
 ## [stream_caching]
 
 The [Stream Cache](../steps/stream-cache.md) step buffers stream bodies past a threshold so the body can be read more than once. The cache applies to the whole runtime, not per route.

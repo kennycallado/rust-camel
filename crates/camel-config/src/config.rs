@@ -529,7 +529,9 @@ pub struct RedbIdempotentConfig {
 /// [default.cache_repo]
 /// backend = "redb"
 /// path = "cache.redb"
+/// cache_size = "256MiB"
 /// stale_retention = "168h"
+/// sweep_interval = "1h"
 /// max_entries = 1_000_000
 /// ```
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -549,11 +551,23 @@ pub struct CacheRepoConfig {
     #[serde(default)]
     pub path: Option<String>,
 
+    /// Maximum on-disk size of the redb cache file. Required when
+    /// `backend = "redb"`. Accepts human-readable sizes like "256MiB",
+    /// "384MB", or plain bytes (e.g. "268435456").
+    #[serde(default)]
+    pub cache_size: Option<String>,
+
     /// How long after expiry a stale entry survives before the sweep reclaims it.
     /// Redb backend only. Accepts human-readable strings like "168h", "7d", "1w".
-    /// Default: "168h" (7 days).
+    /// When omitted, deserializes as `None`; the redb wiring then falls back to
+    /// 7 days (168h).
     #[serde(default = "default_stale_retention")]
     pub stale_retention: Option<String>,
+
+    /// How often the stale-entry sweep runs. Redb backend only. Accepts
+    /// human-readable durations like "1h", "30m". Must be positive.
+    #[serde(default)]
+    pub sweep_interval: Option<String>,
 
     /// Maximum entry count for the redb backend. Default: 1_000_000.
     #[serde(default)]
@@ -565,7 +579,98 @@ fn default_cache_backend() -> String {
 }
 
 fn default_stale_retention() -> Option<String> {
-    Some("168h".to_string())
+    None
+}
+
+/// Parse a human-readable byte size (used by `cache_repo.cache_size`).
+///
+/// Suffixes are case-insensitive and no space may separate the number from the
+/// suffix: `b`, `kb`, `kib`, `mb`, `mib`, `gb`, `gib`. `kb`/`mb`/`gb` are
+/// decimal powers of 1000; `kib`/`mib`/`gib` are binary powers of 1024. A bare
+/// number counts as plain bytes. Returns `Err` naming the field on invalid
+/// input or when the value does not fit in `usize`.
+pub(crate) fn parse_byte_size(s: &str) -> Result<usize, String> {
+    const SUFFIXES: [(&str, u128); 7] = [
+        ("gib", 1_073_741_824),
+        ("gb", 1_000_000_000),
+        ("mib", 1_048_576),
+        ("mb", 1_000_000),
+        ("kib", 1_024),
+        ("kb", 1_000),
+        ("b", 1),
+    ];
+
+    let trimmed = s.trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    for (suffix, factor) in SUFFIXES {
+        if let Some(num) = lower.strip_suffix(suffix) {
+            let value = num
+                .parse::<u128>()
+                .map_err(|_| format!("cache_repo.cache_size: invalid byte size '{trimmed}'"))?;
+            let bytes = value.checked_mul(factor).ok_or_else(|| {
+                format!("cache_repo.cache_size: overflow in byte size '{trimmed}'")
+            })?;
+            return usize::try_from(bytes)
+                .map_err(|_| format!("cache_repo.cache_size: overflow in byte size '{trimmed}'"));
+        }
+    }
+
+    // No suffix: treat the whole input as plain bytes.
+    let value = trimmed
+        .parse::<u128>()
+        .map_err(|_| format!("cache_repo.cache_size: invalid byte size '{trimmed}'"))?;
+    usize::try_from(value)
+        .map_err(|_| format!("cache_repo.cache_size: overflow in byte size '{trimmed}'"))
+}
+
+#[cfg(test)]
+mod byte_size_tests {
+    use super::parse_byte_size;
+
+    #[test]
+    fn parses_plain_bytes() {
+        assert_eq!(parse_byte_size("4096"), Ok(4096));
+    }
+
+    #[test]
+    fn parses_decimal_and_binary_mb() {
+        assert_eq!(parse_byte_size("384MB"), Ok(384_000_000));
+        assert_eq!(parse_byte_size("512MiB"), Ok(536_870_912));
+    }
+
+    #[test]
+    fn parses_case_insensitive_suffix() {
+        assert_eq!(parse_byte_size("256mib"), Ok(268_435_456));
+    }
+
+    #[test]
+    fn parses_gb_and_gib() {
+        assert_eq!(parse_byte_size("1GB"), Ok(1_000_000_000));
+        assert_eq!(parse_byte_size("1GiB"), Ok(1_073_741_824));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        let err = parse_byte_size("thirty").unwrap_err();
+        assert!(err.contains("cache_repo.cache_size"), "err: {err}");
+    }
+
+    #[test]
+    fn rejects_unknown_suffix() {
+        assert!(parse_byte_size("5XB").is_err());
+    }
+
+    #[test]
+    fn rejects_space_between_number_and_suffix() {
+        assert!(parse_byte_size("512 MiB").is_err());
+    }
+
+    #[test]
+    fn rejects_overflow() {
+        let err = parse_byte_size("18446744073709551616B").unwrap_err();
+        assert!(err.contains("overflow"), "err: {err}");
+    }
 }
 
 impl Default for CacheRepoConfig {
@@ -574,7 +679,9 @@ impl Default for CacheRepoConfig {
             backend: default_cache_backend(),
             max_capacity: None,
             path: None,
+            cache_size: None,
             stale_retention: None,
+            sweep_interval: None,
             max_entries: None,
         }
     }
@@ -1196,7 +1303,44 @@ impl CamelConfig {
                     )));
                 }
             }
+            if cache.backend == "memory" {
+                if cache.path.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.path does not apply to the \"memory\" backend".to_string(),
+                    ));
+                }
+                if cache.cache_size.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.cache_size does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.stale_retention.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.stale_retention does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.sweep_interval.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.sweep_interval does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.max_entries.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.max_entries does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+            }
             if cache.backend == "redb" {
+                if cache.max_capacity.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.max_capacity does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
                 let path_empty = match &cache.path {
                     None => true,
                     Some(p) => p.is_empty(),
@@ -1205,6 +1349,33 @@ impl CamelConfig {
                     return Err(CamelError::Config(
                         "cache_repo.path must be set when backend is \"redb\"".to_string(),
                     ));
+                }
+                let cache_size = cache.cache_size.as_deref().ok_or_else(|| {
+                    CamelError::Config(
+                        "cache_repo.cache_size must be set when backend is \"redb\" (e.g. \"256MiB\", \"384MB\", plain bytes)"
+                            .to_string(),
+                    )
+                })?;
+                parse_byte_size(cache_size).map_err(CamelError::Config)?;
+                if let Some(sweep) = cache.sweep_interval.as_deref() {
+                    let parsed = humantime::parse_duration(sweep).map_err(|_| {
+                        CamelError::Config(format!(
+                            "cache_repo.sweep_interval: invalid duration '{sweep}'"
+                        ))
+                    })?;
+                    if parsed.is_zero() {
+                        return Err(CamelError::Config(
+                            "cache_repo.sweep_interval must be positive (greater than zero)"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let Some(stale) = cache.stale_retention.as_deref() {
+                    humantime::parse_duration(stale).map_err(|_| {
+                        CamelError::Config(format!(
+                            "cache_repo.stale_retention: invalid duration '{stale}'"
+                        ))
+                    })?;
                 }
             }
         }

@@ -15,6 +15,7 @@
 
 use std::fmt;
 use std::ops::Bound;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -46,13 +47,18 @@ const CACHE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("cache_en
 /// Redb-backed implementation of [`CacheRepository`].
 ///
 /// All counters are `Arc<AtomicU64>` so the spawned sweep task can update
-/// them via cloned references. `sweep_interval` is consumed by the
-/// constructor to build the ticker and is not stored.
+/// them via cloned references. `cache_size`, `sweep_interval`, and
+/// `stale_retention` are retained so the propagation seam required by the
+/// eip-cache spec can expose them via accessors.
 pub struct RedbCacheRepository {
     name: String,
     db: Arc<redb::Database>,
     stale_retention: Duration,
     max_entries: Option<usize>,
+    /// redb page-cache size in bytes, passed to `redb::Builder::set_cache_size`.
+    cache_size: usize,
+    /// Recorded background-sweep interval, consumed by the spawned sweep task.
+    sweep_interval: Duration,
     hits: Arc<AtomicU64>,
     misses: Arc<AtomicU64>,
     evictions: Arc<AtomicU64>,
@@ -83,6 +89,7 @@ impl RedbCacheRepository {
         path: impl Into<PathBuf>,
         stale_retention: Duration,
         max_entries: Option<usize>,
+        cache_size: usize,
         sweep_interval: Duration,
         shutdown_token: CancellationToken,
     ) -> Result<Self, CamelError> {
@@ -94,7 +101,9 @@ impl RedbCacheRepository {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| CamelError::Io(format!("redb create_dir_all: {e}")))?;
             }
-            let db = redb::Database::create(&path_for_db)
+            let db = redb::Builder::new()
+                .set_cache_size(cache_size)
+                .create(&path_for_db)
                 .map_err(|e| CamelError::Io(format!("redb open: {e}")))?;
             // Create the table on first open AND read the persisted entry
             // count in a single write txn so the counter survives reopen.
@@ -127,6 +136,15 @@ impl RedbCacheRepository {
         let peek_stale_served = Arc::new(AtomicU64::new(0));
         let invalidations = Arc::new(AtomicU64::new(0));
         let entries = Arc::new(AtomicU64::new(initial_len));
+
+        // Container memory guardrail — diagnostic only, never fails
+        // construction. Warns once when the redb page cache cannot fit within
+        // the container's cgroup memory limit.
+        emit_memory_guardrail(
+            cache_size,
+            Path::new("/sys/fs/cgroup/memory.max"),
+            Path::new("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+        );
 
         // Spawn the sweep loop. All shared state is captured as cloned Arcs;
         // the context token clone drives termination.
@@ -161,6 +179,8 @@ impl RedbCacheRepository {
             db,
             stale_retention,
             max_entries,
+            cache_size,
+            sweep_interval,
             hits,
             misses,
             evictions,
@@ -170,6 +190,22 @@ impl RedbCacheRepository {
             shutdown_token,
             sweep_handle: Mutex::new(Some(handle)),
         })
+    }
+
+    /// Recorded redb page-cache size in bytes (propagation seam for the
+    /// eip-cache spec).
+    pub fn cache_size(&self) -> usize {
+        self.cache_size
+    }
+
+    /// Recorded background-sweep interval.
+    pub fn sweep_interval(&self) -> std::time::Duration {
+        self.sweep_interval
+    }
+
+    /// Recorded stale-retention window.
+    pub fn stale_retention(&self) -> std::time::Duration {
+        self.stale_retention
     }
 
     /// Run a single reclamation pass and return the number of entries
@@ -187,6 +223,47 @@ impl RedbCacheRepository {
         let sub = std::cmp::min(current, reclaimed);
         self.entries.fetch_sub(sub, Ordering::Relaxed);
         Ok(reclaimed)
+    }
+}
+
+// ── Memory guardrail ──────────────────────────────────────────────────────────
+
+/// Read the container memory limit (bytes) from the cgroup filesystem,
+/// preferring cgroup v2 (`memory.max`) with cgroup v1
+/// (`memory.limit_in_bytes`) as fallback.
+///
+/// v2 `"max"` (unlimited) or unparseable content falls through to v1; a v1
+/// value above 16 TiB is the v1 "unlimited" sentinel and is reported as no
+/// limit. Missing/unreadable files at either path fall through to `None`.
+/// All reads are best-effort (`std::fs::read_to_string(...).ok()`) — this is a
+/// diagnostic seam, never a failure path.
+pub(crate) fn memory_limit_from_paths(v2: &Path, v1: &Path) -> Option<u64> {
+    if let Ok(content) = std::fs::read_to_string(v2)
+        && let Ok(bytes) = content.trim().parse::<u64>()
+    {
+        return Some(bytes);
+    }
+    if let Ok(content) = std::fs::read_to_string(v1)
+        && let Ok(bytes) = content.trim().parse::<u64>()
+        // cgroup v1 "unlimited" sentinel: anything above 16 TiB.
+        && bytes <= 17_592_186_044_416
+    {
+        return Some(bytes);
+    }
+    None
+}
+
+/// Diagnostic-only guardrail: when the configured redb cache size exceeds the
+/// container's cgroup memory limit, emit a single warning naming both values.
+/// Never fails — a missing limit or unreadable files simply skip the warning.
+pub(crate) fn emit_memory_guardrail(cache_size: usize, v2: &Path, v1: &Path) {
+    let cache_size = cache_size as u64;
+    if let Some(limit) = memory_limit_from_paths(v2, v1)
+        && cache_size > limit
+    {
+        tracing::warn!(
+            "redb cache_size ({cache_size} bytes) exceeds container memory limit ({limit} bytes)"
+        );
     }
 }
 
@@ -598,6 +675,8 @@ impl fmt::Debug for RedbCacheRepository {
             .field("name", &self.name)
             .field("stale_retention", &self.stale_retention)
             .field("max_entries", &self.max_entries)
+            .field("cache_size", &self.cache_size)
+            .field("sweep_interval", &self.sweep_interval)
             .field("shutdown_cancelled", &self.shutdown_token.is_cancelled())
             .finish()
     }
@@ -628,20 +707,113 @@ mod tests {
     }
 
     /// Open a repo at `<tmp>/cache.redb` with a 60s stale-retention, no cap,
-    /// and a 1h sweep interval (so the background loop stays dormant during
-    /// sequential tests).
+    /// a 256 MiB cache size, and a 1h sweep interval (so the background loop
+    /// stays dormant during sequential tests).
     async fn new_repo(tmp: &TempDir, shutdown_token: CancellationToken) -> RedbCacheRepository {
+        new_repo_with(
+            tmp,
+            shutdown_token,
+            Duration::from_secs(60),
+            None,
+            256 * 1024 * 1024,
+            Duration::from_secs(3600),
+        )
+        .await
+    }
+
+    /// Full-parameter variant of [`new_repo`] for tests that need custom
+    /// stale-retention, cap, cache size, or sweep interval values.
+    async fn new_repo_with(
+        tmp: &TempDir,
+        shutdown_token: CancellationToken,
+        stale_retention: Duration,
+        max_entries: Option<usize>,
+        cache_size: usize,
+        sweep_interval: Duration,
+    ) -> RedbCacheRepository {
         let path = tmp.path().join("cache.redb");
         RedbCacheRepository::new(
             "redb",
             path,
-            Duration::from_secs(60),
-            None,
-            Duration::from_secs(3600),
+            stale_retention,
+            max_entries,
+            cache_size,
+            sweep_interval,
             shutdown_token,
         )
         .await
         .expect("open redb cache repo")
+    }
+
+    #[tokio::test]
+    async fn cache_size_recorded_and_accessible() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo_with(
+            &dir,
+            token,
+            Duration::from_secs(60),
+            None,
+            536_870_912,
+            Duration::from_secs(3600),
+        )
+        .await;
+        assert_eq!(repo.cache_size(), 536_870_912);
+    }
+
+    #[tokio::test]
+    async fn sweep_interval_recorded_and_accessible() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo_with(
+            &dir,
+            token,
+            Duration::from_secs(60),
+            None,
+            256 * 1024 * 1024,
+            Duration::from_secs(1800),
+        )
+        .await;
+        assert_eq!(repo.sweep_interval(), Duration::from_secs(1800));
+    }
+
+    #[tokio::test]
+    async fn stale_retention_recorded_and_accessible() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo_with(
+            &dir,
+            token,
+            Duration::from_secs(3600),
+            None,
+            256 * 1024 * 1024,
+            Duration::from_secs(3600),
+        )
+        .await;
+        assert_eq!(repo.stale_retention(), Duration::from_secs(3600));
+    }
+
+    #[tokio::test]
+    async fn explicit_cache_size_round_trip() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo_with(
+            &dir,
+            token,
+            Duration::from_secs(60),
+            None,
+            512 * 1024 * 1024,
+            Duration::from_secs(3600),
+        )
+        .await;
+        repo.set("k", entry(), Some(Duration::from_secs(3600)))
+            .await
+            .expect("set");
+        let found = repo.get("k").await.expect("get");
+        assert!(
+            found.is_some(),
+            "entry must round-trip through the builder-opened database"
+        );
     }
 
     #[tokio::test]
@@ -660,6 +832,7 @@ mod tests {
                 path.clone(),
                 Duration::from_secs(60),
                 None,
+                256 * 1024 * 1024,
                 Duration::from_secs(3600),
                 token,
             )
@@ -694,6 +867,7 @@ mod tests {
             path,
             Duration::from_secs(60),
             None,
+            256 * 1024 * 1024,
             Duration::from_secs(3600),
             token2,
         )
@@ -739,6 +913,7 @@ mod tests {
             path,
             Duration::from_millis(10),
             None,
+            256 * 1024 * 1024,
             Duration::from_secs(3600),
             token,
         )
@@ -778,6 +953,7 @@ mod tests {
             path,
             Duration::from_secs(60),
             None,
+            256 * 1024 * 1024,
             Duration::from_millis(10),
             token.clone(),
         )
@@ -810,6 +986,7 @@ mod tests {
             path,
             Duration::from_secs(60),
             None,
+            256 * 1024 * 1024,
             Duration::from_secs(3600),
             CancellationToken::new(),
         )
@@ -864,6 +1041,7 @@ mod tests {
             path,
             Duration::from_secs(60),
             Some(2),
+            256 * 1024 * 1024,
             Duration::from_secs(3600),
             token,
         )
@@ -936,6 +1114,98 @@ mod tests {
         );
     }
 
+    // ── cgroup memory-limit guardrail ─────────────────────────────────────────
+
+    /// Runs `f` under a thread-local default `fmt` subscriber that appends into
+    /// a shared buffer, then returns the captured text.
+    fn capture_guardrail(f: impl FnOnce()) -> String {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+            .with_writer(TestWriter {
+                buf: Arc::clone(&buf),
+            })
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let captured = buf.lock().clone();
+        String::from_utf8(captured).expect("captured output must be UTF-8")
+    }
+
+    /// `fmt` writer that appends into a shared `Arc<Mutex<Vec<u8>>>`.
+    struct TestWriter {
+        buf: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for TestWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.buf.lock().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TestWriter {
+        type Writer = TestWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            TestWriter {
+                buf: Arc::clone(&self.buf),
+            }
+        }
+    }
+
+    #[test]
+    fn cgroup_v2_limit_parsed() {
+        let dir = tempdir().expect("tempdir");
+        let v2 = dir.path().join("memory.max");
+        std::fs::write(&v2, "805306368\n").expect("write v2");
+        let missing_v1 = dir.path().join("missing-v1");
+        assert_eq!(memory_limit_from_paths(&v2, &missing_v1), Some(805_306_368));
+    }
+
+    #[test]
+    fn cgroup_v2_max_means_unlimited() {
+        let dir = tempdir().expect("tempdir");
+        let v2 = dir.path().join("memory.max");
+        std::fs::write(&v2, "max").expect("write v2");
+        let missing_v1 = dir.path().join("missing-v1");
+        assert_eq!(memory_limit_from_paths(&v2, &missing_v1), None);
+    }
+
+    #[test]
+    fn cgroup_v2_malformed_falls_through() {
+        let dir = tempdir().expect("tempdir");
+        let v2 = dir.path().join("memory.max");
+        std::fs::write(&v2, "not-a-number").expect("write v2");
+        let v1 = dir.path().join("memory.limit_in_bytes");
+        std::fs::write(&v1, "1073741824").expect("write v1");
+        assert_eq!(memory_limit_from_paths(&v2, &v1), Some(1_073_741_824));
+    }
+
+    #[test]
+    fn cgroup_v1_sentinel_unlimited() {
+        let dir = tempdir().expect("tempdir");
+        let missing_v2 = dir.path().join("missing-v2");
+        let v1 = dir.path().join("memory.limit_in_bytes");
+        std::fs::write(&v1, "9223372036854771712").expect("write v1");
+        assert_eq!(memory_limit_from_paths(&missing_v2, &v1), None);
+    }
+
+    #[test]
+    fn cgroup_v1_exactly_16tib_is_a_limit() {
+        let dir = tempdir().expect("tempdir");
+        let missing_v2 = dir.path().join("missing-v2");
+        let v1 = dir.path().join("memory.limit_in_bytes");
+        std::fs::write(&v1, "17592186044416\n").expect("write v1");
+        assert_eq!(
+            memory_limit_from_paths(&missing_v2, &v1),
+            Some(17_592_186_044_416)
+        );
+    }
+
     #[test]
     fn successor_bound_unit_tests() {
         assert_eq!(
@@ -988,5 +1258,54 @@ mod tests {
             .await
             .expect("invalidate_prefix");
         assert_eq!(deleted, 0, "absent namespace must report zero removals");
+    }
+
+    #[test]
+    fn cgroup_files_missing() {
+        let dir = tempdir().expect("tempdir");
+        let missing_v2 = dir.path().join("missing-v2");
+        let missing_v1 = dir.path().join("missing-v1");
+        assert_eq!(memory_limit_from_paths(&missing_v2, &missing_v1), None);
+    }
+
+    #[test]
+    fn guardrail_warns_when_exceeds() {
+        let dir = tempdir().expect("tempdir");
+        let v2 = dir.path().join("memory.max");
+        std::fs::write(&v2, "805306368\n").expect("write v2");
+        let missing_v1 = dir.path().join("missing-v1");
+        let output = capture_guardrail(|| {
+            emit_memory_guardrail(1_073_741_824, &v2, &missing_v1);
+        });
+        assert!(output.contains("1073741824"), "output: {output}");
+        assert!(output.contains("805306368"), "output: {output}");
+        assert_eq!(
+            output.matches("exceeds container memory limit").count(),
+            1,
+            "warn line must appear exactly once: {output}"
+        );
+    }
+
+    #[test]
+    fn guardrail_silent_when_fits() {
+        let dir = tempdir().expect("tempdir");
+        let v2 = dir.path().join("memory.max");
+        std::fs::write(&v2, "805306368\n").expect("write v2");
+        let missing_v1 = dir.path().join("missing-v1");
+        let output = capture_guardrail(|| {
+            emit_memory_guardrail(268_435_456, &v2, &missing_v1);
+        });
+        assert!(output.is_empty(), "expected no output, got: {output}");
+    }
+
+    #[test]
+    fn guardrail_silent_when_files_missing() {
+        let dir = tempdir().expect("tempdir");
+        let missing_v2 = dir.path().join("missing-v2");
+        let missing_v1 = dir.path().join("missing-v1");
+        let output = capture_guardrail(|| {
+            emit_memory_guardrail(1_073_741_824, &missing_v2, &missing_v1);
+        });
+        assert!(output.is_empty(), "expected no output, got: {output}");
     }
 }

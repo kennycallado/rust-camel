@@ -117,6 +117,9 @@ entries is per-backend:
   for an in-process cache bounded by `max_capacity`.
 - **Redb:** a background sweep task runs at a configurable interval (default
   `60s`) and deletes entries whose `expires_at + retention < now`.
+
+> Amendment (2026-08-18): the 60s default documented above never shipped — the wiring hardcoded 1h. `sweep_interval` now makes the interval configurable via `[default.cache_repo]`; the default stays 1h because an O(N) sweep over a large persistent cache costs more than delayed reclamation.
+
 - **Redis:** `EXPIRE` / `PEXPIRE` handles reclamation natively (the entry is
   deleted at the Redis server level when the TTL expires).
 

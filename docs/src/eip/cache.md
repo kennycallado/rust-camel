@@ -72,7 +72,7 @@ The control plane also accepts the five cache steps. A `CanonicalRouteSpec` sent
 
 Use the Cache pattern when a route computes the same result more than once. API responses, database lookups, and transform-heavy pipelines benefit from caching.
 
-The default repository is `"memory"` (moka-backed, size-eviction only). A persistent `"persistent"` repository (redb-backed) is available when `[default.cache_repo] backend = "redb"` is set. The redb backend survives process restarts. Its sweep task reclaims entries whose `expires_at + stale_retention` has passed. The memory backend does not run a sweep. Expired entries stay in memory until size pressure evicts them.
+The default repository is `"memory"` (moka-backed, size-eviction only). A persistent `"persistent"` repository (redb-backed) is available when `[default.cache_repo] backend = "redb"` is set. The redb backend survives process restarts. Its sweep task reclaims entries whose `expires_at + stale_retention` has passed. The memory backend does not run a sweep. Expired entries stay in memory until size pressure evicts them. `cache_size` is required for the redb backend (for example, `cache_size = "256MiB"`), bounding the redb page cache; `sweep_interval` is optional (default 1h).
 
 The Cache differs from the [Claim Check](claim-check.md) and the [Idempotent Consumer](idempotent-consumer.md). All three use a repository trait. The Cache stores the full computed body with a TTL. The Claim Check stores the original payload without a TTL. The Idempotent Consumer stores only the deduplication key. A route that needs all three can chain them.
 

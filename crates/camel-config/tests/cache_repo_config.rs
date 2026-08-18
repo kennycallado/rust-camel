@@ -24,7 +24,7 @@ fn make_cfg(toml: &str) -> CamelConfig {
 // ── Test 1: redb backed persistent repo registered ────────────────────────
 
 #[tokio::test]
-async fn redb_registered_when_backend_redb() {
+async fn redb_with_cache_size_builds() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("cache.redb");
     let toml = format!(
@@ -32,6 +32,7 @@ async fn redb_registered_when_backend_redb() {
 [cache_repo]
 backend = "redb"
 path = "{}"
+cache_size = "256MiB"
 "#,
         db_path.to_str().unwrap()
     );
@@ -46,6 +47,76 @@ path = "{}"
     assert!(
         ctx.cache_repository("memory").is_some(),
         "default memory cache repository must still be present"
+    );
+}
+
+#[tokio::test]
+async fn redb_builds_with_cache_size_and_sweep_interval() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("cache.redb");
+    let toml = format!(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "{}"
+cache_size = "512MiB"
+sweep_interval = "30m"
+"#,
+        db_path.to_str().unwrap()
+    );
+
+    let cfg = make_cfg(&toml);
+    let ctx = CamelConfig::configure_context(&cfg).await.unwrap();
+
+    assert!(
+        ctx.cache_repository("persistent").is_some(),
+        "persistent cache repository must be registered when backend=redb"
+    );
+}
+
+#[tokio::test]
+async fn redb_builds_without_sweep_interval_using_default() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("cache.redb");
+    let toml = format!(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "{}"
+cache_size = "512MiB"
+"#,
+        db_path.to_str().unwrap()
+    );
+
+    let cfg = make_cfg(&toml);
+    let ctx = CamelConfig::configure_context(&cfg).await.unwrap();
+
+    assert!(
+        ctx.cache_repository("persistent").is_some(),
+        "persistent cache repository must be registered when backend=redb"
+    );
+}
+
+#[tokio::test]
+async fn redb_builds_without_stale_retention_using_default() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("cache.redb");
+    let toml = format!(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "{}"
+cache_size = "512MiB"
+"#,
+        db_path.to_str().unwrap()
+    );
+
+    let cfg = make_cfg(&toml);
+    let ctx = CamelConfig::configure_context(&cfg).await.unwrap();
+
+    assert!(
+        ctx.cache_repository("persistent").is_some(),
+        "persistent cache repository must be registered when backend=redb"
     );
 }
 
@@ -77,10 +148,7 @@ backend = "redb"
 "#,
     );
 
-    let err = cfg
-        .validate()
-        .expect_err("validation must fail when backend=redb without path");
-    let msg = err.to_string();
+    let msg = cfg.validate().unwrap_err().to_string();
     assert!(
         msg.contains("path"),
         "validation error must mention path, got: {msg}"
@@ -97,10 +165,7 @@ path = ""
 "#,
     );
 
-    let err = cfg
-        .validate()
-        .expect_err("validation must fail when backend=redb with empty path");
-    let msg = err.to_string();
+    let msg = cfg.validate().unwrap_err().to_string();
     assert!(
         msg.contains("path"),
         "validation error must mention path, got: {msg}"
@@ -116,13 +181,122 @@ backend = "postgres"
 "#,
     );
 
-    let err = cfg
-        .validate()
-        .expect_err("validation must fail for unknown backend");
-    let msg = err.to_string();
+    let msg = cfg.validate().unwrap_err().to_string();
     assert!(
         msg.contains("postgres") || msg.contains("backend"),
         "validation error must mention the invalid backend, got: {msg}"
+    );
+}
+
+// ── Test 3b: redb cache_size and interval validation ──────────────────────
+
+#[test]
+fn missing_cache_size_on_redb_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.cache_size"),
+        "validation error must mention cache_repo.cache_size, got: {msg}"
+    );
+}
+
+#[test]
+fn malformed_cache_size_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "thirty"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.cache_size"),
+        "validation error must mention cache_repo.cache_size, got: {msg}"
+    );
+}
+
+#[test]
+fn overflowing_cache_size_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "18446744073709551616B"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.cache_size"),
+        "validation error must mention cache_repo.cache_size, got: {msg}"
+    );
+}
+
+#[test]
+fn malformed_sweep_interval_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+sweep_interval = "1x"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sweep_interval"),
+        "validation error must mention cache_repo.sweep_interval, got: {msg}"
+    );
+}
+
+#[test]
+fn zero_sweep_interval_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+sweep_interval = "0s"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sweep_interval") && msg.contains("positive"),
+        "validation error must mention cache_repo.sweep_interval and require positive, got: {msg}"
+    );
+}
+
+#[test]
+fn malformed_stale_retention_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+stale_retention = "forever-ish"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.stale_retention"),
+        "validation error must mention cache_repo.stale_retention, got: {msg}"
     );
 }
 
@@ -207,6 +381,7 @@ fn profile_section_loads() {
 [default.cache_repo]
 backend = "redb"
 path = "cache.redb"
+cache_size = "256MiB"
 max_entries = 500
 stale_retention = "24h"
 "#;
@@ -244,4 +419,136 @@ backend = "memory"
     assert!(cache.path.is_none());
     assert!(cache.max_capacity.is_none());
     assert!(cache.max_entries.is_none());
+}
+
+// ── Test 7: cross-backend field rejection ─────────────────────────────────
+
+#[test]
+fn cache_size_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+cache_size = "512MiB"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.cache_size"),
+        "validation error must name cache_repo.cache_size as not applicable, got: {msg}"
+    );
+}
+
+#[test]
+fn path_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+path = "data/cache.redb"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.path"),
+        "validation error must name cache_repo.path as not applicable, got: {msg}"
+    );
+}
+
+#[test]
+fn stale_retention_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+stale_retention = "168h"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.stale_retention"),
+        "validation error must name cache_repo.stale_retention as not applicable, got: {msg}"
+    );
+}
+
+#[test]
+fn max_entries_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+max_entries = 100
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.max_entries"),
+        "validation error must name cache_repo.max_entries as not applicable, got: {msg}"
+    );
+}
+
+#[test]
+fn sweep_interval_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+sweep_interval = "30m"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sweep_interval"),
+        "validation error must name cache_repo.sweep_interval as not applicable, got: {msg}"
+    );
+}
+
+#[test]
+fn max_capacity_on_redb_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+max_capacity = 5000
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.max_capacity"),
+        "validation error must name cache_repo.max_capacity as not applicable, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn omitted_stale_retention_stays_none_on_memory() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+max_capacity = 5000
+"#,
+    );
+
+    let cache = cfg
+        .cache_repo
+        .as_ref()
+        .expect("cache_repo should be loaded");
+    assert!(
+        cache.stale_retention.is_none(),
+        "omitted stale_retention must deserialize as None on the memory backend"
+    );
+
+    let ctx = CamelConfig::configure_context(&cfg).await.unwrap();
+    assert!(
+        ctx.cache_repository("memory").is_some(),
+        "memory cache repository must be present"
+    );
 }
