@@ -13,6 +13,13 @@ Dependencies: `camel-api`, `noyalib`, `jsonschema`, `ariadne`, `serde`, `thiserr
 `lint(source: &str) -> Vec<Diagnostic>` parses the source, runs every rule, and returns
 diagnostics sorted by span position.
 
+**Editor support**: the same engine powers `complete_at` / `hover_at` for camel-lsp and the
+lint CLI. Completion covers scheme position, query-string option keys, and `parameters:`
+entry keys (catalog options minus query-declared keys, because the DSL lowering rejects
+the overlap) and values (enum variants, bool literals, or the default value). Hover
+resolves an option key in either the query string or a `parameters:` entry to its catalog
+metadata (description, deprecation, secret flag).
+
 **Rules** implement the `Rule` trait: `analyze(doc: &Document, catalog: &dyn ComponentMetadataCatalog) -> Vec<Diagnostic>`.
 The engine ships with 5 rules:
 
