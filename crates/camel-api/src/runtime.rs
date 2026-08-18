@@ -155,11 +155,26 @@ pub enum CanonicalStepSpec {
         key: String,
         ttl: Option<String>,
         max_entry_bytes: Option<usize>,
+        /// Coalesce concurrent misses on the same key into a single `on_miss`
+        /// run. Absent/null means `false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        coalesce_misses: Option<bool>,
         on_miss: Vec<CanonicalStepSpec>,
     },
     CacheInvalidate {
         repository: Option<String>,
-        key: String,
+        /// Exact key to invalidate (simple-language expression).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        /// Namespace prefix to invalidate (simple-language expression).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_prefix: Option<String>,
+    },
+    CacheClear {
+        repository: Option<String>,
+    },
+    CacheStats {
+        repository: Option<String>,
     },
     CachePeekStale {
         repository: Option<String>,
@@ -468,6 +483,8 @@ fn validate_steps(steps: &[CanonicalStepSpec]) -> Result<(), CamelError> {
             | CanonicalStepSpec::Stop
             | CanonicalStepSpec::Delay { .. }
             | CanonicalStepSpec::CacheInvalidate { .. }
+            | CanonicalStepSpec::CacheClear { .. }
+            | CanonicalStepSpec::CacheStats { .. }
             | CanonicalStepSpec::CachePeekStale { .. } => {}
         }
     }
@@ -1008,6 +1025,49 @@ mod tests {
         );
         let back: CanonicalStepSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(none, back);
+    }
+
+    #[test]
+    fn canonical_cache_invalidate_prefix_round_trip() {
+        let prefixed = CanonicalStepSpec::CacheInvalidate {
+            repository: Some("persistent".into()),
+            key: None,
+            key_prefix: Some("ns:".into()),
+        };
+        let json = serde_json::to_string(&prefixed).unwrap();
+        assert!(json.contains("key_prefix"), "must emit key_prefix: {json}");
+        let back: CanonicalStepSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(prefixed, back);
+
+        // Legacy wire form carrying only `key` still deserializes with
+        // `key_prefix: None` (no key-iteration field).
+        let legacy = r#"{"step":"cache_invalidate","config":{"repository":null,"key":"k"}}"#;
+        let parsed: CanonicalStepSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed,
+            CanonicalStepSpec::CacheInvalidate {
+                repository: None,
+                key: Some("k".into()),
+                key_prefix: None,
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_cache_clear_stats_round_trip() {
+        let clear = CanonicalStepSpec::CacheClear {
+            repository: Some("persistent".into()),
+        };
+        let json = serde_json::to_string(&clear).unwrap();
+        assert!(json.contains("cache_clear"));
+        let back: CanonicalStepSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(clear, back);
+
+        let stats = CanonicalStepSpec::CacheStats { repository: None };
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(json.contains("cache_stats"));
+        let back: CanonicalStepSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats, back);
     }
 
     #[test]

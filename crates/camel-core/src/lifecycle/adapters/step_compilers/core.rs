@@ -127,6 +127,7 @@ impl StepCompiler for CoreCompiler {
                 key,
                 ttl,
                 max_entry_bytes,
+                coalesce_misses,
                 on_miss,
             } => {
                 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
@@ -158,7 +159,8 @@ impl StepCompiler for CoreCompiler {
                     max_entry_bytes.unwrap_or(camel_api::body::DEFAULT_MATERIALIZE_LIMIT),
                     child_pipeline,
                     ctx.rt.clone(),
-                );
+                )
+                .with_coalesce(coalesce_misses);
                 Ok(CompileOutcome::Matched(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
@@ -167,15 +169,51 @@ impl StepCompiler for CoreCompiler {
             }
 
             // ── Cache Invalidate (Segment-mode) ──
-            BuilderStep::CacheInvalidate { repository, key } => {
+            BuilderStep::CacheInvalidate {
+                repository,
+                key,
+                key_prefix,
+            } => {
+                // Exactly one of `key` or `key_prefix` is required: both-None
+                // and both-Some fail closed at compile time with a Config
+                // error naming the step.
+                let (expr, as_prefix) = match (&key, &key_prefix) {
+                    (Some(expr), None) => (expr, false),
+                    (None, Some(expr)) => (expr, true),
+                    _ => {
+                        return Err(CamelError::Config(
+                            "cache_invalidate: exactly one of 'key' or 'key_prefix' is required"
+                                .into(),
+                        ));
+                    }
+                };
+                // Backstop for the canonical RegisterRoute path (the DSL
+                // fast-fails the same condition): a key/key_prefix whose
+                // source trims to empty is rejected with the same message.
+                if expr.source.trim().is_empty() {
+                    return Err(CamelError::Config(
+                        "cache_invalidate: key/key_prefix must not be empty".into(),
+                    ));
+                }
+                let target = if as_prefix {
+                    camel_processor::CacheInvalidateTarget::Prefix(compile_message_id_expression(
+                        ctx.languages,
+                        expr,
+                    )?)
+                } else {
+                    camel_processor::CacheInvalidateTarget::Key(compile_message_id_expression(
+                        ctx.languages,
+                        expr,
+                    )?)
+                };
                 let repo_name = repository.as_deref().unwrap_or("memory");
                 let repo = ctx.cache_repositories.get(repo_name).ok_or_else(|| {
                     CamelError::ComponentNotFound(format!(
                         "cache_invalidate: repository '{repo_name}' is not registered"
                     ))
                 })?;
-                let key_expr = compile_message_id_expression(ctx.languages, &key)?;
-                let svc = camel_processor::CacheInvalidateService::new(repo, key_expr);
+                let svc =
+                    camel_processor::CacheInvalidateService::new(repo, target, ctx.rt.clone());
                 Ok(CompileOutcome::Matched(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
@@ -196,7 +234,44 @@ impl StepCompiler for CoreCompiler {
                     ))
                 })?;
                 let key_expr = compile_message_id_expression(ctx.languages, &key)?;
-                let svc = camel_processor::CachePeekStaleService::new(repo, key_expr, on_miss);
+                let svc = camel_processor::CachePeekStaleService::new(
+                    repo,
+                    key_expr,
+                    on_miss,
+                    ctx.rt.clone(),
+                );
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(svc)),
+                    body_contract: None,
+                    lifecycle: None,
+                }))
+            }
+
+            // ── Cache Clear (Segment-mode) ──
+            BuilderStep::CacheClear { repository } => {
+                let repo_name = repository.as_deref().unwrap_or("memory");
+                let repo = ctx.cache_repositories.get(repo_name).ok_or_else(|| {
+                    CamelError::ComponentNotFound(format!(
+                        "cache_clear: repository '{repo_name}' is not registered"
+                    ))
+                })?;
+                let svc = camel_processor::CacheClearService::new(repo);
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(svc)),
+                    body_contract: None,
+                    lifecycle: None,
+                }))
+            }
+
+            // ── Cache Stats (Segment-mode) ──
+            BuilderStep::CacheStats { repository } => {
+                let repo_name = repository.as_deref().unwrap_or("memory");
+                let repo = ctx.cache_repositories.get(repo_name).ok_or_else(|| {
+                    CamelError::ComponentNotFound(format!(
+                        "cache_stats: repository '{repo_name}' is not registered"
+                    ))
+                })?;
+                let svc = camel_processor::CacheStatsService::new(repo);
                 Ok(CompileOutcome::Matched(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
@@ -846,6 +921,203 @@ mod tests {
         assert!(
             output.headers.contains_key("X-Shared"),
             "X-Shared should remain on output headers"
+        );
+    }
+
+    /// A cache_clear step naming an unregistered repository must fail
+    /// compilation with `ComponentNotFound` naming both the step and repo.
+    #[test]
+    fn cache_clear_unknown_repository_fails_compile() {
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let step = BuilderStep::CacheClear {
+            repository: Some("nope".into()),
+        };
+
+        let result = reg.compile_step(step, 0, &dummy_context());
+        let err = result.expect_err("compilation should fail for unknown repository");
+        match err {
+            CamelError::ComponentNotFound(msg) => {
+                assert!(
+                    msg.contains("cache_clear"),
+                    "error must name cache_clear: {msg}"
+                );
+                assert!(
+                    msg.contains("nope"),
+                    "error must name the repository: {msg}"
+                );
+            }
+            other => panic!("expected ComponentNotFound, got {other:?}"),
+        }
+    }
+
+    /// Compile a single cache step through the `CoreCompiler` against a
+    /// context with the `simple` language and the `memory` cache repository
+    /// registered. Returns the registry's `Result<Option<CompiledStep>, _>`.
+    fn compile_cache_step(step: BuilderStep) -> Result<Option<CompiledStep>, CamelError> {
+        // ── languages with simple language ──
+        let languages: SharedLanguageRegistry = {
+            let mut map: HashMap<String, Arc<dyn Language>> = HashMap::new();
+            map.insert(
+                "simple".to_string(),
+                Arc::new(camel_language_simple::SimpleLanguage::new()),
+            );
+            Arc::new(Mutex::new(map))
+        };
+
+        // ── register memory cache repository ──
+        let cache_repositories = crate::CacheRegistry::new();
+        let repo: Arc<dyn camel_api::CacheRepository> =
+            Arc::new(crate::cache::MemoryCacheRepository::new("memory", 100));
+        cache_repositories
+            .register("memory", repo)
+            .expect("register cache repo");
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+
+        // ── registry with only CoreCompiler ──
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        // ── CompilationContext ──
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+
+        let ctx = CompilationContext {
+            producer_ctx: &pc,
+            rt,
+            languages: &languages,
+            beans: &beans,
+            function_invoker: None,
+            component_ctx,
+            route_id: None,
+            staging_mode: &staging,
+            idempotent_repositories: &idempotent_repositories,
+            claim_check_repositories: &claim_check_repositories,
+            cache_repositories: &cache_repositories,
+        };
+
+        reg.compile_step(step, 0, &ctx)
+    }
+
+    /// A `cache_invalidate` step with both `key` and `key_prefix` set, or with
+    /// neither set, must be rejected at compile time with a `Config` error
+    /// naming the conflict.
+    #[test]
+    fn cache_invalidate_both_key_and_prefix_rejected() {
+        for step in [
+            BuilderStep::CacheInvalidate {
+                repository: None,
+                key: Some(LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "k".into(),
+                }),
+                key_prefix: Some(LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "ns:".into(),
+                }),
+            },
+            BuilderStep::CacheInvalidate {
+                repository: None,
+                key: None,
+                key_prefix: None,
+            },
+        ] {
+            let err =
+                compile_cache_step(step).expect_err("key/key_prefix conflict must be rejected");
+            match err {
+                CamelError::Config(msg) => {
+                    assert!(
+                        msg.contains("cache_invalidate"),
+                        "error must name the invalidate step: {msg}"
+                    );
+                    assert!(
+                        msg.contains("exactly one of"),
+                        "error must require exactly one of key/key_prefix: {msg}"
+                    );
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+    }
+
+    /// A `cache_invalidate` step with only `key_prefix` must compile to a
+    /// `CompiledStep::Segment` (the prefix target reaches the service).
+    #[test]
+    fn cache_invalidate_prefix_compiles_to_target() {
+        let step = BuilderStep::CacheInvalidate {
+            repository: None,
+            key: None,
+            key_prefix: Some(LanguageExpressionDef {
+                language: "simple".into(),
+                source: "ns:".into(),
+            }),
+        };
+
+        let compiled = compile_cache_step(step)
+            .expect("compilation should succeed")
+            .expect("should match");
+        assert!(
+            matches!(compiled, CompiledStep::Segment { .. }),
+            "expected CompiledStep::Segment, got {compiled:?}"
+        );
+    }
+
+    /// A `cache_invalidate` step whose key source trims to empty must be
+    /// rejected at compile time with a `Config` error naming the empty guard.
+    #[test]
+    fn cache_invalidate_empty() {
+        let step = BuilderStep::CacheInvalidate {
+            repository: None,
+            key: Some(LanguageExpressionDef {
+                language: "simple".into(),
+                source: "".into(),
+            }),
+            key_prefix: None,
+        };
+
+        let err = compile_cache_step(step).expect_err("empty key must be rejected");
+        match err {
+            CamelError::Config(msg) => {
+                assert!(
+                    msg.contains("must not be empty"),
+                    "error must name the empty guard: {msg}"
+                );
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    /// A `cache` step with `coalesce_misses: true` must compile to a
+    /// `CompiledStep::Segment`. Compile-level pin only; threading proven by
+    /// 2.7 route-level integration test.
+    #[test]
+    fn cache_coalesce_misses_compiles() {
+        let step = BuilderStep::Cache {
+            repository: None,
+            key: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "k".into(),
+            },
+            ttl: None,
+            max_entry_bytes: None,
+            coalesce_misses: true,
+            on_miss: vec![BuilderStep::Log {
+                level: camel_processor::LogLevel::Info,
+                message: "miss".into(),
+            }],
+        };
+
+        let compiled = compile_cache_step(step)
+            .expect("compilation should succeed")
+            .expect("should match");
+        assert!(
+            matches!(compiled, CompiledStep::Segment { .. }),
+            "expected CompiledStep::Segment, got {compiled:?}"
         );
     }
 

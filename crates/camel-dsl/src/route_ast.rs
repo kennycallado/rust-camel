@@ -479,6 +479,8 @@ pub enum RouteDslStep {
     Cache(CacheStep),
     CacheInvalidate(CacheInvalidateStep),
     CachePeekStale(CachePeekStaleStep),
+    CacheClear(CacheClearStep),
+    CacheStats(CacheStatsStep),
     ClaimCheck(ClaimCheckStep),
     Sampling(SamplingStep),
     Sort(SortStep),
@@ -1152,6 +1154,10 @@ pub struct CacheConfig {
     /// Maximum bytes per cache entry (optional).
     #[serde(default)]
     pub max_entry_bytes: Option<usize>,
+    /// Coalesce concurrent misses on the same key into a single `on_miss` run
+    /// (singleflight). Absent/null means `false`.
+    #[serde(default)]
+    pub coalesce_misses: Option<bool>,
     /// Child sub-pipeline executed on cache miss.
     #[serde(default)]
     pub on_miss: Vec<RouteDslStep>,
@@ -1171,8 +1177,14 @@ pub struct CacheInvalidateStep {
 pub struct CacheInvalidateBody {
     /// Name of the registered CacheRepository (optional; defaults to system default).
     pub repository: Option<String>,
-    /// Simple-language expression for the cache key to invalidate.
-    pub key: String,
+    /// Simple-language expression for the exact cache key to invalidate.
+    /// Mutually exclusive with `key_prefix` (exactly one of the two).
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Simple-language expression for the namespace prefix to invalidate.
+    /// Mutually exclusive with `key` (exactly one of the two).
+    #[serde(default)]
+    pub key_prefix: Option<String>,
 }
 
 /// Cache Peek Stale step — returns cached data even if TTL has expired.
@@ -1199,6 +1211,38 @@ pub struct CachePeekStaleBody {
         schemars(extend("enum" = json!(["stop", "continue", null])))
     )]
     pub on_miss: Option<String>,
+}
+
+/// Cache Clear step — removes all entries from a CacheRepository.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CacheClearStep {
+    pub cache_clear: CacheClearBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CacheClearBody {
+    /// Name of the registered CacheRepository (optional; defaults to system default).
+    pub repository: Option<String>,
+}
+
+/// Cache Stats step — emits the repository stats as a JSON body.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CacheStatsStep {
+    pub cache_stats: CacheStatsBody,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CacheStatsBody {
+    /// Name of the registered CacheRepository (optional; defaults to system default).
+    pub repository: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

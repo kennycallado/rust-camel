@@ -29,7 +29,7 @@
 - **Security Policy Layer**: Tower middleware that enforces authorization before forwarding to the inner service
 - **Marshal / Unmarshal**: Serialize/deserialize message bodies using pluggable data formats (JSON, XML, ZIP)
 - **Streaming Splitter**: Split lazy streams (ZIP entries, NDJSON, text lines, binary chunks) with one-entry lookahead and aggregation. Supports `streaming: true` in YAML DSL with auto format detection from `Content-Type`
-- **Cache**: Caching EIP with `cache` (lookup → on_miss sub-pipeline → write-back), `cache_invalidate` (remove a single key), and `cache_peek_stale` (serve a post-expiry stale entry). Backed by `CacheRepository` (memory or redb). ADR-0056.
+- **Cache**: Caching EIP with five steps: `cache` (lookup → on_miss sub-pipeline → write-back, with `coalesce_misses` singleflight), `cache_invalidate` (exact-key or `key_prefix` namespace purge), `cache_peek_stale` (serve a post-expiry stale entry), `cache_clear` (remove all entries), and `cache_stats` (JSON snapshot). Backed by `CacheRepository` (memory or redb). ADR-0056.
 
 ## Installation
 

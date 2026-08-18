@@ -283,13 +283,28 @@ pub enum BuilderStep {
         key: LanguageExpressionDef,
         ttl: Option<String>,
         max_entry_bytes: Option<usize>,
+        /// Coalesce concurrent misses on the same key into one `on_miss` run.
+        coalesce_misses: bool,
         on_miss: Vec<BuilderStep>,
     },
-    /// Cache Invalidate step (EIP). Removes a single cache entry by key.
-    /// Compiled to a `CacheInvalidateService` (OutcomePipeline, segment-mode).
+    /// Cache Invalidate step (EIP). Removes a single cache entry by exact key
+    /// (`key`) or every entry under a namespace prefix (`key_prefix`) — exactly
+    /// one of the two. Compiled to a `CacheInvalidateService` (OutcomePipeline,
+    /// segment-mode).
     CacheInvalidate {
         repository: Option<String>,
-        key: LanguageExpressionDef,
+        key: Option<LanguageExpressionDef>,
+        key_prefix: Option<LanguageExpressionDef>,
+    },
+    /// Cache Clear step (EIP). Removes all entries from the repository.
+    /// Compiled to a `CacheClearService` (OutcomePipeline, segment-mode).
+    CacheClear {
+        repository: Option<String>,
+    },
+    /// Cache Stats step (EIP). Emits the repository stats as a JSON body.
+    /// Compiled to a `CacheStatsService` (OutcomePipeline, segment-mode).
+    CacheStats {
+        repository: Option<String>,
     },
     /// Cache Peek Stale step (EIP). Serves a stale (post-expiry) cache entry.
     /// Compiled to a `CachePeekStaleService` (OutcomePipeline, segment-mode).

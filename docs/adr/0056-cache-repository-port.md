@@ -243,7 +243,11 @@ The trait has no `#[non_exhaustive]` attribute — adding methods would break
 existing implementations. The 7-method interface (`name`, `get`, `set`,
 `peek_stale`, `invalidate`, `clear`, `stats`) is considered stable. If a
 future backend needs a `len()` or `keys()` method, a separate trait or default
-method with `unimplemented!()` can be added.
+method with `unimplemented!()` can be added. The anticipated `len()`/`keys()`
+extension materialized as the default async method `invalidate_prefix` (chosen
+over a separate trait — single registry lookup, no downcast); `CacheStats`
+grew `peek_stale_served`/`invalidations`/`bytes` (source-breaking for external
+struct literals; migrate with `..Default::default()`).
 
 ### Default memory backend
 

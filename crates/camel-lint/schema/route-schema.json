@@ -135,9 +135,43 @@
         }
       ]
     },
+    "CacheClearBody": {
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "description": "Name of the registered CacheRepository (optional; defaults to system default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CacheClearStep": {
+      "additionalProperties": false,
+      "description": "Cache Clear step — removes all entries from a CacheRepository.",
+      "properties": {
+        "cache_clear": {
+          "$ref": "#/$defs/CacheClearBody"
+        }
+      },
+      "required": [
+        "cache_clear"
+      ],
+      "type": "object"
+    },
     "CacheConfig": {
       "additionalProperties": false,
       "properties": {
+        "coalesce_misses": {
+          "default": null,
+          "description": "Coalesce concurrent misses on the same key into a single `on_miss` run\n(singleflight). Absent/null means `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "key": {
           "description": "Simple-language expression for the cache key.",
           "type": "string"
@@ -184,8 +218,20 @@
       "additionalProperties": false,
       "properties": {
         "key": {
-          "description": "Simple-language expression for the cache key to invalidate.",
-          "type": "string"
+          "default": null,
+          "description": "Simple-language expression for the exact cache key to invalidate.\nMutually exclusive with `key_prefix` (exactly one of the two).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key_prefix": {
+          "default": null,
+          "description": "Simple-language expression for the namespace prefix to invalidate.\nMutually exclusive with `key` (exactly one of the two).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "repository": {
           "description": "Name of the registered CacheRepository (optional; defaults to system default).",
@@ -195,9 +241,6 @@
           ]
         }
       },
-      "required": [
-        "key"
-      ],
       "type": "object"
     },
     "CacheInvalidateStep": {
@@ -255,6 +298,32 @@
       },
       "required": [
         "cache_peek_stale"
+      ],
+      "type": "object"
+    },
+    "CacheStatsBody": {
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "description": "Name of the registered CacheRepository (optional; defaults to system default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CacheStatsStep": {
+      "additionalProperties": false,
+      "description": "Cache Stats step — emits the repository stats as a JSON body.",
+      "properties": {
+        "cache_stats": {
+          "$ref": "#/$defs/CacheStatsBody"
+        }
+      },
+      "required": [
+        "cache_stats"
       ],
       "type": "object"
     },
@@ -2025,6 +2094,12 @@
         },
         {
           "$ref": "#/$defs/CachePeekStaleStep"
+        },
+        {
+          "$ref": "#/$defs/CacheClearStep"
+        },
+        {
+          "$ref": "#/$defs/CacheStatsStep"
         },
         {
           "$ref": "#/$defs/ClaimCheckStep"

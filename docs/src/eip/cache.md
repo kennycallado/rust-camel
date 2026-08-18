@@ -8,7 +8,11 @@ The Cache pattern stores the result of an expensive computation and serves it on
 
 The `cache` step evaluates a `key` expression against each exchange. If the repository holds a live entry for that key, the step replaces the body with the cached bytes and returns `Completed`. If the key is absent or expired, the step runs the `on_miss` sub-pipeline, writes the resulting body to the repository with the given `ttl`, and returns the body to the pipeline. A key expression that evaluates to `None` bypasses the cache. The route runs the `on_miss` sub-pipeline without a lookup or a write-back.
 
-The `cache_invalidate` step removes a single key from the repository. Use it when an upstream event makes a cached entry stale. The `cache_peek_stale` step reads a cached entry and ignores its in-band expiry. This serves a post-expiry entry as a fallback when the source is unavailable.
+With `coalesce_misses: true`, concurrent misses on the same key run the `on_miss` sub-pipeline once. The first miss becomes the leader. The other misses wait and share the leader's body and error. This prevents a stampede when many exchanges miss the same key at once.
+
+The `cache_invalidate` step removes a key from the repository. Use it when an upstream event makes a cached entry stale. Set `key` to remove one entry. Set `key_prefix` to remove every entry whose key starts with that prefix, a namespace purge. Exactly one of the two is required. On success the step sets the `CamelCacheInvalidatedCount` exchange property. The value is `1` for an exact key and the removed count for a prefix. A backend without key iteration fails closed on `key_prefix`. The memory backend has no key iteration.
+
+The `cache_peek_stale` step reads a cached entry and ignores its in-band expiry. This serves a post-expiry entry as a fallback when the source is unavailable.
 
 ## cache_peek_stale `on_miss` policy
 
@@ -34,6 +38,24 @@ On a hit the step sets `CamelCachePeekHit=true`. It sets `CamelCachePeekStale=tr
       - log: "Serving cached body: ${body}"
 ```
 
+## cache_clear and cache_stats
+
+The `cache_clear` step removes every entry from the repository. It takes an optional `repository` name and defaults to `"memory"`. The body passes through unchanged.
+
+```yaml
+- cache_clear: {}
+- cache_clear:
+    repository: "persistent"
+```
+
+The `cache_stats` step replaces the body with a JSON snapshot of the repository statistics. It takes an optional `repository` name and defaults to `"memory"`.
+
+```yaml
+- cache_stats: {}
+```
+
+The snapshot has these fields: `repository`, `hits`, `misses`, `evictions`, `entries`, `peek_stale_served`, `invalidations`, and `bytes`. The `bytes` field is the total stored payload size when the backend reports it. The redb backend reports a size. The memory backend reports `null`.
+
 ## Stale-on-error with a circuit breaker
 
 Compose `cache_peek_stale` with a route-level `circuit_breaker` to serve a stale entry when the downstream service fails. The `fallback` list holds a sub-pipeline. The breaker runs the fallback only while the circuit is open.
@@ -46,7 +68,7 @@ The route body wraps the upstream fetch in a `cache` step that stores the result
 
 The fallback runs on routes with and without an `error_handler`. A failing fallback step follows the route's error handling. A route with an `error_handler` routes the failure through the handler. A route without one surfaces the raw error. See [Circuit Breaker](circuit-breaker.md) for the breaker states and [Route structure](../yaml-dsl/route-structure.md) for the `fallback` field.
 
-The control plane also accepts the three cache steps. A `CanonicalRouteSpec` sent through `RuntimeCommand::RegisterRoute` supports `cache`, `cache_invalidate`, and `cache_peek_stale` in the route body and in `circuit_breaker.fallback`. An unknown step still fails with an error that names the step. See [Control Bus](../components/controlbus.md) and [ADR-0016](../adr/0016-canonical-route-spec-v2-contract.md).
+The control plane also accepts the five cache steps. A `CanonicalRouteSpec` sent through `RuntimeCommand::RegisterRoute` supports `cache`, `cache_invalidate`, `cache_clear`, `cache_stats`, and `cache_peek_stale` in the route body and in `circuit_breaker.fallback`. An unknown step still fails with an error that names the step. See [Control Bus](../components/controlbus.md) and [ADR-0016](../adr/0016-canonical-route-spec-v2-contract.md).
 
 Use the Cache pattern when a route computes the same result more than once. API responses, database lookups, and transform-heavy pipelines benefit from caching.
 

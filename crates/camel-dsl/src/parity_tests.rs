@@ -25,6 +25,8 @@
 //! See: docs/superpowers/specs/2026-06-24-json-canonical-route-format.md §4 Slice B1.
 
 use crate::route_ast::{RouteDslRoutes, RouteDslStep};
+use camel_api::CanonicalRouteSpec;
+use camel_api::runtime::CanonicalStepSpec;
 
 // serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
 // Same alias used by route_ast.rs:3 and yaml.rs:5.
@@ -82,6 +84,8 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
         RouteDslStep::Cache(_) => (),
         RouteDslStep::CacheInvalidate(_) => (),
         RouteDslStep::CachePeekStale(_) => (),
+        RouteDslStep::CacheClear(_) => (),
+        RouteDslStep::CacheStats(_) => (),
         RouteDslStep::ClaimCheck(_) => (),
         RouteDslStep::Sampling(_) => (),
         RouteDslStep::Sort(_) => (),
@@ -606,6 +610,29 @@ routes:
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_peek_stale":{"key":"${header.k}"}}]}]}"#,
         },
+        ParityCase {
+            name: "CacheClear",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache_clear:
+          repository: memory
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_clear":{"repository":"memory"}}]}]}"#,
+        },
+        ParityCase {
+            name: "CacheStats",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - cache_stats: {}
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_stats":{}}]}]}"#,
+        },
     ]
 }
 
@@ -659,7 +686,7 @@ fn test_variant_count_matches_matrix() {
     //   2. Bumped EXPECTED_VARIANTS below.
     //   3. Added a ParityCase for the new variant.
     // Step 3 is not mechanically enforced; review discipline applies.
-    const EXPECTED_VARIANTS: usize = 40;
+    const EXPECTED_VARIANTS: usize = 42;
     let actual = parity_cases().len();
     assert!(
         actual >= EXPECTED_VARIANTS,
@@ -667,4 +694,87 @@ fn test_variant_count_matches_matrix() {
         actual,
         EXPECTED_VARIANTS
     );
+}
+
+#[test]
+fn cache_clear_stats_parity() {
+    let yaml = r#"
+routes:
+  - id: cache-admin
+    from: direct:start
+    steps:
+      - cache_clear:
+          repository: memory
+      - cache_stats: {}
+"#;
+    let routes = crate::yaml::parse_yaml_to_declarative(yaml).unwrap();
+    assert_eq!(routes.len(), 1);
+    let route = routes.into_iter().next().unwrap();
+    let (spec, _loss) =
+        crate::compile::compile_declarative_route_to_canonical(route, false).unwrap();
+    let json = serde_json::to_string(&spec).unwrap();
+    let back: CanonicalRouteSpec = serde_json::from_str(&json).unwrap();
+    assert_eq!(spec, back, "canonical spec must survive JSON round-trip");
+}
+
+#[test]
+fn cache_invalidate_prefix_parity() {
+    let yaml = r#"
+routes:
+  - id: cache-admin
+    from: direct:start
+    steps:
+      - cache_invalidate:
+          key_prefix: "ns:"
+"#;
+    let routes = crate::yaml::parse_yaml_to_declarative(yaml).unwrap();
+    assert_eq!(routes.len(), 1);
+    let route = routes.into_iter().next().unwrap();
+    let (spec, _loss) =
+        crate::compile::compile_declarative_route_to_canonical(route, false).unwrap();
+    let json = serde_json::to_string(&spec).unwrap();
+    let back: CanonicalRouteSpec = serde_json::from_str(&json).unwrap();
+    assert_eq!(spec, back, "canonical spec must survive JSON round-trip");
+
+    match &spec.steps[0] {
+        CanonicalStepSpec::CacheInvalidate {
+            key, key_prefix, ..
+        } => {
+            assert_eq!(key, &None, "key must be None for prefix invalidation");
+            assert_eq!(key_prefix.as_deref(), Some("ns:"));
+        }
+        other => panic!("expected CacheInvalidate, got {other:?}"),
+    }
+}
+
+#[test]
+fn cache_coalesce_misses_parity() {
+    let yaml = r#"
+routes:
+  - id: cache-admin
+    from: direct:start
+    steps:
+      - cache:
+          key: "k"
+          coalesce_misses: true
+          on_miss:
+            - log: "miss"
+"#;
+    let routes = crate::yaml::parse_yaml_to_declarative(yaml).unwrap();
+    assert_eq!(routes.len(), 1);
+    let route = routes.into_iter().next().unwrap();
+    let (spec, _loss) =
+        crate::compile::compile_declarative_route_to_canonical(route, false).unwrap();
+    let json = serde_json::to_string(&spec).unwrap();
+    let back: CanonicalRouteSpec = serde_json::from_str(&json).unwrap();
+    assert_eq!(spec, back, "canonical spec must survive JSON round-trip");
+
+    match &spec.steps[0] {
+        CanonicalStepSpec::Cache {
+            coalesce_misses, ..
+        } => {
+            assert_eq!(coalesce_misses, &Some(true));
+        }
+        other => panic!("expected Cache, got {other:?}"),
+    }
 }

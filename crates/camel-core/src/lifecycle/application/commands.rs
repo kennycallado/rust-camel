@@ -1079,6 +1079,7 @@ fn canonical_step_to_builder_step(
             key,
             ttl,
             max_entry_bytes,
+            coalesce_misses,
             on_miss,
         } => Ok(BuilderStep::Cache {
             repository,
@@ -1088,16 +1089,29 @@ fn canonical_step_to_builder_step(
             },
             ttl,
             max_entry_bytes,
+            coalesce_misses: coalesce_misses.unwrap_or(false),
             on_miss: canonical_steps_to_builder_steps(on_miss)?,
         }),
-        camel_api::runtime::CanonicalStepSpec::CacheInvalidate { repository, key } => {
-            Ok(BuilderStep::CacheInvalidate {
-                repository,
-                key: camel_api::LanguageExpressionDef {
-                    language: "simple".into(),
-                    source: key,
-                },
-            })
+        camel_api::runtime::CanonicalStepSpec::CacheInvalidate {
+            repository,
+            key,
+            key_prefix,
+        } => Ok(BuilderStep::CacheInvalidate {
+            repository,
+            key: key.map(|k| camel_api::LanguageExpressionDef {
+                language: "simple".into(),
+                source: k,
+            }),
+            key_prefix: key_prefix.map(|p| camel_api::LanguageExpressionDef {
+                language: "simple".into(),
+                source: p,
+            }),
+        }),
+        camel_api::runtime::CanonicalStepSpec::CacheClear { repository } => {
+            Ok(BuilderStep::CacheClear { repository })
+        }
+        camel_api::runtime::CanonicalStepSpec::CacheStats { repository } => {
+            Ok(BuilderStep::CacheStats { repository })
         }
         camel_api::runtime::CanonicalStepSpec::CachePeekStale {
             repository,

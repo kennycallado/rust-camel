@@ -483,19 +483,25 @@ pub struct CacheStepDef {
     pub ttl: Option<String>,
     /// Maximum bytes per cache entry.
     pub max_entry_bytes: Option<usize>,
+    /// Coalesce concurrent misses on the same key into a single `on_miss` run.
+    pub coalesce_misses: bool,
     /// Child sub-pipeline executed on cache miss.
     pub on_miss: Vec<DeclarativeStep>,
 }
 
 /// Cache Invalidate EIP step definition.
 ///
-/// Removes an entry from a `CacheRepository` by key.
+/// Removes an entry from a `CacheRepository` by exact key or namespace prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheInvalidateStepDef {
     /// Name of the registered `CacheRepository` (optional; defaults to system default).
     pub repository: Option<String>,
-    /// Expression that extracts the cache key to invalidate.
-    pub key: LanguageExpressionDef,
+    /// Expression that extracts the exact cache key to invalidate.
+    /// Mutually exclusive with `key_prefix` (exactly one of the two).
+    pub key: Option<LanguageExpressionDef>,
+    /// Expression that extracts the namespace prefix to invalidate.
+    /// Mutually exclusive with `key` (exactly one of the two).
+    pub key_prefix: Option<LanguageExpressionDef>,
 }
 
 /// Cache Peek Stale EIP step definition.
@@ -509,6 +515,24 @@ pub struct CachePeekStaleStepDef {
     pub key: LanguageExpressionDef,
     /// On-miss policy: `"stop"` (default) or `"continue"`, validated at compile.
     pub on_miss: Option<String>,
+}
+
+/// Cache Clear EIP step definition.
+///
+/// Removes all entries from a `CacheRepository`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheClearStepDef {
+    /// Name of the registered `CacheRepository` (optional; defaults to system default).
+    pub repository: Option<String>,
+}
+
+/// Cache Stats EIP step definition.
+///
+/// Emits the repository statistics as a JSON body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheStatsStepDef {
+    /// Name of the registered `CacheRepository` (optional; defaults to system default).
+    pub repository: Option<String>,
 }
 
 /// Sampling EIP step definition.
@@ -617,6 +641,8 @@ pub enum DeclarativeStep {
     Cache(CacheStepDef),
     CacheInvalidate(CacheInvalidateStepDef),
     CachePeekStale(CachePeekStaleStepDef),
+    CacheClear(CacheClearStepDef),
+    CacheStats(CacheStatsStepDef),
     ClaimCheck(ClaimCheckStepDef),
     Sampling(SamplingStepDef),
     Sort(SortStepDef),
@@ -680,6 +706,8 @@ impl DeclarativeStep {
             DeclarativeStep::CachePeekStale(_) => {
                 crate::contract::DeclarativeStepKind::CachePeekStale
             }
+            DeclarativeStep::CacheClear(_) => crate::contract::DeclarativeStepKind::CacheClear,
+            DeclarativeStep::CacheStats(_) => crate::contract::DeclarativeStepKind::CacheStats,
             DeclarativeStep::ClaimCheck(_) => crate::contract::DeclarativeStepKind::ClaimCheck,
             DeclarativeStep::Sampling(_) => crate::contract::DeclarativeStepKind::Sampling,
             DeclarativeStep::Sort(_) => crate::contract::DeclarativeStepKind::Sort,

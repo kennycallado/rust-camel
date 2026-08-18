@@ -614,6 +614,7 @@ fn canonical_step_to_builder_step_maps_cache_with_nested_on_miss() {
         key: "${body.id}".into(),
         ttl: Some("60s".into()),
         max_entry_bytes: Some(1024),
+        coalesce_misses: None,
         on_miss: vec![CanonicalStepSpec::To {
             uri: "log:miss".into(),
         }],
@@ -625,6 +626,7 @@ fn canonical_step_to_builder_step_maps_cache_with_nested_on_miss() {
         key,
         ttl,
         max_entry_bytes,
+        coalesce_misses,
         on_miss,
     } = cache
     else {
@@ -635,6 +637,7 @@ fn canonical_step_to_builder_step_maps_cache_with_nested_on_miss() {
     assert_eq!(key.source, "${body.id}");
     assert_eq!(ttl.as_deref(), Some("60s"));
     assert_eq!(max_entry_bytes, Some(1024));
+    assert!(!coalesce_misses, "None must map to false");
     assert_eq!(on_miss.len(), 1);
     assert!(matches!(on_miss[0], BuilderStep::To(_)));
 }
@@ -645,16 +648,45 @@ fn canonical_step_to_builder_step_maps_cache_invalidate() {
 
     let invalidate = canonical_step_to_builder_step(CanonicalStepSpec::CacheInvalidate {
         repository: None,
-        key: "${body.id}".into(),
+        key: Some("${body.id}".into()),
+        key_prefix: None,
     })
     .unwrap();
 
-    let BuilderStep::CacheInvalidate { repository, key } = invalidate else {
+    let BuilderStep::CacheInvalidate {
+        repository,
+        key,
+        key_prefix,
+    } = invalidate
+    else {
         panic!("expected BuilderStep::CacheInvalidate");
     };
     assert_eq!(repository, None);
+    assert_eq!(key_prefix, None);
+    let key = key.expect("key must be present");
     assert_eq!(key.language, "simple");
     assert_eq!(key.source, "${body.id}");
+}
+
+#[test]
+fn canonical_cache_clear_and_stats_convert() {
+    use camel_api::runtime::CanonicalStepSpec;
+
+    let clear = canonical_step_to_builder_step(CanonicalStepSpec::CacheClear {
+        repository: Some("memory".into()),
+    })
+    .unwrap();
+    let BuilderStep::CacheClear { repository } = clear else {
+        panic!("expected BuilderStep::CacheClear");
+    };
+    assert_eq!(repository.as_deref(), Some("memory"));
+
+    let stats =
+        canonical_step_to_builder_step(CanonicalStepSpec::CacheStats { repository: None }).unwrap();
+    let BuilderStep::CacheStats { repository } = stats else {
+        panic!("expected BuilderStep::CacheStats");
+    };
+    assert_eq!(repository, None);
 }
 
 #[test]
@@ -730,13 +762,15 @@ async fn register_route_accepts_cache_steps_in_body() {
                 key: "${body.id}".into(),
                 ttl: Some("60s".into()),
                 max_entry_bytes: None,
+                coalesce_misses: None,
                 on_miss: vec![CanonicalStepSpec::To {
                     uri: "log:miss".into(),
                 }],
             },
             CanonicalStepSpec::CacheInvalidate {
                 repository: None,
-                key: "${body.id}".into(),
+                key: Some("${body.id}".into()),
+                key_prefix: None,
             },
         ],
         circuit_breaker: None,

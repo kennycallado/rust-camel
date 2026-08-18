@@ -529,6 +529,13 @@
             "config": {
               "type": "object",
               "properties": {
+                "coalesce_misses": {
+                  "description": "Coalesce concurrent misses on the same key into a single `on_miss`\nrun. Absent/null means `false`.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
                 "key": {
                   "type": "string"
                 },
@@ -581,7 +588,18 @@
               "type": "object",
               "properties": {
                 "key": {
-                  "type": "string"
+                  "description": "Exact key to invalidate (simple-language expression).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "key_prefix": {
+                  "description": "Namespace prefix to invalidate (simple-language expression).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "repository": {
                   "type": [
@@ -589,14 +607,59 @@
                     "null"
                   ]
                 }
-              },
-              "required": [
-                "key"
-              ]
+              }
             },
             "step": {
               "type": "string",
               "const": "cache_invalidate"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "repository": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "step": {
+              "type": "string",
+              "const": "cache_clear"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "repository": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "step": {
+              "type": "string",
+              "const": "cache_stats"
             }
           },
           "required": [

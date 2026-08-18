@@ -134,3 +134,127 @@ fn schema_validation_rejects_unknown_circuit_breaker_field() {
         "unknown field under circuit_breaker must be rejected by schema, but validation passed"
     );
 }
+
+#[test]
+fn schema_validation_accepts_cache_admin_route() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    let valid: serde_json::Value = serde_json::json!({
+        "routes": [
+            {
+                "id": "cache-admin",
+                "from": "direct:start",
+                "steps": [
+                    { "cache_clear": { "repository": "memory" } },
+                    { "cache_stats": {} }
+                ]
+            }
+        ]
+    });
+
+    let errors: Vec<_> = validator.iter_errors(&valid).collect();
+    assert!(
+        errors.is_empty(),
+        "route with cache_clear/cache_stats should validate, got: {errors:?}"
+    );
+}
+
+#[test]
+fn schema_validation_rejects_unknown_cache_clear_field() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    let invalid: serde_json::Value = serde_json::json!({
+        "routes": [
+            {
+                "id": "cache-clear-unknown",
+                "from": "direct:start",
+                "steps": [
+                    { "cache_clear": { "repo": "memory" } }
+                ]
+            }
+        ]
+    });
+
+    assert!(
+        validator.validate(&invalid).is_err(),
+        "unknown field under cache_clear must be rejected by schema, but validation passed"
+    );
+}
+
+#[test]
+fn schema_validation_accepts_cache_invalidate_key_prefix() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    let valid: serde_json::Value = serde_json::json!({
+        "routes": [
+            {
+                "id": "cache-invalidate-prefix",
+                "from": "direct:start",
+                "steps": [
+                    { "cache_invalidate": { "key_prefix": "ns:" } }
+                ]
+            }
+        ]
+    });
+
+    let errors: Vec<_> = validator.iter_errors(&valid).collect();
+    assert!(
+        errors.is_empty(),
+        "route with cache_invalidate.key_prefix should validate, got: {errors:?}"
+    );
+}
+
+#[test]
+fn schema_validation_accepts_cache_coalesce_misses() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    let valid: serde_json::Value = serde_json::json!({
+        "routes": [
+            {
+                "id": "cache-coalesce",
+                "from": "direct:start",
+                "steps": [
+                    {
+                        "cache": {
+                            "key": "k",
+                            "coalesce_misses": true,
+                            "on_miss": [ { "log": "miss" } ]
+                        }
+                    }
+                ]
+            }
+        ]
+    });
+
+    let errors: Vec<_> = validator.iter_errors(&valid).collect();
+    assert!(
+        errors.is_empty(),
+        "route with cache.coalesce_misses should validate, got: {errors:?}"
+    );
+}
+
+#[test]
+fn cache_invalidate_both_key_and_key_prefix_rejected_at_compile() {
+    let yaml = r#"
+routes:
+  - id: cache-invalidate-both
+    from: direct:start
+    steps:
+      - cache_invalidate:
+          key: "k"
+          key_prefix: "ns:"
+"#;
+    let routes = camel_dsl::parse_yaml_to_declarative(yaml).expect("YAML must parse");
+    let step = routes[0].steps[0].clone();
+    let err = camel_dsl::compile_declarative_step(step)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("exactly one of"),
+        "both key and key_prefix must be rejected at compile, got: {err}"
+    );
+}

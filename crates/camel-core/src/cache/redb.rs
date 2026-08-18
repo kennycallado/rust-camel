@@ -14,6 +14,7 @@
 //! context).
 
 use std::fmt;
+use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -55,6 +56,8 @@ pub struct RedbCacheRepository {
     hits: Arc<AtomicU64>,
     misses: Arc<AtomicU64>,
     evictions: Arc<AtomicU64>,
+    peek_stale_served: Arc<AtomicU64>,
+    invalidations: Arc<AtomicU64>,
     /// Best-effort approximation of `table.len()` for stats display.
     /// The authoritative count is `table.len()` inside write transactions,
     /// used for capacity enforcement. Sweep and invalidate decrement via
@@ -121,6 +124,8 @@ impl RedbCacheRepository {
         let hits = Arc::new(AtomicU64::new(0));
         let misses = Arc::new(AtomicU64::new(0));
         let evictions = Arc::new(AtomicU64::new(0));
+        let peek_stale_served = Arc::new(AtomicU64::new(0));
+        let invalidations = Arc::new(AtomicU64::new(0));
         let entries = Arc::new(AtomicU64::new(initial_len));
 
         // Spawn the sweep loop. All shared state is captured as cloned Arcs;
@@ -159,6 +164,8 @@ impl RedbCacheRepository {
             hits,
             misses,
             evictions,
+            peek_stale_served,
+            invalidations,
             entries,
             shutdown_token,
             sweep_handle: Mutex::new(Some(handle)),
@@ -231,6 +238,47 @@ fn sweep_reclaim(db: &redb::Database, stale_retention: Duration) -> Result<u64, 
     txn.commit()
         .map_err(|e| CamelError::Io(format!("redb commit: {e}")))?;
     Ok(reclaimed)
+}
+
+/// Compute the smallest string that sorts after every string beginning with
+/// `prefix`, as the exclusive upper [`Bound`] of a range scan.
+///
+/// The successor is `prefix` with its last Unicode scalar value incremented by
+/// one, skipping the UTF-16 surrogate gap (U+D7FF → U+E000). A trailing
+/// U+10FFFF carries into the preceding scalar; an empty or all-U+10FFFF
+/// prefix has no successor, so the bound is [`Bound::Unbounded`].
+fn successor_bound(prefix: &str) -> Bound<String> {
+    match prefix.chars().last() {
+        // Empty string has no scalar to increment — match every key.
+        None => Bound::Unbounded,
+        Some(last) => {
+            let rest = &prefix[..prefix.len() - last.len_utf8()];
+            match increment_scalar(last) {
+                Some(next) => {
+                    let mut s = String::with_capacity(rest.len() + next.len_utf8());
+                    s.push_str(rest);
+                    s.push(next);
+                    Bound::Excluded(s)
+                }
+                // U+10FFFF has no successor scalar — carry into the rest.
+                None => successor_bound(rest),
+            }
+        }
+    }
+}
+
+/// Increment a Unicode scalar value by one, skipping the surrogate range.
+///
+/// Returns `None` for U+10FFFF (the maximum scalar has no successor).
+fn increment_scalar(c: char) -> Option<char> {
+    match c {
+        // U+D7FF jumps over the surrogate range to U+E000.
+        '\u{D7FF}' => Some('\u{E000}'),
+        // U+10FFFF is the maximum scalar value.
+        '\u{10FFFF}' => None,
+        // Surrogates are not valid `char`, so every remaining scalar +1 is valid.
+        _ => char::from_u32(c as u32 + 1),
+    }
 }
 
 // ── CacheRepository impl ──────────────────────────────────────────────────────
@@ -352,27 +400,32 @@ impl CacheRepository for RedbCacheRepository {
     async fn peek_stale(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
         let db = Arc::clone(&self.db);
         let key = key.to_string();
-        tokio::task::spawn_blocking(move || {
-            let rtx = db
-                .begin_read()
-                .map_err(|e| CamelError::Io(format!("redb begin_read: {e}")))?;
-            let table = rtx
-                .open_table(CACHE_TABLE)
-                .map_err(|e| CamelError::Io(format!("redb open_table: {e}")))?;
-            match table
-                .get(key.as_str())
-                .map_err(|e| CamelError::Io(format!("redb get: {e}")))?
-            {
-                Some(guard) => {
-                    let entry: CacheEntry = serde_json::from_slice(guard.value())
-                        .map_err(|e| CamelError::Io(format!("cache deserialization: {e}")))?;
-                    Ok(Some(entry))
+        let result =
+            tokio::task::spawn_blocking(move || -> Result<Option<CacheEntry>, CamelError> {
+                let rtx = db
+                    .begin_read()
+                    .map_err(|e| CamelError::Io(format!("redb begin_read: {e}")))?;
+                let table = rtx
+                    .open_table(CACHE_TABLE)
+                    .map_err(|e| CamelError::Io(format!("redb open_table: {e}")))?;
+                match table
+                    .get(key.as_str())
+                    .map_err(|e| CamelError::Io(format!("redb get: {e}")))?
+                {
+                    Some(guard) => {
+                        let entry: CacheEntry = serde_json::from_slice(guard.value())
+                            .map_err(|e| CamelError::Io(format!("cache deserialization: {e}")))?;
+                        Ok(Some(entry))
+                    }
+                    None => Ok(None),
                 }
-                None => Ok(None),
-            }
-        })
-        .await
-        .map_err(|e| CamelError::Io(format!("spawn_blocking join: {e}")))?
+            })
+            .await
+            .map_err(|e| CamelError::Io(format!("spawn_blocking join: {e}")))??;
+        if result.is_some() {
+            self.peek_stale_served.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(result)
     }
 
     async fn invalidate(&self, key: &str) -> Result<(), CamelError> {
@@ -406,7 +459,68 @@ impl CacheRepository for RedbCacheRepository {
             let sub = std::cmp::min(current, 1);
             self.entries.fetch_sub(sub, Ordering::Relaxed);
         }
+        self.invalidations.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    async fn invalidate_prefix(&self, prefix: &str) -> Result<u64, CamelError> {
+        let db = Arc::clone(&self.db);
+        let prefix = prefix.to_string();
+        let deleted = tokio::task::spawn_blocking(move || -> Result<u64, CamelError> {
+            // Collect matching keys in a read txn, then delete in one write
+            // txn (mirrors the collect-then-remove pattern of `clear`).
+            let keys: Vec<String> = {
+                let rtx = db
+                    .begin_read()
+                    .map_err(|e| CamelError::Io(format!("redb begin_read: {e}")))?;
+                let table = rtx
+                    .open_table(CACHE_TABLE)
+                    .map_err(|e| CamelError::Io(format!("redb open_table: {e}")))?;
+                // `successor_bound` yields an owned bound; redb's range needs
+                // `&str` bounds for `&str` keys (`String` is not `Borrow<&str>`).
+                let upper: Bound<String> = successor_bound(&prefix);
+                let upper_ref: Bound<&str> = match &upper {
+                    Bound::Included(s) => Bound::Included(s.as_str()),
+                    Bound::Excluded(s) => Bound::Excluded(s.as_str()),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
+                let mut keys = Vec::new();
+                for row in table
+                    .range::<&str>((Bound::Included(prefix.as_str()), upper_ref))
+                    .map_err(|e| CamelError::Io(format!("redb range: {e}")))?
+                {
+                    let (k, _v) =
+                        row.map_err(|e| CamelError::Io(format!("redb range item: {e}")))?;
+                    keys.push(k.value().to_string());
+                }
+                keys
+            };
+            let wtx = db
+                .begin_write()
+                .map_err(|e| CamelError::Io(format!("redb begin_write: {e}")))?;
+            {
+                let mut table = wtx
+                    .open_table(CACHE_TABLE)
+                    .map_err(|e| CamelError::Io(format!("redb open_table: {e}")))?;
+                for k in &keys {
+                    let _ = table
+                        .remove(k.as_str())
+                        .map_err(|e| CamelError::Io(format!("redb remove: {e}")))?;
+                }
+            }
+            wtx.commit()
+                .map_err(|e| CamelError::Io(format!("redb commit: {e}")))?;
+            Ok(keys.len() as u64)
+        })
+        .await
+        .map_err(|e| CamelError::Io(format!("spawn_blocking join: {e}")))??;
+        self.invalidations.fetch_add(1, Ordering::Relaxed);
+        if deleted > 0 {
+            let current = self.entries.load(Ordering::Relaxed);
+            let sub = std::cmp::min(current, deleted);
+            self.entries.fetch_sub(sub, Ordering::Relaxed);
+        }
+        Ok(deleted)
     }
 
     async fn clear(&self) -> Result<(), CamelError> {
@@ -452,7 +566,29 @@ impl CacheRepository for RedbCacheRepository {
             misses: self.misses.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             entries: self.entries.load(Ordering::Relaxed),
+            peek_stale_served: self.peek_stale_served.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
+            bytes: self.total_bytes(),
         }
+    }
+}
+
+impl RedbCacheRepository {
+    /// Sum every entry's `bytes.len()` over the full table range.
+    ///
+    /// `None` when the table cannot be read or any entry fails to
+    /// deserialize — the `bytes` field is a best-effort report, never an
+    /// error (`stats()` is `&self`, synchronous, and infallible).
+    fn total_bytes(&self) -> Option<u64> {
+        let rtx = self.db.begin_read().ok()?;
+        let table = rtx.open_table(CACHE_TABLE).ok()?;
+        let mut total: u64 = 0;
+        for row in table.iter().ok()? {
+            let (_key, value) = row.ok()?;
+            let entry: CacheEntry = serde_json::from_slice(value.value()).ok()?;
+            total = total.saturating_add(entry.bytes.len() as u64);
+        }
+        Some(total)
     }
 }
 
@@ -463,7 +599,6 @@ impl fmt::Debug for RedbCacheRepository {
             .field("stale_retention", &self.stale_retention)
             .field("max_entries", &self.max_entries)
             .field("shutdown_cancelled", &self.shutdown_token.is_cancelled())
-            .field("stats", &self.stats())
             .finish()
     }
 }
@@ -700,6 +835,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_reports_bytes_sum() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo(&dir, token).await;
+        let a = CacheEntry {
+            bytes: vec![1, 2, 3],
+            content_type: camel_api::cache::ContentType::Bytes,
+            expires_at: None,
+        };
+        let b = CacheEntry {
+            bytes: vec![1, 2, 3, 4, 5],
+            content_type: camel_api::cache::ContentType::Bytes,
+            expires_at: None,
+        };
+        repo.set("a", a, None).await.expect("set a");
+        repo.set("b", b, None).await.expect("set b");
+        assert_eq!(repo.stats().bytes, Some(8));
+    }
+
+    #[tokio::test]
     async fn max_entries_rejects_new_key_allows_overwrite() {
         let dir = tempdir().expect("tempdir");
         let token = CancellationToken::new();
@@ -726,5 +881,112 @@ mod tests {
             overw.is_ok(),
             "overwrite of an existing key must succeed at max_entries, got {overw:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn invalidate_prefix_removes_namespace_only() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo(&dir, token).await;
+        repo.set("rainviewer:a", entry(), None)
+            .await
+            .expect("set rainviewer:a");
+        repo.set("rainviewer:b", entry(), None)
+            .await
+            .expect("set rainviewer:b");
+        repo.set("gibs:a", entry(), None).await.expect("set gibs:a");
+        let deleted = repo
+            .invalidate_prefix("rainviewer:")
+            .await
+            .expect("invalidate_prefix");
+        assert_eq!(deleted, 2, "only the rainviewer namespace must be removed");
+        assert!(
+            repo.get("rainviewer:a").await.expect("get").is_none(),
+            "rainviewer:a must be gone"
+        );
+        assert!(
+            repo.get("rainviewer:b").await.expect("get").is_none(),
+            "rainviewer:b must be gone"
+        );
+        assert!(
+            repo.get("gibs:a").await.expect("get").is_some(),
+            "gibs:a must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidate_prefix_does_not_delete_successor_key() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo(&dir, token).await;
+        repo.set("ns:", entry(), None).await.expect("set ns:");
+        repo.set("ns;", entry(), None).await.expect("set ns;");
+        let deleted = repo
+            .invalidate_prefix("ns:")
+            .await
+            .expect("invalidate_prefix");
+        assert_eq!(deleted, 1, "only the ns: key must be removed");
+        assert!(
+            repo.get("ns:").await.expect("get").is_none(),
+            "ns: must be gone"
+        );
+        assert!(
+            repo.get("ns;").await.expect("get").is_some(),
+            "successor key ns; must survive"
+        );
+    }
+
+    #[test]
+    fn successor_bound_unit_tests() {
+        assert_eq!(
+            successor_bound("ns:"),
+            std::ops::Bound::Excluded("ns;".to_string())
+        );
+        // Prefix ending U+D7FF must jump the surrogate gap to U+E000.
+        assert_eq!(
+            successor_bound("a\u{D7FF}"),
+            std::ops::Bound::Excluded("a\u{E000}".to_string())
+        );
+        // Prefix ending U+E000 increments to U+E001.
+        assert_eq!(
+            successor_bound("a\u{E000}"),
+            std::ops::Bound::Excluded("a\u{E001}".to_string())
+        );
+        // Trailing U+10FFFF carries into the preceding scalar: "a…" → "b".
+        assert_eq!(
+            successor_bound("a\u{10FFFF}"),
+            std::ops::Bound::Excluded("b".to_string())
+        );
+        // A prefix of only U+10FFFF has no successor.
+        assert_eq!(
+            successor_bound("\u{10FFFF}\u{10FFFF}"),
+            std::ops::Bound::Unbounded
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidate_prefix_empty_prefix_removes_all_seeded() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo(&dir, token).await;
+        repo.set("ns:a", entry(), None).await.expect("set ns:a");
+        repo.set("ns:b", entry(), None).await.expect("set ns:b");
+        repo.set("other:c", entry(), None)
+            .await
+            .expect("set other:c");
+        let deleted = repo.invalidate_prefix("").await.expect("invalidate_prefix");
+        assert_eq!(deleted, 3, "empty prefix must remove every entry");
+    }
+
+    #[tokio::test]
+    async fn invalidate_prefix_empty_namespace_returns_zero() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo(&dir, token).await;
+        let deleted = repo
+            .invalidate_prefix("ns:")
+            .await
+            .expect("invalidate_prefix");
+        assert_eq!(deleted, 0, "absent namespace must report zero removals");
     }
 }

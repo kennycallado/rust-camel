@@ -49,8 +49,9 @@ pub mod zip_splitter;
 
 pub use aggregator::AggregatorService;
 pub use cache_eip::{
-    CAMEL_CACHE_PEEK_HIT, CAMEL_CACHE_PEEK_STALE, CacheInvalidateService, CachePeekStaleService,
-    CacheService, PeekStaleMissPolicy,
+    CAMEL_CACHE_INVALIDATED_COUNT, CAMEL_CACHE_PEEK_HIT, CAMEL_CACHE_PEEK_STALE, CacheClearService,
+    CacheInvalidateService, CacheInvalidateTarget, CachePeekStaleService, CacheService,
+    CacheStatsService, PeekStaleMissPolicy,
 };
 pub use choice::{ChoiceSegment, ChoiceService, WhenClause, WhenClauseSegment};
 pub use circuit_breaker::{

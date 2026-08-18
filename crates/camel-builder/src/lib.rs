@@ -1299,6 +1299,8 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::ClaimCheck { .. } => "claim_check",
         BuilderStep::Cache { .. } => "cache",
         BuilderStep::CacheInvalidate { .. } => "cache_invalidate",
+        BuilderStep::CacheClear { .. } => "cache_clear",
+        BuilderStep::CacheStats { .. } => "cache_stats",
         BuilderStep::CachePeekStale { .. } => "cache_peek_stale",
         BuilderStep::Sampling { .. } => "sampling",
         BuilderStep::Sort { .. } => "sort",

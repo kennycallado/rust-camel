@@ -8,7 +8,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | Module | Processor / concern | Type | Source |
 |---|---|---|---|
 | `aggregator` | Aggregate | stateful routing / aggregation | `src/aggregator.rs` (`impl AggregatorService`, `fn poll_ready`, `fn call`): defaults are max_buckets=10_000 and bucket_ttl=300s. The background TTL sweep starts lazily on the first `poll_ready` and is managed via `StepLifecycle::start`/`shutdown` (ADR-0022): `shutdown` cancels the sweep token + aborts the handle; `start` resets both so the sweep respawns on route restart. The sweep token is seeded from the constructor's `route_cancel` but lives in an internal swappable cell (`sweep_cancel`), independent of any externally-threaded token. Inline eviction in `call` remains active before the sweep starts (Batch 1 R3-C1). |
-| `cache_eip` | Cache | stateful caching (ADR-0056) | `src/cache_eip.rs` (`CacheService`, `CacheInvalidateService`, `CachePeekStaleService`): OutcomePipeline-backed lookup → on-miss sub-pipeline → write-back. HIT short-circuits; MISS runs body and stores result (subject to `max_entry_bytes`). `ttl` propagated to repository `set`. `CacheInvalidateService` removes a single key. `CachePeekStaleService` serves a post-expiry stale entry, with an optional `on_miss` knob (`"stop"` default or `"continue"`) and sets `CamelCachePeekHit`/`CamelCachePeekStale` exchange properties. |
+| `cache_eip` | Cache | stateful caching (ADR-0056) | `src/cache_eip.rs` (`CacheService`, `CacheInvalidateService`, `CachePeekStaleService`): OutcomePipeline-backed lookup → on-miss sub-pipeline → write-back. HIT short-circuits; MISS runs body and stores result (subject to `max_entry_bytes`); `coalesce_misses` coalesces concurrent misses on the same key (singleflight). `ttl` propagated to repository `set`. `CacheInvalidateService` removes a single key or a whole namespace (via `key_prefix`). `CachePeekStaleService` serves a post-expiry stale entry, with an optional `on_miss` knob (`"stop"` default or `"continue"`) and sets `CamelCachePeekHit`/`CamelCachePeekStale` exchange properties. |
 | `choice` | Choice | conditional routing | `src/lib.rs:2` |
 | `circuit_breaker` | CircuitBreaker gate | fault tolerance | `src/lib.rs:3` |
 | `claim_check` | Claim Check | stateful repository stash/retrieve (ADR-0046 retro-exempt) | `src/lib.rs:4` |
@@ -79,7 +79,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `ChoiceSegment`, `ChoiceService`, `WhenClause`, `WhenClauseSegment` | stable | `pub use choice::{...}` | Choice EIP. |
 | `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `pub use circuit_breaker::{...}` | README claims deprecation for layer/service; code has no `#[deprecated]` yet. |
 | `ClaimCheckOp`, `ClaimCheckService`, `KeyExpression` | stable | `pub use claim_check::{...}` | Claim Check EIP. |
-| `CacheService`, `CacheInvalidateService`, `CachePeekStaleService` | stable | `pub use cache_eip::{...}` | Cache EIP. Outcome-aware segment for lookup, invalidation, and stale-serving. |
+| `CacheService`, `CacheInvalidateService`, `CachePeekStaleService`, `CacheClearService`, `CacheStatsService`, `CacheInvalidateTarget`, `CAMEL_CACHE_INVALIDATED_COUNT` | stable | `pub use cache_eip::{...}` | Cache EIP. Outcome-aware segment for lookup, invalidation, stale-serving, clear, and stats. |
 | `EnrichService`, `PollEnrichService` | stable | `pub use content_enricher::{...}` | Enrich / pollEnrich. |
 | `ConvertBodyTo` | stable | `pub use convert_body::ConvertBodyTo` | Body conversion. |
 | `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonConfig`, `JsonDataFormat`, `XmlConfig`, `XmlDataFormat`, `ZipConfig`, `ZipDataFormat`, `builtin_data_format`, `builtin_data_format_with_config` | stable | `pub use data_format::{...}` | Built-in data formats. CSV added per ADR-0030. Configurable DoS caps per ADR-0038. |
@@ -166,6 +166,9 @@ Exchange property (`"CamelCachePeekHit"`) set by `CachePeekStaleService` on a hi
 
 **CamelCachePeekStale**:
 Exchange property (`"CamelCachePeekStale"`) set by `CachePeekStaleService` on a hit and on both miss arms. Value is `true` when the served entry's `expires_at` has elapsed at evaluation time and `false` when the entry is fresh or absent. Not set when the key expression resolves to `None`. Source: `src/cache_eip.rs`.
+
+**CamelCacheInvalidatedCount**:
+Exchange property (`"CamelCacheInvalidatedCount"`) set by `CacheInvalidateService` after a successful invalidation. Value is the number of entries removed: always `1` for exact-key removal (absence is not observable by the backend) and the backend-reported count for a namespace purge. Not set when the key/prefix expression resolves to `None` or the backend reports an error. Source: `src/cache_eip.rs`.
 
 **StreamSplitInput**:
 Groups the parent Exchange, the byte stream (`Pin<Box<dyn Stream<Item = Result<Bytes, CamelError>>>>`), and `StreamMetadata` into one argument for `StreamSplitCodec::split`.

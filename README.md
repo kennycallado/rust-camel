@@ -160,7 +160,7 @@ implementations.
 | Loop                       | `.loop_count(n)`                              |
 | Content Enricher           | `.enrich(uri)` / `.poll_enrich(uri, timeout)` |
 | Marshal / Unmarshal        | `.marshal(fmt)` / `.unmarshal(fmt)`           |
-| Cache                      | `cache:` / `cache_invalidate:` / `cache_peek_stale:` (YAML DSL) |
+| Cache                      | `cache:` / `cache_invalidate:` (key or `key_prefix`) / `cache_peek_stale:` / `cache_clear:` / `cache_stats:` (YAML DSL) |
 | Stream Cache               | `.stream_cache(n)`                            |
 | try / catch / finally      | `.do_try()` / `.do_catch()` / `.do_finally()` |
 

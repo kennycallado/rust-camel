@@ -26,6 +26,8 @@ pub struct MemoryCacheRepository {
     hits: Arc<AtomicU64>,
     misses: Arc<AtomicU64>,
     evictions: Arc<AtomicU64>,
+    peek_stale_served: Arc<AtomicU64>,
+    invalidations: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for MemoryCacheRepository {
@@ -45,6 +47,8 @@ impl MemoryCacheRepository {
         let hits = Arc::new(AtomicU64::new(0));
         let misses = Arc::new(AtomicU64::new(0));
         let evictions = Arc::new(AtomicU64::new(0));
+        let peek_stale_served = Arc::new(AtomicU64::new(0));
+        let invalidations = Arc::new(AtomicU64::new(0));
         let evictions_clone = Arc::clone(&evictions);
 
         let inner = moka::future::CacheBuilder::new(max_capacity as u64)
@@ -62,6 +66,8 @@ impl MemoryCacheRepository {
             hits,
             misses,
             evictions,
+            peek_stale_served,
+            invalidations,
         }
     }
 }
@@ -106,11 +112,16 @@ impl CacheRepository for MemoryCacheRepository {
     }
 
     async fn peek_stale(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
-        Ok(self.inner.get(key).await)
+        let entry = self.inner.get(key).await;
+        if entry.is_some() {
+            self.peek_stale_served.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(entry)
     }
 
     async fn invalidate(&self, key: &str) -> Result<(), CamelError> {
         self.inner.invalidate(key).await;
+        self.invalidations.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -125,6 +136,9 @@ impl CacheRepository for MemoryCacheRepository {
             misses: self.misses.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             entries: self.inner.entry_count(),
+            peek_stale_served: self.peek_stale_served.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
+            bytes: None,
         }
     }
 }
@@ -219,6 +233,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_reports_peek_stale_served() {
+        let repo = MemoryCacheRepository::new("test", 100);
+
+        repo.set("k", entry(), Some(Duration::from_millis(1)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(repo.get("k").await.unwrap(), None); // miss/expired
+        assert!(repo.peek_stale("k").await.unwrap().is_some());
+        assert_eq!(repo.stats().peek_stale_served, 1);
+    }
+
+    #[tokio::test]
+    async fn stats_reports_invalidations_per_operation() {
+        let repo = MemoryCacheRepository::new("test", 100);
+
+        repo.set("a", entry(), None).await.unwrap();
+        repo.invalidate("a").await.unwrap();
+        repo.invalidate("absent").await.unwrap();
+        assert_eq!(repo.stats().invalidations, 2);
+    }
+
+    #[tokio::test]
     async fn clear_empties_repository() {
         let repo = MemoryCacheRepository::new("test", 100);
 
@@ -237,5 +274,15 @@ mod tests {
         repo.set("b", entry(), None).await.unwrap();
         repo.inner.run_pending_tasks().await;
         assert!(repo.stats().evictions >= 1);
+    }
+
+    #[tokio::test]
+    async fn invalidate_prefix_on_memory_fails_naming_backend() {
+        let repo = MemoryCacheRepository::new("test", 100);
+        let err = repo.invalidate_prefix("ns:").await.unwrap_err();
+        assert!(
+            format!("{err}").contains("test"),
+            "error must name the backend, got: {err}"
+        );
     }
 }
