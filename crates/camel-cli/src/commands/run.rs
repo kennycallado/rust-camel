@@ -454,6 +454,13 @@ pub async fn run(
         security_compile_context.clone(),
     ) {
         Ok(defs) => {
+            if defs.is_empty() {
+                tracing::warn!(
+                    "route discovery matched zero route files for patterns {:?}; \
+                     starting with no routes",
+                    patterns
+                );
+            }
             // Conditionally register ExecBundle: only when a discovered route
             // references `exec:` or the operator declared `[components.exec]`.
             #[cfg(feature = "exec")]
