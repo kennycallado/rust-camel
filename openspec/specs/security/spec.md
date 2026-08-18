@@ -54,7 +54,12 @@ The route `security_policy` block SHALL accept an optional
 When the key is absent, the effective list SHALL be
 `[authorization_header]` only (ADR-0033 fail-closed default). Unknown or
 malformed source forms SHALL be rejected at route load time, not at request
-time.
+time. Every transport consumer (HTTP, WS, MCP, gRPC) SHALL extract tokens
+according to this declaration via the shared extraction helper. Sources the
+transport cannot carry SHALL be rejected at route load time with an error
+naming the source (gRPC: `query_param` and `cookie` are not carryable;
+`authorization_header` maps to the `authorization` metadata key and
+`{header: {name}}` to the same-named metadata key).
 
 #### Scenario: default is header-only when key absent
 
@@ -110,6 +115,30 @@ time.
 - **WHEN** a request arrives with `X-API-Key: <valid key>` and no
   `Authorization` header
 - **THEN** authentication succeeds and maps the stored principal
+
+#### Scenario: gRPC honors declared custom-header source
+
+- **GIVEN** a `from: grpc://` route declaring
+  `credential_sources: [{header: {name: X-API-Key}}]` with the native
+  credential store holding the key
+- **WHEN** a gRPC request carries the token in the `x-api-key` metadata key
+- **THEN** the request authenticates against the configured provider,
+  matching HTTP behavior for the same declaration
+
+#### Scenario: gRPC default remains authorization bearer
+
+- **GIVEN** a `from: grpc://` route with no declared `credential_sources`
+- **WHEN** a request presents `authorization: Bearer <token>` metadata
+- **THEN** the request authenticates (existing default preserved)
+
+#### Scenario: uncarryable source on gRPC rejected at load
+
+- **GIVEN** a `from: grpc://` route declaring
+  `credential_sources: [{query_param: {param: ticket}}]` or
+  `[{cookie: {name: session}}]`
+- **WHEN** the route is loaded
+- **THEN** loading fails with an error naming the source and the transport,
+  because gRPC metadata cannot carry query parameters or cookies
 
 ### Requirement: Multi-source extraction precedence
 
@@ -256,4 +285,166 @@ behavior SHALL remain unchanged (header-only default).
   `credential_sources`
 - **WHEN** a client connects as before the change
 - **THEN** authentication behavior is identical to the pre-change default
+
+### Requirement: Native multi-credential authentication
+
+The runtime SHALL accept multiple native credentials declared as
+`[[security.native.credentials]]` entries (each with `subject`, an env-based or
+plaintext secret, `roles`, `scopes`) and authenticate each declared principal
+through the existing `NativeCredentialStore`. Scalar `bearer_token` and
+`api_key` fields SHALL keep working as single-entry equivalents.
+
+#### Scenario: Two principals both authenticate
+
+- **GIVEN** a Camel.toml with two `[[security.native.credentials]]` entries (subject `ops` with role `admin`, subject `svc` with role `service`) and a route requiring role `admin`
+- **WHEN** a request presents the `ops` credential and another presents the `svc` credential
+- **THEN** `ops` authenticates and passes the role check, `svc` authenticates but fails the role check with 403, and an unknown token value is rejected with 401
+
+#### Scenario: api_key-only config starts
+
+- **GIVEN** a Camel.toml with `[security.native]` declaring a credential consumed only via a non-bearer `credential_sources` entry (e.g. `{header: {name: X-API-Key}}`)
+- **WHEN** the CLI starts
+- **THEN** startup succeeds without requiring `bearer_token`, and the route enforces against the declared credential store
+
+#### Scenario: Legacy scalar bearer_token still works
+
+- **GIVEN** a Camel.toml with `[security.native]` using only scalar `bearer_token` + `subject` + `roles`
+- **WHEN** the CLI starts and a request presents that token
+- **THEN** behavior is identical to v0.29.0 single-credential enforcement
+
+### Requirement: Native secrets from environment variables
+
+Credentials declared via `[[security.native.credentials]]` with `secret_env`
+SHALL be constructed using the store's env-var secret variant, failing closed
+with a `ConfigError` when the variable is unset or empty.
+
+#### Scenario: Env-based credential resolves at startup
+
+- **GIVEN** `[[security.native.credentials]]` with `secret_env = "AUTH_SVC_TOKEN"` and `AUTH_SVC_TOKEN` set
+- **WHEN** the CLI starts
+- **THEN** the credential authenticates via the environment value, and no plaintext token appears in the Camel.toml
+
+#### Scenario: Missing env var fails closed
+
+- **GIVEN** `secret_env = "AUTH_SVC_TOKEN"` with `AUTH_SVC_TOKEN` unset
+- **WHEN** the CLI starts
+- **THEN** startup fails with a `ConfigError` naming the variable
+
+### Requirement: Security credential placeholder resolution
+
+ALL `[security.*]` string leaves SHALL be resolved by the config placeholder
+resolver — credential leaves (`native.bearer_token`, `native.api_key`,
+`keycloak.client_secret`, `oidc.client_secret`) and non-credential leaves
+(samples: `subject`, `issuer`, `keycloak.realm`, `oidc.jwks_uri`; the walk is
+structural over every string leaf under `[security.*]`, not an enumerated
+allowlist) — plus `[datasources.*]` connection leaves (`db_url`, SurrealDB
+`password` under `extra`), which are treated as credential-class. EVERY leaf
+covered by this walk SHALL share uniform fail-closed semantics: an unset env
+var without a default yields `ConfigError`; a placeholder whose default
+segment starts with `-` (the `{{env:X:-default}}` double-dash trap) yields
+`ConfigError`; a surviving `{{` or `${` literal yields `ConfigError`. A valid
+single-colon default (`{{env:X:fallback}}`) SHALL resolve to `fallback` when
+`X` is unset. A literal marker SHALL never be accepted as a credential value,
+at the resolver or at the authenticator boundary.
+
+#### Scenario: Placeholder resolves to real secret
+
+- **GIVEN** `[security.native]` with `bearer_token = "{{env:AUTH_TOKEN}}"` and `AUTH_TOKEN` set
+- **WHEN** the CLI starts
+- **THEN** the resolved environment value is the accepted credential, and the placeholder string itself is NOT a valid credential
+
+#### Scenario: Unset env var on a covered leaf fails closed
+
+- **GIVEN** `bearer_token = "{{env:AUTH_TOKEN}}"` (credential leaf) or `db_url = "{{env:DB_URL}}"` (datasource credential-class leaf), env var unset
+- **WHEN** the CLI starts
+- **THEN** startup fails with a `ConfigError` naming the field and the variable
+
+#### Scenario: Single-colon default resolves normally
+
+- **GIVEN** `bearer_token = "{{env:AUTH_TOKEN:fallback-secret}}"` with `AUTH_TOKEN` unset
+- **WHEN** the CLI starts
+- **THEN** the credential resolves to `fallback-secret` with no error or warning about the default syntax
+
+#### Scenario: Dash-prefixed default fails closed on any covered leaf
+
+- **GIVEN** any leaf the walk covers — security credential, non-credential security, or datasource — carrying `{{env:X:-changeme}}` with `X` unset
+- **WHEN** the CLI starts
+- **THEN** startup fails with `ConfigError` — the manufactured `-`-prefixed value is never used
+
+#### Scenario: Non-credential security leaf resolves
+
+- **GIVEN** `[security.keycloak]` with `realm = "{{env:KC_REALM:main}}"` and `KC_REALM` unset
+- **WHEN** the CLI starts
+- **THEN** the realm resolves to `main` with no error
+
+#### Scenario: Datasource leaves resolve
+
+- **GIVEN** `[datasources.main]` with `db_url = "{{env:DB_URL}}"` and a SurrealDB `extra.password = "{{env:SURREAL_PASS}}"`, both env vars set
+- **WHEN** the CLI starts
+- **THEN** both leaves resolve to the environment values
+
+#### Scenario: Authenticator boundary guard rejects marker secrets
+
+- **GIVEN** any code path that constructs a native credential store or keycloak/oidc authenticator from a secret still containing `{{` or `${`
+- **WHEN** the store or authenticator is constructed
+- **THEN** construction fails with a `ConfigError` naming the unresolved marker
+
+### Requirement: OIDC-only configuration registers an authenticator or fails
+
+An `[security.oidc]`-only configuration with a valid `issuer` and reachable
+`jwks_uri` SHALL register a functioning JWT authenticator (issuer validation via
+`LocalJwtValidator`). Malformed configuration (missing `jwks_uri`) or an
+unreachable JWKS endpoint at startup SHALL fail with an explicit `ConfigError`.
+Silent resolution to no authenticator is not a permitted outcome.
+
+#### Scenario: Valid OIDC-only config protects routes
+
+- **GIVEN** a Camel.toml with only `[security.oidc]` (issuer, jwks_uri, audience) and a route declaring `security_policy`
+- **WHEN** the CLI starts and a request presents a valid JWT for that issuer
+- **THEN** the request authenticates and reaches the route
+
+#### Scenario: Missing jwks_uri fails closed
+
+- **GIVEN** `[security.oidc]` without `jwks_uri`
+- **WHEN** the CLI starts
+- **THEN** startup fails with a `ConfigError` naming `security.oidc.jwks_uri` (no implicit Keycloak-style default)
+
+#### Scenario: Unreachable JWKS at startup fails closed
+
+- **GIVEN** `[security.oidc]` with a `jwks_uri` that does not respond at startup
+- **WHEN** the CLI starts
+- **THEN** startup fails with a `ConfigError` describing the unreachable JWKS endpoint
+
+### Requirement: Named authentication providers
+
+`SecurityCompileContext` SHALL hold authenticators keyed by provider name
+(`keycloak`, `oidc`, `native`). Route `security_policy` MAY declare a `provider`
+name. When exactly one provider is configured, an omitted `provider` SHALL select
+it (back-compatible). When more than one provider is configured, a route SHALL
+name one; route load SHALL fail otherwise, naming the available providers. An
+unknown `provider` name SHALL fail route load.
+
+#### Scenario: Mixed providers with explicit selection
+
+- **GIVEN** a Camel.toml with both `[security.keycloak]` (human JWTs) and `[[security.native.credentials]]` (m2m), and two routes declaring `provider: keycloak` and `provider: native` respectively
+- **WHEN** requests present a valid Keycloak JWT and a valid native credential
+- **THEN** each route authenticates against its named provider
+
+#### Scenario: Sole provider works without a provider key
+
+- **GIVEN** a single-provider Camel.toml and routes without `provider` in `security_policy`
+- **WHEN** the CLI starts
+- **THEN** routes authenticate against the sole provider, exactly as pre-change single-provider configs
+
+#### Scenario: Ambiguous provider fails at load
+
+- **GIVEN** a multi-provider Camel.toml and a route whose `security_policy` omits `provider`
+- **WHEN** the route is loaded
+- **THEN** loading fails with an error naming the configured providers and the missing `provider` key
+
+#### Scenario: Unknown provider fails at load
+
+- **GIVEN** a route declaring `provider: saml` when no such provider is configured
+- **WHEN** the route is loaded
+- **THEN** loading fails with an error naming the unknown provider and the available ones
 
