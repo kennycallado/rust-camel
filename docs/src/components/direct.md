@@ -79,8 +79,8 @@ direct:<name>[?timeout_ms=30000][&failIfNoConsumers=true]
 | --- | --- | --- | --- |
 | `timeout_ms` | no | `30000` | Producer `call()` timeout in milliseconds |
 | `failIfNoConsumers` | no | `true` | Reject the call when no Consumer is registered for the name |
-| `block` | no | `true` | Reserved for non-blocking send (TODO(DIR-001)) |
-| `exchangePattern` | no | (none) | Reserved for pattern override (TODO(DIR-005)) |
+| `block` | no | — | Not supported. The Component rejects it at Endpoint creation with `block is not supported` |
+| `exchangePattern` | no | — | Not supported. The Component rejects it at Endpoint creation with `exchange_pattern is not supported` |
 
 The endpoint name must not be empty and must not contain whitespace. The Component rejects both at Endpoint creation.
 

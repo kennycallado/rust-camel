@@ -24,7 +24,7 @@ The Convert Body step is a Message Translator (Hohpe & Woolf). It converts the e
 
 </details>
 
-The `.convert_body_to(BodyType::Json)` call picks a target variant from the `BodyType` enum: `Json`, `Bytes`, or `Text`. The step reads the current body, re-encodes it to that variant, and stores the result on the exchange. Steps after the conversion then read the body under its new type.
+The `.convert_body_to(BodyType::Json)` call picks a target variant from the `BodyType` enum: `Text`, `Json`, `Bytes`, `Xml`, or `Empty`. The step reads the current body, re-encodes it to that variant, and stores the result on the exchange. Steps after the conversion then read the body under its new type.
 
 Use Convert Body when the data is correct but the type is wrong. A source that emits bytes and a sink that expects JSON sit at a type boundary. The step changes the type and keeps the content. [Transform](transform.md) does a different job. It replaces the body from an expression or a literal value. Convert Body re-types the existing data. Transform overwrites it.
 

@@ -81,9 +81,9 @@ Endpoints that share a name must agree on `size`, `multipleConsumers`, `exchange
 
 ## Consumer
 
-`seda:processing?concurrentConsumers=2` registers a consumer that pulls from the endpoint's bounded queue. The Runtime starts one queue forwarder task per consumer. That forwarder awaits `send_and_wait` for `InOut` and `waitForTaskToComplete=Always` exchanges, so those exchanges remain serial even when `concurrentConsumers` is greater than 1. `InOnly` exchanges without a reply channel do not block the forwarder.
+`seda:processing?concurrentConsumers=2` registers a consumer that pulls from the endpoint's bounded queue. The consumer's `start()` spawns one forwarder task per unit of `concurrentConsumers` (one per subscriber queue in `Fanout` mode). The forwarders share one receiver. Each forwarder awaits `send_and_wait` for `InOut` and `waitForTaskToComplete=Always` exchanges, and the forwarders process exchanges in parallel when `concurrentConsumers` is greater than 1. `InOnly` exchanges without a reply channel do not block a forwarder.
 
-`concurrentConsumers` is reported to the Runtime through `ConcurrencyModel::Concurrent`. Finding I1 and bd issue `rc-exa2` track the limitation that blocks true concurrent `InOut` processing.
+`concurrentConsumers` is reported to the Runtime through `ConcurrencyModel::Concurrent`. This parallel `InOut` processing was a defect until 2026-08-09. Finding I1 and bd issue `rc-exa2` (`audit-fix-misc-correctness`) tracked the defect when a single forwarder serialized `send_and_wait`.
 
 The consumer transfers the primary forwarder handle to the Runtime through `background_task_handle()`. On shutdown, the Runtime aborts that handle, then calls `stop()`. `stop()` cancels the private token, aborts retained forwarders, and clears the active consumer registration.
 

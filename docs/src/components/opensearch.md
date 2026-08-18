@@ -123,7 +123,7 @@ opensearchs://<host>:<port>/<index>?operation=<op>[&option=value...]  (TLS)
 | --- | --- | --- | --- |
 | `host` | no | `localhost` | OpenSearch hostname. Falls back to the global config |
 | `port` | no | `9200` | OpenSearch port. Falls back to the global config |
-| `index` | yes | — | Target index name. Lowercase letters, digits, hyphens, underscores. Max 255 bytes |
+| `indexName` | yes | — | Target index name. Overrides the index from the URI path. Lowercase letters, digits, hyphens, underscores. Max 255 bytes |
 | `operation` | no | `SEARCH` | One of the operations in the table below |
 | `username` | no | — | Basic auth username. Falls back to the global config |
 | `password` | no | — | Basic auth password. Falls back to the global config |
@@ -132,11 +132,11 @@ opensearchs://<host>:<port>/<index>?operation=<op>[&option=value...]  (TLS)
 | `from` | no | — | Search result offset. Filled into the body when absent |
 | `max_bulk_bytes` | no | — | Maximum serialized bulk payload size. `BULK` rejects larger payloads |
 | `retryEnabled` | no | `true` | Enable retry on transient failures |
-| `retryMaxAttempts` | no | `3` | Maximum retry attempts |
-| `retryInitialDelayMs` | no | `1000` | Initial backoff delay |
+| `retryMaxAttempts` | no | `10` | Maximum retry attempts |
+| `retryInitialDelayMs` | no | `100` | Initial backoff delay |
 | `retryMultiplier` | no | `2.0` | Backoff multiplier |
-| `retryMaxDelayMs` | no | `60000` | Maximum backoff delay |
-| `retryJitter` | no | `0.0` | Jitter factor between 0.0 and 1.0 |
+| `retryMaxDelayMs` | no | `30000` | Maximum backoff delay |
+| `retryJitter` | no | `0.2` | Jitter factor between 0.0 and 1.0 |
 
 ## Operations
 
@@ -209,4 +209,4 @@ All operations except `MULTISEARCH` and `UNKNOWN` use typed request builders fro
 
 Operation failures log at `warn!` with the index name and error. Client initialization failures log at `error!` because the producer cannot function without a client. ADR-0012 classifies initialization failures as system-broken. The Producer surfaces transient retry exhaustion and permanent failures as `CamelError::ProcessorError`. The route `ErrorHandler` owns the operational signal.
 
-**Reference**: [camel-opensearch CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-opensearch/CONTEXT.md). Example source: not yet published.
+**Reference**: [camel-opensearch CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-opensearch/CONTEXT.md). Example source: [`examples/opensearch-example`](https://github.com/kennycallado/rust-camel/tree/main/examples/opensearch-example).

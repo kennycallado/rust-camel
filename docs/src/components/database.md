@@ -16,7 +16,7 @@ sql:<query>[?outputType=<mode>&dataSource=<name>&allowDynamicQuery=<bool>&bridge
 | --- | --- | --- | --- |
 | `query` | yes | — | SQL query or statement. Can also come from a file |
 | `outputType` | no | `SelectList` | `SelectList` (JSON array) or `StreamList` (NDJSON stream) |
-| `dataSource` | no | `default` | Named datasource from `Camel.toml` |
+| `dataSource` | no | — | Named datasource from `Camel.toml`. Omit to use the inline `db_url` |
 | `allowDynamicQuery` | no | `false` | Allow query from Exchange header or body (ADR-0032) |
 | `bridgeErrorHandler` | no | `false` | Route poll errors through the error handler |
 
@@ -83,7 +83,7 @@ The operation is the path segment in the URI. The 12 supported operations are:
 
 Credentials belong in the named datasource, not in the Endpoint URI. The `redact_db_url` function removes user information before a URL enters a log or error message. Identifier validation rejects whitespace, quotes, semicolons, and backslashes in interpolated table, edge, and vector-field names.
 
-The raw-query trust boundary is an open hardening gap. The `query` operation accepts SurrealQL from the `CamelSurrealDbQuery` header or the body before it falls back to Endpoint configuration. Route authors must filter these sources before the Producer. The SurrealDB crate CONTEXT documents the gap.
+The `query` operation gates its dynamic query sources behind `allow_dynamic_query` (default `false`, [ADR-0032](../adr/0032-exchange-data-trust-boundary.md)). When the gate is off, the `CamelSurrealDbQuery` header and the Exchange body are ignored, and the Producer runs the query from the Endpoint configuration. Set `allow_dynamic_query=true` to accept SurrealQL from the header (first priority) or the body (second priority).
 
 ## Datasource configuration
 

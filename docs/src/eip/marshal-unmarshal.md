@@ -43,7 +43,7 @@ Marshal and Unmarshal are the Message Translator pair (Hohpe & Woolf). Marshal s
 
 The `.marshal("csv")` call names the wire format as a string. The processor looks up that name in the data format registry and applies the format to the current body. Marshal stores the serialized result on the exchange. Unmarshal reverses the flow. It parses the body through the named format and stores the parsed structure on the exchange.
 
-The string parameter keeps the route declaration format-agnostic. Common formats include `json`, `csv`, `xml`, and `protobuf`. Each format owns its body-type mapping and its configuration. See [Data Formats](../data-formats/index.md) for the format catalog, the `DataFormat` trait, and per-format options. This page covers only the route-level step.
+The string parameter keeps the route declaration format-agnostic. Built-in formats are `json`, `csv`, `xml`, and `zip`. Protobuf ships as the separate `camel-dataformat-protobuf` crate and must be registered in the data format registry before a route uses it. Each format owns its body-type mapping and its configuration. See [Data Formats](../data-formats/index.md) for the format catalog, the `DataFormat` trait, and per-format options. This page covers only the route-level step.
 
 A route that crosses a system boundary pairs the two steps. Marshal prepares the body for the wire on the outgoing side. Unmarshal restores a structured type on the incoming side. Each step in between then reads the body shape it expects.
 

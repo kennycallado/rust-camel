@@ -70,7 +70,7 @@ The server exposes these endpoints:
 
 ### Exposure posture
 
-Diagnostic endpoints follow the Prometheus scrape convention: unauthenticated by default, with TLS and auth as opt-in hooks. The default bind address prefers loopback. Binding to `0.0.0.0` emits a startup warning.
+Diagnostic endpoints follow the Prometheus scrape convention: unauthenticated by default, with TLS and auth as opt-in hooks. The service binds exactly the address the caller supplies; there is no loopback default. Binding to `0.0.0.0` emits a startup warning.
 
 See [ADR-0052](../adr/0052-diagnostic-endpoint-exposure-posture.md) for the full posture.
 

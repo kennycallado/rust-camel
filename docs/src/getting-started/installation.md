@@ -35,11 +35,11 @@ resulting `[dependencies]` block looks like:
 
 ```toml
 [dependencies]
-camel-api = "0.26"
-camel-core = "0.26"
-camel-builder = "0.26"
-camel-component-timer = "0.26"
-camel-component-log = "0.26"
+camel-api = "0.29"
+camel-core = "0.29"
+camel-builder = "0.29"
+camel-component-timer = "0.29"
+camel-component-log = "0.29"
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"
 ```

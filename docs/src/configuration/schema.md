@@ -418,7 +418,7 @@ WASM limits appear in three places: `[beans.<name>.limits]`, `[security.permissi
 
 ## [datasources]
 
-Named datasource pools. Each entry is keyed by a name routes reference with the `sql-ds://<name>` URI scheme. The block is a map of [`DatasourceConfig`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-api/CONTEXT.md) values.
+Named datasource pools. Each entry is keyed by a name that routes reference through the `datasource` URI parameter (for example `sql:SELECT * FROM users?datasource=my-db`). The block is a map of [`DatasourceConfig`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-api/CONTEXT.md) values.
 
 ```toml
 {{#include ../../../examples/sql-datasource-example/Camel.toml}}
@@ -464,6 +464,11 @@ A small allowlist of `CAMEL_*` environment variables overrides specific fields w
 | `CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS` | `runtime_journal.compaction_threshold_events` |
 | `CAMEL_IDEMPOTENT_REPO_PATH` | `idempotent_repo.path` |
 | `CAMEL_IDEMPOTENT_REPO_DURABILITY` | `idempotent_repo.durability` |
+| `CAMEL_CACHE_REPO_BACKEND` | `cache_repo.backend` |
+| `CAMEL_CACHE_REPO_PATH` | `cache_repo.path` |
+| `CAMEL_CACHE_REPO_MAX_CAPACITY` | `cache_repo.max_capacity` |
+| `CAMEL_CACHE_REPO_STALE_RETENTION` | `cache_repo.stale_retention` |
+| `CAMEL_CACHE_REPO_MAX_ENTRIES` | `cache_repo.max_entries` |
 | `CAMEL_SUPERVISION_INITIAL_DELAY_MS` | `supervision.initial_delay_ms` |
 | `CAMEL_SUPERVISION_MAX_ATTEMPTS` | `supervision.max_attempts` |
 

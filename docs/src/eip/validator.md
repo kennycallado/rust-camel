@@ -21,12 +21,12 @@ The Validator is a Message Transformation pattern from Hohpe and Woolf. It check
 
 </details>
 
-The included route fires a timer twice. The `.set_body(...)` step sets the body to an XML order. The `.validate(&xsd)` step loads the XSD schema from the configured path and checks the body against it. The log step after the validator runs only when the body is valid. A second route in the example sends an invalid order. It pairs the validator with an `error_handler`, so the validation error is logged instead of crashing the process.
+The included route fires a timer twice. The `.set_body(...)` step sets the body to an XML order. The `.validate(...)` step takes an expression string and compiles it to a predicate through the simple language. The included route uses `${body.contains('<order>')}`. The log step after the validator runs only when the predicate holds. A second route in the example sends an invalid order. It pairs the validator with an `error_handler`, so the validation error is logged instead of crashing the process.
 
-On a mismatch the validator returns an error. The error flows back through the same `RouteErrorHandler` boundary as any other step error. A route-level `error_handler` or a `do-try` catch block can recover it. Wrap the validator in a `do-try` block to keep the exchange in the pipeline after a failure. Use the bare validator to fail fast on bad input. The YAML `validate` step also accepts a predicate expression like `${body.contains('<order>')}` for inline checks without a schema file.
+On a mismatch the validator returns an error. The error flows back through the same `RouteErrorHandler` boundary as any other step error. A route-level `error_handler` or a `do-try` catch block can recover it. Wrap the validator in a `do-try` block to keep the exchange in the pipeline after a failure. Use the bare validator to fail fast on bad input. Schema-file validation (XSD, JSON Schema) runs through the `validator:` component endpoint (`to: "validator:<path>?type=xml"`), not the `validate` step.
 
 The Validator differs from the Filter. The Validator stops the route on a failed check and surfaces the error. The Filter silently drops the exchange. Use the Validator for input validation and contract enforcement at a trust boundary. Use the Filter when an exchange is well-formed but not relevant.
 
-Per [ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md), the validator compiles into a `Service<Exchange>` step. The schema engine runs inside the step. The processor contract is documented in [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).
+Per [ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md), the validator compiles into a `Service<Exchange>` step. The predicate runs inside the step. The processor contract is documented in [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).
 
 The example source is at [`examples/validator`](https://github.com/kennycallado/rust-camel/tree/main/examples/validator).

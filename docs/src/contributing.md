@@ -80,7 +80,7 @@ explanation.
 
 Write like a senior engineer talking to a peer. Short sentences, active voice,
 concrete examples over abstractions. The full rules, including banned words and
-the em-dash policy, are in [`VOICE.md`](https://github.com/kennycallado/rust-camel/blob/main/docs/VOICE.md). Read it before you write
+the em-dash policy, are in [`docs/AGENTS.md`](https://github.com/kennycallado/rust-camel/blob/main/docs/AGENTS.md). Read it before you write
 prose.
 
 ## Structural checks

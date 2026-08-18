@@ -32,7 +32,7 @@ routes:
 ## URI
 
 ```text
-llm:<operation>?provider=<name>[&model=<model>][&temperature=<n>][&max_tokens=<n>][&stream=<bool>][&system_prompt=<text>][&timeout_secs=<n>]
+llm:<operation>?provider=<name>[&model=<model>][&temperature=<n>][&max_tokens=<n>][&stream=<bool>][&system_prompt=<text>]
 ```
 
 | Parameter | Default | Description |
@@ -43,7 +43,8 @@ llm:<operation>?provider=<name>[&model=<model>][&temperature=<n>][&max_tokens=<n
 | `max_tokens` | provider default | Max output tokens |
 | `stream` | `true` | `true` streams, `false` materializes |
 | `system_prompt` | — | System prompt override |
-| `timeout_secs` | provider default | Activity timeout (streaming) or total deadline (materialized) |
+
+`timeout_secs` is not a URI parameter. Configure it in the provider section of `Camel.toml` (or the global LLM config). It sets the activity timeout for streaming mode and the total deadline for materialized mode.
 
 ## Operations
 

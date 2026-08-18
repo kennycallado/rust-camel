@@ -33,7 +33,7 @@ Components connect routes to external systems. Each Component owns a URI scheme 
 | `xslt` | producer | [camel-xslt](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-xslt/CONTEXT.md) |
 | `xj` | producer | [camel-xj](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-xj/CONTEXT.md) |
 | `cxf` | both | [camel-cxf](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-cxf/CONTEXT.md) |
-| `keycloak` | consumer | [camel-component-keycloak](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-keycloak/CONTEXT.md) |
+| `keycloak` | both | [camel-component-keycloak](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-keycloak/CONTEXT.md) |
 | `wasm` | both | [camel-component-wasm](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-wasm/CONTEXT.md) |
 | `template` | producer | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
 

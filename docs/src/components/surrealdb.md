@@ -60,14 +60,14 @@ routes:
 ## URI
 
 ```text
-surrealdb:<operation>?datasource=<name>[&table=<t>][&id=<r>][&edge=<e>][&from=<r>][&to=<r>][&function=<f>][&top_k=<n>][&metric=<m>][&vector_field=<f>][&query=<surrealql>]
+surrealdb:<operation>?datasource=<name>[&table=<t>][&id=<r>][&edge=<e>][&from=<r>][&to=<r>][&function=<f>][&top_k=<n>][&metric=<m>][&vector_field=<f>][&query=<surrealql>][&allow_dynamic_query=<bool>]
 ```
 
 The path segment is the operation. The component rejects the URI if `datasource` is missing, the operation is unknown, or `output=stream` is set. Streaming output is not supported. All results materialize as `Body::Json(Vec<Value>)`.
 
 | Operation | Direction | Required URI params | Description |
 | --- | --- | --- | --- |
-| `query` | producer / polling | — | Run raw SurrealQL from URI, header, or body |
+| `query` | producer / polling | — | Run raw SurrealQL from the header, the body, or the Endpoint config (dynamic sources gated by `allow_dynamic_query`) |
 | `select` | producer / polling | `table` | Select all rows or one row by `id` |
 | `create` | producer | `table` | Insert a new record from a JSON body |
 | `update` | producer | `table`, `id` | Merge JSON body fields into an existing record |
@@ -95,6 +95,7 @@ The path segment is the operation. The component rejects the URI if `datasource`
 | `vector_field` | no | `embedding` | Field that holds the vector |
 | `function` | `run` | — | Function name, validated as ASCII identifier with `::` |
 | `query` | no | — | Inline SurrealQL for the `query` operation |
+| `allow_dynamic_query` | no | `false` | Accept SurrealQL from the `CamelSurrealDbQuery` header or the Exchange body (ADR-0032) |
 
 Retry policy parameters (`retryEnabled`, `retryMaxAttempts`, `retryInitialDelayMs`, `retryMultiplier`, `retryMaxDelayMs`, `retryJitter`) match `camel-sql` by name and default. They configure pool-establishment retry today. ADR-0013 owns the retry semantics; producer operations do not retry to avoid duplicating non-idempotent writes.
 
@@ -106,7 +107,7 @@ The Producer executes the eleven non-`live` operations. The body shape the Produ
 
 Result bodies land as `Body::Json`. The Producer sets `CamelSurrealDbRecordId` on writes when the id can be derived from the URI or the response. The id is the edge record for `relate`, not the source node.
 
-The `query` operation reads SurrealQL from the URI, then the `CamelSurrealDbQuery` header, then the Exchange body. The `CamelSurrealDbParams` header binds `$name` placeholders. ADR-0032 classifies Exchange data as untrusted. The component has no `allow_dynamic_query` switch. The route is responsible for sanitizing SurrealQL from external sources before it reaches the Producer.
+The `query` operation resolves SurrealQL with this priority: the `CamelSurrealDbQuery` header, then the Exchange body, then the query configured on the Endpoint. The header and the body are untrusted Exchange data under [ADR-0032](../adr/0032-exchange-data-trust-boundary.md). The component gates both dynamic sources behind `allow_dynamic_query` (default `false`). When the gate is off, the Producer runs the configured query only. The `CamelSurrealDbParams` header binds `$name` placeholders.
 
 ## Consumer
 
@@ -138,7 +139,7 @@ The `extra` map carries `namespace`, `database`, `username`, and `password`. The
 
 | Header | Direction | Operations | Description |
 | --- | --- | --- | --- |
-| `CamelSurrealDbQuery` | input | `query` | SurrealQL text (priority: header > body > URI) |
+| `CamelSurrealDbQuery` | input | `query` | SurrealQL text (priority: header > body > endpoint config; requires `allow_dynamic_query=true`) |
 | `CamelSurrealDbParams` | input | `query` | JSON object map of `$name` → value bindings |
 | `CamelSurrealDbVector` | input | `search` | Query vector as JSON array of `f32` (alternative to body) |
 | `CamelSurrealDbRecordId` | output | all writes | Resolved `table:key` id when one can be determined |
@@ -151,7 +152,7 @@ Identifier validation runs on `table`, `edge`, and `vector_field`. The validator
 
 `from` and `to` for `relate` must be full RecordIds in `table:key` form. Bare keys are rejected at endpoint creation. This prevents the edge from silently targeting the wrong record when a route author writes `from=1` instead of `from=user:1`.
 
-The raw-query trust boundary is the documented hardening gap for this component. The `query` operation accepts SurrealQL from the body and the `CamelSurrealDbQuery` header. The route must filter these sources before the Producer. The component exposes no default-deny switch equivalent to `camel-sql`'s `allowDynamicQuery=false`.
+The `query` operation gates its dynamic query sources behind `allow_dynamic_query` (default `false`), the same default-deny posture as `camel-sql`'s `allowDynamicQuery`. With the gate off, the `CamelSurrealDbQuery` header and the body are ignored, and the Producer runs the query from the Endpoint configuration. Set `allow_dynamic_query=true` on a controlled route to accept query text from Exchange data.
 
 The component follows the [ADR-0012](../adr/0012-log-level-convention-handler-contract-boundaries.md) log-level convention. It never emits `error!` in production code. Recoverable and handler-owned conditions use `warn!`. Errors that terminate an operation return `CamelError` or `SurrealDbError`. The route error handler or supervision owns the final signal. ADR-0020 classifies the SurrealDB SDK as a stable database-driver class. The crate does not wrap the SDK in a project-owned adapter trait.
 

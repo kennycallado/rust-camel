@@ -71,10 +71,10 @@ Apache Camel runs processors in a pipeline backed by a Java service architecture
 
 | Apache Camel | rust-camel | Notes |
 |---|---|---|
-| `onException(Exception.class)` | `on_exceptions: [{ exception: [...] }]` | Match by variant name. |
+| `onException(Exception.class)` | `on_exceptions: [{ kind: "..." }]` | Match by error `kind`. |
 | `errorHandler(deadLetterChannel)` | `error_handler: { dead_letter_channel: ... }` | Route-level config. |
-| `handled(true)` | `disposition: Handled` | Absorbs the error. Route terminates normally. |
-| `continued(true)` | `disposition: Continued` | Clears the error. Advances to the next step. |
+| `handled(true)` | `disposition: handled` | Absorbs the error. Route terminates normally. |
+| `continued(true)` | `disposition: continued` | Clears the error. Advances to the next step. |
 | `maximumRedeliveries` | `retry(max).with_backoff(...)` | Retry on the builder. |
 
 See [ADR-0019](../adr/0019-error-disposition-pipeline-recovery.md) for the exception disposition contract.
@@ -94,7 +94,7 @@ See [ADR-0019](../adr/0019-error-disposition-pipeline-recovery.md) for the excep
 
 ## Body types
 
-Apache Camel uses `Object` as the body type and relies on type converters. rust-camel uses a `Body` enum with five variants:
+Apache Camel uses `Object` as the body type and relies on type converters. rust-camel uses a `Body` enum with six variants:
 
 | Variant | Holds |
 |---|---|
@@ -102,6 +102,7 @@ Apache Camel uses `Object` as the body type and relies on type converters. rust-
 | `Body::Json` | Parsed JSON value |
 | `Body::Bytes` | Raw byte buffer |
 | `Body::Stream` | Async stream (materialized by [Stream Cache](../steps/stream-cache.md)) |
+| `Body::Xml` | XML document |
 | `Body::Empty` | No payload |
 
 The [Exchange and Message](exchange-message.md) page covers typed body access. The [Convert Body](../eip/convert-body.md) step changes between variants. The [Marshal and Unmarshal](../eip/marshal-unmarshal.md) step converts between wire formats (JSON, CSV, XML, ZIP) and these variants.

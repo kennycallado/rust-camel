@@ -5,29 +5,30 @@ The Mock component is a producer-only testing utility. It records every Exchange
 ```rust,ignore
 use camel_builder::RouteBuilder;
 use camel_component_mock::MockComponent;
+use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
-use tower::ServiceExt;
 
 let mock = MockComponent::new();
 let mock_ref = mock.clone();
 
-let mut ctx = CamelContext::new();
-ctx.register_component("mock", Box::new(mock));
+let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
+ctx.register_component(TimerComponent::new());
+ctx.register_component(mock);
 
-let route = RouteBuilder::from("direct:input")
+let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=1")
+    .route_id("mock-demo")
+    .set_body(camel_api::Body::Text("hello"))
     .map_body(|body: camel_api::Body| {
         camel_api::Body::Text(body.as_text().unwrap_or("").to_uppercase())
     })
     .to("mock:result")
     .build()?;
 
-ctx.add_route(route).await?;
+ctx.add_route_definition(route).await?;
 ctx.start().await?;
 
-let producer = ctx.create_producer("direct:input").await?;
-producer.oneshot(camel_api::Exchange::new(camel_api::Message::new("hello"))).await?;
-
 let endpoint = mock_ref.get_endpoint("result").unwrap();
+endpoint.await_exchanges(1, std::time::Duration::from_secs(5)).await;
 endpoint.assert_exchange_count(1).await;
 endpoint.exchange(0)
     .assert_body_text("HELLO")

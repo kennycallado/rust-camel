@@ -157,6 +157,7 @@ Core patterns, lifecycle, pipeline, and route authoring.
 | [0045](../adr/0045-camel-core-architecture-charter.md) | camel-core architecture charter | Codifies Clean + DDD + CQRS + vertical slices + hexagonal discipline crate-wide. |
 | [0046](../adr/0046-apache-camel-inspiration-not-conformance.md) | Apache Camel inspiration, not conformance | Apache Camel is design inspiration, not conformance authority. |
 | [0047](../adr/0047-template-rendering-engine.md) | Template rendering engine | MiniJinja-based external template engine with compile-once caching and atomic hot reload. |
+| [0058](../adr/0058-outcome-aware-segment-composition.md) | Outcome-aware segment composition contract | Defines how outcome-aware EIP segments compose with `PipelineOutcome` semantics. |
 | [0053](../adr/0053-wit-interface-versioning.md) | WIT interface versioning | `camel:plugin` uses one package-level WIT SemVer, independent from Rust crate versions. |
 
 ### Security
@@ -175,6 +176,8 @@ Authentication, authorization, trust boundaries, and capability models.
 | [0050](../adr/0050-wasm-sandbox-capability-posture.md) | WASM sandbox capability posture | Per-world grants for Camel host functions and selective WASI registration. |
 | [0051](../adr/0051-credential-redaction-at-diagnostic-boundaries.md) | Credential redaction at diagnostic boundaries | Credential-bearing types use manual redacting `Debug`; `Serialize` must not expose credential bytes. |
 | [0052](../adr/0052-diagnostic-endpoint-exposure-posture.md) | Diagnostic endpoint exposure posture | Diagnostic endpoints follow the Prometheus scrape model; network isolation is the operator's duty. |
+| [0057](../adr/0057-http-header-emission-policy.md) | HTTP header emission policy | Sorts HTTP headers into three RFC-derived buckets that decide what the component emits. |
+| [0059](../adr/0059-auth-extraction-path-divergence.md) | Auth extraction path divergence | Documents where credential extraction diverges from the shared trust-boundary path and why. |
 
 ### Error Handling
 
@@ -186,6 +189,7 @@ Disposition, drain, supervision, and repository patterns.
 | [0019](../adr/0019-error-disposition-pipeline-recovery.md) | Error disposition in-pipeline recovery | `RouteErrorHandler` trait injected into the pipeline decides disposition after each step failure. |
 | [0023](../adr/0023-idempotent-repository-trait.md) | Idempotent Repository trait | Key-only `IdempotentRepository` trait in `camel-api` for duplicate detection. |
 | [0028](../adr/0028-claimcheck-repository-trait.md) | Claim Check Repository trait | Payload-bearing `ClaimCheckRepository` trait distinct from key-only `IdempotentRepository`. |
+| [0056](../adr/0056-cache-repository-port.md) | Cache Repository port | `CacheRepository` port in `camel-api` with a memory-default backend for cache storage. |
 
 ### Performance and Limits
 
@@ -210,3 +214,13 @@ WASM, functions, components, and cross-cutting contracts.
 | [0027](../adr/0027-mqtt-component-3-1-1-per-endpoint-connections.md) | MQTT component 3.1.1 per-endpoint | MQTT 3.1.1 via `rumqttc` with one connection per Consumer or Producer. |
 | [0048](../adr/0048-attestation-provenance-retired.md) | Attestation provenance (retired) | Retired HMAC-SHA256 attestation decision kept for history. |
 | [0049](../adr/0049-workspace-non-exhaustive-policy-for-v1-contract-enums.md) | Workspace non-exhaustive policy | Public contract enums are `#[non_exhaustive]` by default before the 1.0 API freeze. |
+| [0060](../adr/0060-mcp-first-class-component.md) | MCP as a first-class component | MCP becomes a first-class component with its own adapter confinement and trust rules. |
+
+### Process and Tooling
+
+Workspace policy for tests, builds, and publishing.
+
+| ADR | Title | Summary |
+| --- | --- | --- |
+| [0054](../adr/0054-ignore-test-classification-policy.md) | `#[ignore]` test classification policy | Ignored tests must carry a reason and a classification; an xtask lint enforces the policy. |
+| [0055](../adr/0055-publish-topology-no-cyclic-devdeps.md) | Publish topology without cyclic dev-dependencies | Publishable crates must not form cyclic dev/build dependency chains in the publish topology. |

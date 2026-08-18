@@ -34,8 +34,8 @@ cron:<name>?schedule=<5-field-expr>[&timeZone=<IANA>&includeMetadata=true]
 | Parameter | Required | Default | Description |
 | --- | --- | --- | --- |
 | `schedule` | yes | — | Unix 5-field cron expression. Use `+` as the space separator |
-| `timeZone` | no | system | IANA timezone identifier (e.g. `America/New_York`) |
-| `includeMetadata` | no | `false` | Attach `CronFire` metadata to each Exchange |
+| `timeZone` | no | `UTC` | IANA timezone identifier (e.g. `America/New_York`) |
+| `includeMetadata` | no | `true` | Attach `CronFire` metadata to each Exchange |
 
 ## Schedule format
 

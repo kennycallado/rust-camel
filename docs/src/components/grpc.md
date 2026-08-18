@@ -77,7 +77,7 @@ The Consumer supports four RPC modes. It auto-detects the mode from the proto me
 
 `grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=helloworld.proto&transport=plaintext` sends the Exchange body as a gRPC call. The Producer holds a lazy pool of connections. It reports endpoint health through `RuntimeObservability`.
 
-The Producer requires `transport=plaintext` or `transport=tls` in the URI (ADR-0033). The legacy `tls=true` and `tls=false` keys are rejected. Under `tls`, the endpoint URL is rewritten to `https://`. The `insecure_skip_verify=true` option hard-errors. The component fails closed on an incomplete mTLS identity.
+The Producer requires `transport=plaintext` or `transport=tls` in the URI (ADR-0033). The legacy `tls=true` key is rejected: a URI cannot carry a TLS configuration, so `tls=true` can never be satisfied and fails closed. `tls=false` still parses and means explicit plaintext. Under `tls`, the endpoint URL is rewritten to `https://`. The `insecure_skip_verify=true` option hard-errors. The component fails closed on an incomplete mTLS identity.
 
 ## Security
 
