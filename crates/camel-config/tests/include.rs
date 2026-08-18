@@ -204,3 +204,111 @@ fn include_invalid_value_type_is_error() {
         "expected type error, got: {err}"
     );
 }
+
+// --- include inside profile sections (bd rc-zfmj) ---
+
+#[test]
+fn include_inside_default_section_loads() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "sec.toml", "timeout_ms = 4242\n");
+    write(
+        dir.path(),
+        "Camel.toml",
+        "[default]\ninclude = [\"sec.toml\"]\ntimeout_ms = 100\n",
+    );
+    // Root [default].timeout_ms must win over the included file's value
+    let cfg = CamelConfig::from_file(&path(dir.path())).unwrap();
+    assert_eq!(cfg.timeout_ms, 100);
+}
+
+#[test]
+fn include_inside_default_section_values_visible() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "sec.toml", "watch_debounce_ms = 111\n");
+    write(
+        dir.path(),
+        "Camel.toml",
+        "[default]\ninclude = [\"sec.toml\"]\ntimeout_ms = 100\n",
+    );
+    // Keys ONLY present in the included file must be visible
+    let cfg = CamelConfig::from_file(&path(dir.path())).unwrap();
+    assert_eq!(cfg.watch_debounce_ms, 111);
+    assert_eq!(cfg.timeout_ms, 100);
+}
+
+#[test]
+fn include_inside_active_profile_section_loads() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "dev.toml",
+        "watch_debounce_ms = 111\ntimeout_ms = 100\n",
+    );
+    write(dir.path(), "prod.toml", "timeout_ms = 500\n");
+    write(
+        dir.path(),
+        "Camel.toml",
+        "[default]\ninclude = [\"dev.toml\"]\n\n[production]\ninclude = [\"prod.toml\"]\n",
+    );
+    let cfg = CamelConfig::from_file_with_profile(&path(dir.path()), Some("production")).unwrap();
+    // Union: dev-only keys survive, profile include wins on conflicts
+    assert_eq!(cfg.watch_debounce_ms, 111);
+    assert_eq!(cfg.timeout_ms, 500);
+}
+
+#[test]
+fn include_top_level_and_profile_section_union() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "global.toml", "timeout_ms = 7\n");
+    write(dir.path(), "prod.toml", "timeout_ms = 500\n");
+    write(
+        dir.path(),
+        "Camel.toml",
+        "include = [\"global.toml\"]\n\n[default]\nwatch_debounce_ms = 100\n\n[production]\ninclude = [\"prod.toml\"]\n",
+    );
+    let cfg = CamelConfig::from_file_with_profile(&path(dir.path()), Some("production")).unwrap();
+    // Profile-scoped include overrides top-level include on conflicts;
+    // root [default] value wins over all includes.
+    assert_eq!(cfg.timeout_ms, 500);
+    assert_eq!(cfg.watch_debounce_ms, 100);
+}
+
+#[test]
+fn include_inside_inactive_profile_section_is_not_loaded() {
+    let dir = TempDir::new().unwrap();
+    // staging.toml intentionally NOT created — it must never be read
+    write(
+        dir.path(),
+        "Camel.toml",
+        "[default]\ntimeout_ms = 100\n\n[staging]\ninclude = [\"staging.toml\"]\n",
+    );
+    let cfg = CamelConfig::from_file(&path(dir.path())).unwrap();
+    assert_eq!(cfg.timeout_ms, 100);
+}
+
+#[test]
+fn include_invalid_type_inside_section_is_error() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "Camel.toml", "[default]\ninclude = 42\n");
+    let err = CamelConfig::from_file(&path(dir.path())).unwrap_err();
+    assert!(
+        err.to_string().contains("default.include"),
+        "expected section-named type error, got: {err}"
+    );
+}
+
+#[test]
+fn include_same_file_in_top_level_and_section_is_error() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "base.toml", "timeout_ms = 1\n");
+    write(
+        dir.path(),
+        "Camel.toml",
+        "include = [\"base.toml\"]\n\n[default]\ninclude = [\"base.toml\"]\n",
+    );
+    let err = CamelConfig::from_file(&path(dir.path())).unwrap_err();
+    assert!(
+        err.to_string().contains("duplicate"),
+        "expected duplicate error, got: {err}"
+    );
+}

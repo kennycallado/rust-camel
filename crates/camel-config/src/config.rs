@@ -1288,46 +1288,53 @@ impl CamelConfig {
         let mut root_value: toml::Value = toml::from_str(&content)
             .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
 
-        let includes = Self::extract_includes(&root_value)?;
-
-        // Strip `include` before passing to inner builder (not a CamelConfig field)
-        if let toml::Value::Table(ref mut table) = root_value {
-            table.remove("include");
-        }
-
         let env_profile = std::env::var("CAMEL_PROFILE").ok();
         let effective_profile = profile.or(env_profile.as_deref());
+
+        let includes = Self::extract_includes(&mut root_value, effective_profile)?;
 
         let pre_sources = crate::include::load_includes(base_dir, &includes, effective_profile)?;
 
         build_from_toml_value_inner(root_value, profile, merge_env, pre_sources)
     }
 
-    /// Validates and extracts the `include` field from a parsed TOML value.
-    /// Returns an error if `include` is present but not an array of strings.
-    fn extract_includes(raw_value: &toml::Value) -> Result<Vec<String>, ConfigError> {
-        match raw_value.get("include") {
-            None => Ok(vec![]),
-            Some(toml::Value::Array(arr)) => {
-                let mut paths = Vec::with_capacity(arr.len());
-                for (i, item) in arr.iter().enumerate() {
-                    match item.as_str() {
-                        Some(s) => paths.push(s.to_string()),
-                        None => {
-                            return Err(ConfigError::Message(format!(
-                                "include[{}] must be a string, got: {}",
-                                i, item
-                            )));
-                        }
-                    }
-                }
-                Ok(paths)
-            }
-            Some(other) => Err(ConfigError::Message(format!(
-                "'include' must be an array of strings, got: {}",
-                other.type_str()
-            ))),
+    /// Validates and extracts `include` lists from a parsed TOML value.
+    ///
+    /// Extraction covers the top-level table plus, when present, the `[default]`
+    /// and active `[<profile>]` sections (profile-scoped includes). Returns an
+    /// error if any `include` is present but not an array of strings.
+    ///
+    /// Order (lowest priority first): top-level, `[default]`, `[<profile>]` —
+    /// profile-scoped includes override top-level ones on key conflicts, mirroring
+    /// profile-overlay semantics. The `include` keys are stripped from all
+    /// extracted locations so they never reach profile merging or deserialization.
+    fn extract_includes(
+        raw_value: &mut toml::Value,
+        profile: Option<&str>,
+    ) -> Result<Vec<String>, ConfigError> {
+        let mut paths = Vec::new();
+
+        let Some(table) = raw_value.as_table_mut() else {
+            return Ok(paths);
+        };
+
+        if let Some(value) = table.remove("include") {
+            paths.extend(parse_include_list(&value, "include")?);
         }
+
+        let mut sections = vec!["default"];
+        if let Some(p) = profile.filter(|p| *p != "default") {
+            sections.push(p);
+        }
+        for section in sections {
+            if let Some(toml::Value::Table(section_table)) = table.get_mut(section)
+                && let Some(value) = section_table.remove("include")
+            {
+                paths.extend(parse_include_list(&value, &format!("{section}.include"))?);
+            }
+        }
+
+        Ok(paths)
     }
 
     pub fn from_env_or_default() -> Result<Self, ConfigError> {
@@ -1356,14 +1363,10 @@ impl CamelConfig {
         let mut root_value: toml::Value = toml::from_str(&content)
             .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
 
-        let includes = Self::extract_includes(&root_value)?;
-
-        if let toml::Value::Table(ref mut table) = root_value {
-            table.remove("include");
-        }
-
         let env_profile = std::env::var("CAMEL_PROFILE").ok();
         let effective_profile = profile.or(env_profile.as_deref());
+
+        let includes = Self::extract_includes(&mut root_value, effective_profile)?;
 
         let pre_sources =
             crate::include::load_includes(&base_dir_owned, &includes, effective_profile)?;
@@ -1391,14 +1394,10 @@ impl CamelConfig {
         let mut root_value: toml::Value = toml::from_str(&content)
             .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
 
-        let includes = Self::extract_includes(&root_value)?;
-
-        if let toml::Value::Table(ref mut table) = root_value {
-            table.remove("include");
-        }
-
         let env_profile = std::env::var("CAMEL_PROFILE").ok();
         let effective_profile = profile.or(env_profile.as_deref());
+
+        let includes = Self::extract_includes(&mut root_value, effective_profile)?;
 
         let pre_sources =
             crate::include::load_includes(&base_dir_owned, &includes, effective_profile)?;
@@ -1620,6 +1619,31 @@ fn resolve_toml_value_placeholders(
             }
         }
         _ => {}
+    }
+}
+
+/// Parses one `include` value (array of strings) for [`CamelConfig::extract_includes`].
+/// `where_` names the location ("include" or "<section>.include") for error messages.
+fn parse_include_list(value: &toml::Value, where_: &str) -> Result<Vec<String>, ConfigError> {
+    match value {
+        toml::Value::Array(arr) => {
+            let mut paths = Vec::with_capacity(arr.len());
+            for (i, item) in arr.iter().enumerate() {
+                match item.as_str() {
+                    Some(s) => paths.push(s.to_string()),
+                    None => {
+                        return Err(ConfigError::Message(format!(
+                            "{where_}[{i}] must be a string, got: {item}",
+                        )));
+                    }
+                }
+            }
+            Ok(paths)
+        }
+        other => Err(ConfigError::Message(format!(
+            "'{where_}' must be an array of strings, got: {}",
+            other.type_str()
+        ))),
     }
 }
 
