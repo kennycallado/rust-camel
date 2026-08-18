@@ -3799,6 +3799,148 @@ allow-call-schemes = "{{env:WASM_SCHEMES:file,https}}"
 }
 
 #[cfg(test)]
+mod security_walk_exhaustiveness {
+    use super::*;
+
+    /// Exhaustiveness guard for `resolve_security_fail_closed`.
+    ///
+    /// The fixture below uses COMPLETE struct literals (the only exception is
+    /// `WasmLimitsConfig`, a general subsystem whose single walk-covered field,
+    /// `allow_call_schemes`, is set explicitly). Adding any string field to
+    /// `SecurityConfig` or a struct it owns breaks this test's compilation;
+    /// the new field must then carry a marker here, and if the walk lacks a
+    /// matching arm, the serialized scan below fails. This converts the
+    /// doc-comment discipline on the walk into a test guard.
+    #[test]
+    fn every_string_leaf_is_walked() {
+        fn marker(name: &str) -> String {
+            format!("{{{{env:SECWALK_{name}:r{name}}}}}")
+        }
+
+        let mut security = SecurityConfig {
+            oidc: Some(OidcSecurityConfig {
+                issuer: marker("ISSUER"),
+                jwks_uri: Some(marker("JWKS_URI")),
+                audience: vec![marker("AUDIENCE")],
+                client_id: Some(marker("CLIENT_ID")),
+                client_secret: Some(marker("OIDC_SECRET")),
+                token_endpoint: Some(marker("TOKEN_ENDPOINT")),
+                introspection_endpoint: Some(marker("INTROSPECTION_ENDPOINT")),
+            }),
+            native: Some(NativeAuthConfig {
+                subject: marker("SUBJECT"),
+                issuer: Some(marker("NATIVE_ISSUER")),
+                bearer_token: Some(marker("BEARER")),
+                api_key: Some(marker("API_KEY")),
+                roles: vec![marker("ROLE")],
+                scopes: vec![marker("SCOPE")],
+                credentials: vec![
+                    NativeCredentialEntry {
+                        subject: marker("CRED1_SUBJECT"),
+                        secret_env: Some(marker("CRED1_ENV")),
+                        secret: None,
+                        roles: vec![marker("CRED1_ROLE")],
+                        scopes: vec![marker("CRED1_SCOPE")],
+                    },
+                    NativeCredentialEntry {
+                        subject: marker("CRED2_SUBJECT"),
+                        secret_env: None,
+                        secret: Some(marker("CRED2_SECRET")),
+                        roles: vec![],
+                        scopes: vec![],
+                    },
+                ],
+            }),
+            keycloak: Some(KeycloakSecurityConfig {
+                server_url: marker("KC_URL"),
+                realm: marker("KC_REALM"),
+                client_id: marker("KC_CLIENT_ID"),
+                client_secret: marker("KC_SECRET"),
+                validation: KeycloakValidationConfig {
+                    method: marker("KC_METHOD"),
+                    audience: vec![marker("KC_AUDIENCE")],
+                    clock_skew_secs: 30,
+                },
+                jwks: KeycloakJwksConfig {
+                    cache_ttl_secs: 3600,
+                    refresh_skew_secs: 60,
+                },
+                introspection: KeycloakIntrospectionConfig {
+                    max_entries: 1,
+                    default_ttl_secs: 1,
+                    negative_ttl_secs: 1,
+                },
+                uma: Some(KeycloakUmaConfig {
+                    provider: marker("UMA_PROVIDER"),
+                    cache: PermissionCacheConfig {
+                        positive_ttl_secs: 1,
+                        negative_ttl_secs: 1,
+                        max_entries: 1,
+                    },
+                }),
+                allow_internal: false,
+            }),
+            permissions: Some(HashMap::from([(
+                "perm".to_string(),
+                PermissionProviderConfig {
+                    provider: marker("PERM_PROVIDER"),
+                    path: Some(marker("PERM_PATH")),
+                    config: Some(HashMap::from([("k".to_string(), marker("PERM_CFG"))])),
+                    cache: PermissionCacheConfig {
+                        positive_ttl_secs: 1,
+                        negative_ttl_secs: 1,
+                        max_entries: 1,
+                    },
+                    limits: crate::wasm_limits::WasmLimitsConfig {
+                        allow_call_schemes: Some(marker("PERM_SCHEMES")),
+                        ..Default::default()
+                    },
+                },
+            )])),
+            policies: Some(WasmSecurityPoliciesConfig {
+                wasm: HashMap::from([(
+                    "pol".to_string(),
+                    WasmSecurityPolicyConfig {
+                        path: marker("WASM_PATH"),
+                        limits: crate::wasm_limits::WasmLimitsConfig {
+                            allow_call_schemes: Some(marker("WASM_SCHEMES")),
+                            ..Default::default()
+                        },
+                        config: HashMap::from([("k".to_string(), marker("WASM_CFG"))]),
+                    },
+                )]),
+            }),
+        };
+
+        resolve_security_fail_closed(&mut security)
+            .expect("default-syntax markers must resolve without env vars");
+
+        // `skip_serializing` secrets are invisible to the serialized scan
+        // below; the walk must have resolved them in place instead.
+        assert_ne!(
+            security.oidc.as_ref().unwrap().client_secret.as_deref(),
+            Some("{{env:SECWALK_OIDC_SECRET:rOIDC_SECRET}}"),
+            "oidc.client_secret marker survived the walk"
+        );
+        assert_ne!(
+            security.keycloak.as_ref().unwrap().client_secret,
+            "{{env:SECWALK_KC_SECRET:rKC_SECRET}}",
+            "keycloak.client_secret marker survived the walk"
+        );
+
+        let serialized = toml::to_string(&security).expect("SecurityConfig serializes");
+        assert!(
+            !serialized.contains("{{env:"),
+            "unwalked string leaf survived the fail-closed walk:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("${env:"),
+            "DSL-style marker survived the walk:\n{serialized}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod native_credentials {
     use super::*;
 
