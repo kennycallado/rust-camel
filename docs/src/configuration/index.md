@@ -4,7 +4,7 @@
 
 Top-level sections: `[default.routes]` (discovery globs), `[components.*]` (per-component defaults, untyped TOML), `[supervision]` (retry and backoff), `[observability]` (tracing and metrics), `[idempotent_repo]` (persistent idempotent backend).
 
-Set `CAMEL_PROFILE` to select a profile. The `[default]` section always applies. The named profile merges on top. Use `include = ["path/to/file.toml"]` to pull shared sections from other files.
+Set `CAMEL_PROFILE` to select a profile. The `[default]` section always applies. The named profile merges on top. Use `include = ["path/to/file.toml"]` to pull shared sections from other files. An `include` list can also live inside `[default]` or a named profile section. Profile-scoped lists override top-level lists on key conflicts.
 
 - [Environment variable interpolation](env-interpolation.md): substitute `${env:VAR}` tokens in route files before parse
 - [Hot reload](hot-reload.md): swap pipelines at runtime without downtime
