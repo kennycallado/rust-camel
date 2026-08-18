@@ -2974,7 +2974,6 @@ async fn adapter_remove_route_clears_endpoint() {
 /// A capture component records the `SecurityContext` it receives in
 /// `set_security_context`, so the test asserts the wiring end-to-end without
 /// reaching into consumer internals.
-
 struct CaptureSecCtxPolicy;
 
 #[async_trait::async_trait]

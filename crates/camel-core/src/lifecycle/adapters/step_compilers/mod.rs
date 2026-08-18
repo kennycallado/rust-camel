@@ -338,7 +338,7 @@ mod segment_tests {
             lifecycle: None,
         };
         let _cloned = step.clone();
-        if let CompiledStep::Segment { segment: _, .. } = _cloned {
+        if let CompiledStep::Segment { .. } = _cloned {
             // ok
         } else {
             panic!("clone should preserve variant");
