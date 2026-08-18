@@ -79,8 +79,7 @@ backend = "redb"
 
     let err = cfg
         .validate()
-        .err()
-        .expect("validation must fail when backend=redb without path");
+        .expect_err("validation must fail when backend=redb without path");
     let msg = err.to_string();
     assert!(
         msg.contains("path"),
@@ -100,8 +99,7 @@ path = ""
 
     let err = cfg
         .validate()
-        .err()
-        .expect("validation must fail when backend=redb with empty path");
+        .expect_err("validation must fail when backend=redb with empty path");
     let msg = err.to_string();
     assert!(
         msg.contains("path"),
@@ -120,8 +118,7 @@ backend = "postgres"
 
     let err = cfg
         .validate()
-        .err()
-        .expect("validation must fail for unknown backend");
+        .expect_err("validation must fail for unknown backend");
     let msg = err.to_string();
     assert!(
         msg.contains("postgres") || msg.contains("backend"),
