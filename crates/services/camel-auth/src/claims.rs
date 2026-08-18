@@ -20,6 +20,20 @@ pub struct JsonPointerClaimsMapper {
     scope_path: Option<String>,
 }
 
+/// Escape a string for use as a JSON Pointer token segment (RFC 6901):
+/// `~` becomes `~0` and `/` becomes `~1`.
+pub fn escape_json_pointer(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '~' => out.push_str("~0"),
+            '/' => out.push_str("~1"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 impl JsonPointerClaimsMapper {
     pub fn new(paths: ClaimPaths) -> Self {
         Self {

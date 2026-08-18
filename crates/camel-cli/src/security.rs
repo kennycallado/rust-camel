@@ -6,7 +6,7 @@
 //! shared between the wasm and non-wasm build paths.
 
 use camel_api::CamelError;
-use camel_auth::JwksProvider;
+use camel_auth::{JwksProvider, escape_json_pointer};
 use camel_dsl::SecurityCompileContext;
 use std::sync::Arc;
 
@@ -166,19 +166,6 @@ async fn keycloak_authenticator(
             "unsupported security.keycloak.validation.method: {other}"
         ))),
     }
-}
-
-/// Escape a string for use as a JSON Pointer token segment (RFC 6901).
-fn escape_json_pointer(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '~' => out.push_str("~0"),
-            '/' => out.push_str("~1"),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// OIDC claim-path preset, mirroring

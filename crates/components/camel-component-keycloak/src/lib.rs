@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use camel_api::component_metadata::ComponentMetadata;
 use camel_api::{CamelError, SsrfPolicy, is_ssrf_blocked_ip};
 use camel_auth::claims::ClaimPaths;
+use camel_auth::escape_json_pointer;
 use camel_auth::oauth2::{ClientCredentialsProvider, TokenProvider};
 use camel_auth::permission::PermissionEvaluator;
 use camel_auth::types::AuthError;
@@ -56,18 +57,6 @@ impl fmt::Debug for KeycloakRealmConfig {
             .field("allow_internal", &self.allow_internal)
             .finish()
     }
-}
-
-fn escape_json_pointer(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '~' => out.push_str("~0"),
-            '/' => out.push_str("~1"),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 impl KeycloakRealmConfig {
