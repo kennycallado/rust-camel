@@ -1239,6 +1239,17 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     // Step wrappers
     ts_export!(ts_config, camel_dsl::route_ast::AggregateStep);
     ts_export!(ts_config, camel_dsl::route_ast::BeanStep);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheBody);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheClearBody);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheClearStep);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheConfig);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheInvalidateBody);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheInvalidateStep);
+    ts_export!(ts_config, camel_dsl::route_ast::CachePeekStaleBody);
+    ts_export!(ts_config, camel_dsl::route_ast::CachePeekStaleStep);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheStatsBody);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheStatsStep);
+    ts_export!(ts_config, camel_dsl::route_ast::CacheStep);
     ts_export!(ts_config, camel_dsl::route_ast::ChoiceStep);
     ts_export!(ts_config, camel_dsl::route_ast::ConvertBodyToStep);
     ts_export!(ts_config, camel_dsl::route_ast::DelayStep);

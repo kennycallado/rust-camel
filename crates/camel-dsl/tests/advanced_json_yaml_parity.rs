@@ -58,7 +58,7 @@ fn advanced_example_yaml_json_parity() {
         "advanced EIP example lowers to different DeclarativeRoute sets\n\
          --- YAML debug (first 2k) ---\n{}\n\
          --- JSON debug (first 2k) ---\n{}",
-        &yaml_debug.chars().take(2048).collect::<String>(),
-        &json_debug.chars().take(2048).collect::<String>(),
+        yaml_debug.chars().take(2048).collect::<String>(),
+        json_debug.chars().take(2048).collect::<String>(),
     );
 }
