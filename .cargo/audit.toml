@@ -18,5 +18,11 @@
 # untrusted at the transport layer. `cargo update -p rkyv` cannot cross the 0.7→0.8
 # SemVer-incompatible boundary; the fix is upstream (surrealdb/rust_decimal must bump
 # to rkyv 0.8). Remove this entry once a surrealdb release carries rkyv >=0.8.17.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0235"]
+#
+# RUSTSEC-2026-0249 (smartstring, unmaintained) — transitive, non-applicable in
+# rust-camel. `smartstring 1.0.1` is a MANDATORY (non-optional) dependency of
+# `rhai 1.25.1` (the latest 1.x), pulled via camel-language-rhai. Unmaintained is
+# informational, not a vulnerability; no feature combination avoids it. Remove this
+# entry once a rhai release drops smartstring.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0235", "RUSTSEC-2026-0249"]
 informational_warnings = ["unmaintained"]
