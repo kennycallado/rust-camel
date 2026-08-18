@@ -17,8 +17,7 @@ crates (e.g. `camel-component-keycloak`).
 
 **TokenAuthenticator**:
 Provider-neutral contract (`token_authenticator.rs`) that validates a bearer/API token and returns a
-`Principal`. Implementations: `IntrospectionAuthenticator` (RFC 7662), `ApiKeyAuthenticator`,
-`StaticTokenAuthenticator`.
+`Principal`. Implementations: `IntrospectionAuthenticator` (RFC 7662), `StaticTokenAuthenticator`.
 _Avoid_: Keycloak client, JWT parser (those are specific mechanisms, not the contract)
 
 **ClaimsMapper**:
@@ -29,7 +28,7 @@ _Avoid_: Keycloak mapping, claim parser
 
 **JwtValidator / JwksProvider**:
 `JwtValidator` (`jwt.rs`) verifies JWT signature/claims; `JwksProvider` (`jwks.rs`) supplies signing
-keys (`RemoteJwksProvider` fetches a remote JWKS; `NativeJwksProvider` serves locally-issued keys).
+keys (`RemoteJwksProvider` fetches a remote JWKS).
 _Avoid_: token verifier (use the specific trait), key store
 
 **PermissionEvaluator**:
@@ -42,11 +41,6 @@ _Avoid_: SecurityPolicy (SecurityPolicy is the route boundary type in camel-api;
 Name→implementation lookups (`registry.rs`) so a `security_policy.ref` / `permission` can resolve a
 registered evaluator by name at route-compile time.
 _Avoid_: policy map, evaluator factory
-
-**NativeTokenIssuer**:
-Self-contained token issuer (`native_issuer.rs`) for the built-in (non-OIDC) auth path:
-issues/signs tokens via `NativeSigningKey` against an `M2mClientStore` of machine-to-machine clients.
-_Avoid_: OAuth server, identity provider (it is a minimal native issuer, not a full IdP)
 
 ## Credential sources
 
@@ -134,34 +128,31 @@ with 5s connect timeout and 10s request timeout.
 - `alg` is absent (spec default) OR equals `EXPECTED_ALG` (`"RS256"`).
 - `use` is absent (spec default) OR equals `"sig"`.
 
-### Constant-time comparison (`fn constant_time_eq`, native_client_store.rs:14-18, 142-146)
+### Constant-time comparison (`fn lookup`, native_auth.rs:118-137)
 
-`constant_time_eq(a, b)` compares byte slices in constant time (no early-exit on mismatch).
-Applied to:
-- `client_id` lookup in `M2mClientStore::authenticate()`.
-- Secret hash comparison via the same helper.
+`NativeCredentialStore::lookup` compares the presented token against each stored secret in
+constant time: a length seed and per-byte XOR fold into one accumulator, so no early-exit
+reveals a partial match. Every credential source flows through this single comparison path
+(see Credential sources).
 
 ### Zeroize (multiple files)
 
 `Zeroizing<String>` applied to all secret-bearing fields:
-- `ClientCredentialsProvider.client_secret` (`struct ClientCredentialsProvider`, oauth2.rs:60).
-- `CachingTokenIntrospector.client_secret` (`struct CachingTokenIntrospector`, introspection.rs:70).
-- `CachedToken.access_token` (`struct TokenResponse`, oauth2.rs:29), `TokenResponse.access_token` (oauth2.rs:36).
-- `M2mClient.secret_value` (`enum M2mClientSecret`, native_client_store.rs:40), `M2mClientSecret` enum value (native_client_store.rs:35).
-- `NativeClient.secret_value` (`enum NativeCredentialSecret`, native_auth.rs:21), `NativeClientSecret` enum value (native_auth.rs:16).
-- `native_issuer::TokenResponse.access_token` (`struct TokenResponse`, native_issuer.rs:124).
+- `ClientCredentialsProvider.client_secret` (`struct ClientCredentialsProvider`, oauth2.rs:73).
+- `CachingTokenIntrospector.client_secret` (`struct CachingTokenIntrospector`, introspection.rs:69).
+- `CachedToken.access_token` (`struct CachedToken`, oauth2.rs:50), `TokenResponse.access_token` (`struct TokenResponse`, oauth2.rs:31).
+- `NativeCredential.secret` (`enum NativeCredentialSecret`, native_auth.rs:15), `NativeCredentialSecret` variants (`Env` / `Plaintext`, native_auth.rs:16-17).
 
 > **Debug redaction is separate.** In zeroize 1.9.0, `Zeroizing<T>` derives `Debug`. Its
 > implementation prints the inner value. `Zeroizing<String>` clears memory on drop, but it does not
 > redact formatted output. Each type that contains a secret must also implement `Debug` manually.
 >
-> Follow the redacting implementations for `NativeCredentialSecret`, `M2mClientSecret`,
-> `ExtractedToken`, `CachingTokenIntrospector`, `ClientCredentialsProvider`,
-> `IntrospectionAuthenticator`, `NativeSigningKey`, and `NativeTokenIssuer`.
+> Follow the redacting implementations for `NativeCredentialSecret`, `ExtractedToken`,
+> `CachingTokenIntrospector`, `ClientCredentialsProvider`, and `IntrospectionAuthenticator`.
 >
-> Both known gaps are resolved. `native_issuer::TokenResponse` (rc-c9xo) and
-> `oauth2::TokenResponse` (rc-fvl5) now use manual `Debug` implementations that
-> redact `access_token` as `[REDACTED]`. Regression tests verify sentinel exclusion.
+> The known gap is resolved. `oauth2::TokenResponse` (rc-fvl5) now uses a manual
+> `Debug` implementation that redacts `access_token` as `[REDACTED]`. Regression
+> tests verify sentinel exclusion.
 > This supports the ADR-0032 trust boundary by keeping token data out of
 > diagnostic sinks.
 

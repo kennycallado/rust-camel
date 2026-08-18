@@ -78,6 +78,43 @@ surfaces the raw error to the caller.
 The [Cache](../eip/cache.md) page shows the stale-on-error composition with
 `cache_peek_stale`.
 
+## Security policy
+
+Set `security_policy` to authorize exchanges before the steps run. The object
+takes one of five forms: `roles`, `scopes`, `ref`, `wasm`, or `permission`.
+The full policy model lives in [Authorization](../services/auth.md).
+
+The optional `credential_sources` list names where the route reads its
+credential. When absent, the default is `[authorization_header]`: the route
+reads the `Authorization` header only. Each entry names one source:
+
+| Form | Meaning |
+|---|---|
+| `authorization_header` | Bearer token in the `Authorization` header |
+| `query_param: { param: <name> }` | Token in a query parameter |
+| `cookie: { name: <name> }` | Token in a cookie |
+| `header: { name: <name> }` | API key in a named custom header |
+
+```yaml
+{{#include ../../../examples/credential-sources/routes.yaml:credential-sources}}
+```
+
+Extraction runs in the declared order. The first source that supplies a
+credential wins. `credential_sources` is valid only with the `roles` or
+`scopes` form. Load-time validation rejects malformed `credential_sources`
+entries: an empty list, an empty parameter or cookie name, and a header name
+that is not a valid RFC 9110 token. See [Authorization](../services/auth.md)
+for the extraction semantics and
+[ADR-0059](../adr/0059-auth-extraction-path-divergence.md).
+
+The optional `provider` string names the configured authenticator for the
+route. The name must match one of the configured providers: `keycloak`,
+`oidc`, or `native`. When more than one provider is configured, `provider`
+is required. A route without it fails to load, and the error names the
+available providers. An unknown provider name also fails the load. Like
+`credential_sources`, `provider` is valid only with the `roles` or `scopes`
+form.
+
 ## List-form variant
 
 The hot-reload subsystem consumes a flatter form. When a file holds only routes

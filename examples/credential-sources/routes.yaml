@@ -2,6 +2,7 @@
 # `Authorization` header, so the credential travels in a cookie. Extraction
 # runs in the declared order; the first source that supplies a credential
 # wins (ADR-0059).
+# ANCHOR: credential-sources
 routes:
   - id: tile-service
     from: "http://0.0.0.0:8090/tiles"
@@ -20,3 +21,4 @@ routes:
           key: Content-Type
           value: "application/json"
       - set_body: '{"layer":"streets","status":"authenticated"}'
+# ANCHOR_END: credential-sources

@@ -1,13 +1,13 @@
 //! Keycloak-style security example for rust-camel.
 //!
 //! Demonstrates role-based access control using the native auth pipeline:
-//!   - Issues JWTs with roles using NativeTokenIssuer (simulates Keycloak)
-//!   - Validates tokens via LocalJwtValidator + NativeJwksProvider
+//!   - Registers two principals (alice, bob) in a `NativeCredentialStore`
+//!   - Authenticates pre-shared credentials via `StaticTokenAuthenticator`
 //!   - Applies RolePolicy that checks for required roles
 //!   - Shows Granted for admin user, Denied for viewer user
 //!
-//! No Docker or external Keycloak required — uses the same auth
-//! pipeline that works with a real Keycloak in production.
+//! No Docker or external Keycloak required — the same RolePolicy /
+//! TokenAuthenticator pipeline works with a real Keycloak (OIDC) in production.
 //!
 //! Note: SecurityPolicyLayer evaluates BEFORE route steps (set_header, etc).
 //! In production, the Bearer token arrives from HTTP consumers. This example
@@ -18,22 +18,20 @@
 //!   cargo run -p security-keycloak
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::security_policy::{AuthorizationDecision, SecurityPolicy, SecurityPolicyConfig};
-use camel_api::{CamelError, Exchange, Value};
-use camel_auth::{
-    ClaimPaths, CredentialSource, JsonPointerClaimsMapper, LocalJwtValidator, M2mClient,
-    M2mClientSecret, M2mClientStore, NativeJwksProvider, NativeSigningKey, NativeTokenIssuer,
-    RolePolicy, TokenAuthenticator,
+use camel_api::security_policy::{
+    AuthorizationDecision, Principal, SecurityPolicy, SecurityPolicyConfig,
 };
+use camel_api::{CamelError, Exchange, Value};
+use camel_auth::native_auth::{
+    NativeCredential, NativeCredentialSecret, NativeCredentialStore, StaticTokenAuthenticator,
+};
+use camel_auth::{CredentialSource, RolePolicy, TokenAuthenticator};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
-
-const RSA_PRIVATE_PEM: &str = include_str!("../fixtures/test_key.pem");
 
 struct BearerInjectingPolicy {
     token: String,
@@ -64,83 +62,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let issuer = "https://keycloak.example.com/realms/test";
     let audience = vec!["camel-api".to_string()];
 
-    let issuer_signing_key = NativeSigningKey::from_pem(RSA_PRIVATE_PEM, "test-key-1".to_string())?;
-    let validator_signing_key =
-        NativeSigningKey::from_pem(RSA_PRIVATE_PEM, "test-key-1".to_string())?;
-
-    let client_store = M2mClientStore::try_new(vec![
-        M2mClient {
-            client_id: "alice".to_string(),
-            secret: M2mClientSecret::Plaintext {
-                value: "alice-secret".to_string().into(),
+    let store = NativeCredentialStore::try_new(vec![
+        NativeCredential {
+            secret: NativeCredentialSecret::Plaintext {
+                value: "alice-token".to_string().into(),
             },
-            scopes: vec!["read".to_string(), "write".to_string()],
-            roles: vec!["admin".to_string(), "user".to_string()],
+            principal: Principal {
+                subject: "alice".to_string(),
+                issuer: issuer.to_string(),
+                audience: audience.clone(),
+                scopes: vec!["read".to_string(), "write".to_string()],
+                roles: vec!["admin".to_string(), "user".to_string()],
+                claims: serde_json::Value::Null,
+            },
         },
-        M2mClient {
-            client_id: "bob".to_string(),
-            secret: M2mClientSecret::Plaintext {
-                value: "bob-secret".to_string().into(),
+        NativeCredential {
+            secret: NativeCredentialSecret::Plaintext {
+                value: "bob-token".to_string().into(),
             },
-            scopes: vec!["read".to_string()],
-            roles: vec!["viewer".to_string()],
+            principal: Principal {
+                subject: "bob".to_string(),
+                issuer: issuer.to_string(),
+                audience: audience.clone(),
+                scopes: vec!["read".to_string()],
+                roles: vec!["viewer".to_string()],
+                claims: serde_json::Value::Null,
+            },
         },
     ])?;
 
-    let token_issuer = NativeTokenIssuer::try_new(
-        issuer.to_string(),
-        audience.clone(),
-        Duration::from_secs(300),
-        issuer_signing_key,
-        client_store,
-    )?;
-
-    let jwks_provider = Arc::new(NativeJwksProvider::new(validator_signing_key)?);
-    let claims_mapper = Arc::new(JsonPointerClaimsMapper::new(ClaimPaths {
-        subject: "/sub".to_string(),
-        roles: vec!["/roles".to_string()],
-        scopes: Some("/scope".to_string()),
-    }));
-    let validator = Arc::new(LocalJwtValidator::new(
-        audience,
-        issuer.to_string(),
-        jwks_provider,
-        claims_mapper,
-    )) as Arc<dyn TokenAuthenticator>;
+    let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
 
     // ANCHOR: keycloak-token-issuance
-    let alice_token = token_issuer
-        .issue_token("alice", "alice-secret", Some("read write"), None)
-        .await?;
-    let bob_token = token_issuer
-        .issue_token("bob", "bob-secret", Some("read"), None)
-        .await?;
+    let alice_token = "alice-token";
+    let bob_token = "bob-token";
     // ANCHOR_END: keycloak-token-issuance
 
     println!("\n=== Keycloak Security Example ===");
     println!("Issuer:  {issuer}");
-    println!("Alice:   admin,user roles -> JWT issued");
-    println!("Bob:     viewer role      -> JWT issued");
+    println!("Alice:   admin,user roles -> static auth");
+    println!("Bob:     viewer role      -> static auth");
     println!();
 
     // ANCHOR: keycloak-validation
-    println!("--- JWT Validation ---");
+    println!("--- Validation ---");
 
-    let alice_principal = validator
-        .authenticate_bearer(&alice_token.access_token)
-        .await;
+    let alice_principal = authenticator.authenticate_bearer(alice_token).await;
     match &alice_principal {
         Ok(p) => println!("Alice OK subject={} roles={:?}", p.subject, p.roles), // allow-secret
         Err(e) => println!("Alice invalid ({e})"),                               // allow-secret
     }
 
-    let bob_principal = validator.authenticate_bearer(&bob_token.access_token).await;
+    let bob_principal = authenticator.authenticate_bearer(bob_token).await;
     match &bob_principal {
-        Ok(p) => println!(
-            "Bob JWT:   VALID  (subject={}, roles={:?})",
-            p.subject, p.roles
-        ),
-        Err(e) => println!("Bob JWT:   INVALID ({e})"),
+        Ok(p) => println!("Bob: VALID  (subject={}, roles={:?})", p.subject, p.roles),
+        Err(e) => println!("Bob: INVALID ({e})"),
     }
     // ANCHOR_END: keycloak-validation
     println!();
@@ -151,20 +127,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec!["admin".to_string()],
         true,
         false,
-        validator.clone(),
+        authenticator.clone(),
         vec![CredentialSource::AuthorizationHeader],
     ));
 
     let mut alice_exchange = Exchange::default();
     alice_exchange.input.headers.insert(
         "authorization".to_string(),
-        Value::String(format!("Bearer {}", *alice_token.access_token)), // allow-secret
+        Value::String(format!("Bearer {}", alice_token)), // allow-secret
     );
 
     let mut bob_exchange = Exchange::default();
     bob_exchange.input.headers.insert(
         "authorization".to_string(),
-        Value::String(format!("Bearer {}", *bob_token.access_token)), // allow-secret
+        Value::String(format!("Bearer {}", bob_token)), // allow-secret
     );
 
     let alice_decision = admin_policy.evaluate(&mut alice_exchange).await;
@@ -209,10 +185,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec!["admin".to_string()],
         true,
         false,
-        validator.clone(),
+        authenticator.clone(),
         vec![CredentialSource::AuthorizationHeader],
     );
-    let wrapped = BearerInjectingPolicy::new(alice_token.access_token.to_string(), role_policy);
+    let wrapped = BearerInjectingPolicy::new(alice_token.to_string(), role_policy);
 
     let secured_route = RouteBuilder::from("timer:tick?period=2000&repeatCount=2")
         .route_id("admin-only-route")

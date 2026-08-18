@@ -1937,6 +1937,13 @@
             }
           ]
         },
+        "provider": {
+          "description": "Named authenticator provider to resolve the route's authenticator from\n`SecurityCompileContext::providers`. Absent → sole provider (or legacy\nsingle-authenticator) resolution. Valid only with the `roles`/`scopes`\nforms (validated at load time in `yaml.rs`), mirroring\n`credential_sources`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "ref": {
           "default": null,
           "type": [

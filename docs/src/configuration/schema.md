@@ -116,6 +116,8 @@ OTLP export configuration. The protocol and sampler accept the values listed bel
 
 The security block holds five optional sub-tables. Pick one. Most deployments choose exactly one of `oidc`, `native`, or `keycloak`. The `permissions` and `policies` sub-tables extend the chosen identity layer with authorization.
 
+Placeholders in the `[security]` block use `{{env:VAR}}` and `{{env:VAR:default}}` (single colon). The `{{env:VAR:-default}}` form is rejected at startup. Route files use a different `${env:...}` system. See [Environment variable interpolation](env-interpolation.md).
+
 ```toml
 [security.keycloak]
 server_url = "https://kc.example.com"
@@ -127,7 +129,7 @@ client_secret = "{{env:KC_SECRET}}"
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `oidc` | table | absent | Generic OIDC token validation. |
-| `native` | table | absent | Built-in issuer with m2m clients. |
+| `native` | table | absent | Built-in static credential store. |
 | `keycloak` | table | absent | Keycloak realm with validation, JWKS, introspection, and UMA. |
 | `permissions` | table of tables | absent | Named permission evaluators keyed by policy name. |
 | `policies` | table | absent | Registry of WASM security policies referenced by route configuration. |
@@ -137,45 +139,38 @@ client_secret = "{{env:KC_SECRET}}"
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `issuer` | string | (required) | OIDC issuer URL used to discover endpoints. |
-| `jwks_uri` | string | `null` | JWKS endpoint. Defaults to `${issuer}/protocol/openid-connect/certs`. |
+| `jwks_uri` | string | (required) | JWKS endpoint. |
 | `audience` | array of strings | `[]` | Required `aud` claim values. |
 | `client_id` | string | `null` | OAuth2 client ID. |
-| `client_secret` | string | `null` | OAuth2 client secret. Prefer a placeholder over a literal. |
+| `client_secret` | string | `null` | OAuth2 client secret. Resolves `{{env:VAR}}`; unset variable without default fails startup. |
 | `token_endpoint` | string | `null` | Token endpoint for client credentials flows. |
 | `introspection_endpoint` | string | `null` | Token introspection endpoint. |
 
 ### [security.native]
 
-The native block provides a built-in token issuer plus a list of m2m clients. Set `subject` to the m2m principal.
+The native block is a static credential store with no external identity provider. Set at least one credential: a scalar `bearer_token` or `api_key`, or one or more `[[security.native.credentials]]` entries. A config with no credential fails startup.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `subject` | string | (required) | Principal name for the m2m identity. |
-| `issuer` | string | `null` | Issuer claim on issued tokens. |
-| `bearer_token` | string | `null` | Pre-issued bearer token. Prefer a placeholder. |
-| `api_key` | string | `null` | Pre-shared API key. Prefer a placeholder. |
-| `roles` | array of strings | `[]` | Roles granted to the identity. |
-| `scopes` | array of strings | `[]` | Scopes granted to the identity. |
-| `token_issuer` | table | absent | Built-in token issuer config. |
-| `clients` | array of tables | `[]` | m2m clients allowed to authenticate. |
+| `subject` | string | (required) | Principal name for the scalar `bearer_token` and `api_key` identities. |
+| `issuer` | string | `"native"` | Issuer recorded on synthesized principals. `null` falls back to `"native"`. |
+| `bearer_token` | string | `null` | Pre-issued bearer token. Resolves `{{env:VAR}}`; unset variable without default fails startup. |
+| `api_key` | string | `null` | Pre-shared API key. Resolves `{{env:VAR}}`; unset variable without default fails startup. |
+| `roles` | array of strings | `[]` | Roles granted to the scalar identities. |
+| `scopes` | array of strings | `[]` | Scopes granted to the scalar identities. |
+| `credentials` | array of tables | `[]` | Static credentials, each with its own subject, roles, and scopes. |
 
-`[security.native.token_issuer]` fields:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `issuer` | string | (required) | Issuer URL. |
-| `audience` | array of strings | `[]` | Required `aud` claim. |
-| `token_ttl_secs` | integer (s) | `900` | Issued-token lifetime. |
-| `signing_key_env` | string | (required) | Environment variable holding the signing key (PEM). |
-
-`[[security.native.clients]]` array elements:
+`[[security.native.credentials]]` array elements:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `client_id` | string | (required) | Client identifier. |
-| `client_secret_env` | string | (required) | Environment variable holding the client secret. |
-| `roles` | array of strings | `[]` | Roles assigned to tokens minted for this client. |
-| `scopes` | array of strings | `[]` | Scopes assigned to tokens minted for this client. |
+| `subject` | string | (required) | Principal name for this credential. Must not be empty. |
+| `secret_env` | string | absent | Environment variable holding the secret. Read at startup; fails closed if unset or empty. |
+| `secret` | string | absent | Plaintext secret. Logged with a warning at startup; use `secret_env` in production. |
+| `roles` | array of strings | `[]` | Roles granted to this credential's principal. |
+| `scopes` | array of strings | `[]` | Scopes granted to this credential's principal. |
+
+Each credentials entry must set exactly one of `secret_env` or `secret`; setting both or neither fails at load. The block uses `deny_unknown_fields`, so unknown keys are rejected at load.
 
 ### [security.keycloak]
 
@@ -184,7 +179,7 @@ The native block provides a built-in token issuer plus a list of m2m clients. Se
 | `server_url` | string | (required) | Keycloak base URL. |
 | `realm` | string | (required) | Realm name. |
 | `client_id` | string | (required) | Client ID. |
-| `client_secret` | string | (required) | Client secret. Prefer a placeholder. |
+| `client_secret` | string | (required) | Client secret. Resolves `{{env:VAR}}`; unset variable without default fails startup. |
 | `validation` | table | (defaults below) | Token validation options. |
 | `jwks` | table | (defaults below) | JWKS cache tuning. |
 | `introspection` | table | (defaults below) | Introspection cache tuning. |

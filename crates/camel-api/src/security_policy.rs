@@ -102,8 +102,6 @@ pub enum CredentialSource {
     ///
     /// The extracted value flows into the same constant-time
     /// `NativeCredentialStore::lookup` as every other source.
-    /// `ApiKeyAuthenticator` is superseded for YAML use; its programmatic API
-    /// stays.
     Header { name: String },
 }
 

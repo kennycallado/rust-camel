@@ -666,39 +666,31 @@ impl fmt::Debug for OidcSecurityConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[non_exhaustive]
-#[serde(deny_unknown_fields)]
-pub struct NativeIssuerConfig {
-    pub issuer: String,
-    #[serde(default)]
-    pub audience: Vec<String>,
-    #[serde(default = "default_token_ttl")]
-    pub token_ttl_secs: u64,
-    pub signing_key_env: String,
-}
-
-fn default_token_ttl() -> u64 {
-    900
-}
-
+/// A single credential entry under `[[security.native.credentials]]`.
+///
+/// Each entry binds a `subject` to a credential supplied either inline
+/// (`secret`) or by reference to an environment variable name (`secret_env`).
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
-#[non_exhaustive]
 #[serde(deny_unknown_fields)]
-pub struct NativeM2mClientConfig {
-    pub client_id: String,
-    pub client_secret_env: String,
+pub struct NativeCredentialEntry {
+    pub subject: String,
+    pub secret_env: Option<String>,
+    pub secret: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
 }
 
-impl fmt::Debug for NativeM2mClientConfig {
+impl fmt::Debug for NativeCredentialEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NativeM2mClientConfig")
-            .field("client_id", &self.client_id)
-            .field("client_secret_env", &"[REDACTED]")
+        f.debug_struct("NativeCredentialEntry")
+            .field("subject", &self.subject)
+            .field(
+                "secret_env",
+                &self.secret_env.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
             .field("roles", &self.roles)
             .field("scopes", &self.scopes)
             .finish()
@@ -720,9 +712,7 @@ pub struct NativeAuthConfig {
     #[serde(default)]
     pub scopes: Vec<String>,
     #[serde(default)]
-    pub token_issuer: Option<NativeIssuerConfig>,
-    #[serde(default)]
-    pub clients: Vec<NativeM2mClientConfig>,
+    pub credentials: Vec<NativeCredentialEntry>,
 }
 
 impl fmt::Debug for NativeAuthConfig {
@@ -737,9 +727,29 @@ impl fmt::Debug for NativeAuthConfig {
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("roles", &self.roles)
             .field("scopes", &self.scopes)
-            .field("token_issuer", &self.token_issuer)
-            .field("clients", &self.clients)
+            .field("credentials", &self.credentials.len())
             .finish()
+    }
+}
+
+impl NativeAuthConfig {
+    /// Validate the `credentials` array: every entry must set exactly one of
+    /// `secret_env` / `secret` and carry a non-empty `subject`.
+    pub fn validate_credentials(&self) -> Result<(), ConfigError> {
+        for (i, cred) in self.credentials.iter().enumerate() {
+            if cred.secret_env.is_some() == cred.secret.is_some() {
+                return Err(ConfigError::Message(format!(
+                    // allow-secret: names the credential field, not a secret value
+                    "security.native.credentials[{i}] must set exactly one of secret_env or secret"
+                )));
+            }
+            if cred.subject.trim().is_empty() {
+                return Err(ConfigError::Message(format!(
+                    "security.native.credentials[{i}] must have a non-empty subject"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1065,7 +1075,7 @@ pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
 }
 
 impl CamelConfig {
-    fn resolve_placeholders(&mut self) {
+    fn resolve_placeholders(&mut self) -> Result<(), ConfigError> {
         let resolver = PropertiesResolver::new();
 
         for route in &mut self.routes {
@@ -1137,6 +1147,11 @@ impl CamelConfig {
                 .collect();
             bean.config = resolved;
         }
+
+        resolve_security_fail_closed(&mut self.security)?;
+        resolve_datasources_fail_closed(&mut self.datasources)?;
+
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<(), CamelError> {
@@ -1251,6 +1266,11 @@ impl CamelConfig {
             if let Err(e) = ds.validate() {
                 return Err(CamelError::Config(format!("datasource '{}': {}", name, e)));
             }
+        }
+        if let Some(ref native) = self.security.native {
+            native
+                .validate_credentials()
+                .map_err(|e| CamelError::Config(e.to_string()))?;
         }
         Ok(())
     }
@@ -1565,7 +1585,7 @@ fn build_from_toml_value_inner(
     let config = builder.build()?;
 
     let mut config: CamelConfig = config.try_deserialize()?;
-    config.resolve_placeholders();
+    config.resolve_placeholders()?;
     config
         .validate()
         .map_err(|e| ConfigError::Message(e.to_string()))?;
@@ -1647,6 +1667,226 @@ fn parse_include_list(value: &toml::Value, where_: &str) -> Result<Vec<String>, 
     }
 }
 
+/// Resolve placeholders in a single string leaf, failing closed on any
+/// unresolved or ambiguous credential/datasource placeholder.
+///
+/// Only `{{env:VAR}}` / `{{env:VAR:default}}` are treated as fail-closed;
+/// non-`env` placeholders resolve through the resolver as before (and an
+/// unresolved key surfaces as an error rather than a silent passthrough).
+fn resolve_fail_closed(raw: &str, field: &str) -> Result<String, ConfigError> {
+    // Pre-scan `env:` placeholders for the two conditions the resolver cannot
+    // distinguish from a successful default resolution: a dash-prefixed default
+    // (ambiguous with the empty-default idiom) and an unset var with no default.
+    let mut rest = raw;
+    while let Some(open) = rest.find("{{") {
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("}}") else {
+            break;
+        };
+        let inner = &after_open[..close];
+        if let Some(env_inner) = inner.strip_prefix("env:") {
+            let env_inner = env_inner.trim();
+            if !env_inner.is_empty() {
+                let (var, default) = match env_inner.find(':') {
+                    Some(colon) => (&env_inner[..colon], Some(&env_inner[colon + 1..])),
+                    None => (env_inner, None),
+                };
+                match default {
+                    Some(def) if def.starts_with('-') => {
+                        return Err(ConfigError::Message(format!(
+                            "ambiguous default starting with '-' in {field}: use single-colon \
+                             {{{{env:{var}:default}}}}"
+                        )));
+                    }
+                    None if env::var(var).is_err() => {
+                        return Err(ConfigError::Message(format!(
+                            "security placeholder unresolved: {field}: env var {var} not set"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        rest = &after_open[close + 2..];
+    }
+
+    let resolver = PropertiesResolver::new();
+    let resolved = resolver.resolve(raw).map_err(|e| {
+        ConfigError::Message(format!("security placeholder unresolved: {field}: {e}"))
+    })?;
+
+    if resolved.contains("{{") || resolved.contains("${") {
+        return Err(ConfigError::Message(format!(
+            "unresolved placeholder marker in {field}"
+        )));
+    }
+
+    Ok(resolved)
+}
+
+/// Resolve a single string leaf in place via [`resolve_fail_closed`].
+fn resolve_fail_closed_in_place(value: &mut String, field: &str) -> Result<(), ConfigError> {
+    *value = resolve_fail_closed(value, field)?;
+    Ok(())
+}
+
+/// Recursively resolve every string leaf under `SecurityConfig` fail-closed.
+///
+/// The walk is hand-enumerated: whenever `SecurityConfig` (or any struct it
+/// owns) gains a string field, this function MUST be extended to walk that
+/// field, or its placeholders silently survive config loading.
+fn resolve_security_fail_closed(security: &mut SecurityConfig) -> Result<(), ConfigError> {
+    if let Some(oidc) = security.oidc.as_mut() {
+        resolve_fail_closed_in_place(&mut oidc.issuer, "security.oidc.issuer")?;
+        if let Some(v) = oidc.jwks_uri.as_mut() {
+            resolve_fail_closed_in_place(v, "security.oidc.jwks_uri")?;
+        }
+        for (i, v) in oidc.audience.iter_mut().enumerate() {
+            resolve_fail_closed_in_place(v, &format!("security.oidc.audience[{i}]"))?;
+        }
+        if let Some(v) = oidc.client_id.as_mut() {
+            resolve_fail_closed_in_place(v, "security.oidc.client_id")?;
+        }
+        if let Some(v) = oidc.client_secret.as_mut() {
+            resolve_fail_closed_in_place(v, "security.oidc.client_secret")?;
+        }
+        if let Some(v) = oidc.token_endpoint.as_mut() {
+            resolve_fail_closed_in_place(v, "security.oidc.token_endpoint")?;
+        }
+        if let Some(v) = oidc.introspection_endpoint.as_mut() {
+            resolve_fail_closed_in_place(v, "security.oidc.introspection_endpoint")?;
+        }
+    }
+
+    if let Some(native) = security.native.as_mut() {
+        resolve_fail_closed_in_place(&mut native.subject, "security.native.subject")?;
+        if let Some(v) = native.issuer.as_mut() {
+            resolve_fail_closed_in_place(v, "security.native.issuer")?;
+        }
+        if let Some(v) = native.bearer_token.as_mut() {
+            resolve_fail_closed_in_place(v, "security.native.bearer_token")?;
+        }
+        if let Some(v) = native.api_key.as_mut() {
+            resolve_fail_closed_in_place(v, "security.native.api_key")?;
+        }
+        for (i, v) in native.roles.iter_mut().enumerate() {
+            resolve_fail_closed_in_place(v, &format!("security.native.roles[{i}]"))?;
+        }
+        for (i, v) in native.scopes.iter_mut().enumerate() {
+            resolve_fail_closed_in_place(v, &format!("security.native.scopes[{i}]"))?;
+        }
+        for (i, cred) in native.credentials.iter_mut().enumerate() {
+            let base = format!("security.native.credentials[{i}]");
+            resolve_fail_closed_in_place(&mut cred.subject, &format!("{base}.subject"))?;
+            if let Some(v) = cred.secret_env.as_mut() {
+                // allow-secret: env var name, not a secret value
+                resolve_fail_closed_in_place(v, &format!("{base}.secret_env"))?;
+            }
+            if let Some(v) = cred.secret.as_mut() {
+                // allow-secret: in-place resolution is safe — the boundary guard
+                // `ensure_no_placeholder_markers` re-validates at store construction.
+                resolve_fail_closed_in_place(v, &format!("{base}.secret"))?;
+            }
+            for (j, v) in cred.roles.iter_mut().enumerate() {
+                resolve_fail_closed_in_place(v, &format!("{base}.roles[{j}]"))?;
+            }
+            for (j, v) in cred.scopes.iter_mut().enumerate() {
+                resolve_fail_closed_in_place(v, &format!("{base}.scopes[{j}]"))?;
+            }
+        }
+    }
+
+    if let Some(kc) = security.keycloak.as_mut() {
+        resolve_fail_closed_in_place(&mut kc.server_url, "security.keycloak.server_url")?;
+        resolve_fail_closed_in_place(&mut kc.realm, "security.keycloak.realm")?;
+        resolve_fail_closed_in_place(&mut kc.client_id, "security.keycloak.client_id")?;
+        resolve_fail_closed_in_place(&mut kc.client_secret, "security.keycloak.client_secret")?;
+        resolve_fail_closed_in_place(
+            &mut kc.validation.method,
+            "security.keycloak.validation.method",
+        )?;
+        for (i, v) in kc.validation.audience.iter_mut().enumerate() {
+            resolve_fail_closed_in_place(
+                v,
+                &format!("security.keycloak.validation.audience[{i}]"),
+            )?;
+        }
+        // `jwks` and `introspection` carry no string leaves.
+        if let Some(uma) = kc.uma.as_mut() {
+            resolve_fail_closed_in_place(&mut uma.provider, "security.keycloak.uma.provider")?;
+        }
+    }
+
+    if let Some(permissions) = security.permissions.as_mut() {
+        for (name, provider) in permissions.iter_mut() {
+            let base = format!("security.permissions.{name}");
+            resolve_fail_closed_in_place(&mut provider.provider, &format!("{base}.provider"))?;
+            if let Some(v) = provider.path.as_mut() {
+                resolve_fail_closed_in_place(v, &format!("{base}.path"))?;
+            }
+            if let Some(config) = provider.config.as_mut() {
+                for (k, v) in config.iter_mut() {
+                    resolve_fail_closed_in_place(v, &format!("{base}.config.{k}"))?;
+                }
+            }
+            if let Some(v) = provider.limits.allow_call_schemes.as_mut() {
+                resolve_fail_closed_in_place(v, &format!("{base}.limits.allow_call_schemes"))?;
+            }
+        }
+    }
+
+    if let Some(policies) = security.policies.as_mut() {
+        for (name, policy) in policies.wasm.iter_mut() {
+            let base = format!("security.policies.wasm.{name}");
+            resolve_fail_closed_in_place(&mut policy.path, &format!("{base}.path"))?;
+            if let Some(v) = policy.limits.allow_call_schemes.as_mut() {
+                resolve_fail_closed_in_place(v, &format!("{base}.limits.allow_call_schemes"))?;
+            }
+            for (k, v) in policy.config.iter_mut() {
+                resolve_fail_closed_in_place(v, &format!("{base}.config.{k}"))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve `db_url` and every string leaf inside `extra` fail-closed for each
+/// datasource.
+fn resolve_datasources_fail_closed(
+    datasources: &mut HashMap<String, DatasourceConfig>,
+) -> Result<(), ConfigError> {
+    for (name, ds) in datasources.iter_mut() {
+        let base = format!("datasources.{name}");
+        resolve_fail_closed_in_place(&mut ds.db_url, &format!("{base}.db_url"))?;
+        for (k, v) in ds.extra.iter_mut() {
+            resolve_toml_value_fail_closed(v, &format!("{base}.extra.{k}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively resolve every string leaf of a `toml::Value` fail-closed.
+fn resolve_toml_value_fail_closed(value: &mut toml::Value, path: &str) -> Result<(), ConfigError> {
+    match value {
+        toml::Value::String(s) => {
+            *s = resolve_fail_closed(s, path)?;
+        }
+        toml::Value::Array(arr) => {
+            for (i, item) in arr.iter_mut().enumerate() {
+                resolve_toml_value_fail_closed(item, &format!("{path}[{i}]"))?;
+            }
+        }
+        toml::Value::Table(table) => {
+            for (k, v) in table.iter_mut() {
+                resolve_toml_value_fail_closed(v, &format!("{path}.{k}"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Apply profile-based TOML section merging in-place.
 pub(crate) fn apply_profile(
     config_value: &mut toml::Value,
@@ -1709,6 +1949,20 @@ pub(crate) fn apply_profile_lenient(value: &mut toml::Value, profile: Option<&st
 /// test flakes ~1/5 runs in workspace mode.
 #[cfg(test)]
 static ENV_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Sets an env var for a test. Caller MUST hold [`ENV_OVERRIDE_LOCK`].
+#[cfg(test)]
+fn set_env(key: &str, value: &str) {
+    // SAFETY: serialized against every other env-touching test via ENV_OVERRIDE_LOCK.
+    unsafe { std::env::set_var(key, value) }
+}
+
+/// Removes an env var for a test. Caller MUST hold [`ENV_OVERRIDE_LOCK`].
+#[cfg(test)]
+fn unset_env(key: &str) {
+    // SAFETY: serialized against every other env-touching test via ENV_OVERRIDE_LOCK.
+    unsafe { std::env::remove_var(key) }
+}
 
 #[cfg(test)]
 mod camel_config_defaults_tests {
@@ -2984,85 +3238,13 @@ scopes = ["read", "write"]
             api_key: Some("super-secret-key".into()),
             roles: vec!["admin".into()],
             scopes: vec!["read".into()],
-            token_issuer: None,
-            clients: Vec::new(),
+            credentials: Vec::new(),
         };
 
         let debug = format!("{native:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("super-secret-token"));
         assert!(!debug.contains("super-secret-key"));
-    }
-
-    #[test]
-    fn parse_native_issuer_and_clients() {
-        let toml = r#"
-[security]
-[security.native]
-subject = "m2m-system"
-[security.native.token_issuer]
-issuer = "https://orders.local"
-audience = ["orders-api"]
-token_ttl_secs = 900
-signing_key_env = "CAMEL_NATIVE_ISSUER_KEY_PEM"
-
-[[security.native.clients]]
-client_id = "billing-worker"
-client_secret_env = "BILLING_CLIENT_SECRET"
-roles = ["billing"]
-scopes = ["orders:read", "orders:write"]
-
-[[security.native.clients]]
-client_id = "reporting-worker"
-client_secret_env = "REPORTING_CLIENT_SECRET"
-roles = ["reporting"]
-scopes = ["orders:read"]
-"#;
-        let config: CamelConfig = toml::from_str(toml).unwrap();
-        let native = config.security.native.as_ref().unwrap();
-        let issuer = native.token_issuer.as_ref().unwrap();
-        assert_eq!(issuer.issuer, "https://orders.local");
-        assert_eq!(issuer.audience, vec!["orders-api"]);
-        assert_eq!(issuer.token_ttl_secs, 900);
-        assert_eq!(issuer.signing_key_env, "CAMEL_NATIVE_ISSUER_KEY_PEM");
-        assert_eq!(native.clients.len(), 2);
-        assert_eq!(native.clients[0].client_id, "billing-worker");
-        assert_eq!(
-            native.clients[0].scopes,
-            vec!["orders:read", "orders:write"]
-        );
-    }
-
-    #[test]
-    fn parse_native_issuer_defaults() {
-        let toml = r#"
-[security]
-[security.native]
-subject = "m2m-system"
-[security.native.token_issuer]
-issuer = "https://test.local"
-signing_key_env = "KEY"
-"#;
-        let config: CamelConfig = toml::from_str(toml).unwrap();
-        let issuer = config.security.native.unwrap().token_issuer.unwrap();
-        assert_eq!(issuer.token_ttl_secs, 900);
-        assert!(issuer.audience.is_empty());
-    }
-
-    #[test]
-    fn parse_native_debug_redacts_client_secret_env() {
-        let toml = r#"
-[security]
-[security.native]
-subject = "m2m-system"
-[[security.native.clients]]
-client_id = "test-worker"
-client_secret_env = "MY_SECRET"
-"#;
-        let config: CamelConfig = toml::from_str(toml).unwrap();
-        let debug = format!("{:?}", config.security.native.unwrap());
-        assert!(!debug.contains("MY_SECRET"));
-        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]
@@ -3232,6 +3414,448 @@ unknown_key = "rejected"
         assert!(
             result.is_err(),
             "deny_unknown_fields must reject unknown keys"
+        );
+    }
+}
+
+#[cfg(test)]
+mod placeholder {
+    use super::*;
+
+    /// Loads a `CamelConfig` from TOML text through the real config-building
+    /// path (profile handling, deserialization, placeholder resolution, validation).
+    fn load_config(toml_text: &str) -> Result<CamelConfig, ConfigError> {
+        let value: toml::Value = toml::from_str(toml_text).expect("test TOML must parse");
+        super::build_from_toml_value_inner(value, None, false, Vec::new())
+    }
+
+    #[test]
+    fn security_bearer_token_env_resolves() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        set_env("AUTH_TOKEN", "real-secret");
+        let config = load_config(
+            r#"
+[security.native]
+subject = "svc"
+bearer_token = "{{env:AUTH_TOKEN}}"
+"#,
+        )
+        .expect("config should load");
+        assert_eq!(
+            config
+                .security
+                .native
+                .as_ref()
+                .and_then(|n| n.bearer_token.as_deref()),
+            Some("real-secret")
+        );
+        unset_env("AUTH_TOKEN");
+    }
+
+    #[test]
+    fn security_unset_env_fails_closed() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("AUTH_TOKEN");
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+bearer_token = "{{env:AUTH_TOKEN}}"
+"#,
+        )
+        .expect_err("unset credential env var must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AUTH_TOKEN"),
+            "message should name the var: {msg}"
+        );
+        assert!(
+            msg.contains("bearer_token"),
+            "message should name the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn security_single_colon_default_resolves() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("AUTH_TOKEN");
+        let config = load_config(
+            r#"
+[security.native]
+subject = "svc"
+bearer_token = "{{env:AUTH_TOKEN:fallback-secret}}"
+"#,
+        )
+        .expect("single-colon default should resolve without error");
+        assert_eq!(
+            config
+                .security
+                .native
+                .as_ref()
+                .and_then(|n| n.bearer_token.as_deref()),
+            Some("fallback-secret")
+        );
+    }
+
+    #[test]
+    fn dash_default_rejected_on_any_covered_leaf() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("X");
+
+        // Credential leaf.
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+bearer_token = "{{env:X:-changeme}}"
+"#,
+        )
+        .expect_err("dash default on a credential leaf must fail");
+        assert!(err.to_string().contains('-'), "message: {err}");
+
+        // Datasource leaf.
+        let err = load_config(
+            r#"
+[datasources.main]
+db_url = "{{env:X:-url}}"
+"#,
+        )
+        .expect_err("dash default on a datasource leaf must fail");
+        assert!(err.to_string().contains('-'), "message: {err}");
+    }
+
+    #[test]
+    fn dash_default_rejected_on_noncredential_leaf() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("KC_REALM");
+        let err = load_config(
+            r#"
+[security.keycloak]
+server_url = "http://localhost:8080"
+realm = "{{env:KC_REALM:-main}}"
+client_id = "client"
+client_secret = "secret"
+"#,
+        )
+        .expect_err("dash default on a non-credential security leaf must fail");
+        assert!(err.to_string().contains('-'), "message: {err}");
+    }
+
+    #[test]
+    fn noncredential_security_leaf_resolves() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("KC_REALM");
+        let config = load_config(
+            r#"
+[security.keycloak]
+server_url = "http://localhost:8080"
+realm = "{{env:KC_REALM:main}}"
+client_id = "client"
+client_secret = "secret"
+"#,
+        )
+        .expect("non-credential security leaf should resolve");
+        assert_eq!(config.security.keycloak.unwrap().realm, "main");
+    }
+
+    #[test]
+    fn datasource_leaves_resolve() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        set_env("DB_URL", "postgresql://localhost:5432/db");
+        set_env("SURREAL_PASS", "s3cret");
+        let config = load_config(
+            r#"
+[datasources.main]
+db_url = "{{env:DB_URL}}"
+
+[datasources.main.extra]
+password = "{{env:SURREAL_PASS}}"
+"#,
+        )
+        .expect("datasource leaves should resolve");
+        let ds = config.datasources.get("main").expect("main datasource");
+        assert_eq!(ds.db_url, "postgresql://localhost:5432/db");
+        assert_eq!(
+            ds.extra.get("password").and_then(|v| v.as_str()),
+            Some("s3cret")
+        );
+        unset_env("DB_URL");
+        unset_env("SURREAL_PASS");
+    }
+
+    #[test]
+    fn surviving_marker_rejected() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+bearer_token = "{{env:"
+"#,
+        )
+        .expect_err("surviving placeholder marker must fail closed");
+        assert!(
+            err.to_string().contains("marker"),
+            "message should mention the marker: {err}"
+        );
+    }
+
+    #[test]
+    fn wasm_limits_allow_call_schemes_resolves() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("WASM_SCHEMES");
+        let config = load_config(
+            r#"
+[security.policies.wasm.corp-auth]
+path = "plugins/authz.wasm"
+
+[security.policies.wasm.corp-auth.limits]
+allow-call-schemes = "{{env:WASM_SCHEMES:file,https}}"
+"#,
+        )
+        .expect("wasm limits allow_call_schemes should resolve");
+        let policy = config
+            .security
+            .policies
+            .as_ref()
+            .and_then(|p| p.wasm.get("corp-auth"))
+            .expect("corp-auth policy");
+        assert_eq!(
+            policy.limits.allow_call_schemes.as_deref(),
+            Some("file,https")
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_credentials {
+    use super::*;
+
+    /// Loads a `CamelConfig` from TOML text through the real config-building
+    /// path (profile handling, deserialization, placeholder resolution, validation).
+    fn load_config(toml_text: &str) -> Result<CamelConfig, ConfigError> {
+        let value: toml::Value = toml::from_str(toml_text).expect("test TOML must parse");
+        super::build_from_toml_value_inner(value, None, false, Vec::new())
+    }
+
+    #[test]
+    fn credentials_array_parses() {
+        let config = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[[security.native.credentials]]
+subject = "svc-a"
+secret_env = "SVC_A_SECRET"
+roles = ["admin", "reader"]
+scopes = ["read", "write"]
+
+[[security.native.credentials]]
+subject = "svc-b"
+secret = "plain-text-secret"
+"#,
+        )
+        .expect("config should load");
+
+        let native = config.security.native.expect("native config present");
+        let creds = &native.credentials;
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0].subject, "svc-a");
+        assert_eq!(creds[0].secret_env.as_deref(), Some("SVC_A_SECRET"));
+        assert_eq!(creds[0].secret, None);
+        assert_eq!(
+            creds[0].roles,
+            vec!["admin".to_string(), "reader".to_string()]
+        );
+        assert_eq!(
+            creds[0].scopes,
+            vec!["read".to_string(), "write".to_string()]
+        );
+        assert_eq!(creds[1].subject, "svc-b");
+        assert_eq!(creds[1].secret.as_deref(), Some("plain-text-secret"));
+        assert_eq!(creds[1].secret_env, None);
+        assert!(creds[1].roles.is_empty());
+        assert!(creds[1].scopes.is_empty());
+    }
+
+    #[test]
+    fn entry_with_both_secrets_rejected() {
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[[security.native.credentials]]
+subject = "svc-a"
+secret_env = "SVC_A_SECRET"
+secret = "also-a-secret"
+"#,
+        )
+        .expect_err("both secret_env and secret must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("credentials[0]"), "must name index: {msg}");
+        assert!(
+            msg.contains("exactly one"),
+            "must explain the constraint: {msg}"
+        );
+    }
+
+    #[test]
+    fn entry_with_no_secret_rejected() {
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[[security.native.credentials]]
+subject = "svc-a"
+"#,
+        )
+        .expect_err("neither secret_env nor secret must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("credentials[0]"), "must name index: {msg}");
+    }
+
+    #[test]
+    fn entry_with_empty_subject_rejected() {
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[[security.native.credentials]]
+subject = ""
+secret = "x"
+"#,
+        )
+        .expect_err("empty subject must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("credentials[0]"), "must name index: {msg}");
+    }
+
+    #[test]
+    fn credentials_debug_redacts() {
+        let config = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[[security.native.credentials]]
+subject = "svc-a"
+secret = "hunter2-debug-secret"
+"#,
+        )
+        .expect("config should load");
+        let debug = format!("{:?}", config.security.native);
+        assert!(
+            !debug.contains("hunter2-debug-secret"),
+            "debug must not leak the secret: {debug}"
+        );
+        let creds = &config.security.native.expect("native").credentials;
+        let entry_debug = format!("{:?}", creds[0]);
+        assert!(
+            entry_debug.contains("[REDACTED]"),
+            "entry debug must redact the secret: {entry_debug}"
+        );
+        assert!(
+            !entry_debug.contains("hunter2-debug-secret"),
+            "entry debug must not leak the secret: {entry_debug}"
+        );
+    }
+
+    #[test]
+    fn credential_secret_placeholder_resolves() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        set_env("CRED_ONE", "resolved-env-secret");
+        let config = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[[security.native.credentials]]
+subject = "svc-a"
+secret = "{{env:CRED_ONE}}"
+"#,
+        )
+        .expect("env-backed secret should resolve");
+        let creds = &config.security.native.expect("native").credentials;
+        assert_eq!(creds[0].secret.as_deref(), Some("resolved-env-secret"));
+        unset_env("CRED_ONE");
+    }
+
+    #[test]
+    fn credential_secret_unset_fails_closed() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("CRED_ONE");
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[[security.native.credentials]]
+subject = "svc-a"
+secret = "{{env:CRED_ONE}}"
+"#,
+        )
+        .expect_err("unset credential secret must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("CRED_ONE"), "must name the var: {msg}");
+        assert!(
+            msg.contains("credentials[0].secret") || msg.contains("credentials[0]"),
+            "must name the field path: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stale_native {
+    use super::*;
+
+    /// Loads a `CamelConfig` from TOML text through the real config-building
+    /// path (profile handling, deserialization, placeholder resolution, validation).
+    fn load_config(toml_text: &str) -> Result<CamelConfig, ConfigError> {
+        let value: toml::Value = toml::from_str(toml_text).expect("test TOML must parse");
+        super::build_from_toml_value_inner(value, None, false, Vec::new())
+    }
+
+    #[test]
+    fn stale_token_issuer_rejected_loudly() {
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[security.native.token_issuer]
+issuer = "https://orders.local"
+signing_key_env = "KEY"
+"#,
+        )
+        .expect_err("stale `token_issuer` key must be rejected (deny_unknown_fields)");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("token_issuer"),
+            "message should name the stale key: {msg}"
+        );
+    }
+
+    #[test]
+    fn stale_clients_rejected_loudly() {
+        let err = load_config(
+            r#"
+[security.native]
+subject = "svc"
+
+[[security.native.clients]]
+client_id = "worker"
+client_secret_env = "SECRET"
+"#,
+        )
+        .expect_err("stale `clients` key must be rejected (deny_unknown_fields)");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("clients"),
+            "message should name the stale key: {msg}"
         );
     }
 }

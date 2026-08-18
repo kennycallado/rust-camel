@@ -243,9 +243,11 @@ pub async fn run(
 
     tracing::info!("camel-cli: loading routes from patterns: {:?}", patterns);
 
-    let security_compile_context =
-        crate::build_security_compile_context_from_config(&camel_config, ctx.registry_arc())
-            .await?;
+    let security_compile_context = crate::security::build_security_compile_context_from_config(
+        &camel_config,
+        ctx.registry_arc(),
+    )
+    .await?;
 
     // Define register_bundle! macro — looks up config key in ComponentsConfig::raw,
     // falling back to an empty table so bundles always register with their serde defaults.

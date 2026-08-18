@@ -67,6 +67,17 @@ impl fmt::Debug for NativeCredentialStore {
     }
 }
 
+/// Defense-in-depth: reject credentials that still carry unresolved
+/// placeholder markers (`{{` or `${`) at the authenticator boundary.
+pub fn ensure_no_placeholder_markers(secret: &str) -> Result<(), CamelError> {
+    if secret.contains("{{") || secret.contains("${") {
+        return Err(CamelError::Config(
+            "credential contains unresolved placeholder marker: {{ or ${".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl NativeCredentialStore {
     pub fn try_new(credentials: Vec<NativeCredential>) -> Result<Self, CamelError> {
         let mut resolved = Vec::with_capacity(credentials.len());
@@ -93,6 +104,7 @@ impl NativeCredentialStore {
                     value.clone()
                 }
             };
+            ensure_no_placeholder_markers(secret_value.as_str())?;
             resolved.push(ResolvedCredential {
                 secret_value,
                 principal: c.principal,
@@ -150,51 +162,6 @@ impl crate::TokenAuthenticator for StaticTokenAuthenticator {
             .lookup(token)
             .cloned()
             .ok_or_else(|| CamelError::Unauthenticated("invalid credential".into()))
-    }
-}
-
-pub struct ApiKeyAuthenticator {
-    header: String,
-    store: NativeCredentialStore,
-}
-
-impl fmt::Debug for ApiKeyAuthenticator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ApiKeyAuthenticator")
-            .field("header", &self.header)
-            .field("store", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl ApiKeyAuthenticator {
-    pub fn new(header: String, store: NativeCredentialStore) -> Self {
-        Self { header, store }
-    }
-
-    pub fn header(&self) -> &str {
-        &self.header
-    }
-
-    pub async fn authenticate_api_key(&self, key: &str) -> Result<Principal, CamelError> {
-        self.store
-            .lookup(key)
-            .cloned()
-            .ok_or_else(|| CamelError::Unauthenticated("invalid credential".into()))
-    }
-
-    pub async fn authenticate_exchange(
-        &self,
-        exchange: &mut camel_api::Exchange,
-    ) -> Result<Principal, CamelError> {
-        let key = exchange
-            .input
-            .header_ic(&self.header)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                CamelError::Unauthenticated(format!("missing header: {}", self.header))
-            })?;
-        self.authenticate_api_key(key).await
     }
 }
 
@@ -310,6 +277,38 @@ mod tests {
         assert!(store.lookup("insecure").is_some());
     }
 
+    #[test]
+    fn store_rejects_marker_secret() {
+        let result = NativeCredentialStore::try_new(vec![NativeCredential {
+            secret: NativeCredentialSecret::Plaintext {
+                value: Zeroizing::new("{{env:X}}".to_string()),
+            },
+            principal: test_principal("bad", vec![], vec![]),
+        }]);
+        let err = match result {
+            Ok(_) => panic!("marker secret must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("marker"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn store_accepts_clean_secret() {
+        let store = NativeCredentialStore::try_new(vec![NativeCredential {
+            secret: NativeCredentialSecret::Plaintext {
+                value: Zeroizing::new("clean-secret-value".to_string()),
+            },
+            principal: test_principal("clean-user", vec![], vec![]),
+        }])
+        .unwrap();
+        let found = store.lookup("clean-secret-value");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().subject, "clean-user");
+    }
+
     #[tokio::test]
     async fn test_static_token_authenticator_valid_token() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
@@ -343,74 +342,6 @@ mod tests {
             }
             e => panic!("expected Unauthenticated, got: {e:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn test_api_key_authenticator_valid_key() {
-        let store = NativeCredentialStore::try_new(vec![NativeCredential {
-            secret: NativeCredentialSecret::Plaintext {
-                value: Zeroizing::new("ak-12345".to_string()),
-            },
-            principal: test_principal("api-user", vec!["read"], vec!["api:read"]),
-        }])
-        .unwrap();
-        let auth = ApiKeyAuthenticator::new("x-api-key".to_string(), store);
-        let result = auth.authenticate_api_key("ak-12345").await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().subject, "api-user");
-    }
-
-    #[tokio::test]
-    async fn test_api_key_authenticator_invalid_key() {
-        let store = NativeCredentialStore::try_new(vec![NativeCredential {
-            secret: NativeCredentialSecret::Plaintext {
-                value: Zeroizing::new("ak-12345".to_string()),
-            },
-            principal: test_principal("api-user", vec!["read"], vec![]),
-        }])
-        .unwrap();
-        let auth = ApiKeyAuthenticator::new("x-api-key".to_string(), store);
-        let result = auth.authenticate_api_key("wrong").await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_api_key_authenticate_exchange() {
-        let store = NativeCredentialStore::try_new(vec![NativeCredential {
-            secret: NativeCredentialSecret::Plaintext {
-                value: Zeroizing::new("ak-exchange".to_string()),
-            },
-            principal: test_principal("ex-user", vec!["read"], vec![]),
-        }])
-        .unwrap();
-        let auth = ApiKeyAuthenticator::new("x-api-key".to_string(), store);
-        let mut exchange = Exchange::new(Message::default());
-        exchange.input.set_header("x-api-key", "ak-exchange");
-        let result = auth.authenticate_exchange(&mut exchange).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().subject, "ex-user");
-    }
-
-    #[tokio::test]
-    async fn test_api_key_authenticate_exchange_missing_header() {
-        let store = NativeCredentialStore::try_new(vec![NativeCredential {
-            secret: NativeCredentialSecret::Plaintext {
-                value: Zeroizing::new("ak-exchange".to_string()),
-            },
-            principal: test_principal("ex-user", vec!["read"], vec![]),
-        }])
-        .unwrap();
-        let auth = ApiKeyAuthenticator::new("x-api-key".to_string(), store);
-        let mut exchange = Exchange::new(Message::default());
-        let result = auth.authenticate_exchange(&mut exchange).await;
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_api_key_authenticator_exposes_header() {
-        let store = NativeCredentialStore::try_new(vec![]).unwrap();
-        let auth = ApiKeyAuthenticator::new("x-api-key".to_string(), store);
-        assert_eq!(auth.header(), "x-api-key");
     }
 
     #[tokio::test]

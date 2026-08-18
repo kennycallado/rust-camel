@@ -9,7 +9,7 @@ providers live in component crates such as `camel-component-keycloak`.
 
 The auth pipeline has three layers:
 
-1. **TokenAuthenticator** validates a bearer or API token and returns a `Principal`. Implementations include `IntrospectionAuthenticator` (RFC 7662), `ApiKeyAuthenticator`, `StaticTokenAuthenticator`, and `LocalJwtValidator`.
+1. **TokenAuthenticator** validates a bearer or API token and returns a `Principal`. Implementations include `IntrospectionAuthenticator` (RFC 7662), `StaticTokenAuthenticator`, and `LocalJwtValidator`.
 2. **ClaimsMapper** maps token or introspection claims into `Principal` fields: subject, roles, scopes, issuer, audience. `JsonPointerClaimsMapper` resolves JSON Pointer paths, so any OIDC provider works without code.
 3. **PermissionEvaluator** evaluates resource, action, and scope requests and returns a `PermissionDecision`. Route-level `security_policy.permission` calls it.
 
@@ -17,17 +17,33 @@ The enforcement boundary is `SecurityPolicyLayer` in camel-core. It evaluates BE
 
 See [ADR-0010](../adr/0010-security-policy-pre-pipeline-authorization.md) for the pre-pipeline authorization decision.
 
-## Keycloak-style auth
+## Native auth
 
-The native auth pipeline reproduces a Keycloak flow without external dependencies. It issues JWTs, validates them, and applies role-based policies. The same pipeline works with a real Keycloak through `camel-component-keycloak`.
+The native auth pipeline reproduces a Keycloak-style flow without external dependencies. It validates static credentials against a local store and applies role-based policies. The same pipeline works with a real Keycloak through `camel-component-keycloak`.
 
-Issue tokens with `NativeTokenIssuer`:
+Register static credentials in `Camel.toml`. Each `[[security.native.credentials]]` entry binds a `subject` to a credential, supplied inline (`secret`) or by environment-variable reference (`secret_env`). Roles and scopes are optional:
+
+```toml
+[security.native]
+subject = "native-user"
+issuer = "native"
+
+[[security.native.credentials]]
+subject = "svc-orders"
+secret_env = "ORDERS_SECRET"
+roles = ["service"]
+scopes = ["read:orders", "write:orders"]
+```
+
+The CLI builds a `NativeCredentialStore` from these entries and wraps it in a `StaticTokenAuthenticator`. Each entry maps its credential to a `Principal` with the entry's roles and scopes.
+
+The example defines the bearer values it presents to the authenticator:
 
 ```rust,ignore
 {{#include ../../../examples/security-keycloak/src/main.rs:keycloak-token-issuance}}
 ```
 
-Validate tokens with `LocalJwtValidator` and `NativeJwksProvider`:
+Validate a bearer value with `StaticTokenAuthenticator`:
 
 ```rust,ignore
 {{#include ../../../examples/security-keycloak/src/main.rs:keycloak-validation}}

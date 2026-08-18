@@ -321,6 +321,8 @@ port = 9090
 
 The `[security]` section configures authentication and authorization for the runtime. All sub-sections are optional -- enable only the providers you need.
 
+Placeholders in the `[security]` block use `{{env:VAR}}` and `{{env:VAR:default}}` (single colon). The `{{env:VAR:-default}}` form is rejected at startup. Route files use a different `${env:...}` system; see the [DSL docs](../../docs/src/configuration/env-interpolation.md).
+
 ### `[security.oidc]` -- OpenID Connect
 
 Validates JWT tokens against an OIDC issuer.
@@ -339,7 +341,7 @@ introspection_endpoint = "https://auth.example.com/realms/my-realm/protocol/open
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `issuer` | string | yes | OIDC issuer URL |
-| `jwks_uri` | string | no | Override JWKS endpoint (auto-discovered from issuer if omitted) |
+| `jwks_uri` | string | yes | JWKS endpoint |
 | `audience` | [string] | no | Accepted `aud` claim values |
 | `client_id` | string | no | OAuth2 client ID |
 | `client_secret` | string | no | OAuth2 client secret (redacted in debug output) |
@@ -348,7 +350,7 @@ introspection_endpoint = "https://auth.example.com/realms/my-realm/protocol/open
 
 ### `[security.native]` -- Native / Static Authentication
 
-Static credentials and optional built-in token issuer for development or trusted-network deployments.
+Static credentials for development or trusted-network deployments.
 
 ```toml
 [security.native]
@@ -358,17 +360,12 @@ bearer_token = "{{env:SYSTEM_BEARER_TOKEN}}"
 roles = ["admin", "operator"]
 scopes = ["read", "write"]
 
-# Optional: built-in JWT issuer for machine-to-machine tokens
-[security.native.token_issuer]
-issuer = "rust-camel-internal"
-audience = ["internal"]
-token_ttl_secs = 900
-signing_key_env = "SIGNING_KEY"    # env var holding the HMAC or RSA key
-
-# Optional: pre-registered M2M clients
-[[security.native.clients]]
-client_id = "svc-orders"
-client_secret_env = "ORDERS_SECRET"
+# Optional: multiple named credentials (machine-to-machine style). Each
+# entry binds a `subject` to a credential supplied inline (`secret`) or by
+# environment-variable reference (`secret_env`).
+[[security.native.credentials]]
+subject = "svc-orders"
+secret_env = "ORDERS_SECRET"
 roles = ["service"]
 scopes = ["read:orders", "write:orders"]
 ```
@@ -381,8 +378,7 @@ scopes = ["read:orders", "write:orders"]
 | `api_key` | string | no | Static API key (redacted in debug output) |
 | `roles` | [string] | no | Granted roles |
 | `scopes` | [string] | no | Granted OAuth scopes |
-| `token_issuer` | table | no | Built-in JWT issuer config (`NativeIssuerConfig`) |
-| `clients` | [table] | no | M2M client registrations (`NativeM2mClientConfig`) |
+| `credentials` | [table] | no | Named credentials (`NativeCredentialEntry`); each entry sets `subject`, exactly one of `secret_env` / `secret`, and optional `roles` / `scopes` |
 
 ### `[security.keycloak]` -- Keycloak Integration
 

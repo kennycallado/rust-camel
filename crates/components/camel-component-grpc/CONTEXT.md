@@ -37,12 +37,17 @@ transport keys. These keys include `content-type`, `te`, `grpc-*`, and
 
 Security enforcement has two layers:
 
-1. The server handler authenticates the request. `extract_principal` parses an
-   `Authorization: Bearer <token>` value and calls
+1. The server handler authenticates the request. `extract_principal` maps the
+   inbound metadata to an HTTP header view and extracts the token through the
+   shared `camel_auth::extract_token_multi` using the route-declared
+   `credential_sources` (default `[authorization_header]`, so the historical
+   `authorization: Bearer <token>` behavior is unchanged). It then calls
    `TokenAuthenticator::authenticate_bearer`. Missing or invalid credentials
    return `Status::unauthenticated`. An unavailable provider returns
    `Status::unavailable`. An unexpected authenticator failure returns
-   `Status::internal` and emits the category (h) log.
+   `Status::internal` and emits the category (h) log. `query_param` and
+   `cookie` sources are rejected at route load (`validate_credential_sources`)
+   because gRPC metadata cannot carry them.
 2. `GrpcConsumer` authorizes before pipeline dispatch, as required by
    ADR-0010. It calls `SecurityPolicy::evaluate` in unary, server-streaming,
    client-streaming, and bidirectional modes. `Denied` returns

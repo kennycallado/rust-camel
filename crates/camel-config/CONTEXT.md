@@ -54,12 +54,12 @@ struct-literal side of the same rule: consumers construct or deserialize them, s
 
 | Type | non_exhaustive | Rationale (ADR-0049 §Rule 3 framework) |
 |------|----------------|----------------------------------------|
-| Config `pub struct` (deserialized from TOML; some also constructed by consumers) | **No** | Struct-literal side of §Rule 3 — `#[non_exhaustive]` blocks literal construction for no forward-compat gain on serde-owned shapes. 25/27 structs comply. `NativeIssuerConfig` (`config.rs:597`) and `NativeM2mClientConfig` (`config.rs:613`) carry it inconsistently — current state; proposed correction tracked as finding M3 (not prescribed by this doc). |
+| Config `pub struct` (deserialized from TOML; some also constructed by consumers) | **No** | Struct-literal side of §Rule 3 — `#[non_exhaustive]` blocks literal construction for no forward-compat gain on serde-owned shapes. 27/27 structs comply — the former exceptions `NativeIssuerConfig` / `NativeM2mClientConfig` were deleted with the mini-IdP surface (see finding M3 below). |
 | `JournalDurability` (`config.rs:448`) | **No** | Closed 2-variant set (`Immediate` / `Eventual`) mirroring `redb::Durability`; the set **is** the contract — the §Rule 3 Exceptions clause (cf. `PipelineOutcome`). Matched exhaustively in-crate via the `From<JournalDurability> for camel_core::JournalDurability` impl (`config.rs:456`). |
 | `PlatformCamelConfig` (`config.rs:181`) | **No (monitor)** | Feature-gated platform taxonomy (`Noop` / `Kubernetes`). The one external match (`camel-test/master_kubernetes_test.rs`) is wildcard-bearing, so a future `Aws`/`Gcp` variant is additive today. Flip to `#[non_exhaustive]` if a non-test consumer ever matches it exhaustively. |
 | `OtelProtocol` (`config.rs:335`), `OtelSampler` (`config.rs:344`) | **No** | Config-value enums, serde-parsed from TOML and immediately lowered to the camel-otel runtime types (see Two-layer enum split). No external match; OTLP surface is spec-stable. |
 
-Counts (verified mechanically, HEAD `98ace84e`): **27** `pub struct`, **2** `#[non_exhaustive]`,
+Counts (verified mechanically, HEAD `745b2732`): **27** `pub struct`, **0** `#[non_exhaustive]`,
 **4** `pub enum` in `config.rs`.
 
 ## Architecture notes
@@ -88,7 +88,8 @@ crate implements no EIPs and no route steps (L7 N/A).
 - **ADR-0011** — CanonicalRouteSpec minimal contract; referenced by `wasm_limits.rs` for the
   "unset field falls back to the runtime default, no silent surprises" rule on `[limits]`.
 - **camel-dsl DP-8** (`98ace84e`) — crate-local posture-table precedent this file follows.
-- **Open question (does not block this doc):** finding M3 — remove vs keep `#[non_exhaustive]`
-  on `NativeIssuerConfig` / `NativeM2mClientConfig`. The recommendation (remove, to align
-  with the other 25 structs) is a mechanical, non-breaking widening tracked in the code stream;
-  this doc records the current state either way.
+- **Finding M3 (resolved):** `NativeIssuerConfig` / `NativeM2mClientConfig` were deleted with the
+  mini-IdP surface (`token_issuer` / `clients`, auth-reinforcement). The `#[non_exhaustive]`
+  inconsistency they carried is gone; `NativeAuthConfig` now holds a
+  `credentials: Vec<NativeCredentialEntry>` array instead. All `config.rs` structs comply without
+  exceptions.

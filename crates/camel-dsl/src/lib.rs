@@ -57,3 +57,37 @@ pub use template::materializer::{
     substitute_strings_in_json,
 };
 pub use template::yaml::{parse_yaml_templated_routes, parse_yaml_templates};
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+
+    /// Test double for `TokenAuthenticator`, shared by unit tests across this
+    /// crate. `subject` lets tests distinguish instances by resolved identity.
+    pub(crate) fn test_authenticator(subject: &str) -> Arc<dyn camel_auth::TokenAuthenticator> {
+        Arc::new(TestAuthenticator {
+            subject: subject.to_string(),
+        })
+    }
+
+    struct TestAuthenticator {
+        subject: String,
+    }
+
+    #[async_trait::async_trait]
+    impl camel_auth::TokenAuthenticator for TestAuthenticator {
+        async fn authenticate_bearer(
+            &self,
+            _token: &str,
+        ) -> Result<camel_api::security_policy::Principal, camel_api::CamelError> {
+            Ok(camel_api::security_policy::Principal {
+                subject: self.subject.clone(),
+                issuer: "test-issuer".into(),
+                audience: vec![],
+                scopes: vec!["read:api".into()],
+                roles: vec!["admin".into()],
+                claims: serde_json::Value::Null,
+            })
+        }
+    }
+}

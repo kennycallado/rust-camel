@@ -48,13 +48,16 @@ use crate::model::{
 fn require_authenticator(
     ctx: &SecurityCompileContext,
     mode: &str,
+    provider: Option<&str>,
 ) -> Result<std::sync::Arc<dyn camel_auth::TokenAuthenticator>, CamelError> {
-    ctx.authenticator.clone().ok_or_else(|| {
-        CamelError::RouteError(format!(
-            "security_policy with {} requires a JWT authenticator (configure [security] in Camel.toml)",
+    match ctx.authenticator_for(provider) {
+        Ok(Some(auth)) => Ok(auth),
+        Ok(None) => Err(CamelError::RouteError(format!(
+            "route requires an authenticator: configure one of [security.keycloak], [security.oidc], [security.native] in Camel.toml (security_policy with {})",
             mode
-        ))
-    })
+        ))),
+        Err(e) => Err(CamelError::RouteError(e)),
+    }
 }
 
 /// Map the DSL credential-source list to the `camel_api` contract form.
@@ -100,8 +103,9 @@ fn compile_security_policy(
             all_required,
             trust_upstream_principal,
             credential_sources,
+            provider,
         } => {
-            let auth = require_authenticator(ctx, "roles")?;
+            let auth = require_authenticator(ctx, "roles", provider.as_deref())?;
             let sources = map_credential_sources(credential_sources);
             let policy = camel_auth::RolePolicy::new(
                 roles,
@@ -121,8 +125,9 @@ fn compile_security_policy(
             all_required,
             trust_upstream_principal,
             credential_sources,
+            provider,
         } => {
-            let auth = require_authenticator(ctx, "scopes")?;
+            let auth = require_authenticator(ctx, "scopes", provider.as_deref())?;
             let sources = map_credential_sources(credential_sources);
             let policy = camel_auth::ScopePolicy::new(
                 scopes,
@@ -2151,6 +2156,7 @@ mod tests {
         SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
         ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
     };
+    use crate::test_support::test_authenticator;
     use async_trait::async_trait;
     use serde_json::Value;
 
@@ -4150,25 +4156,6 @@ mod tests {
         assert!(compile_declarative_route(route).is_ok());
     }
 
-    struct TestAuthenticator;
-
-    #[async_trait]
-    impl camel_auth::TokenAuthenticator for TestAuthenticator {
-        async fn authenticate_bearer(
-            &self,
-            _token: &str,
-        ) -> Result<camel_api::security_policy::Principal, CamelError> {
-            Ok(camel_api::security_policy::Principal {
-                subject: "test-user".into(),
-                issuer: "test-issuer".into(),
-                audience: vec![],
-                scopes: vec!["read:api".into()],
-                roles: vec!["admin".into()],
-                claims: serde_json::Value::Null,
-            })
-        }
-    }
-
     struct TestPolicy;
 
     #[async_trait]
@@ -4192,13 +4179,14 @@ mod tests {
 
     #[test]
     fn compile_security_policy_roles() {
-        let auth = std::sync::Arc::new(TestAuthenticator);
+        let auth = test_authenticator("test-user");
         let ctx = SecurityCompileContext::new(Some(auth), None);
         let def = DeclarativeSecurityPolicy::Roles {
             roles: vec!["admin".into()],
             all_required: true,
             trust_upstream_principal: false,
             credential_sources: None,
+            provider: None,
         };
         let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
         assert!(returned_auth.is_some());
@@ -4206,13 +4194,14 @@ mod tests {
 
     #[test]
     fn compile_security_policy_scopes() {
-        let auth = std::sync::Arc::new(TestAuthenticator);
+        let auth = test_authenticator("test-user");
         let ctx = SecurityCompileContext::new(Some(auth), None);
         let def = DeclarativeSecurityPolicy::Scopes {
             scopes: vec!["read".into()],
             all_required: false,
             trust_upstream_principal: false,
             credential_sources: None,
+            provider: None,
         };
         let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
         assert!(returned_auth.is_some());
@@ -4226,9 +4215,41 @@ mod tests {
             all_required: true,
             trust_upstream_principal: false,
             credential_sources: None,
+            provider: None,
         };
         let result = compile_security_policy(def, &ctx);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_authenticator_error_names_providers() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: Some(DeclarativeSecurityPolicy::Roles {
+                roles: vec!["admin".into()],
+                all_required: true,
+                trust_upstream_principal: false,
+                credential_sources: None,
+                provider: None,
+            }),
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::To(ToStepDef {
+                uri: "log:info".into(),
+            })],
+        };
+        let msg = match compile_declarative_route(route) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected compile error for security_policy without authenticator"),
+        };
+        assert!(msg.contains("[security.keycloak]"), "got: {msg}");
+        assert!(msg.contains("[security.oidc]"), "got: {msg}");
+        assert!(msg.contains("[security.native]"), "got: {msg}");
     }
 
     #[test]
@@ -4394,7 +4415,7 @@ mod tests {
 
     #[test]
     fn compile_security_policy_sets_both_policy_and_authenticator() {
-        let auth = std::sync::Arc::new(TestAuthenticator);
+        let auth = test_authenticator("test-user");
         let ctx = SecurityCompileContext::new(Some(auth), None);
         let route = DeclarativeRoute {
             from: "direct:start".into(),
@@ -4409,6 +4430,7 @@ mod tests {
                 all_required: true,
                 trust_upstream_principal: false,
                 credential_sources: None,
+                provider: None,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {
@@ -4435,6 +4457,7 @@ mod tests {
                 all_required: true,
                 trust_upstream_principal: false,
                 credential_sources: None,
+                provider: None,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {

@@ -537,6 +537,7 @@ mcp:
             config: None,
             permission: None,
             credential_sources: None,
+            provider: None,
         };
         let mut block = make_block();
         block.server.security_policy = Some(policy);

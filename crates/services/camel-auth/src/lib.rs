@@ -19,9 +19,6 @@ pub mod introspection_auth;
 pub mod jwks;
 pub mod jwt;
 pub mod native_auth;
-pub mod native_client_store;
-pub mod native_issuer;
-pub mod native_jwks;
 pub mod oauth2;
 pub mod permission;
 pub mod permission_cache;
@@ -57,12 +54,7 @@ pub use permission_cache::{CachingPermissionEvaluator, PermissionCacheOptions};
 
 pub use permission_policy::PermissionPolicy;
 
-pub use native_auth::{
-    ApiKeyAuthenticator, NativeCredential, NativeCredentialSecret, StaticTokenAuthenticator,
-};
-pub use native_client_store::{M2mClient, M2mClientSecret, M2mClientStore};
-pub use native_issuer::{IssuerError, NativeSigningKey, NativeTokenIssuer, TokenResponse};
-pub use native_jwks::NativeJwksProvider;
+pub use native_auth::{NativeCredential, NativeCredentialSecret, StaticTokenAuthenticator};
 
 pub use camel_api::security_policy::{
     AuthorizationDecision, PRINCIPAL_KEY, Principal, SecurityPolicy, SecurityPolicyConfig,

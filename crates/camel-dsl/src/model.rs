@@ -4,7 +4,8 @@ use crate::route_ast::CredentialSourceDsl;
 
 #[derive(Default)]
 pub struct SecurityCompileContext {
-    pub authenticator: Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
+    pub providers:
+        std::collections::HashMap<String, std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
     pub registry: Option<std::sync::Arc<camel_auth::SecurityPolicyRegistry>>,
     pub evaluator_registry: Option<std::sync::Arc<camel_auth::PermissionEvaluatorRegistry>>,
 }
@@ -12,7 +13,7 @@ pub struct SecurityCompileContext {
 impl Clone for SecurityCompileContext {
     fn clone(&self) -> Self {
         Self {
-            authenticator: self.authenticator.clone(),
+            providers: self.providers.clone(),
             registry: self.registry.clone(),
             evaluator_registry: self.evaluator_registry.clone(),
         }
@@ -20,15 +21,66 @@ impl Clone for SecurityCompileContext {
 }
 
 impl SecurityCompileContext {
+    /// `Some(a)` registers `a` as a named provider under the reserved name
+    /// `"default"`; `None` leaves the provider map empty.
     pub fn new(
         authenticator: Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
         registry: Option<std::sync::Arc<camel_auth::SecurityPolicyRegistry>>,
     ) -> Self {
+        let mut providers = std::collections::HashMap::new();
+        if let Some(auth) = authenticator {
+            providers.insert("default".to_string(), auth);
+        }
         Self {
-            authenticator,
+            providers,
             registry,
             evaluator_registry: None,
         }
+    }
+
+    /// Register a named authenticator provider.
+    pub fn with_named_authenticator(
+        mut self,
+        name: &str,
+        auth: std::sync::Arc<dyn camel_auth::TokenAuthenticator>,
+    ) -> Self {
+        self.providers.insert(name.to_string(), auth);
+        self
+    }
+
+    /// Resolve the authenticator for a route.
+    ///
+    /// `None` resolves to the sole registered provider when exactly one is
+    /// registered, and to `None` when the map is empty. More than one provider
+    /// requires an explicit provider name.
+    pub fn authenticator_for(
+        &self,
+        name: Option<&str>,
+    ) -> Result<Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>, String> {
+        match name {
+            None => match self.providers.len() {
+                0 => Ok(None),
+                1 => Ok(self.providers.values().next().cloned()),
+                _ => Err(format!(
+                    "multiple authenticators configured: {}; route must declare security_policy.provider",
+                    self.sorted_provider_names()
+                )),
+            },
+            Some(n) => match self.providers.get(n) {
+                Some(auth) => Ok(Some(auth.clone())),
+                None => Err(format!(
+                    "unknown provider: {}; available: {}",
+                    n,
+                    self.sorted_provider_names()
+                )),
+            },
+        }
+    }
+
+    fn sorted_provider_names(&self) -> String {
+        let mut names: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        names.join(", ")
     }
 
     pub fn with_evaluator_registry(
@@ -68,12 +120,14 @@ pub enum DeclarativeSecurityPolicy {
         all_required: bool,
         trust_upstream_principal: bool,
         credential_sources: Option<Vec<CredentialSourceDsl>>,
+        provider: Option<String>,
     },
     Scopes {
         scopes: Vec<String>,
         all_required: bool,
         trust_upstream_principal: bool,
         credential_sources: Option<Vec<CredentialSourceDsl>>,
+        provider: Option<String>,
     },
     Ref {
         name: String,
@@ -834,5 +888,74 @@ mod tests {
         };
         assert_eq!(cb.failure_threshold, 3);
         assert_eq!(cb.open_duration_ms, 5000);
+    }
+
+    mod provider_registry {
+        use super::*;
+        use crate::test_support::test_authenticator;
+        use std::sync::Arc;
+
+        #[test]
+        fn sole_provider_resolves_without_name() {
+            let ctx = SecurityCompileContext::default()
+                .with_named_authenticator("native", test_authenticator("test-user"));
+            let resolved = ctx.authenticator_for(None).unwrap();
+            assert!(resolved.is_some());
+        }
+
+        #[test]
+        fn legacy_constructor_registers_default() {
+            let auth = test_authenticator("test-user");
+            let ctx = SecurityCompileContext::new(Some(auth.clone()), None);
+            let unnamed = ctx
+                .authenticator_for(None)
+                .unwrap()
+                .expect("expected resolved authenticator");
+            assert!(Arc::ptr_eq(&auth, &unnamed));
+            let named = ctx
+                .authenticator_for(Some("default"))
+                .unwrap()
+                .expect("expected default-named authenticator");
+            assert!(Arc::ptr_eq(&auth, &named));
+        }
+
+        #[test]
+        fn constructor_registered_and_named_are_ambiguous() {
+            let legacy = test_authenticator("legacy-user");
+            let named = test_authenticator("named-user");
+            let ctx = SecurityCompileContext::new(Some(legacy.clone()), None)
+                .with_named_authenticator("native", named.clone());
+            let err = ctx.authenticator_for(None).err().expect("expected error");
+            assert!(
+                err.contains("multiple authenticators configured"),
+                "got: {err}"
+            );
+            assert!(err.contains("default"), "got: {err}");
+            assert!(err.contains("native"), "got: {err}");
+        }
+
+        #[test]
+        fn multiple_providers_require_name() {
+            let ctx = SecurityCompileContext::default()
+                .with_named_authenticator("native", test_authenticator("native-user"))
+                .with_named_authenticator("oidc", test_authenticator("oidc-user"));
+            let err = ctx.authenticator_for(None).err().expect("expected error");
+            assert!(err.contains("native"));
+            assert!(err.contains("oidc"));
+        }
+
+        #[test]
+        fn unknown_provider_errors() {
+            let ctx = SecurityCompileContext::default()
+                .with_named_authenticator("native", test_authenticator("native-user"))
+                .with_named_authenticator("oidc", test_authenticator("oidc-user"));
+            let err = ctx
+                .authenticator_for(Some("saml"))
+                .err()
+                .expect("expected error");
+            assert!(err.contains("saml"));
+            assert!(err.contains("native"));
+            assert!(err.contains("oidc"));
+        }
     }
 }

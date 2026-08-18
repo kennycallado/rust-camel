@@ -1,10 +1,10 @@
 //! WASM authorization-policy example for rust-camel.
 //!
 //! Demonstrates the full auth pipeline with a WASM authorization policy:
-//!   - Issues a JWT with roles using NativeTokenIssuer
-//!   - Validates tokens via LocalJwtValidator + NativeJwksProvider
-//!   - A wrapper SecurityPolicy authenticates a pre-issued token,
-//!     populates camel.auth.* properties, then delegates to WASM
+//!   - Registers a principal (alice) in a `NativeCredentialStore`
+//!   - Authenticates a pre-shared credential via `StaticTokenAuthenticator`
+//!   - A wrapper SecurityPolicy authenticates the credential, populates
+//!     camel.auth.* properties, then delegates to WASM
 //!   - The WASM plugin reads those properties and grants/denies access
 //!
 //! In production the Bearer token comes from HTTP requests. This example
@@ -16,24 +16,22 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_api::security_policy::{
-    AuthorizationDecision, SecurityPolicy, SecurityPolicyConfig, store_principal_properties,
+    AuthorizationDecision, Principal, SecurityPolicy, SecurityPolicyConfig,
+    store_principal_properties,
 };
 use camel_api::{CamelError, Exchange};
-use camel_auth::{
-    ClaimPaths, JsonPointerClaimsMapper, LocalJwtValidator, M2mClient, M2mClientSecret,
-    M2mClientStore, NativeJwksProvider, NativeSigningKey, NativeTokenIssuer, TokenAuthenticator,
+use camel_auth::TokenAuthenticator;
+use camel_auth::native_auth::{
+    NativeCredential, NativeCredentialSecret, NativeCredentialStore, StaticTokenAuthenticator,
 };
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_component_wasm::{WasmConfig, WasmSecurityPolicy};
 use camel_core::context::CamelContext;
-
-const RSA_PRIVATE_PEM: &str = include_str!("../fixtures/test_key.pem");
 
 struct AuthenticatedWasmPolicy {
     authenticator: Arc<dyn TokenAuthenticator>,
@@ -71,53 +69,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let issuer = "https://wasm-example.local/realms/test";
     let audience = vec!["camel-api".to_string()];
 
-    let signing_key = NativeSigningKey::from_pem(RSA_PRIVATE_PEM, "wasm-example-key".to_string())?;
-    let signing_key_val =
-        NativeSigningKey::from_pem(RSA_PRIVATE_PEM, "wasm-example-key".to_string())?;
-
-    let client_store = M2mClientStore::try_new(vec![
-        M2mClient {
-            client_id: "alice".to_string(),
-            secret: M2mClientSecret::Plaintext {
-                value: "alice-secret".to_string().into(),
-            },
+    let store = NativeCredentialStore::try_new(vec![NativeCredential {
+        secret: NativeCredentialSecret::Plaintext {
+            value: "alice-token".to_string().into(),
+        },
+        principal: Principal {
+            subject: "alice".to_string(),
+            issuer: issuer.to_string(),
+            audience,
             scopes: vec!["read".to_string(), "write".to_string()],
             roles: vec!["admin".to_string(), "user".to_string()],
+            claims: serde_json::Value::Null,
         },
-        M2mClient {
-            client_id: "bob".to_string(),
-            secret: M2mClientSecret::Plaintext {
-                value: "bob-secret".to_string().into(),
-            },
-            scopes: vec!["read".to_string()],
-            roles: vec!["viewer".to_string()],
-        },
-    ])?;
+    }])?;
 
-    let token_issuer = NativeTokenIssuer::try_new(
-        issuer.to_string(),
-        audience.clone(),
-        Duration::from_secs(300),
-        signing_key,
-        client_store,
-    )?;
+    let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
 
-    let jwks = Arc::new(NativeJwksProvider::new(signing_key_val)?);
-    let mapper = Arc::new(JsonPointerClaimsMapper::new(ClaimPaths {
-        subject: "/sub".to_string(),
-        roles: vec!["/roles".to_string()],
-        scopes: Some("/scope".to_string()),
-    }));
-    let validator = Arc::new(LocalJwtValidator::new(
-        audience,
-        issuer.to_string(),
-        jwks,
-        mapper,
-    )) as Arc<dyn TokenAuthenticator>;
-
-    let alice_token = token_issuer
-        .issue_token("alice", "alice-secret", Some("read write"), None)
-        .await?;
+    let alice_token = "alice-token";
 
     // ANCHOR: wasm-policy-setup
     let fixtures_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
@@ -136,14 +104,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let policy =
-        AuthenticatedWasmPolicy::new(validator, alice_token.access_token.to_string(), wasm_policy);
+    let policy = AuthenticatedWasmPolicy::new(authenticator, alice_token.to_string(), wasm_policy);
     // ANCHOR_END: wasm-policy-setup
 
     println!("\n=== WASM Security Policy Example ===");
     println!("Plugin:    role-check.wasm (authorization-policy world)");
-    println!("Auth:      NativeTokenIssuer + LocalJwtValidator");
-    println!("Alice:     admin,user roles -> JWT issued");
+    println!("Auth:      StaticTokenAuthenticator + NativeCredentialStore");
+    println!("Alice:     admin,user roles -> static auth");
     println!();
 
     let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
@@ -160,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.start().await?;
 
     println!("Route: timer -> [AuthenticatedWasmPolicy: auth + WASM check] -> log");
-    println!("Flow: policy authenticates Alice JWT, populates camel.auth.roles,");
+    println!("Flow: policy authenticates Alice, populates camel.auth.roles,");
     println!("      WASM plugin reads property, grants access (admin role present).");
     println!("Running for ~6s...\n");
 

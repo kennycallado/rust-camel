@@ -285,25 +285,36 @@ async fn http_health_check_with_real_listener() {
 
 #[test]
 fn http_bearer_token_extraction() {
-    use camel_component_http::auth::extract_bearer_token;
+    use camel_auth::extract_bearer_token;
+
+    // `camel_auth::extract_bearer_token` parses a header *value* string, so
+    // pull the `Authorization` header out of the map first (the deleted
+    // `camel_component_http::auth` module did this for us).
+    fn extract(headers: &http::HeaderMap) -> Result<Option<String>, CamelError> {
+        let value = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        extract_bearer_token(value)
+    }
 
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::AUTHORIZATION,
         "Bearer my-token".parse().unwrap(),
     );
-    let result = extract_bearer_token(&headers).unwrap();
+    let result = extract(&headers).unwrap();
     assert_eq!(result, Some("my-token".to_string()));
 
     // Missing header
     let headers = http::HeaderMap::new();
-    let result = extract_bearer_token(&headers).unwrap();
+    let result = extract(&headers).unwrap();
     assert!(result.is_none());
 
     // Wrong scheme
     let mut headers = http::HeaderMap::new();
     headers.insert(http::header::AUTHORIZATION, "Basic abc".parse().unwrap());
-    let result = extract_bearer_token(&headers);
+    let result = extract(&headers);
     assert!(matches!(result, Err(CamelError::Unauthenticated(_))));
 }
 

@@ -16,4 +16,12 @@ trust_upstream_principal: boolean | null, ref: string | null, wasm: string | nul
  * Absent → compile-time default `[authorization_header]`. Valid only with
  * the `roles`/`scopes` forms (validated at load time in `yaml.rs`).
  */
-credential_sources: Array<CredentialSourceDsl> | null, };
+credential_sources: Array<CredentialSourceDsl> | null, 
+/**
+ * Named authenticator provider to resolve the route's authenticator from
+ * `SecurityCompileContext::providers`. Absent → sole provider (or legacy
+ * single-authenticator) resolution. Valid only with the `roles`/`scopes`
+ * forms (validated at load time in `yaml.rs`), mirroring
+ * `credential_sources`.
+ */
+provider?: string | null, };

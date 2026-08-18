@@ -55,10 +55,8 @@ camel-auth.workspace = true
 | `permission_cache` | `CachingPermissionEvaluator` with `PermissionCacheOptions` |
 | `registry` | `NamedRegistry<T>` implementations: `SecurityPolicyRegistry`, `PermissionEvaluatorRegistry` |
 | `token_authenticator` | `TokenAuthenticator` trait with blanket impl for `JwtValidator` |
-| `native_auth` | Built-in auth without external IdP: `ApiKeyAuthenticator`, `StaticTokenAuthenticator` |
-| `native_issuer` | `NativeTokenIssuer` for issuing tokens in native mode, `NativeSigningKey` |
-| `native_jwks` | `NativeJwksProvider` serving JWKS from native signing keys |
-| `native_client_store` | `M2mClientStore` and `M2mClient` for machine-to-machine native auth |
+| `native_auth` | Built-in auth without external IdP: `NativeCredentialStore`, `StaticTokenAuthenticator`, `ensure_no_placeholder_markers` |
+| `http_client` | SSRF-pinned HTTP client factory (`SsrfClientOptions`, `validate_uri`) |
 | `types` | `AuthError` enum for all authentication/authorization error cases |
 
 ## Quick Example

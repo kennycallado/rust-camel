@@ -30,10 +30,7 @@ percent-encoding.workspace = true
 sha2 = { workspace = true }
 hex = { workspace = true }
 zeroize.workspace = true
-pkcs1 = { workspace = true }
-pkcs8 = { workspace = true }
 base64 = { workspace = true }
-serde_urlencoded = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

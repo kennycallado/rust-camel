@@ -441,6 +441,18 @@ pub(crate) fn route_dsl_to_declarative_route(
                     ));
                 }
             }
+            if let Some(provider) = &sp.provider {
+                if provider.trim().is_empty() {
+                    return Err(CamelError::RouteError(
+                        "security_policy provider must not be empty".into(),
+                    ));
+                }
+                if sp.roles.is_none() && sp.scopes.is_none() {
+                    return Err(CamelError::RouteError(
+                        "security_policy provider is only valid with the roles or scopes form".into(),
+                    ));
+                }
+            }
             if let Some(roles) = sp.roles {
                 if roles.is_empty() {
                     return Err(CamelError::RouteError(
@@ -452,6 +464,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                     all_required: sp.all_required.unwrap_or(true),
                     trust_upstream_principal: sp.trust_upstream_principal.unwrap_or(false),
                     credential_sources: sp.credential_sources,
+                    provider: sp.provider,
                 })
             } else if let Some(scopes) = sp.scopes {
                 if scopes.is_empty() {
@@ -464,6 +477,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                     all_required: sp.all_required.unwrap_or(true),
                     trust_upstream_principal: sp.trust_upstream_principal.unwrap_or(false),
                     credential_sources: sp.credential_sources,
+                    provider: sp.provider,
                 })
             } else if let Some(name) = sp.r#ref {
                 if sp.all_required.is_some() {
@@ -2395,6 +2409,7 @@ routes:
                 all_required,
                 trust_upstream_principal,
                 credential_sources: _,
+                provider: _,
             } => {
                 assert_eq!(roles, &vec!["admin".to_string(), "superuser".to_string()]);
                 assert!(!all_required);
@@ -2423,6 +2438,7 @@ routes:
                 all_required,
                 trust_upstream_principal,
                 credential_sources: _,
+                provider: _,
             } => {
                 assert_eq!(scopes, &vec!["read:api".to_string()]);
                 assert!(*all_required);
@@ -5324,5 +5340,102 @@ routes:
             result.is_err(),
             "expected error for whitespace-only remove_header key"
         );
+    }
+}
+
+#[cfg(test)]
+mod provider_validation {
+    use super::*;
+    use crate::test_support::test_authenticator;
+    use std::sync::Arc;
+
+    fn two_provider_ctx() -> SecurityCompileContext {
+        SecurityCompileContext::default()
+            .with_named_authenticator("native", test_authenticator("native-user"))
+            .with_named_authenticator("oidc", test_authenticator("oidc-user"))
+    }
+
+    #[test]
+    fn ambiguous_provider_fails_at_load() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+    steps:
+      - to: log:info
+"#;
+        let err = match parse_yaml_with_threshold_and_security(yaml, 1024, two_provider_ctx()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected compile error for ambiguous named providers"),
+        };
+        assert!(err.contains("native"), "got: {err}");
+        assert!(err.contains("oidc"), "got: {err}");
+        assert!(err.contains("provider"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_provider_fails_at_load() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+      provider: "saml"
+    steps:
+      - to: log:info
+"#;
+        let err = match parse_yaml_with_threshold_and_security(yaml, 1024, two_provider_ctx()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected compile error for unknown provider"),
+        };
+        assert!(err.contains("saml"), "got: {err}");
+        assert!(err.contains("native"), "got: {err}");
+        assert!(err.contains("oidc"), "got: {err}");
+    }
+
+    #[test]
+    fn named_provider_compiles() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+      provider: "native"
+    steps:
+      - to: log:info
+"#;
+        let native_arc = test_authenticator("native-user");
+        let ctx = SecurityCompileContext::default()
+            .with_named_authenticator("native", native_arc.clone())
+            .with_named_authenticator("oidc", test_authenticator("oidc-user"));
+        let defs = parse_yaml_with_threshold_and_security(yaml, 1024, ctx).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert!(defs[0].security_authenticator().is_some());
+        assert!(defs[0].security_policy_config().is_some());
+        assert!(Arc::ptr_eq(
+            &native_arc,
+            defs[0].security_authenticator().unwrap()
+        ));
+    }
+
+    #[test]
+    fn provider_on_non_authenticating_variant_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      ref: "my-custom-policy"
+      provider: "native"
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(err.contains("provider"), "got: {err}");
+        assert!(err.contains("security_policy"), "got: {err}");
     }
 }

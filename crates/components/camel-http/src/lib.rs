@@ -1,4 +1,3 @@
-pub mod auth;
 pub mod bundle;
 pub mod config;
 mod header_policy;

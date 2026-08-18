@@ -84,6 +84,7 @@ tempfile = { workspace = true }
 serde_json.workspace = true
 ron = { workspace = true }
 glob = { workspace = true }
+jsonwebtoken.workspace = true
 
 [features]
 default = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt"]

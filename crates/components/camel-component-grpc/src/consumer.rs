@@ -9,6 +9,7 @@ use base64::Engine;
 use bytes::BytesMut;
 use camel_api::store_principal_properties;
 use camel_api::{AuthorizationDecision, Body, CamelError, Exchange, Message, Value};
+use camel_auth::CredentialSource;
 use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
     SecurityContext,
@@ -255,6 +256,27 @@ fn json_to_protobuf_bytes(
 
 // ── GrpcConsumer ───────────────────────────────────────────────────────────
 
+/// Reject credential sources the gRPC transport cannot carry.
+///
+/// gRPC metadata maps to HTTP headers only: `authorization_header` maps to the
+/// `authorization` metadata key and `{header: {name}}` to the same-named
+/// metadata key. Query parameters and cookies have no gRPC metadata
+/// representation, so a route declaring them must fail at load (ADR-0033
+/// fail-closed), not silently authenticate nothing at request time.
+pub(crate) fn validate_credential_sources(sources: &[CredentialSource]) -> Result<(), CamelError> {
+    for source in sources {
+        let source_kind = match source {
+            CredentialSource::QueryParam { .. } => "query_param",
+            CredentialSource::Cookie { .. } => "cookie",
+            _ => continue,
+        };
+        return Err(CamelError::Config(format!(
+            "grpc routes cannot carry {source_kind} credential sources; supported: authorization_header, header" // allow-secret: field names in error text, not values
+        )));
+    }
+    Ok(())
+}
+
 pub struct GrpcConsumer {
     host: String,
     port: u16,
@@ -330,6 +352,9 @@ impl GrpcConsumer {
         ctx: ConsumerContext,
         listener: tokio::net::TcpListener,
     ) -> Result<(), CamelError> {
+        if let Some(sec_ctx) = &self.security_ctx {
+            validate_credential_sources(&sec_ctx.credential_sources)?;
+        }
         let dispatch = GrpcServerRegistry::global()
             .get_or_spawn_with_listener(
                 listener,
@@ -359,11 +384,17 @@ impl GrpcConsumer {
                     self.path
                 )));
             }
-            let authenticator = self
-                .security_ctx
-                .as_ref()
-                .map(|ctx| ctx.authenticator.clone());
-            table.insert(self.path.clone(), (env_tx, mode, authenticator));
+            let (authenticator, credential_sources) = match &self.security_ctx {
+                Some(ctx) => (
+                    Some(ctx.authenticator.clone()),
+                    ctx.credential_sources.clone(),
+                ),
+                None => (None, Vec::new()),
+            };
+            table.insert(
+                self.path.clone(),
+                (env_tx, mode, authenticator, credential_sources),
+            );
         }
 
         let path = self.path.clone();
@@ -594,6 +625,9 @@ impl GrpcConsumer {
 #[async_trait]
 impl Consumer for GrpcConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        if let Some(sec_ctx) = &self.security_ctx {
+            validate_credential_sources(&sec_ctx.credential_sources)?;
+        }
         info!(
             host = %self.host,
             port = self.port,
@@ -975,4 +1009,38 @@ async fn process_bidi_request(
 
     // Wait for the forward task to complete
     let _ = forward_task.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grpc_credential_sources_uncarryable_rejected_at_load() {
+        let query = CredentialSource::QueryParam {
+            param: "ticket".to_string(),
+        };
+        let err = validate_credential_sources(&[query]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("query_param"), "message was: {msg}");
+        assert!(msg.contains("grpc"), "message was: {msg}");
+
+        let cookie = CredentialSource::Cookie {
+            name: "session".to_string(),
+        };
+        let err = validate_credential_sources(&[cookie]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cookie"), "message was: {msg}");
+        assert!(msg.contains("grpc"), "message was: {msg}");
+
+        // Carryable sources pass validation.
+        let carryable = vec![
+            CredentialSource::AuthorizationHeader,
+            CredentialSource::Header {
+                name: "x-api-key".to_string(),
+            },
+        ];
+        assert!(validate_credential_sources(&carryable).is_ok());
+        assert!(validate_credential_sources(&[]).is_ok());
+    }
 }

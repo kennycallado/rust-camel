@@ -106,6 +106,8 @@ jobs:
         run: cargo test -p camel-test --features integration-tests --test opensearch_test
       - name: Kubernetes integration tests (testcontainers K3s)
         run: cargo test -p camel-test --features integration-tests --test kubernetes_test
+      - name: Auth multi-credential integration tests
+        run: cargo test -p camel-test --features integration-tests --test auth_multi_credential_test
       - name: Reclaim disk before full workspace test
         # Drop the GraalVM builder image (~5GB), testcontainers images,
         # and Docker build cache before compiling every test target in

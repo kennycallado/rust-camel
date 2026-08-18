@@ -198,6 +198,13 @@ pub struct RouteDslSecurityPolicy {
     /// the `roles`/`scopes` forms (validated at load time in `yaml.rs`).
     #[serde(default)]
     pub credential_sources: Option<Vec<CredentialSourceDsl>>,
+    /// Named authenticator provider to resolve the route's authenticator from
+    /// `SecurityCompileContext::providers`. Absent → sole provider (or legacy
+    /// single-authenticator) resolution. Valid only with the `roles`/`scopes`
+    /// forms (validated at load time in `yaml.rs`), mirroring
+    /// `credential_sources`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// Extraction source for a route's credential, as declared in YAML.
