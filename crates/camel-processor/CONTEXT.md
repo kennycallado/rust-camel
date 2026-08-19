@@ -79,7 +79,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `ChoiceSegment`, `ChoiceService`, `WhenClause`, `WhenClauseSegment` | stable | `pub use choice::{...}` | Choice EIP. |
 | `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `pub use circuit_breaker::{...}` | README claims deprecation for layer/service; code has no `#[deprecated]` yet. |
 | `ClaimCheckOp`, `ClaimCheckService`, `KeyExpression` | stable | `pub use claim_check::{...}` | Claim Check EIP. |
-| `CacheService`, `CacheInvalidateService`, `CachePeekStaleService`, `CacheClearService`, `CacheStatsService`, `CacheInvalidateTarget`, `CAMEL_CACHE_INVALIDATED_COUNT` | stable | `pub use cache_eip::{...}` | Cache EIP. Outcome-aware segment for lookup, invalidation, stale-serving, clear, and stats. |
+| `CacheService`, `CacheInvalidateService`, `CachePeekStaleService`, `CacheClearService`, `CacheStatsService`, `CacheInvalidateTarget`, `CAMEL_CACHE_INVALIDATED_COUNT` | stable | `pub use cache_eip::{...}` | Cache EIP. Outcome-aware segment for lookup, invalidation, stale-serving, clear, and stats (awaited async `stats()` on the port, bd rc-22wj). |
 | `EnrichService`, `PollEnrichService` | stable | `pub use content_enricher::{...}` | Enrich / pollEnrich. |
 | `ConvertBodyTo` | stable | `pub use convert_body::ConvertBodyTo` | Body conversion. |
 | `CsvConfig`, `CsvDataFormat`, `QuoteMode`, `RecordSeparator`, `CAMEL_CSV_HEADER_RECORD`, `JsonConfig`, `JsonDataFormat`, `XmlConfig`, `XmlDataFormat`, `ZipConfig`, `ZipDataFormat`, `builtin_data_format`, `builtin_data_format_with_config` | stable | `pub use data_format::{...}` | Built-in data formats. CSV added per ADR-0030. Configurable DoS caps per ADR-0038. |

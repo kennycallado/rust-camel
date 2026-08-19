@@ -326,7 +326,7 @@ max_capacity = 5
     let mut stable = false;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(10)).await;
-        let stats = repo.stats();
+        let stats = repo.stats().await;
         if stats.entries <= 5 {
             stable = true;
             break;
@@ -335,7 +335,7 @@ max_capacity = 5
     assert!(
         stable,
         "entries {} did not stabilize at or below 5 within 50 polls",
-        repo.stats().entries
+        repo.stats().await.entries
     );
 }
 

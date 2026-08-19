@@ -57,7 +57,7 @@ This design has three consequences:
 
 File: `crates/camel-api/src/cache.rs:18-25` (CacheEntry struct),
 `crates/camel-api/src/cache.rs:77-82` (set computes expires_at),
-`crates/camel-core/src/cache/memory.rs:72-91` (get checks expiry in-band).
+`crates/camel-core/src/cache/memory.rs:95-115` (get checks expiry in-band).
 
 ### Decision 3: moka size-eviction only (no Expiry, no time_to_live)
 
@@ -71,8 +71,8 @@ until it is evicted by size pressure or explicitly invalidated.
 callers can read stale data when the upstream is unavailable.
 
 File: `crates/camel-core/src/cache/memory.rs:50-54` (moka builder — no
-time-based eviction), `crates/camel-core/src/cache/memory.rs:72-91` (get
-checks expiry), `crates/camel-core/src/cache/memory.rs:105-107` (peek_stale
+time-based eviction), `crates/camel-core/src/cache/memory.rs:95-115` (get
+checks expiry), `crates/camel-core/src/cache/memory.rs:128-135` (peek_stale
 skips expiry check).
 
 ### Decision 4: mandatory `max_capacity` on memory default
@@ -104,7 +104,7 @@ is 168 hours. The entry is invisible to normal `get()` (which checks
 The memory tier does not need a retention window — moka keeps entries until
 size-eviction removes them, which is effectively an unbounded retention.
 
-File: `crates/camel-core/src/cache/memory.rs:105-107` (peek_stale on memory —
+File: `crates/camel-core/src/cache/memory.rs:128-135` (peek_stale on memory —
 no retention window needed).
 
 ### Decision 6: no `sweep()` on the trait
@@ -128,7 +128,7 @@ that is a no-op for memory and Redis. This is contract dishonesty — the trait
 should not promise a capability that most backends do not need. The idempotent
 and claim check traits set the same precedent: no sweep method.
 
-File: `crates/camel-api/src/cache.rs:63-101` (trait — no sweep method).
+File: `crates/camel-api/src/cache.rs:68-120` (trait — no sweep method).
 
 ## Rejected alternatives
 
@@ -252,6 +252,14 @@ over a separate trait — single registry lookup, no downcast); `CacheStats`
 grew `peek_stale_served`/`invalidations`/`bytes` (source-breaking for external
 struct literals; migrate with `..Default::default()`).
 
+Amendment (bd rc-22wj, pre-1.0): the `stats` method signature was corrected from
+sync `fn stats(&self) -> CacheStats` to `async fn stats(&self) -> CacheStats`
+(default body unchanged, still infallible). A synchronous signature made it
+structurally impossible for `RedbCacheRepository` to offload its payload-sum
+byte scan off the tokio worker. Call sites await; no twin sync/async pair was
+introduced. Ruled by escalation review (e_gpt) over the rejected twin-method and
+redb `stored_bytes()` alternatives.
+
 ### Default memory backend
 
 `MemoryCacheRepository` is registered as `"memory"` with `max_capacity = 10_000`
@@ -281,7 +289,7 @@ File: `crates/camel-api/src/cache.rs:29-41`.
 Adding fields is backward-compatible (existing literals still compile with
 `..Default::default()`). No `#[non_exhaustive]` attribute.
 
-File: `crates/camel-api/src/cache.rs:46-56`.
+File: `crates/camel-api/src/cache.rs:46-62`.
 
 ## Load-bearing citations
 
@@ -289,11 +297,11 @@ File: `crates/camel-api/src/cache.rs:46-56`.
 |---|---|
 | `camel-api/src/cache.rs:18-25` | `CacheEntry` struct with `expires_at: Option<SystemTime>` |
 | `camel-api/src/cache.rs:29-41` | `ContentType` enum (exhaustive-by-contract) |
-| `camel-api/src/cache.rs:46-56` | `CacheStats` struct (not non_exhaustive) |
-| `camel-api/src/cache.rs:63-101` | `CacheRepository` trait (no sweep, no non_exhaustive) |
+| `camel-api/src/cache.rs:46-62` | `CacheStats` struct (not non_exhaustive) |
+| `camel-api/src/cache.rs:68-120` | `CacheRepository` trait (no sweep, no non_exhaustive) |
 | `camel-api/src/cache.rs:77-82` | `set` computes `expires_at` from `ttl` |
 | `camel-core/src/cache/memory.rs:44` | `MemoryCacheRepository::new` requires `max_capacity` |
 | `camel-core/src/cache/memory.rs:50-54` | moka builder — size-eviction only, no time-based eviction |
-| `camel-core/src/cache/memory.rs:72-91` | `get` checks `expires_at` in-band |
-| `camel-core/src/cache/memory.rs:105-107` | `peek_stale` skips expiry check |
+| `camel-core/src/cache/memory.rs:95-115` | `get` checks `expires_at` in-band |
+| `camel-core/src/cache/memory.rs:128-135` | `peek_stale` skips expiry check |
 | `camel-core/src/context_builder.rs:233-235` | Default `"memory"` registration with `max_capacity = 10_000` |

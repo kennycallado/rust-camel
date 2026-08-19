@@ -997,7 +997,7 @@ impl OutcomePipeline for CacheStatsService {
         mut exchange: Exchange,
     ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
         Box::pin(async move {
-            let s = self.repository.stats();
+            let s = self.repository.stats().await;
             exchange.input.body = Body::Json(serde_json::json!({
                 "repository": self.repository_name,
                 "hits": s.hits,
@@ -1192,7 +1192,7 @@ mod test_utils {
             Ok(())
         }
 
-        fn stats(&self) -> CacheStats {
+        async fn stats(&self) -> CacheStats {
             self.stats_override.lock().unwrap().clone() // allow-unwrap: test-only
         }
     }
@@ -2296,6 +2296,34 @@ mod tests {
             "bytes": null
         });
         assert_eq!(ex.input.body, Body::Json(expected));
+
+        // Exact key-set assertion: the stats JSON snapshot contract is frozen
+        // to the eight canonical keys (bd rc-22wj) — no extras, none missing.
+        let Body::Json(v) = &ex.input.body else {
+            panic!("expected Json body");
+        };
+        let keys: std::collections::BTreeSet<&str> = v
+            .as_object()
+            .expect("stats body must be a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected_keys: std::collections::BTreeSet<&str> = [
+            "repository",
+            "hits",
+            "misses",
+            "evictions",
+            "entries",
+            "peek_stale_served",
+            "invalidations",
+            "bytes",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            keys, expected_keys,
+            "stats body must have exactly the eight canonical keys"
+        );
     }
 
     // ── Peek/invalidate OTel counter tests ──

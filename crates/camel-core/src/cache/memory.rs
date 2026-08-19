@@ -34,7 +34,7 @@ impl std::fmt::Debug for MemoryCacheRepository {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryCacheRepository")
             .field("name", &self.name)
-            .field("stats", &self.stats())
+            .field("stats", &self.stats_snapshot())
             .finish()
     }
 }
@@ -68,6 +68,20 @@ impl MemoryCacheRepository {
             evictions,
             peek_stale_served,
             invalidations,
+        }
+    }
+
+    /// Synchronous snapshot of the current stats, shared by the async trait
+    /// method and the [`std::fmt::Debug`] impl (which cannot await).
+    fn stats_snapshot(&self) -> CacheStats {
+        CacheStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            entries: self.inner.entry_count(),
+            peek_stale_served: self.peek_stale_served.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
+            bytes: None,
         }
     }
 }
@@ -130,16 +144,8 @@ impl CacheRepository for MemoryCacheRepository {
         Ok(())
     }
 
-    fn stats(&self) -> CacheStats {
-        CacheStats {
-            hits: self.hits.load(Ordering::Relaxed),
-            misses: self.misses.load(Ordering::Relaxed),
-            evictions: self.evictions.load(Ordering::Relaxed),
-            entries: self.inner.entry_count(),
-            peek_stale_served: self.peek_stale_served.load(Ordering::Relaxed),
-            invalidations: self.invalidations.load(Ordering::Relaxed),
-            bytes: None,
-        }
+    async fn stats(&self) -> CacheStats {
+        self.stats_snapshot()
     }
 }
 
@@ -226,7 +232,7 @@ mod tests {
         repo.get("absent").await.unwrap(); // miss
         repo.inner.run_pending_tasks().await;
 
-        let stats = repo.stats();
+        let stats = repo.stats().await;
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.misses, 1);
         assert!(stats.entries >= 1, "entries was {}", stats.entries);
@@ -242,7 +248,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(repo.get("k").await.unwrap(), None); // miss/expired
         assert!(repo.peek_stale("k").await.unwrap().is_some());
-        assert_eq!(repo.stats().peek_stale_served, 1);
+        assert_eq!(repo.stats().await.peek_stale_served, 1);
     }
 
     #[tokio::test]
@@ -252,7 +258,7 @@ mod tests {
         repo.set("a", entry(), None).await.unwrap();
         repo.invalidate("a").await.unwrap();
         repo.invalidate("absent").await.unwrap();
-        assert_eq!(repo.stats().invalidations, 2);
+        assert_eq!(repo.stats().await.invalidations, 2);
     }
 
     #[tokio::test]
@@ -273,7 +279,7 @@ mod tests {
         repo.set("a", entry(), None).await.unwrap();
         repo.set("b", entry(), None).await.unwrap();
         repo.inner.run_pending_tasks().await;
-        assert!(repo.stats().evictions >= 1);
+        assert!(repo.stats().await.evictions >= 1);
     }
 
     #[tokio::test]

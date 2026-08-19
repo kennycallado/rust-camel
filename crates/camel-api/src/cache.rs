@@ -111,10 +111,10 @@ pub trait CacheRepository: Send + Sync + std::fmt::Debug + 'static {
         )))
     }
 
-    /// Return current cache statistics.
-    ///
-    /// Default implementation returns zeroed stats.
-    fn stats(&self) -> CacheStats {
+    /// Return current cache statistics. Asynchronous so backends can offload
+    /// I/O-bound byte accounting off the tokio worker (bd rc-22wj). Default
+    /// implementation returns zeroed stats.
+    async fn stats(&self) -> CacheStats {
         CacheStats::default()
     }
 }
@@ -218,5 +218,17 @@ mod tests {
             format!("{err}").contains("noiter"),
             "error must name the backend, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn default_async_stats_returns_zeroed() {
+        let stats = NoIter.stats().await;
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.evictions, 0);
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.peek_stale_served, 0);
+        assert_eq!(stats.invalidations, 0);
+        assert_eq!(stats.bytes, None);
     }
 }

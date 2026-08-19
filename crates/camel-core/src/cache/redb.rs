@@ -637,7 +637,11 @@ impl CacheRepository for RedbCacheRepository {
         Ok(())
     }
 
-    fn stats(&self) -> CacheStats {
+    async fn stats(&self) -> CacheStats {
+        let db = Arc::clone(&self.db);
+        let bytes = tokio::task::spawn_blocking(move || total_bytes(&db))
+            .await
+            .unwrap_or_default();
         CacheStats {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
@@ -645,28 +649,26 @@ impl CacheRepository for RedbCacheRepository {
             entries: self.entries.load(Ordering::Relaxed),
             peek_stale_served: self.peek_stale_served.load(Ordering::Relaxed),
             invalidations: self.invalidations.load(Ordering::Relaxed),
-            bytes: self.total_bytes(),
+            bytes,
         }
     }
 }
 
-impl RedbCacheRepository {
-    /// Sum every entry's `bytes.len()` over the full table range.
-    ///
-    /// `None` when the table cannot be read or any entry fails to
-    /// deserialize — the `bytes` field is a best-effort report, never an
-    /// error (`stats()` is `&self`, synchronous, and infallible).
-    fn total_bytes(&self) -> Option<u64> {
-        let rtx = self.db.begin_read().ok()?;
-        let table = rtx.open_table(CACHE_TABLE).ok()?;
-        let mut total: u64 = 0;
-        for row in table.iter().ok()? {
-            let (_key, value) = row.ok()?;
-            let entry: CacheEntry = serde_json::from_slice(value.value()).ok()?;
-            total = total.saturating_add(entry.bytes.len() as u64);
-        }
-        Some(total)
+/// Sum every entry's `bytes.len()` over the full table range.
+///
+/// Called only inside `spawn_blocking` from `stats()`; `None` when the table
+/// cannot be read or any entry fails to deserialize — the `bytes` field is a
+/// best-effort report, never an error.
+fn total_bytes(db: &redb::Database) -> Option<u64> {
+    let rtx = db.begin_read().ok()?;
+    let table = rtx.open_table(CACHE_TABLE).ok()?;
+    let mut total: u64 = 0;
+    for row in table.iter().ok()? {
+        let (_key, value) = row.ok()?;
+        let entry: CacheEntry = serde_json::from_slice(value.value()).ok()?;
+        total = total.saturating_add(entry.bytes.len() as u64);
     }
+    Some(total)
 }
 
 impl fmt::Debug for RedbCacheRepository {
@@ -842,7 +844,7 @@ mod tests {
                 .await
                 .expect("set");
             assert_eq!(
-                repo.stats().entries,
+                repo.stats().await.entries,
                 1,
                 "entries counter must be 1 after first insert"
             );
@@ -879,7 +881,7 @@ mod tests {
             "persisted entry must survive drop + reopen"
         );
         assert_eq!(
-            repo.stats().entries,
+            repo.stats().await.entries,
             1,
             "entries counter must be restored from table.len() on reopen"
         );
@@ -1005,7 +1007,7 @@ mod tests {
         repo.set("k", entry(), None).await.expect("first set");
         repo.set("k", entry(), None).await.expect("second set");
         assert_eq!(
-            repo.stats().entries,
+            repo.stats().await.entries,
             1,
             "overwriting an existing key must not inflate the entries counter"
         );
@@ -1028,7 +1030,23 @@ mod tests {
         };
         repo.set("a", a, None).await.expect("set a");
         repo.set("b", b, None).await.expect("set b");
-        assert_eq!(repo.stats().bytes, Some(8));
+        assert_eq!(repo.stats().await.bytes, Some(8));
+    }
+
+    #[tokio::test]
+    async fn stats_counters_reported_alongside_bytes() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo(&dir, token).await;
+        let a = CacheEntry {
+            bytes: vec![1, 2, 3],
+            content_type: camel_api::cache::ContentType::Bytes,
+            expires_at: None,
+        };
+        repo.set("a", a, None).await.expect("set a");
+        let s = repo.stats().await;
+        assert_eq!(s.entries, 1);
+        assert_eq!(s.bytes, Some(3));
     }
 
     #[tokio::test]
