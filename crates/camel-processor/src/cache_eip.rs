@@ -1891,40 +1891,60 @@ mod tests {
 
     // --- Tracing capture helper for debug-log assertions ---
 
-    /// `MakeWriter` that appends formatted events to a shared `Vec<u8>` sink.
-    #[derive(Clone)]
-    struct CapturingWriter {
-        sink: Arc<Mutex<Vec<u8>>>,
+    // ── log-capture harness ──────────────────────────────────────────────────
+
+    /// Records dispatched events from this module as `LEVEL field=value…`
+    /// lines. `on_event` fires only for events actually dispatched to this
+    /// layer: unlike fmt-writer capture it has no registration-time side
+    /// effects and does not depend on the process-wide callsite interest
+    /// cache, which parallel tests rebuild concurrently (bd rc-pna5).
+    #[derive(Default)]
+    struct EventRecorder {
+        records: Arc<Mutex<Vec<String>>>,
     }
 
-    impl std::io::Write for CapturingWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.sink.lock().unwrap().extend_from_slice(buf); // allow-unwrap: test-only
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
-        type Writer = CapturingWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
+    impl EventRecorder {
+        /// Installs the recorder as this thread's default subscriber and
+        /// returns the shared record list plus the dispatcher guard.
+        fn install(self) -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
+            use tracing_subscriber::prelude::*;
+            let records = Arc::clone(&self.records);
+            let guard = tracing_subscriber::registry().with(self).set_default();
+            (records, guard)
         }
     }
 
-    fn debug_sink() -> (Arc<Mutex<Vec<u8>>>, impl tracing::Subscriber) {
-        let sink: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        let writer = CapturingWriter {
-            sink: Arc::clone(&sink),
-        };
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(writer)
-            .with_ansi(false)
-            .with_max_level(tracing_subscriber::filter::LevelFilter::DEBUG)
-            .finish();
-        (sink, subscriber)
+    /// Formats each visited field as `name=debug-value`, preserving str
+    /// quoting so `step="cache_peek_stale"`-style assertions keep working.
+    struct FieldFmt<'a>(&'a mut String);
+
+    impl tracing::field::Visit for FieldFmt<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={:?}", field.name(), value);
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record_debug(field, &value);
+        }
+    }
+
+    impl<C> tracing_subscriber::Layer<C> for EventRecorder
+    where
+        C: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, C>,
+        ) {
+            let meta = event.metadata();
+            if meta.target() != "camel_processor::cache_eip" {
+                return;
+            }
+            let mut line = format!("{} ", meta.level());
+            event.record(&mut FieldFmt(&mut line));
+            self.records.lock().unwrap().push(line); // allow-unwrap: test-only
+        }
     }
 
     #[tokio::test]
@@ -1933,18 +1953,13 @@ mod tests {
         let mut svc =
             CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop, noop_rt());
 
-        let (sink, subscriber) = debug_sink();
-        let _guard = tracing::subscriber::set_default(subscriber);
-        // Parallel tests race tracing's per-callsite interest cache against
-        // this thread-local subscriber; force a rebuild so the callsites
-        // below re-evaluate against it (bd rc-u9hs).
-        tracing::callsite::rebuild_interest_cache();
+        let (records, _guard) = EventRecorder::default().install();
         let outcome = svc.run(exchange()).await;
         drop(_guard);
 
         assert!(matches!(outcome, PipelineOutcome::Stopped(_)));
 
-        let captured = String::from_utf8(sink.lock().unwrap().clone()).unwrap(); // allow-unwrap: test-only
+        let captured = records.lock().unwrap().join("\n"); // allow-unwrap: test-only
         let miss_records: Vec<&str> = captured
             .lines()
             .filter(|l| l.contains("peek miss"))
@@ -1974,18 +1989,13 @@ mod tests {
         let mut svc =
             CachePeekStaleService::new(repo, none_key(), PeekStaleMissPolicy::Stop, noop_rt());
 
-        let (sink, subscriber) = debug_sink();
-        let _guard = tracing::subscriber::set_default(subscriber);
-        // Parallel tests race tracing's per-callsite interest cache against
-        // this thread-local subscriber; force a rebuild so the callsites
-        // below re-evaluate against it (bd rc-u9hs).
-        tracing::callsite::rebuild_interest_cache();
+        let (records, _guard) = EventRecorder::default().install();
         let outcome = svc.run(exchange()).await;
         drop(_guard);
 
         assert!(matches!(outcome, PipelineOutcome::Stopped(_)));
 
-        let captured = String::from_utf8(sink.lock().unwrap().clone()).unwrap(); // allow-unwrap: test-only
+        let captured = records.lock().unwrap().join("\n"); // allow-unwrap: test-only
         let none_records: Vec<&str> = captured
             .lines()
             .filter(|l| l.contains("resolved to None"))
