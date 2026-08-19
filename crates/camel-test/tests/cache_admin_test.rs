@@ -248,6 +248,7 @@ async fn cache_invalidate_prefix_purges_namespace_redb() {
             dir.path().join("cache.redb"),
             Duration::from_secs(7 * 24 * 3600),
             Some(1_000_000),
+            256 * 1024 * 1024,
             Duration::from_secs(3600),
             ctx.shutdown_token(),
         )
