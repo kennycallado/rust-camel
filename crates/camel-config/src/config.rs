@@ -2022,14 +2022,26 @@ fn resolve_security_fail_closed(security: &mut SecurityConfig) -> Result<(), Con
     Ok(())
 }
 
-/// Resolve `db_url` and every string leaf inside `extra` fail-closed for each
-/// datasource.
+/// Resolve `db_url`, the `ssl_*` string leaves, and every string leaf inside
+/// `extra` fail-closed for each datasource.
 fn resolve_datasources_fail_closed(
     datasources: &mut HashMap<String, DatasourceConfig>,
 ) -> Result<(), ConfigError> {
     for (name, ds) in datasources.iter_mut() {
         let base = format!("datasources.{name}");
         resolve_fail_closed_in_place(&mut ds.db_url, &format!("{base}.db_url"))?;
+        if let Some(v) = ds.ssl_mode.as_mut() {
+            resolve_fail_closed_in_place(v, &format!("{base}.ssl_mode"))?;
+        }
+        if let Some(v) = ds.ssl_root_cert.as_mut() {
+            resolve_fail_closed_in_place(v, &format!("{base}.ssl_root_cert"))?;
+        }
+        if let Some(v) = ds.ssl_cert.as_mut() {
+            resolve_fail_closed_in_place(v, &format!("{base}.ssl_cert"))?;
+        }
+        if let Some(v) = ds.ssl_key.as_mut() {
+            resolve_fail_closed_in_place(v, &format!("{base}.ssl_key"))?;
+        }
         for (k, v) in ds.extra.iter_mut() {
             resolve_toml_value_fail_closed(v, &format!("{base}.extra.{k}"))?;
         }
@@ -3752,6 +3764,60 @@ password = "{{env:SURREAL_PASS}}"
         );
         unset_env("DB_URL");
         unset_env("SURREAL_PASS");
+    }
+
+    #[test]
+    fn datasource_ssl_leaves_resolve() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        set_env("SSL_MODE", "require");
+        set_env("SSL_ROOT_CERT", "/etc/certs/ca.pem");
+        set_env("SSL_CERT", "/etc/certs/client.pem");
+        set_env("SSL_KEY", "/etc/certs/client-key.pem");
+        let config = load_config(
+            r#"
+[datasources.main]
+db_url = "postgres://localhost/orders"
+ssl_mode = "{{env:SSL_MODE}}"
+ssl_root_cert = "{{env:SSL_ROOT_CERT}}"
+ssl_cert = "{{env:SSL_CERT}}"
+ssl_key = "{{env:SSL_KEY}}"
+"#,
+        )
+        .expect("datasource ssl_* leaves should resolve");
+        let ds = config.datasources.get("main").expect("main datasource");
+        assert_eq!(ds.ssl_mode.as_deref(), Some("require"));
+        assert_eq!(ds.ssl_root_cert.as_deref(), Some("/etc/certs/ca.pem"));
+        assert_eq!(ds.ssl_cert.as_deref(), Some("/etc/certs/client.pem"));
+        assert_eq!(ds.ssl_key.as_deref(), Some("/etc/certs/client-key.pem"));
+        unset_env("SSL_MODE");
+        unset_env("SSL_ROOT_CERT");
+        unset_env("SSL_CERT");
+        unset_env("SSL_KEY");
+    }
+
+    #[test]
+    fn datasource_ssl_leaf_unset_env_fails_closed() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        for field in ["ssl_mode", "ssl_root_cert", "ssl_cert", "ssl_key"] {
+            unset_env("SSL_VAR");
+            let err = load_config(&format!(
+                r#"
+[datasources.main]
+db_url = "postgres://localhost/orders"
+{field} = "{{{{env:SSL_VAR}}}}"
+"#
+            ))
+            .expect_err("unset env var on a datasource ssl_* leaf must fail closed");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("SSL_VAR"),
+                "message should name the var: {msg}"
+            );
+            assert!(
+                msg.contains(field),
+                "message should name the field {field}: {msg}"
+            );
+        }
     }
 
     #[test]
