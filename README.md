@@ -479,8 +479,12 @@ Reclaim space with:
 ```sh
 scripts/purge-target-gc.sh            # sweep */target under CWD, delete .dwp older than 7 days
 scripts/purge-target-gc.sh -n         # dry run first
-scripts/purge-target-gc.sh -o -d 0    # also orphaned test binaries, any age
+scripts/purge-target-gc.sh -o -d 0    # also orphaned test binaries, older than ~24h
 ```
+
+Purged `.dwp` companions degrade line info in already-built binaries.
+Rebuild to restore. Files younger than one full 24h period survive even
+with `-d 0` (`find -mtime +0` semantics).
 
 Emergency one-liner (no script):
 
