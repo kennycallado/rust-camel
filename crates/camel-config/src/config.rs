@@ -2022,14 +2022,17 @@ fn resolve_security_fail_closed(security: &mut SecurityConfig) -> Result<(), Con
     Ok(())
 }
 
-/// Resolve `db_url`, the `ssl_*` string leaves, and every string leaf inside
-/// `extra` fail-closed for each datasource.
+/// Resolve `db_url`, `provider`, the `ssl_*` string leaves, and every string
+/// leaf inside `extra` fail-closed for each datasource.
 fn resolve_datasources_fail_closed(
     datasources: &mut HashMap<String, DatasourceConfig>,
 ) -> Result<(), ConfigError> {
     for (name, ds) in datasources.iter_mut() {
         let base = format!("datasources.{name}");
         resolve_fail_closed_in_place(&mut ds.db_url, &format!("{base}.db_url"))?;
+        if let Some(v) = ds.provider.as_mut() {
+            resolve_fail_closed_in_place(v, &format!("{base}.provider"))?;
+        }
         if let Some(v) = ds.ssl_mode.as_mut() {
             resolve_fail_closed_in_place(v, &format!("{base}.ssl_mode"))?;
         }
@@ -3821,6 +3824,46 @@ db_url = "postgres://localhost/orders"
     }
 
     #[test]
+    fn datasource_provider_leaf_resolves() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        set_env("DS_PROVIDER", "postgres");
+        let config = load_config(
+            r#"
+[datasources.main]
+db_url = "postgres://localhost/orders"
+provider = "{{env:DS_PROVIDER}}"
+"#,
+        )
+        .expect("datasource provider leaf should resolve");
+        let ds = config.datasources.get("main").expect("main datasource");
+        assert_eq!(ds.provider.as_deref(), Some("postgres"));
+        unset_env("DS_PROVIDER");
+    }
+
+    #[test]
+    fn datasource_provider_leaf_unset_env_fails_closed() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("DS_PROVIDER");
+        let err = load_config(
+            r#"
+[datasources.main]
+db_url = "postgres://localhost/orders"
+provider = "{{env:DS_PROVIDER}}"
+"#,
+        )
+        .expect_err("unset env var on the datasource provider leaf must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DS_PROVIDER"),
+            "message should name the var: {msg}"
+        );
+        assert!(
+            msg.contains("provider"),
+            "message should name the field provider: {msg}"
+        );
+    }
+
+    #[test]
     fn surviving_marker_rejected() {
         let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
         let err = load_config(
@@ -4003,6 +4046,89 @@ mod security_walk_exhaustiveness {
             !serialized.contains("${env:"),
             "DSL-style marker survived the walk:\n{serialized}"
         );
+    }
+}
+
+#[cfg(test)]
+mod datasource_walk_exhaustiveness {
+    use super::*;
+
+    /// Exhaustiveness guard for `resolve_datasources_fail_closed`.
+    ///
+    /// The fixture below uses a COMPLETE `DatasourceConfig` literal. The struct
+    /// carries `#[serde(deny_unknown_fields)]`, so adding any string field to
+    /// `DatasourceConfig` breaks this test's compilation; the new field must
+    /// then carry a marker here, and if the walk lacks a matching arm, the
+    /// serialized scan below fails. This converts the doc-comment discipline
+    /// on the walk into a test guard (the bug class that produced rc-xej7 and
+    /// rc-kcp2: a string leaf without a walk arm silently surviving load).
+    ///
+    /// Markers carry no default, so every referenced env var is set under
+    /// [`ENV_OVERRIDE_LOCK`] before the walk runs.
+    #[test]
+    fn every_datasource_string_leaf_is_walked() {
+        let _guard = ENV_OVERRIDE_LOCK.lock().unwrap();
+
+        fn marker(name: &str) -> String {
+            format!("{{{{env:DSWALK_{name}}}}}")
+        }
+
+        let mut datasources = HashMap::from([(
+            "orders".to_string(),
+            DatasourceConfig {
+                db_url: marker("DB_URL"),
+                provider: Some(marker("PROVIDER")),
+                max_connections: None,
+                min_connections: None,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                ssl_mode: Some(marker("SSL_MODE")),
+                ssl_root_cert: Some(marker("SSL_ROOT_CERT")),
+                ssl_cert: Some(marker("SSL_CERT")),
+                ssl_key: Some(marker("SSL_KEY")),
+                extra: HashMap::from([(
+                    "namespace".to_string(),
+                    toml::Value::String(marker("EXTRA_NS")),
+                )]),
+            },
+        )]);
+
+        for name in [
+            "DB_URL",
+            "PROVIDER",
+            "SSL_MODE",
+            "SSL_ROOT_CERT",
+            "SSL_CERT",
+            "SSL_KEY",
+            "EXTRA_NS",
+        ] {
+            set_env(&format!("DSWALK_{name}"), &format!("r{name}"));
+        }
+
+        resolve_datasources_fail_closed(&mut datasources)
+            .expect("markers must resolve with env vars set");
+
+        let serialized = toml::to_string(&datasources).expect("datasources serialize");
+        assert!(
+            !serialized.contains("{{env:"),
+            "unwalked string leaf survived the fail-closed walk:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("${env:"),
+            "DSL-style marker survived the walk:\n{serialized}"
+        );
+
+        for name in [
+            "DB_URL",
+            "PROVIDER",
+            "SSL_MODE",
+            "SSL_ROOT_CERT",
+            "SSL_CERT",
+            "SSL_KEY",
+            "EXTRA_NS",
+        ] {
+            unset_env(&format!("DSWALK_{name}"));
+        }
     }
 }
 
