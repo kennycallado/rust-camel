@@ -74,6 +74,25 @@ The component validates each outbound URL and each redirect hop. `allow_internal
 
 `TlsConfig` verifies peer certificates by default. An operator can opt out with `insecure=true` or `verify_peer=false`. The opt-out emits a warning. The component forbids cleartext HTTP to public addresses even with `allow_internal=true`.
 
+### HTTP method selection
+
+The Producer resolves the outbound method in this order: the `httpMethod` URI option, then the `CamelHttpMethod` header, then a body-based fallback. An empty body selects `GET`. A non-empty body selects `POST`.
+
+An exchange from a non-HTTP consumer (timer, cron, file, quartz) carries no `CamelHttpMethod` header and usually a non-empty default body. A timer exchange, for example, holds a tick label. Driving an `http:` producer from such a source therefore selects `POST` by default. A GET-only upstream then rejects the request, often with a message that does not name the method as the cause.
+
+Set an explicit method when the source is not HTTP. Append `httpMethod=GET` to the destination URI, or set the header:
+
+```yaml
+- to: "http://wfs.example.org/ows?httpMethod=GET"
+```
+
+```yaml
+- set_header:
+    key: CamelHttpMethod
+    value: GET
+- to: "http://wfs.example.org/ows"
+```
+
 ## Direction choice
 
 A route that serves an API uses HTTP as a source. A route that calls another service uses HTTP as a sink. A route that does both needs two Endpoints, one in each position. The second Endpoint belongs to a second Route. The component supports both directions because the same crate owns the connection plumbing. Each Endpoint still picks one direction at creation time.

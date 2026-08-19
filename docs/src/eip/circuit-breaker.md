@@ -28,6 +28,12 @@ The breaker cycles through three states. In **Closed**, traffic flows. Each fail
 
 HalfOpen admits a single probe call. The breaker rejects concurrent callers in that window so the probe runs in isolation. A probe that succeeds closes the breaker and resets the counter. A probe that fails reopens the breaker for another full cool-down. This single-probe design stops a backlog of traffic from stampeding the service. The dependency gets one probe, not a flood, at the first sign of recovery.
 
-Use the circuit breaker to protect a downstream service. Do not use it to repair a transient blip. Retry sends more traffic at a failing call. The circuit breaker sends none. Pair them when a flaky dependency needs a retry for transient errors but a hard stop during a sustained outage. Per [ADR-0019](../adr/0019-error-disposition-pipeline-recovery.md), the breaker compiles into a gate on `RouteChannelService` rather than a pipeline step. Boundary rejections flow through `RouteErrorHandler::handle_boundary`. The route's `error_handler` can then route `CircuitOpen` to a dead-letter sink, as the example does with `log:cb-fallback`.
+Use the circuit breaker to protect a downstream service. Do not use it to repair a transient blip. Retry sends more traffic at a failing call. The circuit breaker sends none. Pair them when a flaky dependency needs a retry for transient errors but a hard stop during a sustained outage. Per [ADR-0019](../adr/0019-error-disposition-pipeline-recovery.md), a route with an `error_handler` compiles the breaker into a gate on `RouteChannelService` rather than a pipeline step. Boundary rejections flow through `RouteErrorHandler::handle_boundary`. The route's `error_handler` can then route `CircuitOpen` to a dead-letter sink, as the example does with `log:cb-fallback`.
 
 The example source is at [`examples/circuit-breaker`](https://github.com/kennycallado/rust-camel/tree/main/examples/circuit-breaker).
+
+## Half-open fallback asymmetry
+
+During the probe-in-flight window, concurrent callers behave differently by route shape. A route with an `error_handler` compiles the breaker into a `CircuitBreakerGate`. The gate serves the fallback to concurrent callers while the probe runs. A route without an `error_handler` compiles the breaker into a Tower `CircuitBreakerService`. That service rejects concurrent callers with `CircuitOpen` while the probe runs, even when a fallback is configured.
+
+Both behaviors are sound. The gate keeps a single probe in flight and serves stale fallback data. The service keeps a single probe in flight and rejects. The asymmetry is intentional. See [Route structure](../yaml-dsl/route-structure.md) for the YAML form.

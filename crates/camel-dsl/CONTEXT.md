@@ -143,6 +143,10 @@ _Avoid_: retry settings, backoff config, DeclarativeRedeliveryPolicy
 Route-level resilience configuration that opens after repeated failures and temporarily rejects Exchanges before the Step pipeline runs. Not a Step — declared at the RouteDefinition level.
 _Avoid_: breaker, failure gate, DeclarativeCircuitBreaker
 
+**REST DSL**:
+Declarative `rest:` blocks that lower to `http:` consumer routes with JSON binding, path templates, and optional schema validation. REST v1 supports only `application/json` for both `consumes` and `produces`; any other value fails route load. For binary, streaming, or non-JSON proxy APIs, use `http:` (which supports `Body::Stream`) instead of `rest:`. A future v2 may lift the restriction.
+_Avoid_: REST API, REST endpoint (use REST DSL for the authoring form)
+
 **SecurityPolicy**:
 Route-level authorization declaration evaluated before normal Route Steps. DSL config must choose exactly one form: `roles`, `scopes`, `ref`, `wasm`, or `permission`; grants attach a Principal to the Exchange, denials return `Unauthorized` into route error handling. Downstream Route Steps do not run unless error handling routes or handles the error.
 _Avoid_: authentication config, ACL, policy step

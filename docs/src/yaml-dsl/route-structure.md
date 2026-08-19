@@ -78,6 +78,12 @@ surfaces the raw error to the caller.
 The [Cache](../eip/cache.md) page shows the stale-on-error composition with
 `cache_peek_stale`.
 
+### Half-open fallback asymmetry
+
+During the half-open probe-in-flight window, the fallback behavior differs by route shape. A route with an `error_handler` compiles the breaker into a `CircuitBreakerGate`. The gate serves the fallback to concurrent callers while the probe runs. A route without an `error_handler` compiles the breaker into a Tower `CircuitBreakerService`. That service rejects concurrent callers with `CircuitOpen` while the probe runs, even when a fallback is configured.
+
+Both behaviors are sound. The gate keeps a single probe in flight and serves stale fallback data. The service keeps a single probe in flight and rejects. The asymmetry is intentional. See [Circuit breaker](../eip/circuit-breaker.md) for the breaker states.
+
 ## Security policy
 
 Set `security_policy` to authorize exchanges before the steps run. The object

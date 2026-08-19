@@ -1,0 +1,5 @@
+error: #[uri_param] `pattern` separator must yield a non-empty name after the trailing `.` is stripped
+  --> tests/ui/pattern_separator_bare_dot_fail.rs:10:5
+   |
+10 |     bad: Vec<(String, String)>,
+   |     ^^^

@@ -39,9 +39,8 @@ impl ComponentBundle for McpBundle {
 
     fn register_all(self, ctx: &mut dyn ComponentRegistrar) {
         // `McpComponent::new` is infallible — construction performs no network
-        // I/O; the `Result` mirrors the LLM component's constructor shape.
-        let component = McpComponent::new(self.config)
-            .expect("McpComponent::new cannot fail: no I/O at construction"); // allow-unwrap
+        // I/O.
+        let component = McpComponent::new(self.config);
         ctx.register_component_dyn(Arc::new(component));
     }
 }

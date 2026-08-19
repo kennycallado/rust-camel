@@ -1069,7 +1069,7 @@ fn run_schema_generation(check: bool) -> Result<(), String> {
             schemas_dir.join("canonical-route-spec.json"),
             canonical_schema,
         ),
-        (dsl_dir.join("route-schema.json"), dsl_schema),
+        (dsl_dir.join("route-schema.json"), dsl_schema.clone()),
         (
             schemas_dir.join("component-metadata.json"),
             component_metadata_schema,
@@ -1123,8 +1123,8 @@ fn run_schema_generation(check: bool) -> Result<(), String> {
         if !drift.is_empty() {
             return Err(format!(
                 "Schema drift detected. Re-run `cargo xtask schema` (regenerates \
-                 schemas/dsl/route-schema.json only) and also copy: \
-                 cp schemas/dsl/route-schema.json crates/camel-lint/schema/route-schema.json\n  {}",
+                 schemas/dsl/route-schema.json and syncs \
+                 crates/camel-lint/schema/route-schema.json)\n  {}",
                 drift.join("\n  ")
             ));
         }
@@ -1139,6 +1139,11 @@ fn run_schema_generation(check: bool) -> Result<(), String> {
             std::fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
             println!("Generated: {}", path.display());
         }
+        // Sync camel-lint's embedded copy with the generated DSL route schema.
+        let lint_schema = workspace_root.join("crates/camel-lint/schema/route-schema.json");
+        std::fs::write(&lint_schema, &dsl_schema)
+            .map_err(|e| format!("write {}: {e}", lint_schema.display()))?;
+        println!("Generated: {}", lint_schema.display());
         // Write TS files from tempdir to ts_dir.
         for (fname, content) in &temp_ts_files {
             let target = ts_dir.join(fname);

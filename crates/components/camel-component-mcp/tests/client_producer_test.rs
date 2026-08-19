@@ -40,7 +40,6 @@ fn component_with_remote(name: &str, url: String) -> McpComponent {
         servers: HashMap::new(),
         remotes,
     })
-    .expect("config with one remote must construct")
 }
 
 #[tokio::test]

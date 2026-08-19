@@ -38,6 +38,16 @@ routes:
 
 Timer is a consumer-only Component. Its Consumer submits one Exchange per tick. The Exchange body holds a short label. When `includeMetadata=true`, the Consumer sets four Exchange headers. They carry the timer name, the tick counter, the ISO-8601 fire time, and the epoch timestamp. Timer does not poll a directory and does not implement `PollingConsumer`. It is event-driven and runs inside the Route lifecycle.
 
+### Driving an HTTP producer
+
+A timer exchange carries no `CamelHttpMethod` header and a non-empty body. An `http:` producer therefore defaults to `POST` for such an exchange. A GET-only upstream rejects the request. Set an explicit method on the destination URI:
+
+```yaml
+- to: "http://wfs.example.org/ows?httpMethod=GET"
+```
+
+The same rule applies to any non-HTTP consumer (cron, file, quartz). The `CamelHttpMethod` header is an alternative. See [HTTP method selection](http.md#http-method-selection) for both forms.
+
 ## Log
 
 `log:info?showHeaders=true&showCorrelationId=true` writes the Exchange to the configured `tracing` level. The query parameters select what the Producer prints. `showHeaders=true` adds the Exchange header map. `showCorrelationId=true` prefixes the line with the correlation id, so several Routes can share one log output.

@@ -838,6 +838,16 @@ fn build_uri_option_entry(
                  (the only permitted separator shape in this version)",
             ));
         }
+        // The option name is derived by stripping the trailing `.`. A
+        // non-empty separator that ends with `.` and has length 1 is exactly
+        // a bare `.`, whose stripped form is empty.
+        if sep.len() == 1 {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "#[uri_param] `pattern` separator must yield a non-empty \
+                 name after the trailing `.` is stripped",
+            ));
+        }
     }
 
     let param_name = if let Some(sep) = &attr.pattern {

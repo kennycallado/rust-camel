@@ -48,4 +48,18 @@ Resource limits bound CPU and memory use. Defaults are 100,000 max operations, 1
 
 Use Rhai for complex logic in pipeline steps: branching, computation, and multi-step mutation. For flat header and body access, [Simple](simple.md) is lighter and needs no engine. For JavaScript-syntax scripting, use [JavaScript](js.md).
 
+## String methods mutate in place
+
+Rhai string methods such as `replace`, `trim`, and `pad` mutate the subject in place and return unit `()`. They do not return a new string. This differs from JavaScript, Python, and Rust.
+
+Call the method as a bare statement. The statement form mutates the body in place:
+
+```rhai
+body.replace(",", "%2C");
+```
+
+Never write `body = body.replace(...)`. The right-hand side is unit, so the assignment silently drops the value. The body stays unchanged. The same applies to headers: `headers["k"] = headers["k"].replace(...)` writes unit into the map entry, and the value becomes `Null`. The failure is silent. No error is raised.
+
+The `rhai_replace_*` characterization tests in the Rhai crate pin this behavior.
+
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [Rhai crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-rhai/CONTEXT.md)

@@ -276,8 +276,7 @@ async fn stopped_tool_call_returns_clean_error() {
     let component = McpComponent::new(McpGlobalConfig {
         servers,
         remotes: HashMap::new(),
-    })
-    .expect("config must construct");
+    });
 
     let encoded_schema = percent_encoding::utf8_percent_encode(
         &id_schema().to_string(),

@@ -859,6 +859,8 @@ REST operation:
 | `description` | string | no | — | Operation description |
 | `parameters` | map | no | `{}` | Additional parameters |
 
+REST v1 supports only `application/json` for both `consumes` and `produces`. Any other value fails route load. For binary, streaming, or non-JSON proxy APIs, use `http:` instead of `rest:`. The `http:` component supports `Body::Stream`. A future v2 may lift the JSON-only restriction.
+
 ### Template declaration
 
 | Field | Type | Required | Default | Description |

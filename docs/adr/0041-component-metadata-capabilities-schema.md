@@ -181,10 +181,10 @@ these components returned `ComponentMetadata::minimal(scheme)` with empty
 - Add a consuming builder `UriOption::pattern_prefix(separator: &str) -> Self`
   that sets `pattern: Some(UriOptionMatch::Prefix { separator: separator.to_string() })`.
 - Add a `#[uri_param(pattern = "<separator>")]` macro key, valid only on
-  `Vec<(String, String)>` fields, with eight compile-time guardrails:
+  `Vec<(String, String)>` fields, with nine compile-time guardrails:
   incompatible with `required`, `default`, `secret`, `name`, `aliases`, and
   any non-`string` `kind`; empty separator rejected; separator without
-  trailing `.` rejected.
+  trailing `.` rejected; bare `.` rejected (strips to an empty name).
 - Extend the shared lint helper `resolve_option` with two-phase resolution:
   **Phase 1** — combined exact-name OR alias match, considering only options
   whose `pattern` is `None`; **Phase 2** — longest-prefix-wins pattern match,
