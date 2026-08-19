@@ -337,8 +337,8 @@ resolver — credential leaves (`native.bearer_token`, `native.api_key`,
 `keycloak.client_secret`, `oidc.client_secret`) and non-credential leaves
 (samples: `subject`, `issuer`, `keycloak.realm`, `oidc.jwks_uri`; the walk is
 structural over every string leaf under `[security.*]`, not an enumerated
-allowlist) — plus `[datasources.*]` connection leaves (`db_url`, the
-`ssl_mode`/`ssl_root_cert`/`ssl_cert`/`ssl_key` TLS fields, SurrealDB
+allowlist) — plus `[datasources.*]` connection leaves (`db_url`, `provider`,
+the `ssl_mode`/`ssl_root_cert`/`ssl_cert`/`ssl_key` TLS fields, SurrealDB
 `password` under `extra`), which are treated as credential-class. EVERY leaf
 covered by this walk SHALL share uniform fail-closed semantics: an unset env
 var without a default yields `ConfigError`; a placeholder whose default

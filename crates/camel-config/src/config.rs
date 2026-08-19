@@ -2022,14 +2022,17 @@ fn resolve_security_fail_closed(security: &mut SecurityConfig) -> Result<(), Con
     Ok(())
 }
 
-/// Resolve `db_url`, the `ssl_*` string leaves, and every string leaf inside
-/// `extra` fail-closed for each datasource.
+/// Resolve `db_url`, `provider`, the `ssl_*` string leaves, and every string
+/// leaf inside `extra` fail-closed for each datasource.
 fn resolve_datasources_fail_closed(
     datasources: &mut HashMap<String, DatasourceConfig>,
 ) -> Result<(), ConfigError> {
     for (name, ds) in datasources.iter_mut() {
         let base = format!("datasources.{name}");
         resolve_fail_closed_in_place(&mut ds.db_url, &format!("{base}.db_url"))?;
+        if let Some(v) = ds.provider.as_mut() {
+            resolve_fail_closed_in_place(v, &format!("{base}.provider"))?;
+        }
         if let Some(v) = ds.ssl_mode.as_mut() {
             resolve_fail_closed_in_place(v, &format!("{base}.ssl_mode"))?;
         }
@@ -3818,6 +3821,46 @@ db_url = "postgres://localhost/orders"
                 "message should name the field {field}: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn datasource_provider_leaf_resolves() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        set_env("DS_PROVIDER", "postgres");
+        let config = load_config(
+            r#"
+[datasources.main]
+db_url = "postgres://localhost/orders"
+provider = "{{env:DS_PROVIDER}}"
+"#,
+        )
+        .expect("datasource provider leaf should resolve");
+        let ds = config.datasources.get("main").expect("main datasource");
+        assert_eq!(ds.provider.as_deref(), Some("postgres"));
+        unset_env("DS_PROVIDER");
+    }
+
+    #[test]
+    fn datasource_provider_leaf_unset_env_fails_closed() {
+        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        unset_env("DS_PROVIDER");
+        let err = load_config(
+            r#"
+[datasources.main]
+db_url = "postgres://localhost/orders"
+provider = "{{env:DS_PROVIDER}}"
+"#,
+        )
+        .expect_err("unset env var on the datasource provider leaf must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DS_PROVIDER"),
+            "message should name the var: {msg}"
+        );
+        assert!(
+            msg.contains("provider"),
+            "message should name the field provider: {msg}"
+        );
     }
 
     #[test]
