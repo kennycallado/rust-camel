@@ -106,6 +106,8 @@ compile time with a spanned diagnostic:
 - `pattern` whose value does not end with `.` (the only permitted separator
   shape in this version; the name derivation algorithm relies on this
   precondition — see "Macro-derived URI options").
+- `pattern = "."` (a bare `.` strips to an empty name; two such namespaces
+  would collide).
 
 When `pattern` is present, the generated `UriOption` SHALL have
 `kind = OptionKind::String` and `name` derived per the "Macro-derived URI options"
@@ -197,6 +199,12 @@ option via a new consuming builder
 - **GIVEN** a `#[uri_param(pattern = "param/")]` field of type `Vec<(String, String)>`
 - **WHEN** the macro is expanded
 - **THEN** compilation fails with a spanned error indicating the separator must end with `.` (the only permitted separator shape in this version; future `UriOptionMatch` variants may relax this)
+
+#### Scenario: bare-dot pattern separator fails compilation
+
+- **GIVEN** a `#[uri_param(pattern = ".")]` field of type `Vec<(String, String)>`
+- **WHEN** the macro is expanded
+- **THEN** compilation fails with a spanned error indicating the separator must yield a non-empty name after the trailing `.` is stripped
 
 ### Requirement: Secret with default is rejected
 

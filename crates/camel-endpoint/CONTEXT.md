@@ -77,6 +77,8 @@ The `#[uri_param(pattern = "<separator>")]` key is valid only on fields of type
 - `pattern` whose value does not end with `.` — the trailing `.` is the only
   permitted separator shape in this version; the name derivation algorithm
   (separator with trailing `.` removed → `name`) relies on this precondition.
+- `pattern = "."` — a bare `.` strips to an empty name, which would collide
+  if repeated.
 
 When `pattern` is present, the generated `UriOption` has `kind = OptionKind::String`,
 `name` derived from the separator (trailing `.` stripped), and
