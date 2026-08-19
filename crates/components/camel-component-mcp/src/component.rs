@@ -37,15 +37,16 @@ pub struct McpComponent {
 }
 
 impl McpComponent {
-    /// Build a component from global config, mirroring `LlmComponent::new`.
+    /// Build a component from global config.
     ///
-    /// Stores the remote configs and an empty live map — no network at
-    /// construction; the `RmcpClient::connect` happens at producer start.
-    pub fn new(config: McpGlobalConfig) -> Result<Self, CamelError> {
-        Ok(Self {
+    /// Infallible: stores the remote configs and an empty live map — no
+    /// network at construction; the `RmcpClient::connect` happens at producer
+    /// start.
+    pub fn new(config: McpGlobalConfig) -> Self {
+        Self {
             config: Arc::new(config),
             servers: Arc::new(McpServerMap::new()),
-        })
+        }
     }
 }
 

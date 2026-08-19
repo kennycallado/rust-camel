@@ -55,7 +55,6 @@ fn component_with_server(name: &str, cfg: McpServerConfig) -> McpComponent {
         servers,
         remotes: HashMap::new(),
     })
-    .expect("config must construct")
 }
 
 /// Create the consumer for a consumer-shaped URI (endpoint + consumer).

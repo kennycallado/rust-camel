@@ -53,7 +53,6 @@ fn component_with_server(name: &str, cfg: &McpServerConfig) -> McpComponent {
         servers,
         remotes: HashMap::new(),
     })
-    .expect("config must construct")
 }
 
 /// Spawn the real listener for `bind`, returning its bound address and the

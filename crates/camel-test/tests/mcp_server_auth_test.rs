@@ -80,7 +80,6 @@ fn component_with_server(name: &str, cfg: &McpServerConfig) -> McpComponent {
         servers,
         remotes: HashMap::new(),
     })
-    .expect("config must construct")
 }
 
 /// A hand-owned route channel: the test acts as the route's pipeline.
