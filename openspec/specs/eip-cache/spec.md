@@ -5,10 +5,12 @@ TBD - created by archiving change add-cache-repository. Update Purpose after arc
 ## Requirements
 ### Requirement: CacheRepository port with in-band expiry
 
-The system SHALL provide a `CacheRepository` trait in `camel-api` that is object-safe,
-`Result`-returning, and stores `CacheEntry { bytes: Vec<u8>, content_type: ContentType,
+The system SHALL provide an object-safe `CacheRepository` trait in `camel-api`,
+implemented with `#[async_trait]`, whose implementations are `Send + Sync` and whose
+fallible operations return `Result`, and stores
+`CacheEntry { bytes: Vec<u8>, content_type: ContentType,
 expires_at: Option<SystemTime> }`. The trait SHALL expose `get`, `set`, `peek_stale`,
-`invalidate`, `clear`, and a default `stats` method. `get` SHALL return `Ok(None)` when the
+`invalidate`, `clear`, and a default async `stats` method. `get` SHALL return `Ok(None)` when the
 key is absent OR when the entry's in-band `expires_at` has elapsed (NEVER silently swallow a
 backend read failure as a miss — Contract C1 inherited from ADR-0023). `peek_stale` SHALL
 return the entry IGNORING in-band expiry (it returns `Ok(None)` only when the key was never
@@ -27,11 +29,20 @@ workspace `bytes` crate does not enable the `serde` feature; backends convert `V
 The trait SHALL additionally provide a default async method
 `invalidate_prefix(&self, prefix: &str) -> Result<u64, CamelError>` that removes every
 entry whose key starts with `prefix` and returns the removed count. This is the
-"default method" extension path ADR-0056's interface-stability consequence sanctions — the
-7 core methods stay untouched. The default implementation SHALL return `Err(CamelError)`
+"default method" extension path ADR-0056's interface-stability consequence sanctions —
+when introduced, this default-method extension left the seven pre-existing methods
+unchanged; this change separately amends the `stats` signature. The default
+implementation SHALL return `Err(CamelError)`
 naming the backend (a backend without key-iteration support reports the limitation; it
 SHALL NOT return `Ok(0)` pretending an empty namespace). Backends with ordered keys
 (`RedbCacheRepository`) SHALL override it with range deletion.
+
+The `stats` method SHALL be asynchronous: `async fn stats(&self) -> CacheStats` under the
+trait's `#[async_trait]`, infallible (no `Result`), with a default body returning
+`CacheStats::default()`. A synchronous signature makes it structurally impossible for a
+backend to offload I/O-bound byte accounting off the tokio worker (bd rc-22wj), so the port
+SHALL NOT reintroduce a synchronous stats surface. This is a pre-1.0 source-breaking
+correction to the port recorded as an ADR-0056 amendment; call sites await `stats().await`.
 
 `CacheStats` SHALL carry `hits`, `misses`, `evictions`, `entries` (as before) plus
 `peek_stale_served: u64`, `invalidations: u64`, and `bytes: Option<u64>` (value = total
@@ -72,7 +83,7 @@ derive `Serialize` so the `cache_stats` step can emit it as a JSON body.
 
 - **GIVEN** a `MemoryCacheRepository` or `RedbCacheRepository` (backends that track stats)
   after one hit and one miss
-- **WHEN** `stats()` is called
+- **WHEN** `stats().await` is called
 - **THEN** it returns a `CacheStats` whose `hits == 1`, `misses == 1`, and whose
   `evictions`, `entries`, `peek_stale_served`, `invalidations`, and `bytes` fields
   reflect the backend's state (`bytes` is `None` on memory, `Some(total)` on redb)
@@ -80,7 +91,7 @@ derive `Serialize` so the `cache_stats` step can emit it as a JSON body.
 #### Scenario: non-tracking backend returns default zero stats
 
 - **GIVEN** a `CacheRepository` implementation that cannot cheaply track counters
-- **WHEN** `stats()` is called
+- **WHEN** `stats().await` is called
 - **THEN** it returns `CacheStats::default()` (all fields zero, `bytes` `None`) — never `Err`
 
 #### Scenario: invalidate_prefix removes exactly the namespace on ordered backends
@@ -160,9 +171,13 @@ name `"memory"` as the default cache repository.
 
 The system SHALL provide a `RedbCacheRepository` in `camel-core` that implements
 `CacheRepository` by persisting `CacheEntry` values (with their in-band `expires_at`) to a
-redb file on disk, surviving process restart. Every trait operation SHALL wrap blocking
-redb I/O in `tokio::task::spawn_blocking` and SHALL map redb errors to `CamelError::Io`,
-satisfying Contract C1. A background sweep task SHALL remove entries whose
+redb file on disk, surviving process restart. Every operation that performs blocking
+redb I/O SHALL use `tokio::task::spawn_blocking`. Fallible operations SHALL map redb
+errors to `CamelError::Io`, satisfying Contract C1. For infallible `stats()`, the
+payload-sum byte scan SHALL run inside
+`spawn_blocking`, never on the tokio worker; scan or join failure SHALL instead produce
+`bytes: None` while preserving eagerly maintained counters. A
+background sweep task SHALL remove entries whose
 `expires_at + stale_retention` has elapsed; the task SHALL bind to the context's
 `CancellationToken` so it stops cleanly on shutdown. The constructor SHALL take a
 **required** cache size in bytes (`usize`) and SHALL open the database through
@@ -215,6 +230,14 @@ configured cache size in a field observable to in-crate tests as the propagation
 - **GIVEN** a `RedbCacheRepository` constructed with an explicit cache size
 - **WHEN** `set("k", entry, Some(1h))` then `get("k")` are called
 - **THEN** the round-trip succeeds on the database opened through the builder
+
+#### Scenario: stats computes bytes off the tokio worker
+
+- **GIVEN** a `RedbCacheRepository` holding entries whose payloads total `N` bytes
+- **WHEN** `stats().await` is called
+- **THEN** it returns `bytes == Some(N)` (payload-byte sum, unchanged semantics) with the
+  byte scan executed inside `spawn_blocking`, and a scan failure yields `bytes == None`
+  with all other fields still reported
 
 ### Requirement: cache_repo Camel.toml configuration
 
@@ -629,10 +652,11 @@ fails at route compile time with `ComponentNotFound` naming the step and reposit
 `cache_clear` SHALL call `repository.clear()`. `Err` propagates as `Failed`; success
 returns `Completed` with the exchange body unchanged.
 
-`cache_stats` SHALL call `repository.stats()` (synchronous pull) and replace the exchange
-body with a JSON object carrying at minimum `repository`, `hits`, `misses`, `evictions`,
-`entries`, `peek_stale_served`, `invalidations`, and `bytes` (JSON `null` when the
-backend cannot report bytes). `stats()` never returns `Err`, so the step always
+`cache_stats` SHALL await `repository.stats()` and replace the exchange
+body with a JSON object. The JSON object SHALL contain exactly `repository`, `hits`,
+`misses`, `evictions`, `entries`, `peek_stale_served`, `invalidations`, and `bytes`;
+`bytes` SHALL be a number or JSON `null` (null when the backend cannot report bytes).
+`stats()` never returns `Err`, so the step always
 completes.
 
 #### Scenario: cache_clear empties the repository
@@ -650,7 +674,9 @@ completes.
   1 invalidation
 - **WHEN** a route step `cache_stats: { repository: memory }` executes
 - **THEN** the exchange body is JSON with `"repository": "memory"`, `"hits": 2`,
-  `"misses": 1`, `"invalidations": 1`, and a `bytes` field (null or number)
+  `"misses": 1`, `"invalidations": 1`, and a `bytes` field (null or number), and the
+  JSON object contains exactly the key set `repository`, `hits`, `misses`, `evictions`,
+  `entries`, `peek_stale_served`, `invalidations`, `bytes` — no additional keys
 
 #### Scenario: cache_clear and cache_stats reach canonical parity
 
