@@ -8,7 +8,7 @@
 //! returns `Result<(), ValidationError>` (single error, not iterator). For
 //! collecting ALL errors use `Validator::iter_errors(&instance)`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use jsonschema::validator_for;
 
@@ -24,9 +24,12 @@ fn examples_dir() -> PathBuf {
     workspace_root().join("examples/json-dsl/config")
 }
 
-fn load_json(path: &PathBuf) -> serde_json::Value {
-    let raw =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+fn load_raw(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+fn load_json(path: &Path) -> serde_json::Value {
+    let raw = load_raw(path);
     serde_json::from_str(&raw).expect("JSON must parse")
 }
 
@@ -49,6 +52,7 @@ fn all_json_examples_validate() {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
+        let raw = load_raw(&path);
         let example = load_json(&path);
         // Use iter_errors to collect all failures (not just the first).
         let errors: Vec<_> = validator.iter_errors(&example).collect();
@@ -58,6 +62,15 @@ fn all_json_examples_validate() {
                 "example {} failed schema validation:\n{}",
                 path.display(),
                 msgs.join("\n")
+            );
+        }
+        // Schema conformance alone is not enough: the example must also
+        // deserialize into the declarative model, or schema/field drift
+        // lets an example pass here but fail at route load time.
+        if let Err(e) = camel_dsl::parse_json_to_declarative(&raw) {
+            panic!(
+                "example {} failed serde deserialization into the DSL model: {e}",
+                path.display()
             );
         }
         checked += 1;
