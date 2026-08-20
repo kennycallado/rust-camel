@@ -157,6 +157,28 @@ pub fn validate_uri(uri: &str, label: &str, policy: SsrfPolicy) -> Result<url::U
     Ok(parsed)
 }
 
+/// Returns `true` if the host string resolves to a loopback or private IP.
+fn is_private_or_loopback_host(host: &str) -> bool {
+    // Named loopback / unspecified — these don't parse as IP literals,
+    // so we hard-reject the conventional names up front.
+    if matches!(host, "localhost" | "localhost.localdomain" | "0.0.0.0") {
+        return true;
+    }
+    // url::Url::host_str() wraps IPv6 addresses in brackets: "[::1]".
+    // std::net::IpAddr::from_str rejects the bracket form, so strip them first.
+    let ip_str = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+        // Delegate to the canonical SSRF block-list so this rule set
+        // stays in lockstep with every other outbound HTTP client
+        // (LLM, Keycloak, …) instead of drifting.
+        return camel_api::is_ssrf_blocked_ip(&ip);
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,26 +238,4 @@ mod tests {
         assert_eq!(opts.request_timeout, Duration::from_secs(5));
         assert_eq!(opts.policy, SsrfPolicy::AllowInternal);
     }
-}
-
-/// Returns `true` if the host string resolves to a loopback or private IP.
-fn is_private_or_loopback_host(host: &str) -> bool {
-    // Named loopback / unspecified — these don't parse as IP literals,
-    // so we hard-reject the conventional names up front.
-    if matches!(host, "localhost" | "localhost.localdomain" | "0.0.0.0") {
-        return true;
-    }
-    // url::Url::host_str() wraps IPv6 addresses in brackets: "[::1]".
-    // std::net::IpAddr::from_str rejects the bracket form, so strip them first.
-    let ip_str = host
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(host);
-    if let Ok(ip) = ip_str.parse::<IpAddr>() {
-        // Delegate to the canonical SSRF block-list so this rule set
-        // stays in lockstep with every other outbound HTTP client
-        // (LLM, Keycloak, …) instead of drifting.
-        return camel_api::is_ssrf_blocked_ip(&ip);
-    }
-    false
 }
