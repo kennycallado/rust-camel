@@ -1050,6 +1050,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stats_degrades_bytes_none_when_entry_corrupt() {
+        let dir = tempdir().expect("tempdir");
+        let token = CancellationToken::new();
+        let repo = new_repo(&dir, token).await;
+
+        // Exercise every operation counter with a deterministic value.
+        repo.set("good", entry(), None).await.expect("set good");
+        repo.get("good").await.expect("get good");
+        repo.get("absent").await.expect("get absent");
+        repo.peek_stale("good").await.expect("peek_stale good");
+        repo.invalidate("absent").await.expect("invalidate absent");
+
+        // Corrupt the table out-of-band: a valid key whose value blob is not
+        // deserializable `CacheEntry` JSON. This bypasses `set`, so the
+        // operation-derived `entries` counter is untouched (still 1) while the
+        // physical table now holds a second row.
+        let garbage: &[u8] = b"not-json";
+        let txn = repo.db.begin_write().expect("begin_write");
+        {
+            let mut table = txn.open_table(CACHE_TABLE).expect("open_table");
+            table
+                .insert("corrupt", garbage)
+                .expect("insert corrupt blob");
+        }
+        txn.commit().expect("commit");
+
+        // The byte-sum scan hits the corrupt blob and degrades to None; the
+        // operation counters are unaffected.
+        let s = repo.stats().await;
+        assert_eq!(s.hits, 1);
+        assert_eq!(s.misses, 1);
+        assert_eq!(s.evictions, 0);
+        assert_eq!(s.entries, 1);
+        assert_eq!(s.peek_stale_served, 1);
+        assert_eq!(s.invalidations, 1);
+        assert_eq!(s.bytes, None);
+    }
+
+    #[tokio::test]
     async fn max_entries_rejects_new_key_allows_overwrite() {
         let dir = tempdir().expect("tempdir");
         let token = CancellationToken::new();
