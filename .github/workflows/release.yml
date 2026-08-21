@@ -35,10 +35,12 @@ jobs:
             use-cross: false
             bin-suffix: ""
             install-musl-tools: true
+            alloc-features: "jemalloc"
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             use-cross: true
             bin-suffix: ""
+            alloc-features: "jemalloc"
           - os: macos-15-intel
             target: x86_64-apple-darwin
             use-cross: false
@@ -83,11 +85,37 @@ jobs:
         run: cargo install cross --version 0.2.5 --locked
 
       - name: Build binary
+        env:
+          KAFKA_FEATURES: ${{ matrix.kafka-features }}
+          ALLOC_FEATURES: ${{ matrix.alloc-features }}
         run: |
+          # Compose the feature set from both matrix keys. Empty/absent keys
+          # must yield no empty elements — "--features ,jemalloc" is a cargo
+          # error, and a silently-dropped feature ships a mallocng binary
+          # that looks green (rc-vnm8).
+          FEATURES=$(echo "${KAFKA_FEATURES},${ALLOC_FEATURES}" | sed 's/^,//; s/,$//; s/,,/,/g')
+          FEATURE_FLAG=""
+          [ -n "$FEATURES" ] && FEATURE_FLAG="--features $FEATURES"
+          echo "Building ${{ matrix.target }} with: ${FEATURE_FLAG:-<no features>}"
           if [[ "${{ matrix.use-cross }}" == "true" ]]; then
-            cross build -p camel-cli --release --target ${{ matrix.target }} ${{ matrix.kafka-features && format('--features "{0}"', matrix.kafka-features) || '' }}
+            cross build -p camel-cli --release --target ${{ matrix.target }} $FEATURE_FLAG
           else
-            cargo build -p camel-cli --release --target ${{ matrix.target }} ${{ matrix.kafka-features && format('--features "{0}"', matrix.kafka-features) || '' }}
+            cargo build -p camel-cli --release --target ${{ matrix.target }} $FEATURE_FLAG
+          fi
+        shell: bash
+
+      - name: Assert jemalloc linked (musl only)
+        if: contains(matrix.alloc-features, 'jemalloc')
+        run: |
+          # Build-green does not prove the allocator was linked — a feature
+          # typo or resolver quirk silently yields musl mallocng (the exact
+          # RSS retention bug rc-vnm8 fixes). Assert the symbol fingerprint.
+          BIN="target/${{ matrix.target }}/release/camel"
+          if nm "$BIN" 2>/dev/null | grep -q ' je_arena_' || strings "$BIN" | grep -q 'jemalloc'; then
+            echo "OK: jemalloc linked into ${{ matrix.target }}"
+          else
+            echo "FAIL: jemalloc NOT linked into ${{ matrix.target }} — would ship mallocng"
+            exit 1
           fi
         shell: bash
 
