@@ -55,8 +55,8 @@ fn spawn_camel_run(dir: &Path) -> Child {
 
 /// Run `camel run` against `dir`, poll the captured output until it contains
 /// `observe` (capped at `timeout`), then send exactly ONE SIGTERM and wait
-/// for a graceful exit (10 s ceiling, force-kill past it). Returns
-/// `(exit_code, captured_output, observed)`.
+/// for a graceful exit (10 s ceiling from the signal, force-kill past it).
+/// Returns `(exit_code, captured_output, observed)`.
 fn run_observe_then_signal(dir: &Path, observe: &str, timeout: Duration) -> (i32, String, bool) {
     let mut child = spawn_camel_run(dir);
     let buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
@@ -108,12 +108,15 @@ fn run_observe_then_signal(dir: &Path, observe: &str, timeout: Duration) -> (i32
         );
     }
 
-    // Bounded graceful-exit wait.
+    // Bounded graceful-exit wait: 10 s measured from the SIGTERM, decoupled
+    // from the observation phase so a slow observation cannot eat the exit
+    // budget under concurrent load (bd rc-5dag).
+    let exit_start = Instant::now();
     let exit_code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code().unwrap_or(-1),
             Ok(None) => {
-                if start.elapsed() >= Duration::from_secs(10) + timeout {
+                if exit_start.elapsed() >= Duration::from_secs(10) {
                     let _ = child.kill();
                     let _ = child.wait();
                     break -1;
@@ -150,7 +153,7 @@ watch = false
     let (exit_code, output, observed) = run_observe_then_signal(
         dir.path(),
         "matched zero route files",
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     );
 
     assert!(
@@ -189,7 +192,7 @@ watch = false
     let (exit_code, output, observed) = run_observe_then_signal(
         dir.path(),
         "matched zero route files",
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     );
 
     assert!(
