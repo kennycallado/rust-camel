@@ -15,14 +15,13 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tokio::task::JoinHandle;
 use tower::Service;
-use tower::util::BoxCloneService;
 
 pub mod batch;
 pub mod stream;
 
 use camel_api::{
-    CamelError, MetricsCollector, StepLifecycle, StepShutdownReason, exchange::Exchange,
-    message::Message, processor::SyncBoxProcessor,
+    BoxProcessor, CamelError, MetricsCollector, StepLifecycle, StepShutdownReason,
+    exchange::Exchange, message::Message, processor::SyncBoxProcessor,
 };
 
 /// Rate-limit window for InOut warning log emission.
@@ -139,7 +138,7 @@ impl ResequencerService {
     /// post-driver tasks via `tokio::spawn`.
     pub fn new(
         policy: Arc<dyn ResequencePolicy>,
-        post_continuation: BoxCloneService<Exchange, Exchange, CamelError>,
+        post_continuation: BoxProcessor,
         input_capacity: usize,
         post_lifecycles: Vec<Arc<dyn StepLifecycle>>,
     ) -> Self {
@@ -159,7 +158,7 @@ impl ResequencerService {
     /// Panics if called outside a Tokio runtime context.
     pub fn with_config(
         policy: Arc<dyn ResequencePolicy>,
-        post_continuation: BoxCloneService<Exchange, Exchange, CamelError>,
+        post_continuation: BoxProcessor,
         input_capacity: usize,
         post_lifecycles: Vec<Arc<dyn StepLifecycle>>,
         config: ResequencerConfig,
@@ -537,8 +536,7 @@ mod tests {
         let policy: Arc<dyn ResequencePolicy> = Arc::new(PassthroughPolicy);
         let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Exchange>();
         let capture = CapturePost { tx: capture_tx };
-        let post_continuation: BoxCloneService<Exchange, Exchange, CamelError> =
-            BoxCloneService::new(capture);
+        let post_continuation: BoxProcessor = BoxProcessor::new(capture);
 
         let service = ResequencerService::new(policy, post_continuation, 1024, vec![]);
 
@@ -592,8 +590,7 @@ mod tests {
         let policy: Arc<dyn ResequencePolicy> = Arc::new(PassthroughPolicy);
         let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Exchange>();
         let capture = CapturePost { tx: capture_tx };
-        let post_continuation: BoxCloneService<Exchange, Exchange, CamelError> =
-            BoxCloneService::new(capture);
+        let post_continuation: BoxProcessor = BoxProcessor::new(capture);
 
         let service = ResequencerService::new(policy, post_continuation, 1024, vec![]);
 
@@ -632,8 +629,7 @@ mod tests {
     async fn inout_guard_increments_counter() {
         let policy: Arc<dyn ResequencePolicy> = Arc::new(PassthroughPolicy);
         let (tx, _rx) = mpsc::unbounded_channel::<Exchange>();
-        let post: BoxCloneService<Exchange, Exchange, CamelError> =
-            BoxCloneService::new(CapturePost { tx });
+        let post: BoxProcessor = BoxProcessor::new(CapturePost { tx });
         let config = ResequencerConfig::default();
         let service = ResequencerService::with_config(policy, post, 16, vec![], config);
 
@@ -659,8 +655,7 @@ mod tests {
     async fn inout_guard_allow_inout_suppresses() {
         let policy: Arc<dyn ResequencePolicy> = Arc::new(PassthroughPolicy);
         let (tx, _rx) = mpsc::unbounded_channel::<Exchange>();
-        let post: BoxCloneService<Exchange, Exchange, CamelError> =
-            BoxCloneService::new(CapturePost { tx });
+        let post: BoxProcessor = BoxProcessor::new(CapturePost { tx });
         let config = ResequencerConfig {
             allow_inout: true,
             ..Default::default()

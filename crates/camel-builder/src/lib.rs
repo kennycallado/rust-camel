@@ -365,7 +365,7 @@ enum EndpointSlot {
 /// ```
 /// `RouteBuilder` is `Clone`: a partially-built route can be cloned and reused as a
 /// template for multiple routes (mirrors Apache Camel's cloneable `RouteBuilder`).
-/// Clone is a deep copy of the step list; step closures live behind `Arc`/`BoxCloneService`
+/// Clone is a deep copy of the step list; step closures live behind `Arc`/`BoxProcessor`
 /// so cloning shares the closure and duplicates only the light wrapper (rc-8m5o).
 #[derive(Clone)]
 pub struct RouteBuilder {

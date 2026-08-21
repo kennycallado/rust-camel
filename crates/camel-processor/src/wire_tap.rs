@@ -115,7 +115,7 @@ pub struct WireTapService {
 // The shared admission gate, liveness tracker, and cancellation token live in
 // `Arc<WireTapShared>`: each clone gets a new ref to the SAME shared state.
 // This is required because the route pipeline clones the `BoxProcessor` per
-// request (`BoxCloneService` contract) and drops the clone once `call()`'s
+// request (`BoxCloneSyncService` contract) and drops the clone once `call()`'s
 // immediate-return future resolves. Per-clone state would close admission on
 // every request drop. Sharing keeps the gate open until canonical teardown.
 impl Clone for WireTapService {
@@ -964,7 +964,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wiretap_tap_readiness_error_suppressed_with_log() {
-        let tap: camel_api::BoxProcessor = tower::util::BoxCloneService::new(ReadyFailingSvc {
+        let tap: camel_api::BoxProcessor = camel_api::BoxProcessor::new(ReadyFailingSvc {
             err_msg: "ready-boom",
         });
         let mut svc = WireTapService::new(tap);
@@ -1028,7 +1028,7 @@ mod tests {
     async fn test_wiretap_poll_ready_always_ready() {
         // poll_ready returns Ready(Ok(())) unconditionally (ADR-0019), even
         // when the tap endpoint's own readiness would fail.
-        let tap: camel_api::BoxProcessor = tower::util::BoxCloneService::new(ReadyFailingSvc {
+        let tap: camel_api::BoxProcessor = camel_api::BoxProcessor::new(ReadyFailingSvc {
             err_msg: "would-fail",
         });
         let mut svc = WireTapService::new(tap);
@@ -1230,7 +1230,7 @@ mod tests {
         }
 
         let called = Arc::new(AtomicBool::new(false));
-        let tap: camel_api::BoxProcessor = tower::util::BoxCloneService::new(ForeverPendingSvc {
+        let tap: camel_api::BoxProcessor = camel_api::BoxProcessor::new(ForeverPendingSvc {
             called: called.clone(),
         });
         let mut svc = WireTapService::new(tap);

@@ -1479,6 +1479,223 @@ async fn syncbox_processor_concurrent_clone_inner_via_arcswap() {
     }
 }
 
+/// Build a 4-step pass-through pipeline the way production routes are
+/// composed (`compose_pipeline` over identity `Process` steps).
+///
+/// Note: the change plan suggested composing `IdentityProcessor` layers via
+/// `tower::ServiceBuilder`, but tower 0.5's `ServiceBuilder::service` is a
+/// terminal call — chaining `.service(a).service(b)` does not compile — so
+/// the production composition path is used instead.
+fn four_layer_identity_pipeline() -> camel_api::BoxProcessor {
+    use crate::lifecycle::adapters::route_compiler::{PipelineRuntimeCtx, compose_pipeline};
+    use crate::lifecycle::adapters::step_compilers::CompiledStep;
+
+    let identity_step = || CompiledStep::Process {
+        processor: camel_api::BoxProcessor::new(camel_api::IdentityProcessor),
+        body_contract: None,
+        lifecycle: None,
+    };
+    compose_pipeline(
+        vec![
+            identity_step(),
+            identity_step(),
+            identity_step(),
+            identity_step(),
+        ],
+        PipelineRuntimeCtx::compile_time(),
+    )
+}
+
+/// Per-clone acquisition latency under 64-way contention must stay far
+/// below the ceiling a serializing mutex would inflate it to.
+///
+/// The retired `Mutex<BoxProcessor>` wrapper held the lock only for the
+/// µs-scale clone, so the discriminating signal is per-clone latency (a
+/// 64-way futex convoy inflates exactly that), not hold-under-lock sleep
+/// work — hence the tight loop with no sleeps.
+///
+/// Multi-thread runtime required: the clone loop has no `.await`, so a
+/// current-thread runtime would run each task to completion before polling
+/// the next — zero contention, and the convoy would go undetected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lockfree_pipeline_acquisition_per_clone_latency_ceiling() {
+    use crate::lifecycle::adapters::pipeline_runtime::PipelineAssembly;
+    use arc_swap::ArcSwap;
+    use camel_api::SyncBoxProcessor;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let assembly = PipelineAssembly::new(
+        SyncBoxProcessor::new(four_layer_identity_pipeline()),
+        vec![],
+    );
+    let shared: Arc<ArcSwap<PipelineAssembly>> = Arc::new(ArcSwap::from_pointee(assembly));
+
+    const TASKS: usize = 64;
+    const ITERS: usize = 200;
+
+    let mut handles = Vec::with_capacity(TASKS);
+    for _ in 0..TASKS {
+        let shared = shared.clone();
+        handles.push(tokio::spawn(async move {
+            let mut durations = Vec::with_capacity(ITERS);
+            for _ in 0..ITERS {
+                let start = Instant::now();
+                let _cloned = shared.load().processor.clone_inner();
+                durations.push(start.elapsed());
+            }
+            durations
+        }));
+    }
+
+    let mut all = Vec::with_capacity(TASKS * ITERS);
+    for h in handles {
+        all.extend(h.await.expect("clone task must not panic"));
+    }
+    assert_eq!(all.len(), TASKS * ITERS);
+    all.sort_unstable();
+
+    // Lock-free clone_box stays in the µs range (1000x margin); the retired
+    // mutex convoy blew per-clone latency well past this ceiling.
+    let p99 = all[(all.len() * 99) / 100];
+    assert!(
+        p99 < Duration::from_millis(10),
+        "p99 clone_inner latency {p99:?} >= 10 ms — mutex convoy suspected"
+    );
+}
+
+/// Hot-reload coherence (ADR-0004): concurrent acquisition while a writer
+/// stores new snapshots must yield only coherent pipelines that process
+/// exchanges with their bodies intact.
+///
+/// Multi-thread runtime required so acquisitions genuinely interleave with
+/// the writer's swaps instead of all completing before the first store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_swap_during_concurrent_acquisition_is_coherent() {
+    use crate::lifecycle::adapters::pipeline_runtime::PipelineAssembly;
+    use crate::lifecycle::adapters::route_compiler::{PipelineRuntimeCtx, compose_pipeline};
+    use crate::lifecycle::adapters::step_compilers::CompiledStep;
+    use arc_swap::ArcSwap;
+    use camel_api::{
+        Body, BoxProcessor, BoxProcessorExt, Exchange, Message, SyncBoxProcessor, Value,
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    let assembly = PipelineAssembly::new(
+        SyncBoxProcessor::new(four_layer_identity_pipeline()),
+        vec![],
+    );
+    let shared: Arc<ArcSwap<PipelineAssembly>> = Arc::new(ArcSwap::from_pointee(assembly));
+
+    const ACQUIRERS: usize = 16;
+    const PER_ACQUIRER: usize = 20;
+    const SWAPS: u32 = 20;
+
+    let mut acquirers = Vec::with_capacity(ACQUIRERS);
+    for t in 0..ACQUIRERS {
+        let shared = shared.clone();
+        acquirers.push(tokio::spawn(async move {
+            for i in 0..PER_ACQUIRER {
+                let payload = format!("body-{t}-{i}");
+                let cloned = shared.load().processor.clone_inner();
+                let out = cloned
+                    .oneshot(Exchange::new(Message::new(Body::Text(payload.clone()))))
+                    .await
+                    .expect("cloned pipeline must process the exchange");
+                assert!(
+                    matches!(&out.input.body, Body::Text(s) if *s == payload),
+                    "exchange body must pass through the swapped pipeline intact"
+                );
+                // Coherence: acquisitions that landed on a swapped snapshot
+                // must see one of the writer's generation markers. The
+                // initial identity stack carries no marker, so absence is
+                // valid; a torn snapshot would surface as a mangled or
+                // out-of-range value.
+                if let Some(Value::String(g)) = out.input.header("gen") {
+                    let generation: u32 =
+                        g.parse().expect("gen marker must be a numeric generation");
+                    assert!(
+                        generation < SWAPS,
+                        "gen marker {generation} out of range — torn snapshot"
+                    );
+                }
+            }
+        }));
+    }
+
+    // Writer: store SWAPS new snapshots, each a distinct composed stack —
+    // a marker step tagging its generation plus identity steps.
+    let writer = {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            for generation in 0..SWAPS {
+                let marker = BoxProcessor::from_fn(move |mut ex: Exchange| {
+                    ex.input
+                        .set_header("gen", Value::String(generation.to_string()));
+                    async move { Ok(ex) }
+                });
+                let identity_step = || CompiledStep::Process {
+                    processor: camel_api::BoxProcessor::new(camel_api::IdentityProcessor),
+                    body_contract: None,
+                    lifecycle: None,
+                };
+                let stack = compose_pipeline(
+                    vec![
+                        CompiledStep::Process {
+                            processor: marker,
+                            body_contract: None,
+                            lifecycle: None,
+                        },
+                        identity_step(),
+                        identity_step(),
+                        identity_step(),
+                    ],
+                    PipelineRuntimeCtx::compile_time(),
+                );
+                shared.store(Arc::new(PipelineAssembly::new(
+                    SyncBoxProcessor::new(stack),
+                    vec![],
+                )));
+            }
+        })
+    };
+
+    writer.await.expect("writer task must not panic");
+    for h in acquirers {
+        h.await.expect("acquirer task must not panic");
+    }
+}
+
+/// Clone-cost tripwire: mean clone_inner cost on a representative 4-step
+/// stack must stay well under the ceiling, catching accidental deep-copy
+/// reintroduction.
+#[tokio::test]
+async fn multi_step_pipeline_clone_cost_tripwire() {
+    use camel_api::SyncBoxProcessor;
+    use std::time::{Duration, Instant};
+
+    let sync = SyncBoxProcessor::new(four_layer_identity_pipeline());
+
+    // 3 runs; take the MINIMUM run mean so a single OS stall (preemption
+    // during one run) cannot flake the tripwire.
+    const RUNS: usize = 3;
+    const CLONES: usize = 1000;
+    let mut means = Vec::with_capacity(RUNS);
+    for _ in 0..RUNS {
+        let start = Instant::now();
+        for _ in 0..CLONES {
+            let _cloned = sync.clone_inner();
+        }
+        means.push(start.elapsed() / CLONES as u32);
+    }
+    let min_mean = means.into_iter().min().expect("at least one run");
+    assert!(
+        min_mean < Duration::from_micros(50),
+        "mean clone_inner cost {min_mean:?} >= 50 µs — deep-copy suspected"
+    );
+}
+
 #[tokio::test]
 async fn aggregate_force_completion_on_natural_consumer_completion_emits_pending_bucket() {
     let mock = Arc::new(camel_component_mock::MockComponent::new());
@@ -1862,9 +2079,9 @@ async fn resequencer_compile_route_returns_ack_and_posts_to_continuation() {
                     },
                 },
             },
-            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
-                tower::util::BoxCloneService::new(RecordingPostProcessor { tx }),
-            ))),
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(RecordingPostProcessor {
+                tx,
+            }))),
         ],
     )
     .with_route_id("reseq-compile");
@@ -1982,9 +2199,7 @@ async fn resequencer_batch_e2e_sort_and_emit() {
                     },
                 },
             },
-            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
-                tower::util::BoxCloneService::new(RecordingPost { tx }),
-            ))),
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(RecordingPost { tx }))),
         ],
     )
     .with_route_id("batch-e2e");
@@ -2103,9 +2318,9 @@ async fn resequencer_hot_swap_drains_old_service() {
                     },
                 },
             },
-            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
-                tower::util::BoxCloneService::new(DrainRecorder { tx: old_tx }),
-            ))),
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(DrainRecorder {
+                tx: old_tx,
+            }))),
         ],
     )
     .with_route_id("hr-drain");
@@ -2129,9 +2344,9 @@ async fn resequencer_hot_swap_drains_old_service() {
                     },
                 },
             },
-            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
-                tower::util::BoxCloneService::new(DrainRecorder { tx: new_tx }),
-            ))),
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(DrainRecorder {
+                tx: new_tx,
+            }))),
         ],
     )
     .with_route_id("hr-drain");

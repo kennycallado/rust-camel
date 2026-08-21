@@ -64,46 +64,28 @@ impl PipelineRuntimeCtx {
     }
 }
 
-/// Newtype around `Arc<[CompiledStep]>` that adds `Send + Sync`.
+/// Newtype around `Arc<[CompiledStep]>`.
 ///
-/// `CompiledStep` contains `BoxProcessor` (tower `BoxCloneService`) which
-/// is `Send + !Sync` — the `!Sync` is an artifact of Tower's trait-object
-/// bounds (`Box<dyn ... + Send>` lacks `+ Sync`), NOT because of interior
-/// mutability. Verified: no `Rc`, `RefCell`, `Cell`, or `UnsafeCell` in
-/// `OutcomePipeline`, `OutcomeSegment`, or `BoxProcessor`.
-///
-/// SAFETY: Concurrent access DOES occur — multiple Exchanges read
-/// `&CompiledStep` from the same Arc simultaneously across tokio worker
-/// threads. This is sound because `run_steps` only reads shared references
-/// and calls `.clone()` to obtain owned copies before invoking. Read-only
-/// `&T` + `clone()` of types free of `UnsafeCell` is sound across threads.
-///
-/// INVARIANT: If any `CompiledStep` variant ever introduces a type backed
-/// by `UnsafeCell` (`Rc`, `RefCell`, `Cell`), this unsafe impl becomes
-/// unsound UB. The compile-time guard below ensures `CompiledStep: Send`;
-/// there is no mechanical guard for `Sync` — that requires manual review
-/// (see `shared_snapshot_is_send_sync` test).
+/// `CompiledStep` contains `BoxProcessor` (`tower::util::BoxCloneSyncService`),
+/// whose erased inner trait object is bounded `Send + Sync`. `CompiledStep` is
+/// therefore `Send + Sync` by construction, and `SharedSnapshot` derives both
+/// auto traits from `Arc<[CompiledStep]>` — the snapshot is shareable across
+/// threads with auto-derived traits alone.
 #[derive(Clone)]
 struct SharedSnapshot(Arc<[CompiledStep]>);
 
-// SAFETY: see struct doc above. `Send` is required so the future returned
-// by `run_steps` (which owns the snapshot) is itself `Send` and compatible
-// with `BoxCloneService`'s `Pin<Box<dyn Future + Send>>` return type.
-unsafe impl Send for SharedSnapshot {}
-
-// SAFETY: see struct doc above. `Sync` is required because the snapshot
-// is held behind `Arc` and may be read concurrently by `&self` access on
+// Compile-time guard: CompiledStep must remain Send + Sync so the snapshot
+// stays shareable via auto-derivation. `Send` keeps the future returned by
+// `run_steps` Send; `Sync` covers concurrent `&self` reads on
 // `SequentialPipeline`/`TracedPipeline` clones (e.g. `poll_ready` on one
 // thread, `call` on another).
-unsafe impl Sync for SharedSnapshot {}
-
-// Compile-time guard: CompiledStep must remain Send.
-// If this fails, SharedSnapshot's unsafe impl Send becomes unsound.
 #[allow(dead_code)]
 const _: () = {
     fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
     fn _check() {
         assert_send::<CompiledStep>();
+        assert_sync::<CompiledStep>();
     }
 };
 
@@ -410,12 +392,13 @@ async fn run_steps(
 ) -> PipelineOutcome {
     use camel_api::error_handler::RetryableStep;
     let mut ex = exchange;
-    // Index-based loop (not `for (i, step) in steps.0.iter().enumerate()`) so
-    // the future stays `Send`: the iterator holds `&[CompiledStep]`, but
-    // `CompiledStep: !Sync` (Tower `BoxCloneService` + `dyn OutcomePipeline`
-    // trait objects), so `&[CompiledStep]: !Send`. The slice reference must
-    // not span any `.await`. `&steps.0[i]` is consumed by the `match` scrutinee
-    // and drops before the await — no borrow is live across the await point.
+    // Index-based loop (not `for (i, step) in steps.0.iter().enumerate()`):
+    // retained to avoid holding a `&[CompiledStep]` borrow across the
+    // `.await` below — `&steps.0[i]` is consumed by the `match` scrutinee
+    // and drops before the await, so no borrow is live across the await
+    // point. The original `CompiledStep: !Sync` rationale is gone
+    // (`BoxProcessor` is now `Send + Sync` via `BoxCloneSyncService`);
+    // the loop shape is kept purely for borrow hygiene — no behavior change.
     let len = steps.0.len();
     for i in 0..len {
         // B1: cooperative cancellation between steps via task-local.

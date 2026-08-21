@@ -3,6 +3,20 @@
 ## Status
 Accepted
 
+## Amendment (2026-08-20): unsafe impls removed
+
+The `unsafe impl Send` / `unsafe impl Sync` for `SharedSnapshot` described
+below no longer exist. `BoxProcessor` is now
+`tower::util::BoxCloneSyncService`, which is `Send + Sync` by construction.
+`CompiledStep` therefore shares through the standard `Arc` auto traits, and
+no unsafe impl is needed. The compile-time guard in `route_compiler.rs` now
+asserts both `CompiledStep: Send` and `CompiledStep: Sync` (change
+`fix-pipeline-syncbox-mutex-convoy`). The Decision, Consequences, and
+Safety sections below stay unchanged as history; they describe the state
+before the type change. `Send`/`Sync` safety is now proven by the compiler.
+The `INVARIANT` rule (no interior mutability) is not what the compiler
+proves. Types with interior mutability such as `Mutex` are still `Sync`.
+
 ## Context
 `SequentialPipeline` and `TracedPipeline` held `Vec<CompiledStep>` and cloned
 the entire Vec (including all boxed services) per Exchange in `call()`. Each

@@ -37,7 +37,7 @@ impl Service<Exchange> for EnrichService {
     }
 
     fn call(&mut self, original: Exchange) -> Self::Future {
-        // BoxProcessor is BoxCloneService — clone for the async block.
+        // BoxProcessor is BoxCloneSyncService — clone for the async block.
         let producer = self.producer.clone();
         let strategy = Arc::clone(&self.strategy);
         Box::pin(async move {

@@ -36,7 +36,7 @@ use convert::{json_to_protobuf, protobuf_to_json};
 
 type ProducerFuture = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 type AcquireFut =
-    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>>;
+    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>>;
 
 /// Default max concurrent gRPC calls per producer instance.
 const DEFAULT_CONCURRENCY: usize = 128;

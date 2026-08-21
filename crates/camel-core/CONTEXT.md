@@ -103,7 +103,7 @@ _Avoid_: metadata collection, metadata extraction
 ## Compiled Step Variants
 
 **Process**:
-The most common variant — wraps a `BoxProcessor` (a Tower `BoxCloneService<Exchange, Exchange, CamelError>`). Used for all non-structural EIP steps (setBody, log, marshal, etc.).
+The most common variant — wraps a `BoxProcessor` (a Tower `BoxCloneSyncService<Exchange, Exchange, CamelError>`). Used for all non-structural EIP steps (setBody, log, marshal, etc.).
 
 **Stop**:
 Terminates route processing successfully. `run_steps` converts it to `PipelineOutcome::Stopped(ex)` without invoking any Tower service. The exchange state is preserved as-is; the reply channel sees `Ok(ex)` (indistinguishable from Completed).

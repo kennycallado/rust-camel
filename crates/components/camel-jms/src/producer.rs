@@ -21,7 +21,7 @@ const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
 
 /// Pinned future for acquiring an owned semaphore permit.
 type AcquirePermitFut =
-    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>;
 
 // JMS-004 [resource-leak]: Exchange is NOT cloned. It is passed by value (moved)
 // through LazyJmsProducer::call → JmsProducer::call → async block → returned.

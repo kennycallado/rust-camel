@@ -31,7 +31,7 @@ fn is_transport_error(status: &tonic::Status) -> bool {
 }
 
 type AcquireFuture =
-    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>;
 
 pub struct CxfProducer {
     pool: Arc<CxfBridgePool>,

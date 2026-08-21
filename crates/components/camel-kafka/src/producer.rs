@@ -18,7 +18,7 @@ use crate::broker_config::apply_rdkafka_config;
 use crate::config::{ResolvedKafkaEndpointConfig, apply_security_config};
 
 type AcquireFut =
-    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>>;
+    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>>;
 pub struct KafkaProducer {
     config: ResolvedKafkaEndpointConfig,
     producer: Arc<FutureProducer>,

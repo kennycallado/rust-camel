@@ -1308,11 +1308,11 @@ mod cancellation_tests {
 
 /// Documents that SharedSnapshot is Send + Sync.
 ///
-/// This is a runtime assertion that the `unsafe impl Send + Sync` is in
-/// effect. It does NOT mechanically verify that `CompiledStep` remains
-/// free of `UnsafeCell` — that requires manual review. The compile-time
-/// guard in the parent module asserts `CompiledStep: Send` as a partial
-/// check; `Sync` has no equivalent guard and must be verified manually.
+/// `CompiledStep` is `Send + Sync` by construction: `BoxProcessor` is
+/// `BoxCloneSyncService`, so the standard `Arc` auto traits hold without
+/// unsafe impls. The compile-time guard in the parent module asserts both
+/// `CompiledStep: Send` and `CompiledStep: Sync`. This test pins the same
+/// fact at the `SharedSnapshot` level.
 #[test]
 fn shared_snapshot_is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}

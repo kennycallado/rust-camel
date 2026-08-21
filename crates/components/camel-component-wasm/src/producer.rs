@@ -35,7 +35,8 @@ pub(crate) fn is_streaming(body: &Body) -> bool {
 pub(crate) const DEFAULT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Standalone runtime init — takes owned Arcs so the resulting future is `Send`
-/// without requiring `WasmProducer: Sync`.
+/// without borrowing the producer. `WasmProducer: Sync` is now required: the
+/// acquire box carries `+ Sync`, and the producer is boxed as `BoxCloneSyncService`.
 async fn ensure_runtime_fn(
     module_path: PathBuf,
     config: crate::config::WasmConfig,
@@ -70,7 +71,7 @@ use crate::runtime::WasmRuntime;
 use crate::serde_bridge::wasm_to_exchange;
 
 type AcquireFut =
-    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>>;
+    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>>;
 
 pub struct WasmProducer {
     module_path: PathBuf,
@@ -191,9 +192,8 @@ impl Service<Exchange> for WasmProducer {
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let permit = self.pending_permit.take();
-        // Extract owned fields before entering the async block to avoid
-        // borrowing &self / &this across an await (which would require
-        // WasmProducer: Sync, violated by the dyn Future in acquire_fut).
+        // Extract owned fields before entering the async block: the boxed
+        // future is 'static, so it must not borrow `&self` across an await.
         let module_path = self.module_path.clone();
         let config = self.config.clone();
         let registry = Arc::clone(&self.registry);

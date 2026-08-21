@@ -112,7 +112,7 @@ this change.
 A partially-built route can be cloned and reused as a template for multiple routes,
 mirroring Apache Camel's cloneable `RouteBuilder` (ADR-0046 inspiration). Clone deep-copies
 the `Vec<BuilderStep>`; step closures already live behind `Arc` (`FilterPredicate`,
-`SplitExpression`) or `BoxCloneService` (`OpaqueProcessor`), so a clone shares the closure and
+`SplitExpression`) or `BoxProcessor` (`OpaqueProcessor`), so a clone shares the closure and
 duplicates only the light wrapper. The capability was landed pre-1.0 specifically to avoid
 `#[non_exhaustive]`-plus-non-`Clone` entrenchment on the camel-core `BuilderStep` enum (ADR-0049).
 

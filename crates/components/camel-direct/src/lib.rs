@@ -34,7 +34,7 @@ use tracing::{debug, error, info, warn};
 type DirectSender = mpsc::Sender<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>;
 type DirectRegistry = Arc<Mutex<HashMap<String, DirectSender>>>;
 type AcquirePermitFut =
-    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>;
 
 // ---------------------------------------------------------------------------
 // Validation helpers

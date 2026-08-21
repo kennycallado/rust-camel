@@ -21,7 +21,10 @@ use std::pin::Pin;
 /// `MulticastSegment`, `LoadBalanceSegment`, plus `BodyCoercingSegment` wrapper.
 ///
 /// See ADR-0025 for full design rationale.
-pub trait OutcomePipeline: Send + 'static {
+///
+/// `Sync` required so `CompiledStep::Segment` is `Sync` by construction; all
+/// in-tree implementors already satisfy it.
+pub trait OutcomePipeline: Send + Sync + 'static {
     /// Clone the segment into a new boxed instance. Required because
     /// `Box<dyn OutcomePipeline>` cannot directly derive `Clone`.
     fn clone_box(&self) -> Box<dyn OutcomePipeline>;

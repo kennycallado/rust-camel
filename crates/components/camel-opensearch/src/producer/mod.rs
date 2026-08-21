@@ -58,7 +58,7 @@ pub struct OpenSearchProducer {
 
 const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
 type AcquirePermitFut =
-    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>;
 
 impl Clone for OpenSearchProducer {
     fn clone(&self) -> Self {

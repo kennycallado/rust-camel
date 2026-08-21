@@ -320,7 +320,7 @@ fn domain_has_no_tower_or_framework_types() {
     collect_rust_files(&root, &mut files);
 
     // `BoxProcessor` is the contract-level type alias for a Tower
-    // `BoxCloneService<Exchange, Exchange, CamelError>` re-exported by
+    // `BoxCloneSyncService<Exchange, Exchange, CamelError>` re-exported by
     // `camel_api`. Domain value objects (`CompiledPipeline`) are allowed to
     // hold it as a field because it is the canonical exchange-processor
     // contract, not a framework-integration point. The direct tower usage

@@ -62,8 +62,9 @@ _Avoid_: handler, middleware, transformer, step (Step is a DSL/compiled concept,
 
 **BoxProcessor**:
 The runtime-erased processor type alias:
-`tower::util::BoxCloneService<Exchange, Exchange, CamelError>`. The composable unit a Pipeline is
-built from. `SyncBoxProcessor` wraps it for `Sync` contexts.
+`tower::util::BoxCloneSyncService<Exchange, Exchange, CamelError>`. The composable unit a Pipeline is
+built from. The erased service is `Send + Sync` by construction; a clone is a lock-free virtual
+`clone_box()` call. `SyncBoxProcessor` remains as a vestigial newtype pending a separate collapse.
 _Avoid_: boxed service, dyn processor
 
 **PipelineOutcome**:

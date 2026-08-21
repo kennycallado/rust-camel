@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -44,12 +44,16 @@ impl Service<Exchange> for IdentityProcessor {
 /// A type-erased, cloneable processor. This is the main runtime representation
 /// of a processor pipeline — a composed chain of Tower Services erased to a
 /// single boxed type.
-pub type BoxProcessor = tower::util::BoxCloneService<Exchange, Exchange, CamelError>;
+///
+/// The erased type is `Send + Sync`, so pipeline snapshots can be shared
+/// between threads directly. Cloning is a lock-free virtual `clone_box()`
+/// call on the inner trait object.
+pub type BoxProcessor = tower::util::BoxCloneSyncService<Exchange, Exchange, CamelError>;
 
 /// Opaque newtype around [`BoxProcessor`] for `Debug` redaction.
 ///
-/// `BoxProcessor` is a type alias for Tower's `BoxCloneService`, which doesn't
-/// have a useful `Debug` impl. This newtype lets the rest of the codebase use
+/// `BoxProcessor` is a type alias for Tower's `BoxCloneSyncService`, which
+/// doesn't have a useful `Debug` impl. This newtype lets the rest of the codebase use
 /// `#[derive(Debug)]` on data structures that hold processors while keeping
 /// the `Debug` output bounded. Use `op.0` to get the inner `BoxProcessor`
 /// for invocation or further wrapping.
@@ -66,22 +70,25 @@ impl std::fmt::Debug for OpaqueProcessor {
     }
 }
 
-/// Thread-safe wrapper for [`BoxProcessor`].
+/// Shareable wrapper for [`BoxProcessor`].
 ///
-/// `BoxProcessor` (`BoxCloneService`) is `Send` but not `Sync` because the
-/// inner `Box<dyn CloneServiceInner>` lacks a `Sync` bound. This wrapper
-/// stores the processor behind `Arc<Mutex<...>>`, providing safe `Send+Sync`
-/// access. The Mutex is only held briefly during `clone()` — each caller
-/// gets an independent `BoxProcessor` copy.
-pub struct SyncBoxProcessor(Arc<Mutex<BoxProcessor>>);
+/// `BoxProcessor` (`BoxCloneSyncService`) is `Send + Sync`, so this wrapper
+/// needs no mutex: it holds the processor directly and `clone_inner()` is a
+/// lock-free virtual `clone_box()` call, giving each caller an independent
+/// `BoxProcessor` copy.
+///
+/// Vestigial wrapper: with the `Send + Sync` erased type the newtype adds no
+/// safety anymore. Collapsing it into a plain `BoxProcessor` alias is a
+/// separate follow-up, not this change.
+pub struct SyncBoxProcessor(BoxProcessor);
 
 impl SyncBoxProcessor {
     pub fn new(processor: BoxProcessor) -> Self {
-        SyncBoxProcessor(Arc::new(Mutex::new(processor)))
+        SyncBoxProcessor(processor)
     }
 
     pub fn clone_inner(&self) -> BoxProcessor {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.0.clone()
     }
 }
 
@@ -91,10 +98,20 @@ impl Clone for SyncBoxProcessor {
     }
 }
 
+// Regression lock: the erased pipeline type must stay `Sync` so no wrapper
+// mutex is ever needed to share pipeline snapshots between threads.
+#[allow(dead_code)]
+const _: () = {
+    fn is_sync<T: Sync>() {}
+    fn _check() {
+        is_sync::<BoxProcessor>();
+    }
+};
+
 /// Extension trait for [`BoxProcessor`] providing ergonomic constructors.
 ///
-/// Since `BoxProcessor` is a type alias for Tower's `BoxCloneService`, we cannot
-/// add inherent methods to it. This trait fills that gap.
+/// Since `BoxProcessor` is a type alias for Tower's `BoxCloneSyncService`, we
+/// cannot add inherent methods to it. This trait fills that gap.
 ///
 /// # Example
 ///
@@ -242,7 +259,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_box_processor_from_identity() {
-        let processor: BoxProcessor = tower::util::BoxCloneService::new(IdentityProcessor);
+        let processor: BoxProcessor = BoxProcessor::new(IdentityProcessor);
 
         let exchange = Exchange::new(Message::new("boxed"));
         let result = processor.oneshot(exchange).await.unwrap();
@@ -252,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn test_box_processor_from_processor_fn() {
         let processor: BoxProcessor =
-            tower::util::BoxCloneService::new(ProcessorFn::new(|mut ex: Exchange| async move {
+            BoxProcessor::new(ProcessorFn::new(|mut ex: Exchange| async move {
                 ex.input.body = crate::body::Body::Text("via_box".into());
                 Ok(ex)
             }));
