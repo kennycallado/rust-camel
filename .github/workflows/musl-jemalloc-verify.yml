@@ -75,13 +75,16 @@ jobs:
       # (aarch64-linux => 64K, x86_64 => 4K). This asserts the compiled page
       # size actually baked into the binary — the 0.6 cross-compile bug baked
       # the build host's 4K, which aborts at startup on 64K aarch64 kernels
-      # (RHEL 9 family). MALLOC_CONF=stats_print makes the allocator dump its
-      # config to stderr at exit; the dump includes "Page size: <n>".
+      # (RHEL 9 family). stats_print makes the allocator dump its config to
+      # stderr at exit; the dump includes "Page size: <n>". NOTE: on musl,
+      # tikv-jemalloc-sys builds jemalloc with the _rjem_ symbol prefix, so
+      # the envvar it reads is _RJEM_MALLOC_CONF — the bare MALLOC_CONF is
+      # silently ignored there. Set both; glibc builds read the bare name.
       - name: Assert compiled page size
         if: matrix.use-cross == false
         run: |
           BIN="target/${{ matrix.target }}/release/camel"
-          OUT=$(MALLOC_CONF=stats_print:true "$BIN" --version 2>&1 || true)
+          OUT=$(env MALLOC_CONF=stats_print:true _RJEM_MALLOC_CONF=stats_print:true "$BIN" --version 2>&1 || true)
           echo "$OUT" | grep -E "Page size: +${{ matrix.expected-page-size }}" \
             || { echo "FAIL: expected page size ${{ matrix.expected-page-size }} not found in allocator stats"; echo "$OUT"; exit 1; }
           echo "OK: compiled page size is ${{ matrix.expected-page-size }}"
