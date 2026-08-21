@@ -31,6 +31,30 @@ camel-component-mock = "*"
 mock:name
 ```
 
+URI parameters are optional. When a parameter is absent, the endpoint uses the
+corresponding value from [`MockConfig`].
+
+| Parameter | Type | Default | Semantics |
+|-----------|------|---------|-----------|
+| `retain` | integer >= 1 | `MockConfig::max_retained` | Maximum number of exchanges retained; the value must be at least 1. |
+| `copy` | boolean | `MockConfig::copy_on_exchange` | Controls deep-copy handling for the recorded exchange body. |
+| `failFast` | boolean | `MockConfig::fail_fast` | Rejects new exchanges after an assertion mismatch trips the fail-fast latch. |
+| `expectedCount` | non-negative integer | No expectation | Registers an exact count expectation on first creation. It is assertion-time only and never rejects live traffic. |
+| `anyOrder` | boolean | `MockConfig::any_order` | Matches expected bodies without requiring their configured order. |
+
+### Count expectations
+
+Use `expect_count` for an exact retained-exchange count or
+`expect_minimum_count` for a lower bound. `try_assert_satisfied` returns the
+assertion error instead of panicking:
+
+```rust
+endpoint.expect_count(2);
+endpoint.expect_minimum_count(1);
+// ... send exchanges ...
+endpoint.try_assert_satisfied().await?;
+```
+
 ## Usage
 
 ### Basic Testing

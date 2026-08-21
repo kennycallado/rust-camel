@@ -23,8 +23,18 @@
 //! // inner.assert_exchange_count(1).await;
 //! // inner.exchange(0).assert_body_text("hello");
 //! ```
+//!
+//! # `expectedCount` is inert in the live runtime path
+//!
+//! The `expectedCount` URI parameter records intent only: at first
+//! endpoint creation it registers an exact count expectation on the
+//! endpoint inner. It is enforced only when an explicit assertion method
+//! runs (`assert_satisfied` / `try_assert_satisfied`), never by the live
+//! producer — `poll_ready` and `call` do not consult it. Under
+//! `camel run`, where no test caller invokes assertions, `expectedCount`
+//! never rejects or drops traffic.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -87,8 +97,20 @@ pub struct MockConfig {
 
 /// Private container for macro-derived `metadata()`.
 ///
-/// Mock has zero real URI params — empty `uri_options` is legitimate.
-/// This inner struct exists solely to anchor the metadata derivation.
+/// Declares the five optional URI parameters (`retain`, `copy`,
+/// `failFast`, `expectedCount`, `anyOrder`) for the generated catalog.
+/// `create_endpoint` parses them manually (controlbus pattern), so the
+/// fields exist only to anchor the metadata derivation — the catalog
+/// parity test locks descriptor ↔ parser agreement.
+///
+/// Inertness contract: `expectedCount` records an exact count
+/// expectation at first endpoint creation; it is enforced only when an
+/// explicit assertion method runs (`assert_satisfied` /
+/// `try_assert_satisfied`), never by the live producer. Under
+/// `camel run` it never rejects or drops traffic. `copy` has no positive
+/// behavioral contrast (both producer branches clone identically) — its
+/// URI parsing is proven by malformed-value rejection and catalog
+/// parity.
 #[derive(Debug, Clone, UriConfig)]
 #[allow(dead_code)]
 #[uri_scheme = "mock"]
@@ -102,8 +124,20 @@ pub struct MockConfig {
     crate = "camel_component_api"
 )]
 struct MockUriConfig {
-    #[allow(dead_code)]
-    _name: String,
+    #[uri_param(name = "retain")]
+    pub _retain: String,
+
+    #[uri_param(name = "copy")]
+    pub _copy: String,
+
+    #[uri_param(name = "failFast")]
+    pub _fail_fast: String,
+
+    #[uri_param(name = "expectedCount")]
+    pub _expected_count: String,
+
+    #[uri_param(name = "anyOrder")]
+    pub _any_order: String,
 }
 
 impl Default for MockConfig {
@@ -138,48 +172,11 @@ impl MockConfig {
 // MockExpectations
 // ---------------------------------------------------------------------------
 
-/// Expectations set on a mock endpoint for batch-style assertion.
-///
-/// Use [`MockEndpointInner::expect_body`] and
-/// [`MockEndpointInner::expect_header`] to populate expectations, then call
-/// [`MockEndpointInner::assert_satisfied`] after exchanges have been received.
-pub struct MockExpectations {
-    expected_bodies: Vec<camel_component_api::Body>,
-    expected_headers: Vec<(String, serde_json::Value)>,
-    expected_header_regexes: Vec<(String, String)>,
-}
+mod assert;
+mod expectations;
 
-impl Default for MockExpectations {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MockExpectations {
-    /// Create an empty set of expectations.
-    pub fn new() -> Self {
-        Self {
-            expected_bodies: Vec::new(),
-            expected_headers: Vec::new(),
-            expected_header_regexes: Vec::new(),
-        }
-    }
-
-    /// Add an expected body value.
-    pub fn push_body(&mut self, body: camel_component_api::Body) {
-        self.expected_bodies.push(body);
-    }
-
-    /// Add an expected header key-value pair.
-    pub fn push_header(&mut self, key: String, value: serde_json::Value) {
-        self.expected_headers.push((key, value));
-    }
-
-    /// Add an expected header regex pattern.
-    pub fn push_header_regex(&mut self, key: String, pattern: String) {
-        self.expected_header_regexes.push((key, pattern));
-    }
-}
+pub use assert::MockAssertionError;
+pub use expectations::MockExpectations;
 
 // ---------------------------------------------------------------------------
 // MockComponent
@@ -189,10 +186,15 @@ impl MockExpectations {
 /// receives via its producer.  It exposes helpers to inspect and assert on
 /// the recorded exchanges.
 ///
-/// URI format: `mock:name`
+/// URI format: `mock:name[?retain=N&copy=true|false&failFast=true|false&expectedCount=N&anyOrder=true|false]`
+///
+/// URI params override the component-level [`MockConfig`] fields; absent
+/// params fall back to them. All params are optional.
 ///
 /// When `create_endpoint` is called multiple times with the same name, the
-/// returned endpoints share the same received-exchanges storage. This enables
+/// returned endpoints share the same received-exchanges storage and the
+/// first creation's configuration wins — later calls with different params
+/// do not reconfigure the existing endpoint. This enables
 /// test assertions: create mock, register it, run routes, then inspect via
 /// `component.get_endpoint("name")`.
 #[derive(Clone)]
@@ -232,6 +234,27 @@ impl Default for MockComponent {
     }
 }
 
+/// Parse a non-negative integer URI parameter value.
+fn parse_usize_param(uri_value: &str, name: &str) -> Result<usize, CamelError> {
+    uri_value.parse::<usize>().map_err(|_| {
+        CamelError::EndpointCreationFailed(format!(
+            "mock: invalid value for URI parameter '{name}': '{uri_value}' is not a non-negative integer"
+        ))
+    })
+}
+
+/// Parse a strict boolean URI parameter value (`true`/`false`,
+/// case-insensitive).
+fn parse_bool_param(uri_value: &str, name: &str) -> Result<bool, CamelError> {
+    match uri_value.to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(CamelError::EndpointCreationFailed(format!(
+            "mock: invalid value for URI parameter '{name}': '{uri_value}' is not a boolean (true|false)"
+        ))),
+    }
+}
+
 impl Component for MockComponent {
     fn scheme(&self) -> &str {
         "mock"
@@ -260,18 +283,52 @@ impl Component for MockComponent {
                 "mock endpoint name must be non-empty (use 'mock:<name>')".to_string(),
             ));
         }
+
+        // URI params override component config; absent params fall back to it.
+        // Resolved before the registry lock — malformed values fail creation
+        // without touching shared state.
+        let max_retained = match parts.params.get("retain") {
+            Some(v) => {
+                let n = parse_usize_param(v, "retain")?;
+                if n == 0 {
+                    return Err(CamelError::EndpointCreationFailed(
+                        "mock: URI parameter 'retain' must be >= 1, got 0".to_string(),
+                    ));
+                }
+                n
+            }
+            None => self.config.max_retained,
+        };
+        let copy_on_exchange = match parts.params.get("copy") {
+            Some(v) => parse_bool_param(v, "copy")?,
+            None => self.config.copy_on_exchange,
+        };
+        let fail_fast = match parts.params.get("failFast") {
+            Some(v) => parse_bool_param(v, "failFast")?,
+            None => self.config.fail_fast,
+        };
+        let any_order = match parts.params.get("anyOrder") {
+            Some(v) => parse_bool_param(v, "anyOrder")?,
+            None => self.config.any_order,
+        };
+        // Inert at creation time: resolved here, bound to a fresh inner
+        // below, enforced only by the explicit assertion methods.
+        let expected_count = match parts.params.get("expectedCount") {
+            Some(v) => Some(parse_usize_param(v, "expectedCount")?),
+            None => None,
+        };
+
         let mut registry = self.registry.lock().map_err(|e| {
             CamelError::EndpointCreationFailed(format!("mock registry lock poisoned: {e}"))
         })?;
-        let max_retained = self.config.max_retained;
-        let copy_on_exchange = self.config.copy_on_exchange;
-        let fail_fast = self.config.fail_fast;
         let assert_period_ms = self.config.assert_period_ms;
-        let any_order = self.config.any_order;
-        let inner = registry
-            .entry(name.clone())
-            .or_insert_with(|| {
-                Arc::new(MockEndpointInner {
+        // First-creation-wins: an existing entry is returned unchanged, so
+        // conflicting params on a re-created name never reconfigure the
+        // inner. `fresh` marks a newly created inner — the only one a
+        // URI-registered expectedCount may bind to.
+        let (inner, fresh) = match registry.entry(name.clone()) {
+            Entry::Vacant(vacant) => {
+                let created = vacant.insert(Arc::new(MockEndpointInner {
                     uri: uri.to_string(),
                     name,
                     received: Arc::new(Mutex::new(VecDeque::new())),
@@ -283,9 +340,19 @@ impl Component for MockComponent {
                     assert_period_ms,
                     any_order,
                     expectations: Arc::new(std::sync::Mutex::new(MockExpectations::new())),
-                })
-            })
-            .clone();
+                }));
+                (Arc::clone(created), true)
+            }
+            Entry::Occupied(occupied) => (Arc::clone(occupied.get()), false),
+        };
+
+        // expectedCount records intent only. It binds at first creation and
+        // is enforced exclusively by the assertion methods
+        // (`assert_satisfied` / `try_assert_satisfied`); the producer never
+        // consults it.
+        if fresh && let Some(n) = expected_count {
+            inner.expect_count(n);
+        }
 
         debug!(endpoint_name = %inner.name, "mock endpoint created");
         Ok(Box::new(MockEndpoint(inner)))
@@ -310,7 +377,7 @@ pub struct MockEndpoint(Arc<MockEndpointInner>);
 /// recorded exchanges in tests.
 pub struct MockEndpointInner {
     uri: String,
-    pub name: String,
+    pub(crate) name: String,
     received: Arc<Mutex<VecDeque<Exchange>>>,
     notify: Arc<Notify>,
     max_retained: usize,
@@ -318,8 +385,8 @@ pub struct MockEndpointInner {
     fail_fast: bool,
     fail_fast_error: Arc<std::sync::Mutex<Option<CamelError>>>,
     assert_period_ms: u64,
-    any_order: bool,
-    expectations: Arc<std::sync::Mutex<MockExpectations>>,
+    pub(crate) any_order: bool,
+    pub(crate) expectations: Arc<std::sync::Mutex<MockExpectations>>,
 }
 
 impl MockEndpointInner {
@@ -413,13 +480,20 @@ impl MockEndpointInner {
     /// Panics if `idx` is out of bounds. Always call [`await_exchanges`] first
     /// to ensure the exchange has been received.
     ///
-    /// Panics if called from a single-threaded tokio runtime. Use
-    /// `#[tokio::test(flavor = "multi_thread")]` for tests that call this method.
+    /// Panics immediately if called from a current-thread tokio runtime.
+    /// Use `#[tokio::test(flavor = "multi_thread")]` or the async accessors
+    /// [`get_received_exchanges`] / [`await_exchanges`] instead.
     ///
     /// [`await_exchanges`]: MockEndpointInner::await_exchanges
-    // NOTE: requires multi-threaded Tokio runtime (current_thread will deadlock)
-    // due to `block_in_place` used for blocking_lock.
     pub fn exchange(&self, idx: usize) -> ExchangeAssert {
+        if let Ok(handle) = tokio::runtime::Handle::try_current()
+            && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+        {
+            panic!(
+                "MockEndpoint '{}': exchange(idx) cannot be used from a current-thread tokio runtime; use #[tokio::test(flavor = \"multi_thread\")] or the async accessors get_received_exchanges()/await_exchanges()",
+                self.name
+            );
+        }
         let received = tokio::task::block_in_place(|| self.received.blocking_lock());
         if idx >= received.len() {
             panic!(
@@ -433,6 +507,22 @@ impl MockEndpointInner {
             exchange: received[idx].clone(),
             idx,
             endpoint_name: self.name.clone(),
+        }
+    }
+
+    /// Set an exact count expectation: `assert_satisfied` panics unless the
+    /// number of retained exchanges equals `n`.
+    pub fn expect_count(&self, n: usize) {
+        if let Ok(mut guard) = self.expectations.lock() {
+            guard.set_expected_count(n);
+        }
+    }
+
+    /// Set a minimum count expectation: `assert_satisfied` panics unless at
+    /// least `n` exchanges are retained.
+    pub fn expect_minimum_count(&self, n: usize) {
+        if let Ok(mut guard) = self.expectations.lock() {
+            guard.set_minimum_count(n);
         }
     }
 
@@ -464,102 +554,33 @@ impl MockEndpointInner {
     ///
     /// # Panics
     ///
-    /// Panics if expected bodies do not match received bodies (in order or any
-    /// order depending on `any_order` config), if expected headers are missing,
-    /// or if header regex patterns do not match.
+    /// Panics if an expected exchange count (exact or minimum, see
+    /// [`expect_count`](Self::expect_count) and
+    /// [`expect_minimum_count`](Self::expect_minimum_count)) is not met, if
+    /// expected bodies do not match received bodies (in order or any order
+    /// depending on `any_order` config), if expected headers are missing, or
+    /// if header regex patterns do not match.
     pub async fn assert_satisfied(&self) {
-        let received = self.get_received_exchanges().await;
-
-        // Check expected bodies
-        {
-            let guard = self
-                .expectations
-                .lock()
-                .expect("expectations lock poisoned"); // allow-unwrap
-            if !guard.expected_bodies.is_empty() {
-                let received_bodies: Vec<_> = received.iter().map(|e| &e.input.body).collect();
-                if guard.expected_bodies.len() != received_bodies.len() {
-                    self.set_fail_fast_on_mismatch();
-                    panic!(
-                        "MockEndpoint '{}': expected {} bodies, got {}",
-                        self.name,
-                        guard.expected_bodies.len(),
-                        received_bodies.len()
-                    );
-                }
-                if self.any_order {
-                    // Match in any order — each expected body must appear exactly once
-                    let mut unmatched: Vec<_> = received_bodies.iter().collect();
-                    for expected in &guard.expected_bodies {
-                        let idx = unmatched
-                            .iter()
-                            .position(|actual| body_eq(expected, actual));
-                        match idx {
-                            Some(i) => {
-                                unmatched.remove(i);
-                            }
-                            None => {
-                                self.set_fail_fast_on_mismatch();
-                                panic!(
-                                    "MockEndpoint '{}': expected body {:?} not found in received exchanges (anyOrder mode)",
-                                    self.name, expected
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    for (i, expected) in guard.expected_bodies.iter().enumerate() {
-                        if !body_eq(expected, received_bodies[i]) {
-                            self.set_fail_fast_on_mismatch();
-                            panic!(
-                                "MockEndpoint '{}': body[{}] expected {:?}, got {:?}",
-                                self.name, i, expected, received_bodies[i]
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Check expected headers (must all be present on at least one exchange)
-            for (key, value) in &guard.expected_headers {
-                let found = received
-                    .iter()
-                    .any(|ex| ex.input.headers.get(key).is_some_and(|v| v == value));
-                if !found {
-                    self.set_fail_fast_on_mismatch();
-                    panic!(
-                        "MockEndpoint '{}': expected header '{}' = {} not found in any received exchange",
-                        self.name, key, value
-                    );
-                }
-            }
-
-            // Check expected header regexes
-            for (key, pattern) in &guard.expected_header_regexes {
-                let re = regex::Regex::new(pattern).unwrap_or_else(|e| {
-                    panic!(
-                        "MockEndpoint '{}': invalid regex pattern {:?}: {e}",
-                        self.name, pattern
-                    )
-                });
-                let found = received.iter().any(|ex| {
-                    ex.input.headers.get(key).is_some_and(|v| {
-                        let s = match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        re.is_match(&s)
-                    })
-                });
-                if !found {
-                    self.set_fail_fast_on_mismatch();
-                    panic!(
-                        "MockEndpoint '{}': no received exchange has header '{}' matching regex {:?}",
-                        self.name, key, pattern
-                    );
-                }
-            }
+        if let Err(e) = self.evaluate_expectations().await {
+            panic!("{e}");
         }
+    }
+
+    /// Assert that all registered expectations are satisfied without
+    /// panicking.
+    ///
+    /// Performs the same checks as [`assert_satisfied`](Self::assert_satisfied)
+    /// (see it for the full list) and evaluates the same fail-fast latch
+    /// rules, but returns the mismatch as [`MockAssertionError`] instead of
+    /// panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(MockAssertionError)` when any expectation is not met or
+    /// an expectation is malformed (e.g. a header regex pattern that fails
+    /// to compile).
+    pub async fn try_assert_satisfied(&self) -> Result<(), MockAssertionError> {
+        self.evaluate_expectations().await
     }
 
     /// Return the stored fail-fast error, if any.
@@ -586,7 +607,7 @@ impl MockEndpointInner {
     /// `MockProducer::poll_ready` / `call` invocation rejects with the fixed
     /// "fail-fast mode" message instead of being blocked on a panic-orphaned
     /// lock or a stale `None` sentinel.
-    fn set_fail_fast_on_mismatch(&self) {
+    pub(crate) fn set_fail_fast_on_mismatch(&self) {
         if self.fail_fast
             && let Ok(mut guard) = self.fail_fast_error.lock()
         {
@@ -594,18 +615,6 @@ impl MockEndpointInner {
                 "assert_satisfied expectation mismatch".to_string(),
             ));
         }
-    }
-}
-
-/// Compare two `Body` values for equality (used by assert_satisfied).
-fn body_eq(a: &camel_component_api::Body, b: &camel_component_api::Body) -> bool {
-    match (a, b) {
-        (camel_component_api::Body::Empty, camel_component_api::Body::Empty) => true,
-        (camel_component_api::Body::Text(a), camel_component_api::Body::Text(b)) => a == b,
-        (camel_component_api::Body::Json(a), camel_component_api::Body::Json(b)) => a == b,
-        (camel_component_api::Body::Xml(a), camel_component_api::Body::Xml(b)) => a == b,
-        (camel_component_api::Body::Bytes(a), camel_component_api::Body::Bytes(b)) => a == b,
-        _ => false,
     }
 }
 
@@ -1209,6 +1218,76 @@ mod tests {
             .await_exchanges(1, std::time::Duration::from_millis(500))
             .await;
         // Should not panic — index 0 exists.
+        let _assert = inner.exchange(0);
+    }
+
+    #[tokio::test]
+    async fn exchange_current_thread_clear_panic() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:current-thread", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("current-thread").unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("recorded")))
+            .await
+            .unwrap();
+
+        let panic =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.exchange(0))) {
+                Ok(_) => panic!("exchange must panic on a current-thread runtime"),
+                Err(payload) => payload,
+            };
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic payload should be a string");
+        assert!(message.contains("current-thread"), "panic: {message}");
+        assert!(message.contains("multi_thread"), "panic: {message}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exchange_multi_thread_unchanged() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:multi-thread", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("multi-thread").unwrap();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("first")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("second")))
+            .await
+            .unwrap();
+
+        let _assert = inner.exchange(1);
+    }
+
+    #[test]
+    fn exchange_no_runtime_returns_assert() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:no-runtime", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("no-runtime").unwrap();
+        let ctx = test_producer_ctx();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+            producer
+                .call(Exchange::new(Message::new("recorded")))
+                .await
+                .unwrap();
+        });
+        drop(runtime);
+
         let _assert = inner.exchange(0);
     }
 
@@ -2364,6 +2443,754 @@ mod tests {
         assert!(
             inner.fail_fast_error().is_some(),
             "fail_fast_error must be set when fail_fast=true and expected header is missing"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Count expectations: expect_count / expect_minimum_count
+    // (mock-expectation-and-uri-surface)
+    // -----------------------------------------------------------------------
+
+    /// Extract the message from a panic payload caught via `catch_unwind`.
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "<non-string panic payload>".to_string())
+    }
+
+    #[tokio::test]
+    async fn count_exact_mismatch_fails() {
+        use std::panic::AssertUnwindSafe;
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:count-exact-mismatch", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("count-exact-mismatch").unwrap();
+
+        inner.expect_count(3);
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("a")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("b")))
+            .await
+            .unwrap();
+
+        let payload = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await
+            .expect_err("assert_satisfied should panic on exact count mismatch");
+        let msg = panic_message(payload);
+        assert!(
+            msg.contains("count-exact-mismatch"),
+            "message should contain endpoint name, got: {msg}"
+        );
+        assert!(
+            msg.contains("expected 3 exchanges") && msg.contains("got 2"),
+            "message should report expected 3 / got 2, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_exact_satisfied_passes() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:count-exact-pass", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("count-exact-pass").unwrap();
+
+        inner.expect_count(2);
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("one")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("two")))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    async fn count_minimum_satisfied_by_more() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:count-min-more", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("count-min-more").unwrap();
+
+        inner.expect_minimum_count(2);
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        for i in 0..5 {
+            producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    async fn count_minimum_violated_fails() {
+        use std::panic::AssertUnwindSafe;
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:count-min-violated", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("count-min-violated").unwrap();
+
+        inner.expect_minimum_count(4);
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("only-one")))
+            .await
+            .unwrap();
+
+        let payload = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await
+            .expect_err("assert_satisfied should panic on minimum count violation");
+        let msg = panic_message(payload);
+        assert!(
+            msg.contains("at least 4"),
+            "message should state at least 4 exchanges were expected, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_exact_and_minimum_enforced_together() {
+        use std::panic::AssertUnwindSafe;
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:count-both", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("count-both").unwrap();
+
+        inner.expect_count(2);
+        inner.expect_minimum_count(1);
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        for i in 0..3 {
+            producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+
+        let payload = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await
+            .expect_err("assert_satisfied should panic on exact count mismatch");
+        let msg = panic_message(payload);
+        assert!(
+            msg.contains("expected 2 exchanges") && msg.contains("got 3"),
+            "message should report the exact mismatch, got: {msg}"
+        );
+        assert!(
+            !msg.contains("at least"),
+            "exact mismatch must be reported even though the minimum was satisfied, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_checked_before_bodies() {
+        use std::panic::AssertUnwindSafe;
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:count-first", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("count-first").unwrap();
+
+        inner.expect_count(5);
+        inner.expect_body(camel_component_api::Body::Text("x".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("y")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("z")))
+            .await
+            .unwrap();
+
+        let payload = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await
+            .expect_err("assert_satisfied should panic on count mismatch");
+        let msg = panic_message(payload);
+        assert!(
+            msg.contains("expected 5 exchanges") && msg.contains("got 2"),
+            "count mismatch must be reported, got: {msg}"
+        );
+        assert!(
+            !msg.contains("bodies"),
+            "body checks must not run after a count mismatch, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_coexists_with_bodies_pass() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:count-with-bodies", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("count-with-bodies").unwrap();
+
+        inner.expect_count(2);
+        inner.expect_body(camel_component_api::Body::Text("alpha".into()));
+        inner.expect_body(camel_component_api::Body::Text("beta".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("alpha")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("beta")))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    async fn count_evaluates_retained_snapshot_under_truncation() {
+        let component = MockComponent::with_config(MockConfig::new(3));
+        let endpoint = component
+            .create_endpoint("mock:count-truncated", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("count-truncated").unwrap();
+
+        inner.expect_count(3);
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        for i in 0..5 {
+            producer
+                .call(Exchange::new(Message::new(format!("msg-{i}"))))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(inner.received_count().await, 3);
+        inner.assert_satisfied().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-panicking assertion surface: try_assert_satisfied / MockAssertionError
+    // (mock-expectation-and-uri-surface)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn try_assert_satisfied_ok_when_satisfied() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:try-ok", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("try-ok").unwrap();
+
+        inner.expect_count(1);
+        inner.expect_body(camel_component_api::Body::Text("payload".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("payload")))
+            .await
+            .unwrap();
+
+        let result = inner.try_assert_satisfied().await;
+        assert!(result.is_ok(), "expected Ok(()), got: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn try_assert_satisfied_err_with_details() {
+        let component = MockComponent::new();
+        let _endpoint = component
+            .create_endpoint("mock:try-err", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("try-err").unwrap();
+
+        inner.expect_count(2);
+        // Send 0 exchanges — no producer needed.
+
+        // Must return Err, not panic.
+        let err = inner
+            .try_assert_satisfied()
+            .await
+            .expect_err("expected Err on unmet expect_count");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("try-err"),
+            "message should contain endpoint name, got: {msg}"
+        );
+        assert!(
+            msg.contains("expected 2"),
+            "message should contain 'expected 2', got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_assert_satisfied_sets_fail_fast_latch() {
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let _endpoint = component
+            .create_endpoint("mock:try-latch", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("try-latch").unwrap();
+
+        inner.expect_count(2);
+        // Send 0 exchanges — expectation unmet.
+
+        let result = inner.try_assert_satisfied().await;
+        assert!(result.is_err(), "expected Err, got: {result:?}");
+        assert!(
+            inner.fail_fast_error().is_some(),
+            "fail-fast latch must be set on mismatch (parity with assert_satisfied)"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_header_regex_returns_err_not_panic() {
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:try-bad-re", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("try-bad-re").unwrap();
+
+        inner.expect_header_regex("k", "(unclosed");
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("body")))
+            .await
+            .unwrap();
+
+        // Must return Err (no panic) even with fail_fast enabled.
+        let err = inner
+            .try_assert_satisfied()
+            .await
+            .expect_err("invalid regex must produce Err, not a panic");
+        assert!(
+            matches!(err, MockAssertionError::InvalidHeaderPattern { .. }),
+            "expected InvalidHeaderPattern, got: {err:?}"
+        );
+        assert!(
+            inner.fail_fast_error().is_none(),
+            "malformed expectation is a caller programming error — latch must NOT trip"
+        );
+    }
+
+    #[tokio::test]
+    async fn display_equals_panicking_variant_message() {
+        use std::panic::AssertUnwindSafe;
+
+        // Two identically-configured endpoints sharing one name (hence one
+        // inner) so the endpoint-name segment of both messages is equal.
+        let component = MockComponent::new();
+        let _endpoint_a = component
+            .create_endpoint("mock:parity", &NoOpComponentContext)
+            .unwrap();
+        let endpoint_b = component
+            .create_endpoint("mock:parity", &NoOpComponentContext)
+            .unwrap();
+        let inner_a = component.get_endpoint("parity").unwrap();
+        let inner_b = component.get_endpoint("parity").unwrap();
+
+        inner_a.expect_count(3);
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint_b.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("only-one")))
+            .await
+            .unwrap();
+
+        let payload = AssertUnwindSafe(inner_a.assert_satisfied())
+            .catch_unwind()
+            .await
+            .expect_err("assert_satisfied should panic on count mismatch");
+        let panicking = panic_message(payload);
+
+        let display = inner_b
+            .try_assert_satisfied()
+            .await
+            .expect_err("try_assert_satisfied should Err on count mismatch")
+            .to_string();
+
+        assert_eq!(panicking, display);
+    }
+
+    #[tokio::test]
+    async fn no_expected_bodies_with_received_exchanges_still_ok() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:try-no-bodies", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("try-no-bodies").unwrap();
+
+        // No body expectations set — the is_empty gate must skip body checks.
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        for i in 0..3 {
+            producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+
+        let result = inner.try_assert_satisfied().await;
+        assert!(result.is_ok(), "no expectations set, got: {result:?}");
+    }
+
+    // -------------------------------------------------------------------
+    // URI parameter surface (Task 3)
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn uri_retain_override_truncates() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:cap?retain=50", &NoOpComponentContext)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        for i in 0..55 {
+            producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+        let inner = component.get_endpoint("cap").unwrap();
+        assert_eq!(
+            inner.received_count().await,
+            50,
+            "retain=50 must cap stored exchanges at 50 (default 10_000 would retain all 55)"
+        );
+    }
+
+    #[tokio::test]
+    async fn uri_any_order_overrides_matching() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:relaxed?anyOrder=true", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("relaxed").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("a".to_string()));
+        inner.expect_body(camel_component_api::Body::Text("b".to_string()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("b")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("a")))
+            .await
+            .unwrap();
+
+        // Component default is strict order, which would fail on this
+        // out-of-order arrival; anyOrder=true must satisfy.
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    async fn uri_fail_fast_overrides_latching() {
+        use std::panic::AssertUnwindSafe;
+
+        let component = MockComponent::new();
+        let _endpoint = component
+            .create_endpoint("mock:tight?failFast=true", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("tight").unwrap();
+
+        inner.expect_count(1);
+        // Send 0 exchanges — expectation unmet.
+
+        let _payload = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await
+            .expect_err("assert_satisfied should panic on unmet expect_count");
+        assert!(
+            inner.fail_fast_error().is_some(),
+            "failFast=true from URI must latch the mismatch (component default false leaves None)"
+        );
+    }
+
+    #[tokio::test]
+    async fn uri_absent_params_fallback_to_config() {
+        use std::panic::AssertUnwindSafe;
+
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let _endpoint = component
+            .create_endpoint("mock:audit", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("audit").unwrap();
+
+        inner.expect_count(1);
+        // Send 0 exchanges — expectation unmet.
+
+        let _payload = AssertUnwindSafe(inner.assert_satisfied())
+            .catch_unwind()
+            .await
+            .expect_err("assert_satisfied should panic on unmet expect_count");
+        assert!(
+            inner.fail_fast_error().is_some(),
+            "component-level fail_fast=true must apply when the URI param is absent"
+        );
+
+        // A no-param endpoint with no expectations and nothing sent satisfies;
+        // no default count expectation may be registered.
+        let _fresh = component
+            .create_endpoint("mock:audit-fresh", &NoOpComponentContext)
+            .unwrap();
+        let fresh = component.get_endpoint("audit-fresh").unwrap();
+        let result = fresh.try_assert_satisfied().await;
+        assert!(result.is_ok(), "no expectations set, got: {result:?}");
+    }
+
+    #[test]
+    fn uri_malformed_numeric_rejected() {
+        let component = MockComponent::new();
+        let err = component
+            .create_endpoint("mock:x?retain=abc", &NoOpComponentContext)
+            .err()
+            .expect("retain=abc must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("retain"),
+            "message should name 'retain', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn uri_malformed_expected_count_rejected() {
+        let component = MockComponent::new();
+        let err = component
+            .create_endpoint("mock:x?expectedCount=abc", &NoOpComponentContext)
+            .err()
+            .expect("expectedCount=abc must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expectedCount"),
+            "message should name 'expectedCount', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn uri_zero_retain_rejected() {
+        let component = MockComponent::new();
+        let err = component
+            .create_endpoint("mock:x?retain=0", &NoOpComponentContext)
+            .err()
+            .expect("retain=0 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("retain"),
+            "message should name 'retain', got: {msg}"
+        );
+        assert!(
+            msg.contains(">= 1"),
+            "message should state the >= 1 constraint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn uri_malformed_boolean_rejected() {
+        let component = MockComponent::new();
+        let err = component
+            .create_endpoint("mock:x?copy=maybe", &NoOpComponentContext)
+            .err()
+            .expect("copy=maybe must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("copy"),
+            "message should name 'copy', got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn uri_first_creation_wins_on_conflict() {
+        let component = MockComponent::new();
+        let _first = component
+            .create_endpoint("mock:single?retain=5", &NoOpComponentContext)
+            .unwrap();
+        let second = component
+            .create_endpoint("mock:single?retain=100", &NoOpComponentContext)
+            .unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = second.create_producer(rt(), &ctx).unwrap();
+        for i in 0..7 {
+            producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+        let inner = component.get_endpoint("single").unwrap();
+        assert_eq!(
+            inner.received_count().await,
+            5,
+            "first creation's retain=5 must still bind; second creation must not reconfigure"
+        );
+    }
+
+    #[test]
+    fn catalog_parity_five_params() {
+        let meta = MockConfig::metadata();
+        let mut names: Vec<&str> = meta.uri_options.iter().map(|o| o.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["anyOrder", "copy", "expectedCount", "failFast", "retain"],
+            "metadata uri_options names must match parser keys"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // expectedCount wiring + live-traffic inertness (Task 4)
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn expected_count_never_rejects_live_exchanges() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint(
+                "mock:sink?expectedCount=2&failFast=true",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        for i in 0..7 {
+            let result = producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await;
+            assert!(
+                result.is_ok(),
+                "live exchange {i} must not be rejected by expectedCount"
+            );
+        }
+        let inner = component.get_endpoint("sink").unwrap();
+        assert_eq!(inner.received_count().await, 7);
+        assert!(
+            inner.fail_fast_error().is_none(),
+            "expectedCount alone must never trip the fail-fast latch before an assertion runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn expected_count_enforced_only_at_assertion() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:sink?expectedCount=2", &NoOpComponentContext)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        for i in 0..3 {
+            producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+        let inner = component.get_endpoint("sink").unwrap();
+        let result = inner.try_assert_satisfied().await;
+        assert!(
+            result.is_err(),
+            "expectedCount=2 vs 3 received must fail at assertion time, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_assertion_then_applies_normal_fail_fast() {
+        use camel_component_api::CamelError;
+
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint(
+                "mock:sink?expectedCount=2&failFast=true",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        for i in 0..3 {
+            producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+        let inner = component.get_endpoint("sink").unwrap();
+        assert!(
+            inner.try_assert_satisfied().await.is_err(),
+            "2-vs-3 mismatch must Err and trip the fail-fast latch"
+        );
+        let result = producer.call(Exchange::default()).await;
+        match result {
+            Err(CamelError::ProcessorError(msg)) => assert!(
+                msg.contains("fail-fast mode"),
+                "fixed fail-fast message expected, got: {msg}"
+            ),
+            other => panic!("expected ProcessorError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn expected_count_not_reset_on_second_creation() {
+        let component = MockComponent::new();
+        let _first = component
+            .create_endpoint("mock:once", &NoOpComponentContext)
+            .unwrap();
+        let second = component
+            .create_endpoint("mock:once?expectedCount=5", &NoOpComponentContext)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let mut producer = second.create_producer(rt(), &ctx).unwrap();
+        for i in 0..2 {
+            producer
+                .call(Exchange::new(Message::new(format!("m{i}"))))
+                .await
+                .unwrap();
+        }
+        let inner = component.get_endpoint("once").unwrap();
+        let result = inner.try_assert_satisfied().await;
+        assert!(
+            result.is_ok(),
+            "first creation registered no count expectation; second creation must not \
+             reconfigure it, got: {result:?}"
         );
     }
 }
