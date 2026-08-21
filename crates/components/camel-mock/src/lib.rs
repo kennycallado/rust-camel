@@ -103,6 +103,11 @@ pub struct MockConfig {
 /// fields exist only to anchor the metadata derivation — the catalog
 /// parity test locks descriptor ↔ parser agreement.
 ///
+/// The anchors are `Option<String>` so required-inference marks every
+/// param optional: absent params fall back to the component-level
+/// [`MockConfig`] fields (see the README param table), so no static
+/// `default = "..."` literal exists and a bare `mock:name` URI is valid.
+///
 /// Inertness contract: `expectedCount` records an exact count
 /// expectation at first endpoint creation; it is enforced only when an
 /// explicit assertion method runs (`assert_satisfied` /
@@ -125,19 +130,19 @@ pub struct MockConfig {
 )]
 struct MockUriConfig {
     #[uri_param(name = "retain")]
-    pub _retain: String,
+    pub _retain: Option<String>,
 
     #[uri_param(name = "copy")]
-    pub _copy: String,
+    pub _copy: Option<String>,
 
     #[uri_param(name = "failFast")]
-    pub _fail_fast: String,
+    pub _fail_fast: Option<String>,
 
     #[uri_param(name = "expectedCount")]
-    pub _expected_count: String,
+    pub _expected_count: Option<String>,
 
     #[uri_param(name = "anyOrder")]
-    pub _any_order: String,
+    pub _any_order: Option<String>,
 }
 
 impl Default for MockConfig {
@@ -3078,6 +3083,19 @@ mod tests {
             ["anyOrder", "copy", "expectedCount", "failFast", "retain"],
             "metadata uri_options names must match parser keys"
         );
+
+        // All five params are optional: absent params fall back to the
+        // component-level `MockConfig` fields (README param table). A
+        // `required` descriptor would make every bare `mock:name` URI a
+        // lint error (R-URI-known:missing-required-option) — locked by
+        // the corpus gate.
+        for opt in &meta.uri_options {
+            assert!(
+                !opt.required,
+                "{} must be optional (falls back to MockConfig)",
+                opt.name
+            );
+        }
     }
 
     // -------------------------------------------------------------------
