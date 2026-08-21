@@ -85,7 +85,10 @@ camel-component-exec = { workspace = true, optional = true }
 # from the TARGET triple (aarch64-linux gets 64K; x86_64 detects 4K natively).
 # 0.6 baked the build-host page size when cross-compiling, which produces a
 # binary that aborts at startup on 64K-page aarch64 kernels (RHEL 9 family).
-tikv-jemallocator = { version = "0.7", optional = true, default-features = false }
+# "stats" re-enables jemalloc's own default statistics (--enable-stats) so
+# the release verify gate can dump allocator config via MALLOC_CONF=
+# stats_print:true; negligible cost, and rc-vnm8 soak observability wants it.
+tikv-jemallocator = { version = "0.7", optional = true, default-features = false, features = ["stats"] }
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
