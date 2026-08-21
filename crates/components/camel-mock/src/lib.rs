@@ -602,7 +602,11 @@ impl MockEndpointInner {
 
     /// Return the stored fail-fast error, if any.
     pub fn fail_fast_error(&self) -> Option<CamelError> {
-        self.fail_fast_error.lock().ok().and_then(|g| g.clone())
+        let guard = self
+            .fail_fast_error
+            .lock()
+            .expect("fail_fast_error lock poisoned"); // allow-unwrap
+        guard.clone()
     }
 
     /// Manually trip the fail-fast latch.
@@ -3286,5 +3290,63 @@ mod tests {
     fn expect_header_regex_panics_on_poisoned_lock() {
         let inner = poisoned_endpoint("poison-header-regex");
         inner.expect_header_regex("X-Test", "^v");
+    }
+
+    /// Poison the `fail_fast_error` mutex by panicking while holding its guard.
+    fn poison_fail_fast_error(inner: &MockEndpointInner) {
+        let _guard = inner.fail_fast_error.lock().unwrap();
+        panic!("intentional poison");
+    }
+
+    /// Create an endpoint and return its inner, with the `fail_fast_error`
+    /// mutex poisoned.
+    fn poisoned_fail_fast_endpoint(name: &str) -> Arc<MockEndpointInner> {
+        let component = MockComponent::new();
+        component
+            .create_endpoint(&format!("mock:{name}"), &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint(name).unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poison_fail_fast_error(&inner);
+        }));
+        inner
+    }
+
+    #[test]
+    #[should_panic(expected = "fail_fast_error lock poisoned")]
+    fn fail_fast_error_getter_panics_on_poisoned_lock() {
+        let inner = poisoned_fail_fast_endpoint("poison-ff-getter");
+        inner.fail_fast_error();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "fail_fast_error lock poisoned")]
+    async fn reset_panics_on_poisoned_fail_fast_lock() {
+        let inner = poisoned_fail_fast_endpoint("poison-ff-reset");
+        inner.reset().await;
+    }
+
+    #[test]
+    #[should_panic(expected = "fail_fast_error lock poisoned")]
+    fn trigger_fail_fast_panics_on_poisoned_lock() {
+        let inner = poisoned_fail_fast_endpoint("poison-ff-trigger");
+        inner.trigger_fail_fast(CamelError::ProcessorError("boom".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "fail_fast_error lock poisoned")]
+    fn set_fail_fast_on_mismatch_panics_on_poisoned_lock() {
+        let component = MockComponent::new();
+        component
+            .create_endpoint(
+                "mock:poison-ff-mismatch?failFast=true",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+        let inner = component.get_endpoint("poison-ff-mismatch").unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poison_fail_fast_error(&inner);
+        }));
+        inner.set_fail_fast_on_mismatch();
     }
 }
