@@ -410,9 +410,11 @@ impl MockEndpointInner {
     /// Useful between test cases to reuse the same mock endpoint.
     pub async fn reset(&self) {
         self.received.lock().await.clear();
-        if let Ok(mut guard) = self.fail_fast_error.lock() {
-            *guard = None;
-        }
+        let mut guard = self
+            .fail_fast_error
+            .lock()
+            .expect("fail_fast_error lock poisoned"); // allow-unwrap
+        *guard = None;
     }
 
     /// Assert that exactly `expected` exchanges have been received.
@@ -518,31 +520,39 @@ impl MockEndpointInner {
     /// Set an exact count expectation: `assert_satisfied` panics unless the
     /// number of retained exchanges equals `n`.
     pub fn expect_count(&self, n: usize) {
-        if let Ok(mut guard) = self.expectations.lock() {
-            guard.set_expected_count(n);
-        }
+        let mut guard = self
+            .expectations
+            .lock()
+            .expect("expectations lock poisoned"); // allow-unwrap
+        guard.set_expected_count(n);
     }
 
     /// Set a minimum count expectation: `assert_satisfied` panics unless at
     /// least `n` exchanges are retained.
     pub fn expect_minimum_count(&self, n: usize) {
-        if let Ok(mut guard) = self.expectations.lock() {
-            guard.set_minimum_count(n);
-        }
+        let mut guard = self
+            .expectations
+            .lock()
+            .expect("expectations lock poisoned"); // allow-unwrap
+        guard.set_minimum_count(n);
     }
 
     /// Add an expected body to the expectations list.
     pub fn expect_body(&self, body: camel_component_api::Body) {
-        if let Ok(mut guard) = self.expectations.lock() {
-            guard.push_body(body);
-        }
+        let mut guard = self
+            .expectations
+            .lock()
+            .expect("expectations lock poisoned"); // allow-unwrap
+        guard.push_body(body);
     }
 
     /// Add an expected header key-value pair to the expectations list.
     pub fn expect_header(&self, key: &str, value: impl Into<serde_json::Value>) {
-        if let Ok(mut guard) = self.expectations.lock() {
-            guard.push_header(key.to_string(), value.into());
-        }
+        let mut guard = self
+            .expectations
+            .lock()
+            .expect("expectations lock poisoned"); // allow-unwrap
+        guard.push_header(key.to_string(), value.into());
     }
 
     /// Add an expected header regex pattern to the expectations list.
@@ -550,9 +560,11 @@ impl MockEndpointInner {
     /// After `await_exchanges()`, `assert_satisfied()` checks whether any
     /// received exchange has the named header matching the given regex pattern.
     pub fn expect_header_regex(&self, key: &str, pattern: &str) {
-        if let Ok(mut guard) = self.expectations.lock() {
-            guard.push_header_regex(key.to_string(), pattern.to_string());
-        }
+        let mut guard = self
+            .expectations
+            .lock()
+            .expect("expectations lock poisoned"); // allow-unwrap
+        guard.push_header_regex(key.to_string(), pattern.to_string());
     }
 
     /// Assert that all registered expectations are satisfied.
@@ -602,9 +614,11 @@ impl MockEndpointInner {
     /// downstream component wants to short-circuit further processing on this
     /// endpoint.
     pub fn trigger_fail_fast(&self, error: CamelError) {
-        if let Ok(mut guard) = self.fail_fast_error.lock() {
-            *guard = Some(error);
-        }
+        let mut guard = self
+            .fail_fast_error
+            .lock()
+            .expect("fail_fast_error lock poisoned"); // allow-unwrap
+        *guard = Some(error);
     }
 
     /// When `fail_fast` is enabled, record the assertion-mismatch sentinel
@@ -613,9 +627,11 @@ impl MockEndpointInner {
     /// "fail-fast mode" message instead of being blocked on a panic-orphaned
     /// lock or a stale `None` sentinel.
     pub(crate) fn set_fail_fast_on_mismatch(&self) {
-        if self.fail_fast
-            && let Ok(mut guard) = self.fail_fast_error.lock()
-        {
+        if self.fail_fast {
+            let mut guard = self
+                .fail_fast_error
+                .lock()
+                .expect("fail_fast_error lock poisoned"); // allow-unwrap
             *guard = Some(CamelError::ProcessorError(
                 "assert_satisfied expectation mismatch".to_string(),
             ));
@@ -3210,5 +3226,65 @@ mod tests {
             "first creation registered no count expectation; second creation must not \
              reconfigure it, got: {result:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Poisoned-lock policy: expectation setters must panic, not silently no-op
+    // (rc-1t6f)
+    // -----------------------------------------------------------------------
+
+    /// Poison the `expectations` mutex by panicking while holding its guard.
+    fn poison_expectations(inner: &MockEndpointInner) {
+        let _guard = inner.expectations.lock().unwrap();
+        panic!("intentional poison");
+    }
+
+    /// Create an endpoint and return its inner, with the `expectations` mutex
+    /// poisoned.
+    fn poisoned_endpoint(name: &str) -> Arc<MockEndpointInner> {
+        let component = MockComponent::new();
+        component
+            .create_endpoint(&format!("mock:{name}"), &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint(name).unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poison_expectations(&inner);
+        }));
+        inner
+    }
+
+    #[test]
+    #[should_panic(expected = "expectations lock poisoned")]
+    fn expect_count_panics_on_poisoned_lock() {
+        let inner = poisoned_endpoint("poison-count");
+        inner.expect_count(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "expectations lock poisoned")]
+    fn expect_minimum_count_panics_on_poisoned_lock() {
+        let inner = poisoned_endpoint("poison-min");
+        inner.expect_minimum_count(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "expectations lock poisoned")]
+    fn expect_body_panics_on_poisoned_lock() {
+        let inner = poisoned_endpoint("poison-body");
+        inner.expect_body(camel_component_api::Body::Text("hello".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "expectations lock poisoned")]
+    fn expect_header_panics_on_poisoned_lock() {
+        let inner = poisoned_endpoint("poison-header");
+        inner.expect_header("X-Test", "value");
+    }
+
+    #[test]
+    #[should_panic(expected = "expectations lock poisoned")]
+    fn expect_header_regex_panics_on_poisoned_lock() {
+        let inner = poisoned_endpoint("poison-header-regex");
+        inner.expect_header_regex("X-Test", "^v");
     }
 }
