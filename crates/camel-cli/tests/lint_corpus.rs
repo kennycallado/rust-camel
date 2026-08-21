@@ -58,6 +58,11 @@ fn collect(pattern: &str, out: &mut BTreeSet<PathBuf>) {
 /// JSON-Schema payload definitions for the validator component (they carry
 /// top-level `type`/`properties`/`required`), not route definitions, so
 /// linting them as routes would emit spurious R-SCHEMA errors.
+///
+/// `*.test.yaml` files are excluded too: they are `camel test` documents for
+/// the declarative mock testkit (`routeFiles`/`inputs`/`expects` keys), not
+/// route definitions — linting them as routes would emit spurious R-SCHEMA
+/// errors the same way.
 fn discover_corpus() -> Vec<(String, PathBuf)> {
     let root = workspace_root();
     let mut found = BTreeSet::new();
@@ -80,11 +85,16 @@ fn discover_corpus() -> Vec<(String, PathBuf)> {
             .into_owned();
         collect(&pat, &mut found);
     }
-    // Exclude non-route payload schemas (see function doc).
+    // Exclude non-route payload schemas and camel-test documents (see
+    // function doc).
     let excluded = root.join("examples").join("validator").join("schemas");
     found
         .into_iter()
         .filter(|p| !p.starts_with(&excluded))
+        .filter(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+            !matches!(&name, Some(n) if n.ends_with(".test.yaml") || n.ends_with(".test.yml"))
+        })
         .map(|p| {
             let rel = p
                 .strip_prefix(&root)
