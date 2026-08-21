@@ -2,7 +2,7 @@
 description: Stable alias — default balanced implementation worker. Points to the current preferred balanced model.
 mode: subagent
 temperature: 0.1
-model: zai-coding-plan/glm-6-turbo
+model: zai-coding-plan/glm-5-turbo
 tools:
   write: true
   edit: true
