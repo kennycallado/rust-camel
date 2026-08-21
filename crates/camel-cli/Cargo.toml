@@ -81,7 +81,11 @@ camel-component-exec = { workspace = true, optional = true }
 # Global allocator backends (binary-only; library crates must never set one).
 # tikv-jemalloc-sys builds jemalloc from source, so keep default features off
 # (no background_threads_runtime_support) for the leanest musl-friendly build.
-tikv-jemallocator = { version = "0.6", optional = true, default-features = false }
+# Version floor 0.7 (= jemalloc 5.3.1): its configure script derives LG_PAGE
+# from the TARGET triple (aarch64-linux gets 64K; x86_64 detects 4K natively).
+# 0.6 baked the build-host page size when cross-compiling, which produces a
+# binary that aborts at startup on 64K-page aarch64 kernels (RHEL 9 family).
+tikv-jemallocator = { version = "0.7", optional = true, default-features = false }
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
