@@ -12,7 +12,7 @@ RUN apk add --no-cache ca-certificates
 COPY camel-${TARGETARCH} /usr/local/bin/camel
 ENTRYPOINT ["camel"]
 
-FROM gcr.io/distroless/cc-debian12 AS gnu
+FROM gcr.io/distroless/cc-debian13 AS gnu
 ARG TARGETARCH
 COPY camel-${TARGETARCH} /usr/local/bin/camel
 ENTRYPOINT ["camel"]
