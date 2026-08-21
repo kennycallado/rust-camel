@@ -232,16 +232,23 @@ pub async fn run(
         }
     }
 
-    // 3. Determine route patterns
-    let patterns: Vec<String> = if let Some(p) = routes_override {
-        vec![p]
-    } else if !camel_config.routes.is_empty() {
-        camel_config.routes.clone()
-    } else {
-        vec!["routes/*.yaml".to_string()]
-    };
+    // 3. Determine route patterns. The default glob is expanded and filtered
+    //    to exclude test documents (`*.test.yaml` / `*.test.yml`); explicit
+    //    `--routes` overrides and Camel.toml `routes` entries pass through
+    //    untouched. Watch-directory derivation uses the raw, unexpanded
+    //    patterns so an initially-empty routes dir still yields a watched root.
+    let config_routes = Some(camel_config.routes.clone());
+    let patterns: Vec<String> = resolve_route_patterns(&routes_override, &config_routes);
+    let raw_patterns: Vec<String> = raw_route_patterns(&routes_override, &config_routes);
 
-    tracing::info!("camel-cli: loading routes from patterns: {:?}", patterns);
+    // Log the RAW, unexpanded patterns: on the default path the expanded
+    // list is empty when no `routes/` dir exists, which would hide which
+    // glob was used (bd rc-1110 operator diagnosis). Config and override
+    // paths are verbatim in both lists, so this is behavior-identical there.
+    tracing::info!(
+        "camel-cli: loading routes from patterns: {:?}",
+        raw_patterns
+    );
 
     let security_compile_context = crate::security::build_security_compile_context_from_config(
         &camel_config,
@@ -457,10 +464,13 @@ pub async fn run(
     ) {
         Ok(defs) => {
             if defs.is_empty() {
+                // Name the RAW patterns: the expanded list is empty on the
+                // default path when `routes/` is missing, which would hide
+                // the glob the operator needs to diagnose (bd rc-1110).
                 tracing::warn!(
                     "route discovery matched zero route files for patterns {:?}; \
                      starting with no routes",
-                    patterns
+                    raw_patterns
                 );
             }
             // Conditionally register ExecBundle: only when a discovered route
@@ -520,19 +530,29 @@ pub async fn run(
     let watcher_shutdown = CancellationToken::new();
     if watch_enabled {
         let ctrl = ctx.runtime_execution_handle();
-        let watch_patterns = patterns.clone();
+        let watch_routes_override = routes_override.clone();
+        let watch_config_routes = config_routes.clone();
+        let watch_raw_patterns = raw_patterns.clone();
         let watch_security_compile_context = security_compile_context.clone();
         let drain_timeout = std::time::Duration::from_millis(camel_config.drain_timeout_ms);
         let debounce = std::time::Duration::from_millis(camel_config.watch_debounce_ms);
         let watcher_token = watcher_shutdown.clone();
         tokio::spawn(async move {
-            let watch_dirs = camel_core::reload_watcher::resolve_watch_dirs(&watch_patterns);
+            // Watch dirs derive from the RAW, unexpanded patterns: an
+            // initially-empty routes dir must still yield a watched root so
+            // newly created files trigger reload.
+            let watch_dirs = camel_core::reload_watcher::resolve_watch_dirs(&watch_raw_patterns);
             let result = camel_core::reload_watcher::watch_and_reload(
                 watch_dirs,
                 ctrl,
                 move || {
+                    // Re-resolve patterns on every reload pass: re-globbing
+                    // picks up newly created/deleted files and re-filters
+                    // test documents per pass.
+                    let patterns =
+                        resolve_route_patterns(&watch_routes_override, &watch_config_routes);
                     camel_dsl::discover_routes_with_threshold_and_security(
-                        &watch_patterns,
+                        &patterns,
                         camel_config.stream_caching.threshold,
                         watch_security_compile_context.clone(),
                     )
@@ -550,7 +570,7 @@ pub async fn run(
         });
         tracing::info!(
             "camel-cli: hot-reload watching {:?}. Press Ctrl+C to stop.",
-            patterns
+            raw_patterns
         );
     } else {
         tracing::info!("camel-cli: running (hot-reload disabled). Press Ctrl+C to stop.");
@@ -621,11 +641,108 @@ pub async fn run(
 }
 
 // ---------------------------------------------------------------------------
+// Route pattern resolution
+// ---------------------------------------------------------------------------
+
+/// The default route glob used when neither `--routes` nor Camel.toml
+/// `routes` entries are present.
+fn default_patterns() -> Vec<String> {
+    vec!["routes/*.yaml".to_string()]
+}
+
+/// Expand glob patterns to concrete route file paths, excluding test
+/// documents (`*.test.yaml` / `*.test.yml`). On glob error the original
+/// pattern passes through unchanged (fail-open to existing discovery
+/// behavior); literal paths are valid glob inputs to discovery.
+fn expand_patterns_excluding_test_docs(patterns: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for pattern in patterns {
+        match glob::glob(pattern) {
+            Ok(paths) => {
+                for entry in paths {
+                    match entry {
+                        Ok(path) => {
+                            let is_test_doc = path.file_name().is_some_and(|name| {
+                                let name = name.to_string_lossy();
+                                name.ends_with(".test.yaml") || name.ends_with(".test.yml")
+                            });
+                            if !is_test_doc {
+                                out.push(path.to_string_lossy().to_string());
+                            }
+                        }
+                        Err(_) => out.push(pattern.clone()),
+                    }
+                }
+            }
+            Err(_) => out.push(pattern.clone()),
+        }
+    }
+    out
+}
+
+/// Three-way route pattern selection with injectable defaults.
+///
+/// - `Some(override)` ⇒ the override verbatim (an explicit user glob is
+///   honored even when it names `*.test.yaml`).
+/// - `None` + non-empty config routes ⇒ the config entries verbatim
+///   (Camel.toml entries pass through; exclusion scopes to the default
+///   glob only).
+/// - otherwise ⇒ `defaults` expanded with test documents filtered out.
+fn resolve_route_patterns_with(
+    defaults: &[String],
+    routes_override: &Option<String>,
+    config_routes: &Option<Vec<String>>,
+) -> Vec<String> {
+    if let Some(ov) = routes_override {
+        vec![ov.clone()]
+    } else if let Some(routes) = config_routes {
+        if routes.is_empty() {
+            expand_patterns_excluding_test_docs(defaults)
+        } else {
+            routes.clone()
+        }
+    } else {
+        expand_patterns_excluding_test_docs(defaults)
+    }
+}
+
+/// Production entry: resolve the route patterns `camel run` loads routes from.
+fn resolve_route_patterns(
+    routes_override: &Option<String>,
+    config_routes: &Option<Vec<String>>,
+) -> Vec<String> {
+    resolve_route_patterns_with(&default_patterns(), routes_override, config_routes)
+}
+
+/// The same three-way selection WITHOUT expansion or test-document filtering.
+/// Used for watch-directory derivation, where the raw glob must survive even
+/// when the expanded match set is empty (an initially-empty routes dir must
+/// still yield a watched root so newly created files trigger reload).
+fn raw_route_patterns(
+    routes_override: &Option<String>,
+    config_routes: &Option<Vec<String>>,
+) -> Vec<String> {
+    if let Some(ov) = routes_override {
+        vec![ov.clone()]
+    } else if let Some(routes) = config_routes {
+        if routes.is_empty() {
+            default_patterns()
+        } else {
+            routes.clone()
+        }
+    } else {
+        default_patterns()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// The run function must emit exactly one startup warning about the CWD trust model.
     #[test]
     fn startup_warning_emitted() {
@@ -653,6 +770,97 @@ mod tests {
         assert!(
             has_trust_doc,
             "expected trust model documentation in the Run subcommand help in main.rs"
+        );
+    }
+
+    /// Minimal valid route text for fixtures (string form). The expansion
+    /// helpers only glob and filter by file name — they never parse content.
+    const ROUTE_TEXT: &str = r#"routes: [- from: "direct:x", steps: [{to: "mock:m"}]]"#;
+
+    #[test]
+    fn test_docs_excluded_from_default_expansion() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let routes_dir = dir.path().join("routes");
+        std::fs::create_dir_all(&routes_dir).expect("create routes dir"); // allow-unwrap
+        std::fs::write(routes_dir.join("demo.yaml"), ROUTE_TEXT).expect("write demo.yaml"); // allow-unwrap
+        std::fs::write(routes_dir.join("demo.test.yaml"), b"expects: {}")
+            .expect("write demo.test.yaml"); // allow-unwrap
+
+        let pattern = format!("{}/routes/*.yaml", dir.path().display());
+        let result = expand_patterns_excluding_test_docs(&[pattern]);
+        assert_eq!(
+            result,
+            vec![routes_dir.join("demo.yaml").to_string_lossy().to_string()]
+        );
+    }
+
+    #[test]
+    fn yml_suffix_also_excluded() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let routes_dir = dir.path().join("routes");
+        std::fs::create_dir_all(&routes_dir).expect("create routes dir"); // allow-unwrap
+        std::fs::write(routes_dir.join("demo.yml"), ROUTE_TEXT).expect("write demo.yml"); // allow-unwrap
+        std::fs::write(routes_dir.join("demo.test.yml"), b"expects: {}")
+            .expect("write demo.test.yml"); // allow-unwrap
+
+        let pattern = format!("{}/routes/*.yml", dir.path().display());
+        let result = expand_patterns_excluding_test_docs(&[pattern]);
+        assert_eq!(
+            result,
+            vec![routes_dir.join("demo.yml").to_string_lossy().to_string()]
+        );
+    }
+
+    #[test]
+    fn override_passthrough_untouched() {
+        let result = resolve_route_patterns(&Some("routes/*.test.yaml".to_string()), &None);
+        assert_eq!(result, vec!["routes/*.test.yaml".to_string()]);
+    }
+
+    #[test]
+    fn config_routes_passthrough_untouched() {
+        let result = resolve_route_patterns(&None, &Some(vec!["custom/*.yaml".to_string()]));
+        assert_eq!(result, vec!["custom/*.yaml".to_string()]);
+    }
+
+    #[test]
+    fn none_returns_expanded_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let routes_dir = dir.path().join("routes");
+        std::fs::create_dir_all(&routes_dir).expect("create routes dir"); // allow-unwrap
+        std::fs::write(routes_dir.join("demo.yaml"), ROUTE_TEXT).expect("write demo.yaml"); // allow-unwrap
+        std::fs::write(routes_dir.join("demo.test.yaml"), b"expects: {}")
+            .expect("write demo.test.yaml"); // allow-unwrap
+
+        let defaults = vec![format!("{}/routes/*.yaml", dir.path().display())];
+        let result = resolve_route_patterns_with(&defaults, &None, &None);
+        assert_eq!(
+            result,
+            vec![routes_dir.join("demo.yaml").to_string_lossy().to_string()]
+        );
+    }
+
+    #[test]
+    fn non_matching_pattern_returns_empty() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let routes_dir = dir.path().join("routes");
+        std::fs::create_dir_all(&routes_dir).expect("create routes dir"); // allow-unwrap
+        std::fs::write(routes_dir.join("demo.yaml"), ROUTE_TEXT).expect("write demo.yaml"); // allow-unwrap
+
+        let pattern = format!("{}/routes/*.json", dir.path().display());
+        let result = expand_patterns_excluding_test_docs(&[pattern]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn raw_patterns_stay_unexpanded_for_watch_dirs() {
+        assert_eq!(
+            raw_route_patterns(&None, &None),
+            vec!["routes/*.yaml".to_string()]
+        );
+        assert_eq!(
+            raw_route_patterns(&Some("custom/*.yaml".to_string()), &None),
+            vec!["custom/*.yaml".to_string()]
         );
     }
 }

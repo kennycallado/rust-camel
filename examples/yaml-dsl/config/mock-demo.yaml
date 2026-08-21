@@ -1,0 +1,17 @@
+# =============================================================================
+# Route for the `camel test` mock-demo example.
+#
+# A single `direct:` route that stamps a header on the incoming message and
+# forwards it to the `mock:result` endpoint. The paired `mock-demo.test.yaml`
+# document drives this route with one input and asserts on the recorded
+# exchange.
+# =============================================================================
+
+routes:
+  - id: "mock-demo"
+    from: "direct:start"
+    steps:
+      - set_header:
+          key: "source"
+          value: "mock-demo"
+      - to: "mock:result"

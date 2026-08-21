@@ -1,0 +1,20 @@
+# =============================================================================
+# `camel test` document for the mock-demo route.
+#
+# References the route file above, delivers one `direct:` input, and asserts
+# that `mock:result` received exactly one exchange whose body is "hello" and
+# whose `source` header was stamped by the route's set_header step.
+# =============================================================================
+
+routeFiles: [mock-demo.yaml]
+
+inputs:
+  - to: "direct:start"
+    body: "hello"
+
+expects:
+  mock:result:
+    count: 1
+    bodies: ["hello"]
+    headers:
+      source: "mock-demo"

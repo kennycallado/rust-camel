@@ -196,6 +196,72 @@ Bridge pool shutdowns have a 30-second timeout. If a pool doesn't shut down with
 
 Bridge health monitors are stopped before route shutdown to prevent restart loops during the shutdown sequence.
 
+## `camel test`
+
+Runs declarative mock tests from `*.test.yaml` documents. Each document boots a
+lean `CamelContext` in-process, loads its routes, delivers `direct:` inputs,
+settles traffic, and asserts expectations against the real mock component.
+
+```bash
+camel test <FILE>...   # one or more *.test.yaml documents, in order
+```
+
+### Test document format
+
+A test document declares a route source, optional inputs, and mandatory
+expectations:
+
+```yaml
+routeFiles: [config/routes.yaml]   # OR inline `routes:` (same schema as route files)
+inputs:                            # optional; omitted ⇒ routes must self-start (timer)
+  - to: "direct:start"             # direct: scheme only
+    body: "hello"
+    headers: {kind: greeting}
+expects:                           # mandatory, ≥ 1 endpoint
+  mock:result:
+    count: 1                       # exact count
+    minCount: 1                    # or minimum count (mutually exclusive with count)
+    bodies: ["hello"]              # ordered expected bodies
+    headers: {kind: greeting}      # expected headers
+settle: "500ms"                    # optional quiet window (0 < settle <= 5s)
+```
+
+- **Route source**: exactly one of `routeFiles` (paths resolved relative to the
+  test document's directory) or inline `routes` (same schema as route files).
+  Both or neither is an error.
+- **Inputs**: `inputs.to` accepts `direct:` endpoints only. Bodies are string,
+  object, or array; null/boolean/number scalars are rejected.
+- **Expects**: keys are `mock:`-prefixed endpoint URIs (`mock:result`); the
+  runner normalizes to the bare name (`result`). `count` and `minCount` are
+  mutually exclusive per endpoint. `settle` is a humantime string
+  (`"500ms"`, `"2s"`) within `0 < settle <= 5s`.
+- Unknown fields are rejected.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Every expectation of every document passed |
+| `1` | Any expectation failed or a settle timeout occurred |
+| `2` | Misuse, unreadable file, or document/route parse error |
+
+When classes coexist, precedence is `2 > 1 > 0` (a broken suite outranks an
+assertion failure). stdout carries one `PASS`/`FAIL` line per endpoint per
+document plus a final `N passed, M failed` summary.
+
+### Non-interference with `camel run`
+
+`camel test` does not change route files or `camel run` behavior. Default route
+discovery (initial load and watch reload) skips `*.test.yaml` documents, so
+test documents sitting next to route files are never loaded as routes — new
+route files still load on watch reload. An explicit `--routes` glob naming
+`*.test.yaml` and `Camel.toml` routes pass through untouched.
+
+### Example
+
+See [`examples/yaml-dsl/config/mock-demo.test.yaml`](../../examples/yaml-dsl/config/mock-demo.test.yaml)
+for a runnable example paired with its route file.
+
 ## Configuration reference
 
 | Key | Type | Default | Description |

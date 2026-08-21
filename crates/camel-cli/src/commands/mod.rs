@@ -7,3 +7,4 @@ pub mod new;
 pub mod openapi;
 pub mod plugin;
 pub mod run;
+pub mod test;

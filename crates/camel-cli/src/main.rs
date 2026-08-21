@@ -87,6 +87,12 @@ enum Commands {
     /// Lint a route file against the production component catalog.
     Lint(commands::lint::LintArgs),
 
+    /// Run declarative mock tests from *.test.yaml documents.
+    ///
+    /// Trust model: `camel test` executes route scripts and beans resolved from
+    /// the current working directory. Only run from a trusted directory.
+    Test(commands::test::TestArgs),
+
     /// Start Language Server Protocol server over stdio.
     Lsp,
 }
@@ -159,6 +165,12 @@ async fn main() {
         Commands::Lsp => {
             let code = commands::lsp::run().await;
             std::process::exit(code);
+        }
+        Commands::Test(args) => {
+            let mut out = std::io::stdout().lock();
+            let mut err = std::io::stderr().lock();
+            let summary = commands::test::run_tests(&args.files, &mut out, &mut err).await;
+            std::process::exit(summary.exit_code);
         }
     }
 }

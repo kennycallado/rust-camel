@@ -109,20 +109,18 @@ fn run_observe_then_signal(dir: &Path, observe: &str, timeout: Duration) -> (i32
     }
 
     // Bounded graceful-exit wait.
-    let exit_code = 'wait: loop {
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break 'wait status.code().unwrap_or(-1),
-                Ok(None) => {
-                    if start.elapsed() >= Duration::from_secs(10) + timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break 'wait -1;
-                    }
-                    thread::sleep(step);
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(-1),
+            Ok(None) => {
+                if start.elapsed() >= Duration::from_secs(10) + timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break -1;
                 }
-                Err(e) => panic!("try_wait failed: {e}"),
+                thread::sleep(step);
             }
+            Err(e) => panic!("try_wait failed: {e}"),
         }
     };
 
@@ -163,6 +161,50 @@ watch = false
     assert!(
         output.contains("routes/*.yaml"),
         "expected the WARN to name the discovery patterns; got:\n{output}"
+    );
+    assert_eq!(
+        exit_code, 0,
+        "expected graceful shutdown (exit 0) after the WARN; got {exit_code}\n--- captured ---\n{output}\n--- end ---"
+    );
+}
+
+/// Default-path variant: NO `routes` key in Camel.toml and NO `routes/`
+/// directory. The default glob `routes/*.yaml` expands to zero files, so the
+/// WARN must name the raw default pattern — not the empty expanded list —
+/// or the operator cannot see which glob matched nothing (bd rc-1110).
+#[test]
+fn empty_discovery_default_path_warns_with_raw_pattern() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("Camel.toml"),
+        r#"[default]
+log_level = "INFO"
+watch = false
+"#,
+    )
+    .expect("write Camel.toml");
+    // Intentionally NO `routes` key and NO `routes/` directory: the default
+    // glob `routes/*.yaml` matches nothing.
+
+    let (exit_code, output, observed) = run_observe_then_signal(
+        dir.path(),
+        "matched zero route files",
+        Duration::from_secs(30),
+    );
+
+    assert!(
+        observed,
+        "expected a WARN containing `matched zero route files` on the default \
+         path; got:\n{output}"
+    );
+    assert!(
+        output.contains("routes/*.yaml"),
+        "expected the WARN to name the raw default pattern `routes/*.yaml` \
+         instead of the empty expanded list; got:\n{output}"
+    );
+    assert!(
+        !output.contains("patterns []"),
+        "expected the WARN NOT to print the empty expanded pattern list; got:\n{output}"
     );
     assert_eq!(
         exit_code, 0,
