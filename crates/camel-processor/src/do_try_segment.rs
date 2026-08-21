@@ -52,13 +52,10 @@ impl Clone for DoTrySegment {
 
 /// Narrow outcome type for `run_finally_body` so the compiler enforces
 /// exhaustiveness at the two call sites instead of `unreachable!()`.
-/// This is a private, transient type — the large-enum-variant lint fires
-/// because Exchange is a fat struct, but boxing it here would just add
-/// allocation churn in a hot path where the outcome is immediately consumed
-/// at the call site.
-#[allow(clippy::large_enum_variant)]
+/// This is a private, transient type; the `Stopped` exchange is boxed to keep
+/// the `Err` variant of `run_finally_body` small (clippy::result_large_err).
 enum FinallyOutcome {
-    Stopped(Exchange),
+    Stopped(Box<Exchange>),
     Failed(CamelError),
 }
 
@@ -77,7 +74,7 @@ async fn run_finally_body(
     }
     match f.body.run(ex).await {
         PipelineOutcome::Completed(e) => Ok(e),
-        PipelineOutcome::Stopped(e) => Err(FinallyOutcome::Stopped(e)),
+        PipelineOutcome::Stopped(e) => Err(FinallyOutcome::Stopped(Box::new(e))),
         PipelineOutcome::Failed(e) => Err(FinallyOutcome::Failed(e)),
     }
 }
@@ -137,7 +134,7 @@ impl OutcomePipeline for DoTrySegment {
                                             match run_finally_body(&mut self.finally, next).await {
                                                 Ok(_) => {}
                                                 Err(FinallyOutcome::Stopped(e)) => {
-                                                    return PipelineOutcome::Stopped(e);
+                                                    return PipelineOutcome::Stopped(*e);
                                                 }
                                                 Err(FinallyOutcome::Failed(_finally_err)) => {
                                                     tracing::warn!(
@@ -171,7 +168,7 @@ impl OutcomePipeline for DoTrySegment {
             // already returned above; skip if catch-body Failed — also returned).
             match run_finally_body(&mut self.finally, returned_ex).await {
                 Ok(ex) => PipelineOutcome::Completed(ex),
-                Err(FinallyOutcome::Stopped(e)) => PipelineOutcome::Stopped(e),
+                Err(FinallyOutcome::Stopped(e)) => PipelineOutcome::Stopped(*e),
                 Err(FinallyOutcome::Failed(finally_err)) => {
                     tracing::warn!(
                         error = %finally_err,

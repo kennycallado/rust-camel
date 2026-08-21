@@ -89,21 +89,21 @@ impl DoTryService {
 }
 
 /// Run a sequence of steps, preserving the last exchange state on error.
-/// Returns `Err((last_ex, err))` so DoTry can populate exception properties.
+/// Returns `Err(Box<(last_ex, err)>)` so DoTry can populate exception properties.
 async fn run_pipeline(
     steps: Vec<BoxProcessor>,
     mut ex: Exchange,
-) -> Result<Exchange, (Exchange, CamelError)> {
+) -> Result<Exchange, Box<(Exchange, CamelError)>> {
     for mut svc in steps {
         match svc.ready().await {
             Ok(ready) => {
                 let snapshot = ex.clone();
                 match ready.call(ex).await {
                     Ok(new_ex) => ex = new_ex,
-                    Err(err) => return Err((snapshot, err)),
+                    Err(err) => return Err(Box::new((snapshot, err))),
                 }
             }
-            Err(err) => return Err((ex, err)),
+            Err(err) => return Err(Box::new((ex, err))),
         }
     }
     Ok(ex)
@@ -129,20 +129,23 @@ async fn run_finally(
     }
     match run_pipeline(finally_steps, ex).await {
         Ok(ex) => Ok(ex),
-        Err((_, finally_err)) => match previous_err {
-            Some(prev) => {
-                tracing::warn!(
-                    finally_error = %finally_err,
-                    previous_error = %prev,
-                    "doFinally threw; restoring previous exception (Camel parity)"
-                );
-                Err(prev)
+        Err(failed) => {
+            let (_, finally_err) = *failed;
+            match previous_err {
+                Some(prev) => {
+                    tracing::warn!(
+                        finally_error = %finally_err,
+                        previous_error = %prev,
+                        "doFinally threw; restoring previous exception (Camel parity)"
+                    );
+                    Err(prev)
+                }
+                None => {
+                    tracing::warn!(error = %finally_err, "doFinally threw");
+                    Err(finally_err)
+                }
             }
-            None => {
-                tracing::warn!(error = %finally_err, "doFinally threw");
-                Err(finally_err)
-            }
-        },
+        }
     }
 }
 
@@ -174,7 +177,8 @@ impl tower::Service<Exchange> for DoTryService {
             let try_result = run_pipeline(try_steps, exchange).await;
             match try_result {
                 Ok(ex) => run_finally(finally_steps, finally_on_when, ex, None).await,
-                Err((failed_ex, original_err)) => {
+                Err(failed) => {
+                    let (failed_ex, original_err) = *failed;
                     let mut ex = failed_ex;
                     ex.set_error(original_err.clone());
 
@@ -239,9 +243,10 @@ impl tower::Service<Exchange> for DoTryService {
                                     _ => Err(original_err),
                                 }
                             }
-                            Err((catch_ex, catch_err)) => {
+                            Err(failed) => {
                                 // Catch threw. Run finally with previous=catch_err.
                                 // Per Camel parity, if finally itself throws, catch_err is restored.
+                                let (catch_ex, catch_err) = *failed;
                                 let _ex = run_finally(
                                     finally_steps.clone(),
                                     finally_on_when.clone(),
