@@ -2,7 +2,7 @@
   description = "rust-camel";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
