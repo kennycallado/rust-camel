@@ -1353,6 +1353,23 @@ fn title_case_header(name: &str) -> String {
 // HttpConsumer
 // ---------------------------------------------------------------------------
 
+/// Capacity for the per-route RequestEnvelope channel.
+///
+/// Each in-flight request holds exactly one `maxInflightRequests` semaphore
+/// permit from before `send()` until its reply, so at most N envelopes can be
+/// outstanding at any time. A buffer of N therefore can never fill before the
+/// semaphore exhausts: dispatcher `send()` calls never park on a full buffer
+/// and the semaphore stays the single, URI-configurable backpressure point.
+/// A hardcoded smaller buffer would act as a second, hidden inflight cap
+/// (rc-3y6j: 64 vs default 1024 permits).
+///
+/// `max(1)`: `maxInflightRequests=0` is a representable "reject everything"
+/// configuration, but `tokio::sync::mpsc::channel(0)` panics — keep consumer
+/// start panic-free (the empty semaphore still 503s every request).
+fn envelope_channel_capacity(max_inflight_requests: usize) -> usize {
+    max_inflight_requests.max(1)
+}
+
 pub struct HttpConsumer {
     config: HttpServerConfig,
     /// Runtime observability handle for ADR-0012 metrics and health calls.
@@ -1383,8 +1400,12 @@ impl Consumer for HttpConsumer {
             )
             .await?;
 
-        // Create channel for this path and register it
-        let (env_tx, mut env_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(64);
+        // Create channel for this path and register it. Capacity matches the
+        // dispatcher's inflight semaphore (see envelope_channel_capacity) so
+        // the channel can never become a second backpressure point.
+        let (env_tx, mut env_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(
+            envelope_channel_capacity(self.config.max_inflight_requests),
+        );
         // When the from-URI carries `httpMethod=...` (REST-lowered
         // route), register the consumer as a method-aware REST endpoint
         // so the dispatcher can route by (method, path template).
@@ -4785,6 +4806,65 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 201);
 
         token.cancel();
+    }
+
+    /// rc-3y6j: the RequestEnvelope channel capacity must mirror the
+    /// dispatcher's inflight semaphore so the semaphore stays the single
+    /// backpressure point. Zero maps to 1 because `mpsc::channel(0)` panics.
+    #[test]
+    fn test_envelope_channel_capacity_follows_max_inflight() {
+        assert_eq!(envelope_channel_capacity(0), 1);
+        assert_eq!(envelope_channel_capacity(1), 1);
+        assert_eq!(envelope_channel_capacity(7), 7);
+        assert_eq!(envelope_channel_capacity(64), 64);
+        assert_eq!(envelope_channel_capacity(1024), 1024);
+    }
+
+    /// rc-3y6j: `maxInflightRequests=0` is a representable reject-everything
+    /// configuration. Consumer start must not panic on it (the channel guard)
+    /// and every request must get 503 from the empty semaphore.
+    #[tokio::test]
+    async fn test_http_consumer_start_with_zero_max_inflight_rejects_503() {
+        use camel_component_api::ConsumerContext;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            scheme: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/ping".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 0,
+            method: None,
+            tls_config: None,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+        let start_handle = tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/ping"))
+            .body("hello world")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 503);
+
+        token.cancel();
+        let _ = start_handle.await;
     }
 
     /// rc-w1u9: HttpConsumer MUST declare Explicit startup_mode so the runtime

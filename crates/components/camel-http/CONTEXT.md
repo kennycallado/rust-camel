@@ -12,6 +12,12 @@ The Consumer bounds resource use with a 2 MiB default request-body limit, a
 read timeout, and an in-flight request semaphore. The Producer has a 10 MiB
 default response-body limit.
 
+The in-flight semaphore (`maxInflightRequests`) is the single intake
+backpressure point. The per-route `RequestEnvelope` channel capacity derives
+from the same limit (`envelope_channel_capacity`, minimum 1), so the channel
+can never become a second, hidden inflight cap; `0` rejects every request with
+503 instead of panicking at consumer start.
+
 ### Credential redaction
 
 `HttpAuth` implements `Debug` manually and redacts passwords and bearer tokens.
