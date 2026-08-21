@@ -4058,6 +4058,18 @@ fn wait_for_crate_index(name: &str, version: &str) -> Result<(), String> {
     ))
 }
 
+/// Whether a `cargo publish` failure output looks like transient
+/// registry-index lag. The sparse index served by `index.crates.io` can
+/// briefly lack a workspace crate that was published moments earlier (CDN
+/// edge staleness), so dependency resolution inside `cargo publish` fails
+/// with a version-selection error even though the wait-for-index probe for
+/// that crate already succeeded. Such failures heal on their own, so the
+/// publish loop retries them with backoff instead of aborting the release.
+fn is_registry_index_lag(output: &str) -> bool {
+    output.contains("failed to select a version for the requirement")
+        || output.contains("candidate versions found which didn't match")
+}
+
 /// Publish all workspace crates to crates.io in topological order.
 /// Whether the workspace root `Cargo.toml` defines an inheritable
 /// `description` under `[workspace.package]`. When true, member crates may
@@ -4169,7 +4181,7 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
     let mut published = 0;
     let mut skipped = 0;
 
-    for c in &sorted {
+    'crates: for c in &sorted {
         println!();
         println!("📦 Publishing {}...", c.name);
 
@@ -4201,36 +4213,59 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
             continue;
         }
 
-        let mut cmd = std::process::Command::new("cargo");
-        cmd.arg("publish").arg("--allow-dirty");
-        let output = cmd
-            .current_dir(workspace_root.join(&c.path))
-            .output()
-            .map_err(|e| format!("Failed to run cargo publish for {}: {e}", c.name))?;
+        // The sparse index CDN can serve stale entries for a workspace
+        // dependency that was published minutes ago, so a publish can fail
+        // with a version-selection error that heals itself. Retry those
+        // with backoff; abort on anything else.
+        let index_lag_retries = 5;
+        let index_lag_delay = std::time::Duration::from_secs(60);
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{stdout}{stderr}");
+        for attempt in 0..=index_lag_retries {
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.arg("publish").arg("--allow-dirty");
+            let output = cmd
+                .current_dir(workspace_root.join(&c.path))
+                .output()
+                .map_err(|e| format!("Failed to run cargo publish for {}: {e}", c.name))?;
 
-        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}{stderr}");
+
+            if output.status.success() {
+                println!("{combined}");
+                published += 1;
+
+                // Wait for registry index to propagate
+                wait_for_crate_index(&c.name, &version)?;
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                continue 'crates;
+            }
+
             if combined.contains("already exists") {
                 println!(
                     "⚠️  {}@{version} already exists (race), skipping...",
                     c.name
                 );
                 skipped += 1;
+                continue 'crates;
+            }
+
+            if attempt < index_lag_retries && is_registry_index_lag(&combined) {
+                eprintln!(
+                    "⚠️  {}@{version}: registry index lag (dependency not yet visible); retry {}/{} in {}s...",
+                    c.name,
+                    attempt + 1,
+                    index_lag_retries,
+                    index_lag_delay.as_secs()
+                );
+                std::thread::sleep(index_lag_delay);
                 continue;
             }
+
             eprintln!("{combined}");
             return Err(format!("Failed to publish {}@{version}", c.name));
         }
-
-        println!("{combined}");
-        published += 1;
-
-        // Wait for registry index to propagate
-        wait_for_crate_index(&c.name, &version)?;
-        std::thread::sleep(std::time::Duration::from_secs(10));
     }
 
     println!();
@@ -5453,6 +5488,34 @@ fn next_item() {}"#;
                 "scripts/xtask/ self-references must not be counted as inline escapes: got {violations:?}"
             );
             fs::remove_dir_all(&ws).unwrap();
+        }
+    }
+
+    mod publish_index_lag {
+        use super::*;
+
+        #[test]
+        fn detects_version_selection_failure() {
+            let stderr = "error: failed to prepare local package for uploading\n\n\
+                          Caused by:\n\
+                          \x20 failed to select a version for the requirement `camel-component-wasm = \"=0.32.0\"`\n\
+                          \x20 candidate versions found which didn't match: 0.31.0, 0.30.0, 0.29.0, ...\n\
+                          \x20 location searched: crates.io index\n";
+            assert!(
+                is_registry_index_lag(stderr),
+                "the v0.32.0 camel-cli failure must classify as registry index lag"
+            );
+        }
+
+        #[test]
+        fn ignores_non_lag_failures() {
+            assert!(!is_registry_index_lag(
+                "error: failed to publish to registry at https://crates.io/api/v1/crates/new"
+            ));
+            assert!(!is_registry_index_lag(
+                "error: api errors (status 403 Forbidden): this crate exists but you don't seem to be an owner"
+            ));
+            assert!(!is_registry_index_lag(""));
         }
     }
 
