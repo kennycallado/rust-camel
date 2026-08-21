@@ -1,0 +1,104 @@
+# On-demand verification that BOTH musl release targets build, link, and boot
+# with jemalloc (rc-vnm8). Dispatch-only by design: the aarch64 cross build
+# compiles jemalloc from C source (~20 min) and must not run on every push.
+#
+# Run before tagging any release that ships musl artifacts:
+#   gh workflow run musl-jemalloc-verify.yml --ref <branch-or-tag>
+# Required evidence in the logs: "OK: jemalloc linked" per target AND the
+# compiled-page assertion (aarch64=65536, x86_64=4096).
+name: musl-jemalloc-verify
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            use-cross: false
+            install-musl-tools: true
+            expected-page-size: "4096"
+          - target: aarch64-unknown-linux-musl
+            use-cross: true
+            install-musl-tools: false
+            expected-page-size: "65536"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install musl-tools
+        if: matrix.install-musl-tools == true
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install target
+        if: matrix.use-cross == false
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use-cross == true
+        run: cargo install cross --version 0.2.5 --locked
+
+      - name: Build binary with jemalloc
+        run: |
+          echo "Building ${{ matrix.target }} with: --features jemalloc"
+          if [[ "${{ matrix.use-cross }}" == "true" ]]; then
+            cross build -p camel-cli --release --target ${{ matrix.target }} --features jemalloc
+          else
+            cargo build -p camel-cli --release --target ${{ matrix.target }} --features jemalloc
+          fi
+        shell: bash
+
+      - name: Assert jemalloc linked
+        run: |
+          BIN="target/${{ matrix.target }}/release/camel"
+          if nm "$BIN" 2>/dev/null | grep -q ' je_arena_' || strings "$BIN" | grep -q 'jemalloc'; then
+            echo "OK: jemalloc linked into ${{ matrix.target }}"
+          else
+            echo "FAIL: jemalloc NOT linked into ${{ matrix.target }} — would ship mallocng"
+            exit 1
+          fi
+        shell: bash
+
+      # tikv-jemalloc-sys >= 0.7 derives LG_PAGE from the target triple
+      # (aarch64-linux => 64K, x86_64 => 4K). This asserts the compiled page
+      # size actually baked into the binary — the 0.6 cross-compile bug baked
+      # the build host's 4K, which aborts at startup on 64K aarch64 kernels
+      # (RHEL 9 family). MALLOC_CONF=stats_print makes the allocator dump its
+      # config to stderr at exit; the dump includes "Page size: <n>".
+      - name: Assert compiled page size
+        if: matrix.use-cross == false
+        run: |
+          BIN="target/${{ matrix.target }}/release/camel"
+          OUT=$(MALLOC_CONF=stats_print:true "$BIN" --version 2>&1 || true)
+          echo "$OUT" | grep -E "Page size: +${{ matrix.expected-page-size }}" \
+            || { echo "FAIL: expected page size ${{ matrix.expected-page-size }} not found in allocator stats"; echo "$OUT"; exit 1; }
+          echo "OK: compiled page size is ${{ matrix.expected-page-size }}"
+        shell: bash
+
+      # Boot smoke under QEMU for the cross target: proves jemalloc init does
+      # not abort (the page-size abort fires at allocator init, before main).
+      - name: Boot smoke (QEMU aarch64)
+        if: matrix.use-cross == true
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
+          BIN="target/${{ matrix.target }}/release/camel"
+          qemu-aarch64-static "$BIN" --version
+        shell: bash
+
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0e # v7.0.1
+        with:
+          name: verify-camel-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/camel
