@@ -16,6 +16,8 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Locate the bench-loadgen binary in the workspace target dir.
 fn loadgen_bin() -> PathBuf {
@@ -368,5 +370,210 @@ fn missing_required_flag_exits_nonzero() {
     assert!(
         stderr.contains("--url is required"),
         "expected --url is required error: {stderr}"
+    );
+}
+
+// ----- --connections knob (change: loadgen-connections-multistep-bench). -----
+
+/// Canned HTTP/1.1 200 response served by the stub servers below.
+/// Content-Length matches the body so keep-alive clients stay in sync.
+const CANNED_200: &str = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nPONG";
+
+/// Read exactly one HTTP request (request line + headers +
+/// Content-Length body) from a buffered stream. Returns `Ok(false)` on
+/// clean EOF (client closed the connection), `Err` on I/O failure.
+fn read_one_request(reader: &mut std::io::BufReader<std::net::TcpStream>) -> std::io::Result<bool> {
+    use std::io::BufRead;
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line)? == 0 {
+        return Ok(false);
+    }
+    let mut content_length: usize = 0;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 {
+            return Ok(false);
+        }
+        let header = header.trim_end();
+        if header.is_empty() {
+            break; // blank line: end of headers
+        }
+        let lower = header.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            content_length = rest.trim().parse().unwrap_or(0);
+        }
+    }
+    if content_length > 0 {
+        let mut body = vec![0u8; content_length];
+        std::io::Read::read_exact(reader, &mut body)?;
+    }
+    Ok(true)
+}
+
+/// Serve canned 200s on one accepted connection until the client
+/// disconnects (thread-per-connection, no artificial latency).
+fn serve_canned(mut stream: std::net::TcpStream) {
+    let Ok(read_half) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = std::io::BufReader::new(read_half);
+    while read_one_request(&mut reader).unwrap_or(false) {
+        if stream.write_all(CANNED_200.as_bytes()).is_err() {
+            return;
+        }
+    }
+}
+
+/// Bind a loopback listener on an ephemeral port; one handler thread per
+/// accepted connection serving [`CANNED_200`] per request. Returns the
+/// base URL (`http://127.0.0.1:PORT`).
+fn spawn_canned_http_server() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let url = format!("http://{}", listener.local_addr().expect("local addr"));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => {
+                    std::thread::spawn(move || serve_canned(s));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    url
+}
+
+#[test]
+fn connections_flag_recorded_in_output() {
+    let url = spawn_canned_http_server();
+    let out = write_tmp("loadgen-connections-recorded.json", "{}");
+    let (output, _stdout, stderr) = run_loadgen(&[
+        "measure-throughput",
+        &kv("--url", &url),
+        &kv("--duration-secs", "1"),
+        &kv("--warmup-secs", "0"),
+        &kv("--workers", "3"),
+        &kv("--connections", "7"),
+        &kv("--out", out.to_str().unwrap()),
+    ]);
+    assert!(
+        output.status.success(),
+        "measure-throughput failed (status {:?}): {stderr}",
+        output.status
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&out).expect("read out json"))
+            .expect("parse out json");
+    assert_eq!(
+        json.get("workers"),
+        Some(&serde_json::json!(3)),
+        "expected top-level \"workers\": 3 in {json}"
+    );
+    assert_eq!(
+        json.get("connections"),
+        Some(&serde_json::json!(7)),
+        "expected top-level \"connections\": 7 in {json}"
+    );
+    let _ = fs::remove_file(out);
+}
+
+#[test]
+fn connections_default_matches_workers() {
+    let url = spawn_canned_http_server();
+    let out = write_tmp("loadgen-connections-default.json", "{}");
+    let (output, _stdout, stderr) = run_loadgen(&[
+        "measure-throughput",
+        &kv("--url", &url),
+        &kv("--duration-secs", "1"),
+        &kv("--warmup-secs", "0"),
+        &kv("--workers", "3"),
+        &kv("--out", out.to_str().unwrap()),
+    ]);
+    assert!(
+        output.status.success(),
+        "measure-throughput failed (status {:?}): {stderr}",
+        output.status
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&out).expect("read out json"))
+            .expect("parse out json");
+    assert_eq!(
+        json.get("connections"),
+        Some(&serde_json::json!(3)),
+        "expected top-level \"connections\": 3 (= workers) in {json}"
+    );
+    let _ = fs::remove_file(out);
+}
+
+/// Serve requests on one accepted connection, holding each request
+/// in flight for 50 ms while tracking the concurrent-open count and its
+/// max watermark across all handler threads.
+fn serve_counting(
+    mut stream: std::net::TcpStream,
+    current: Arc<AtomicUsize>,
+    max_seen: Arc<AtomicUsize>,
+) {
+    let Ok(read_half) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = std::io::BufReader::new(read_half);
+    while read_one_request(&mut reader).unwrap_or(false) {
+        let open = current.fetch_add(1, Ordering::SeqCst) + 1;
+        max_seen.fetch_max(open, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let wrote = stream.write_all(CANNED_200.as_bytes()).is_ok();
+        current.fetch_sub(1, Ordering::SeqCst);
+        if !wrote {
+            return;
+        }
+    }
+}
+
+#[test]
+fn connections_drive_inflight_concurrency() {
+    // One thread per accepted connection; each handler increments an
+    // open-request counter, updates a max watermark, sleeps 50 ms,
+    // responds, decrements. With --connections=8 the client must hold
+    // >= 7 requests in flight simultaneously (8 minus 1 slack for
+    // connection setup/teardown timing) — proving the knob drives ~N
+    // tasks, not merely more than the 2 worker threads.
+    let current = Arc::new(AtomicUsize::new(0));
+    let max_seen = Arc::new(AtomicUsize::new(0));
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let url = format!("http://{}", listener.local_addr().expect("local addr"));
+    {
+        let current = current.clone();
+        let max_seen = max_seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let (current, max_seen) = (current.clone(), max_seen.clone());
+                match stream {
+                    Ok(s) => {
+                        std::thread::spawn(move || serve_counting(s, current, max_seen));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+    }
+
+    let (output, _stdout, stderr) = run_loadgen(&[
+        "measure-throughput",
+        &kv("--url", &url),
+        &kv("--duration-secs", "2"),
+        &kv("--warmup-secs", "0"),
+        &kv("--workers", "2"),
+        &kv("--connections", "8"),
+    ]);
+    assert!(
+        output.status.success(),
+        "measure-throughput failed (status {:?}): {stderr}",
+        output.status
+    );
+    let max = max_seen.load(Ordering::SeqCst);
+    assert!(
+        max >= 7,
+        "expected max concurrent in-flight >= 7 with --connections=8, got {max}"
     );
 }

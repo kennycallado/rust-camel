@@ -1,0 +1,126 @@
+# Multi-step benchmark fixture route for rust-camel CLI
+# (loadgen-connections-multistep-bench, Task 2.1).
+#
+# Purpose: convoy-detection workload. Per-exchange pipeline work that
+# a trivial `set_body` route cannot hide: two rhai scripts (string-map
+# CPU work + property seeding / branch-seeded mutation), a choice
+# branch evaluation, and a header derived inside the happy branch.
+# Under a connection-convoy regression (all in-flight requests
+# serialized behind one lane), this route's throughput collapses at
+# high --connections where the http-server route's would not.
+#
+# Step list, in derivation order (each step's input is the previous
+# step's output — a skipped or reordered step observably changes the
+# response):
+#   0. stream_cache + convert_body_to(text): the http consumer hands
+#      the pipeline a Body::Stream; rhai's `body` variable is
+#      body.as_text() which yields "" for anything but Body::Text.
+#      stream_cache materializes the stream into Body::Bytes and
+#      convert_body_to: text promotes it to Body::Text so step 1
+#      reads `ping`. Without these two the body assertion below is
+#      unachievable (verified empirically: first run produced
+#      "-M1-M2"). Infrastructure, not workload — the measured
+#      per-exchange work starts at step 1.
+#   1. script (rhai, mutating): `body = body.to_upper() + "-M1";
+#      properties["stage"] = "one";` — string-map CPU work plus the
+#      property seed that later steps branch on. Mutating scripts
+#      expose the `properties` map directly
+#      (crates/languages/camel-language-rhai/src/lib.rs:536-557).
+#   2. script (rhai, mutating): branch-seeded mutation — only if
+#      stage == "one" does the body gain "-M2" and the stage advance
+#      to "two"; any other state sets stage = "branch-fail".
+#   3. choice / when (rhai predicate `property("stage") == "two"`):
+#      the happy branch sets response header X-Bench-Stage from the
+#      rhai expression `property("stage")`. Predicates and expression
+#      values expose the scalar accessor `property(name)` (distinct
+#      from the mutating scripts' `properties` map — same crate,
+#      lib.rs:220-310). The header lives INSIDE the happy branch by
+#      design: a skipped or short-circuited choice leaves the header
+#      absent, so the preflight proves branch execution, not just
+#      body shape. otherwise -> set_body literal "BRANCH-FAIL"
+#      (observably wrong on every axis; nothing masks a skipped step).
+# No terminal set_body on the happy path — the response body IS the
+# accumulated script output.
+#
+# Preflight contract (deterministic; asserted by the wrapper before
+# any public marker):
+#   request  : POST /bench-multi, body `ping`
+#   response : HTTP 200, body exactly `PING-M1-M2`
+#              (ping -> to_upper+(-M1) = PING-M1 -> +(-M2) = PING-M1-M2)
+#              AND header `X-Bench-Stage: two` (header NAMES are
+#              emitted lowercase by hyper; the wrapper asserts the
+#              header case-insensitively per HTTP semantics)
+#   Any skipped, mis-ordered, or no-op step yields a different body,
+#   `BRANCH-FAIL`, a missing header, or `branch-fail` — the preflight
+#   fails and the wrapper emits NO BENCH_ROUTE_READY.
+#
+# Port 8081: side-by-side runs with the http-server scenario (which
+# binds 8080) so both fixtures can be measured concurrently without a
+# port clash.
+#
+# No-per-exchange-logging rule: the load phase MUST NOT emit
+# per-exchange logs. High-volume logging can itself become the
+# serialization point and mask pipeline contention (the
+# BENCH_MULTI_TICK log idea was rejected for exactly this reason —
+# see design.md Change 2). This route therefore contains NO log step.
+#
+# Test: multi_step_preflight_contract_holds — scripted shell sequence
+# (no cargo test harness exists for scenario fixtures; same
+# convention as http-server). Verbatim:
+#
+#   cargo build --release -p camel-cli
+#   benchmarks/scenarios/multi-step/rust-camel-cli/multi-step-cli-wrapper.sh \
+#     --camel-bin target/release/camel \
+#     --config benchmarks/scenarios/multi-step/rust-camel-cli/Camel.toml \
+#     --routes benchmarks/scenarios/multi-step/rust-camel-cli/routes/multi-step.yaml \
+#     > /tmp/wrapper.log 2>&1 &
+#   wpid=$!
+#   ready=0
+#   for _ in $(seq 1 150); do
+#       if grep -q BENCH_ROUTE_READY /tmp/wrapper.log; then ready=1; break; fi
+#       kill -0 "$wpid" 2>/dev/null || break
+#       sleep 0.2
+#   done
+#   [ "$ready" = 1 ] || { echo "FAIL: no BENCH_ROUTE_READY"; cat /tmp/wrapper.log; kill "$wpid" 2>/dev/null; exit 1; }
+#   RESP="$(curl -sS -i -X POST --data ping http://127.0.0.1:8081/bench-multi)"
+#   echo "$RESP" | grep -q '^HTTP/.* 200'            # assert: status 200
+#   echo "$RESP" | grep -qi 'x-bench-stage: two'     # assert: header present
+#   [ "$(echo "$RESP" | tail -1)" = "PING-M1-M2" ]  # assert: body derivation
+#   kill "$wpid"   # wrapper's EXIT trap TERMs the camel child
+#
+# Passes only when all steps execute in order (a no-op script, a
+# dropped branch, or wrong derivation order breaks the exact string
+# or the header).
+
+routes:
+  - id: "bench-multi"
+    from: "http://0.0.0.0:8081/bench-multi"
+    steps:
+      - stream_cache: true
+      - convert_body_to: text
+      - script:
+          language: "rhai"
+          source: |
+            body = body.to_upper() + "-M1";
+            properties["stage"] = "one";
+      - script:
+          language: "rhai"
+          source: |
+            if (properties["stage"] == "one") {
+                properties["stage"] = "two";
+                body = body + "-M2";
+            } else {
+                properties["stage"] = "branch-fail";
+            }
+      - choice:
+          when:
+            - language: "rhai"
+              source: 'property("stage") == "two"'
+              steps:
+                - set_header:
+                    key: "X-Bench-Stage"
+                    language: "rhai"
+                    source: 'property("stage")'
+          otherwise:
+            - set_body:
+                value: "BRANCH-FAIL"

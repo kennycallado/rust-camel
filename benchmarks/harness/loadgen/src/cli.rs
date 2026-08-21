@@ -145,10 +145,12 @@ pub fn measure_a_main(args: &[String]) -> ExitCode {
 
 /// `measure-throughput` subcommand: sustained-throughput (M3) measurement.
 ///
-/// Drives `workers` concurrent client loops against `--url` for the
-/// configured duration (after `--warmup-secs` warmup), bucketizing 2xx
-/// responses by wall-clock second. Reports mean / p50 / min / CV /
-/// half-life ratio / error rate via `crate::throughput`.
+/// Drives `--connections` concurrent client loops (default: `workers`)
+/// against `--url` for the configured duration (after `--warmup-secs`
+/// warmup), bucketizing 2xx responses by wall-clock second. The tokio
+/// runtime is sized by `--workers` (CPU lanes, not concurrency). Reports
+/// mean / p50 / min / CV / half-life ratio / error rate via
+/// `crate::throughput`.
 pub fn measure_throughput_main(args: &[String]) -> ExitCode {
     let flags = parse_flags(args);
     let url = match flags.get("url") {
@@ -176,12 +178,20 @@ pub fn measure_throughput_main(args: &[String]) -> ExitCode {
                 .map(|n| n.get())
                 .unwrap_or(4)
         });
+    // --connections: concurrent in-flight request loops, decoupled from
+    // --workers (tokio thread count). Flag absent ⇒ workers, which is
+    // bit-for-bit the pre-knob behavior.
+    let connections: usize = flags
+        .get("connections")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(workers);
     let output_path = flags.get("out").cloned();
     match crate::cli_runtime::run_measure_throughput(
         &url,
         duration_secs,
         warmup_secs,
         workers,
+        connections,
         output_path.as_deref(),
     ) {
         Ok(()) => ExitCode::SUCCESS,

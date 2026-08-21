@@ -434,9 +434,11 @@ async fn warmup_drive(
 
 /// Run sustained-throughput measurement (M3) against the given URL.
 ///
-/// Spawns `workers` concurrent client loops, each in a tight `send().await`
-/// loop with a shared `reqwest::Client` (pool size = `workers`). A
-/// bucket-collector task wakes every wall-clock second, swaps the
+/// Spawns `connections` concurrent client loops (the in-flight request
+/// concurrency knob), each in a tight `send().await` loop with a shared
+/// `reqwest::Client` (pool size = `connections`). The tokio runtime is
+/// sized by `workers` — worker threads are CPU lanes, not concurrency.
+/// A bucket-collector task wakes every wall-clock second, swaps the
 /// per-second atomic counter to 0, and pushes the previous second's
 /// count into `buckets` (after the warmup window has elapsed). After
 /// the configured duration, workers are cancelled via
@@ -457,6 +459,7 @@ pub fn run_measure_throughput(
     duration_secs: u64,
     warmup_secs: u64,
     workers: usize,
+    connections: usize,
     output_path: Option<&str>,
 ) -> Result<(), RuntimeError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -468,6 +471,7 @@ pub fn run_measure_throughput(
         duration_secs,
         warmup_secs,
         workers,
+        connections,
         output_path,
     ))
 }
@@ -477,6 +481,7 @@ async fn run_throughput_async(
     duration_secs: u64,
     warmup_secs: u64,
     workers: usize,
+    connections: usize,
     output_path: Option<&str>,
 ) -> Result<(), RuntimeError> {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -488,7 +493,7 @@ async fn run_throughput_async(
     // its own pool of size 1 and we'd measure per-worker capacity, not
     // the aggregate the spec requires.
     let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(workers)
+        .pool_max_idle_per_host(connections)
         .pool_idle_timeout(Duration::from_secs(60))
         .tcp_nodelay(true)
         .build()?;
@@ -501,8 +506,8 @@ async fn run_throughput_async(
     let error_count = Arc::new(AtomicU64::new(0));
     let cancel = CancellationToken::new();
 
-    let mut worker_handles = Vec::with_capacity(workers);
-    for _ in 0..workers {
+    let mut worker_handles = Vec::with_capacity(connections);
+    for _ in 0..connections {
         let client = client.clone();
         let url = url.to_string();
         let current_count = current_count.clone();
@@ -582,6 +587,7 @@ async fn run_throughput_async(
         "duration_secs": duration_secs,
         "warmup_secs": warmup_secs,
         "workers": workers,
+        "connections": connections,
         "mean_msgs_per_sec": result.mean_msgs_per_sec,
         "p50_msgs_per_sec": result.p50_msgs_per_sec,
         "min_msgs_per_sec": result.min_msgs_per_sec,

@@ -54,7 +54,8 @@ fn usage() {
          \n  calibrate --url=URL                 Protocol A calibration (spec §4.4).\
          \n  measure-a --url=URL --rate=N --samples=N [--rounds=N]\
          \n                                       Protocol A measurement.\
-         \n  measure-throughput --url=URL [--duration-secs=N] [--warmup-secs=N] [--workers=N]\
+         \n  measure-throughput --url=URL [--duration-secs=N] [--warmup-secs=N]\
+         \n                                       [--workers=N] [--connections=N]\
          \n                                       M3 sustained-throughput measurement.\
          \n  parse-protocol-b --log=PATH         Parse /tmp/v3-protocol-b log + print stats.\
          \n  rss-sample --pid=PID --interval-ms=N --duration-ms=N\
