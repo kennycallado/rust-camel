@@ -1,3 +1,14 @@
+// Global allocator overrides (feature-gated, binary-only). Library crates
+// must never set a global allocator. If both features are enabled, jemalloc
+// wins. Soak/migration plan: bd rc-vnm8.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use camel_cli::commands;
 use clap::{Parser, Subcommand};
 

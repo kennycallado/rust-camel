@@ -78,6 +78,11 @@ ariadne.workspace = true
 rustls.workspace = true
 camel-component-surrealdb = { workspace = true, optional = true }
 camel-component-exec = { workspace = true, optional = true }
+# Global allocator backends (binary-only; library crates must never set one).
+# tikv-jemalloc-sys builds jemalloc from source, so keep default features off
+# (no background_threads_runtime_support) for the leanest musl-friendly build.
+tikv-jemallocator = { version = "0.6", optional = true, default-features = false }
+mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -119,6 +124,10 @@ mqtt-tls = ["mqtt", "camel-component-mqtt/tls"]
 surrealdb = ["dep:camel-component-surrealdb"]
 # exec activates the fail-closed system command execution component.
 exec = ["dep:camel-component-exec"]
+# Global allocator overrides for the `camel` release binary. Additive and
+# independent; if both are enabled, jemalloc wins. Soak/migration plan: bd rc-vnm8.
+jemalloc = ["dep:tikv-jemallocator"]
+mimalloc = ["dep:mimalloc"]
 
 [lints]
 workspace = true
