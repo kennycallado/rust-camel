@@ -160,6 +160,17 @@ jobs:
           OUTPUT=$(docker run --rm camel-smoke:alpine --version)
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "camel"
+      - name: Build gnu binary
+        run: cargo build -p camel-cli --release
+      - name: Prepare gnu Docker context
+        run: cp target/release/camel context/camel-amd64
+      - name: Build gnu image
+        run: docker build --target gnu -t camel-smoke:gnu context/
+      - name: Test gnu image
+        run: |
+          OUTPUT=$(docker run --rm camel-smoke:gnu --version)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "camel"
 
   coverage:
     name: Coverage Check
