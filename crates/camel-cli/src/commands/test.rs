@@ -97,7 +97,6 @@ pub async fn run_tests(
         }
     }
 
-    let _ = writeln!(out, "{passed} passed, {failed} failed");
     let exit_code = if had_parse_error {
         2
     } else if failed > 0 {
@@ -105,11 +104,13 @@ pub async fn run_tests(
     } else {
         0
     };
-    TestRunSummary {
+    let summary = TestRunSummary {
         exit_code,
         passed,
         failed,
-    }
+    };
+    let _ = writeln!(out, "{} passed, {} failed", summary.passed, summary.failed);
+    summary
 }
 
 #[cfg(test)]
@@ -186,6 +187,8 @@ expects:
         let mut err = Vec::new();
         let summary = run_tests(&[path], &mut out, &mut err).await;
         assert_eq!(summary.exit_code, 0);
+        assert_eq!(summary.passed, 1, "summary must count the passing endpoint");
+        assert_eq!(summary.failed, 0, "summary must count zero failures");
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("PASS"), "out: {out}");
         assert!(out.contains("1 passed, 0 failed"), "out: {out}");
@@ -199,6 +202,8 @@ expects:
         let mut err = Vec::new();
         let summary = run_tests(&[path], &mut out, &mut err).await;
         assert_eq!(summary.exit_code, 1);
+        assert_eq!(summary.passed, 0, "summary must count zero passes");
+        assert_eq!(summary.failed, 1, "summary must count the failing endpoint");
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("FAIL"), "out: {out}");
         assert!(out.contains("0 passed, 1 failed"), "out: {out}");
@@ -240,9 +245,12 @@ expects:
         let mut err = Vec::new();
         let summary = run_tests(&[a, b], &mut out, &mut err).await;
         assert_eq!(summary.exit_code, 1);
+        assert_eq!(summary.passed, 1, "one passing endpoint across both docs");
+        assert_eq!(summary.failed, 1, "one failing endpoint across both docs");
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("a.test.yaml#out"), "out: {out}");
         assert!(out.contains("b.test.yaml#out"), "out: {out}");
+        assert!(out.contains("1 passed, 1 failed"), "out: {out}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

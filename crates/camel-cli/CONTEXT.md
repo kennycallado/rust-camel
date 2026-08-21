@@ -29,3 +29,16 @@ current-HEAD positions and are secondary to the symbol.
 ## Metrics
 
 Metrics instrumentation for CLI commands is not yet wired; processor-crate instrumentation is tracked separately.
+
+## camel test failure modes
+
+`camel test` runs each `*.test.yaml` document in-process and reports one `PASS`/`FAIL` line per endpoint, then a final `N passed, M failed` summary. Exit-code precedence is `2 > 1 > 0`: any parse-error class forces 2, else any failed endpoint forces 1, else 0. A document-level error is reported to stderr and execution continues with the next document.
+
+| Failure mode | Trigger | Exit code |
+|--------------|---------|-----------|
+| Doc parse error | unreadable file, invalid YAML, or `TestDocError` from `parse_test_document` | 2 |
+| Boot failure | `CamelContext` boot, route load, route start, or input delivery fails | 2 |
+| Settle timeout | traffic does not quiesce within the quiet window plus the 5s instability budget | 1 |
+| Assertion failure | expectation mismatch reported by `MockEndpointInner::try_assert_satisfied` | 1 |
+
+Precedence when classes mix: any parse-error class ⇒ 2, else any failed endpoint ⇒ 1, else 0. The settle timeout and assertion failure both surface as a `FAIL` line and count toward `failed`; parse-error and boot failures surface on stderr and do not count toward `passed`/`failed`.
