@@ -45,6 +45,22 @@ the dispatch entry) SHALL NOT exist.
 - **THEN** the interceptor denies with `Status::unauthenticated` and
   the route body never runs
 
+#### Scenario: plan available at interceptor construction
+
+- **GIVEN** a `grpc:` server route with an `Authenticated` plan
+- **WHEN** the gRPC service is constructed
+- **THEN** the interceptor holds the compiled plan and the first
+  inbound request is authenticated via the core path before dispatch
+
+### Requirement: Per-route dispatch enforcement
+
+The core SHALL enforce each route's compiled access mode at dispatch
+time. A late-registered route SHALL be revalidated atomically before
+it becomes reachable: its plan SHALL classify AND the per-bind
+exposure gate SHALL re-run for the target bind — a late `Public`
+route on an already-bound non-loopback listener without
+`allow_public_exposure` SHALL be rejected before serving any
+request.
 #### Scenario: grpc route without a plan is public pass-through
 
 - **GIVEN** a gRPC route compiled without a security plan and a provider
@@ -52,6 +68,23 @@ the dispatch entry) SHALL NOT exist.
 - **WHEN** a request arrives with a valid credential
 - **THEN** the request dispatches and the provider's authentication
   call counter is zero (no extraction attempted at the transport)
+
+#### Scenario: late route classified before reachable
+
+- **GIVEN** an application with a running listener and a route
+  registered after startup
+- **WHEN** the route registers
+- **THEN** its plan is compiled and gate-checked atomically; requests
+  are refused until classification completes
+
+#### Scenario: late public route on non-loopback bind rejected
+
+- **GIVEN** a running non-loopback listener without
+  `allow_public_exposure` and a late-registered `Public` route
+  targeting it
+- **WHEN** the route registers
+- **THEN** registration is rejected with an error naming the bind
+  and the route; the route never becomes reachable
 
 ## ADDED Requirements
 
