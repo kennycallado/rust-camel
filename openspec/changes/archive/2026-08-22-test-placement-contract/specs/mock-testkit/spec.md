@@ -31,11 +31,17 @@ route sources, or none, SHALL be rejected. Unknown fields SHALL be rejected.
 - **When** `camel test` parses the document
 - **Then** parsing fails with exit code 2 stating that `expects` is mandatory
 
-#### Scenario: two route sources rejected
+#### Scenario: both routeFiles and routes rejected
 
-- **Given** a test document containing both `routeFiles` and `routes`, or both `routeFilesFromRoot` and `routes`, or both `routeFiles` and `routeFilesFromRoot`
+- **Given** a test document containing both `routeFiles` and `routes`
 - **When** `camel test` parses the document
-- **Then** parsing fails with exit code 2 stating the route source keys are mutually exclusive and naming the offending pair
+- **Then** parsing fails with exit code 2 stating the route source keys are mutually exclusive and naming `routeFiles` and `routes`
+
+#### Scenario: routeFilesFromRoot combined with another source rejected
+
+- **Given** a test document containing `routeFilesFromRoot` together with `routeFiles`, with `routes`, or with both of the other keys
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 stating the route source keys are mutually exclusive and naming every present key
 
 #### Scenario: no route source rejected
 
@@ -81,11 +87,11 @@ files.
 - **When** `camel run` starts
 - **Then** the test document is skipped, startup succeeds, and a watch reload triggered by saving the test document is a no-op
 
-#### Scenario: explicit wildcard glob over test documents yields no routes
+#### Scenario: explicit glob override honored
 
-- **Given** a directory containing only `routes/demo.test.yaml`
-- **When** `camel run --routes 'routes/*.test.yaml'` runs
-- **Then** the test document is skipped and never parsed as a route document, and the command reports that no routes were found
+- **Given** a user invoking `camel run --routes 'routes/*.test.yaml'`
+- **When** discovery runs
+- **Then** the explicit glob is processed and every matched test document is skipped (never parsed as a route document); when no other routes match, the command reports that no routes were found
 
 #### Scenario: explicit file naming errors instead of parsing
 
