@@ -117,10 +117,9 @@ grpc = [
   "camel-dsl/protobuf",
 ]
 wasm = ["dep:camel-component-wasm"]
-# LLM component. Default enables mock-only (zero extra deps).
-# For real providers: --features "llm,camel-component-llm/openai"
-# or "llm,camel-component-llm/ollama" or "llm,camel-component-llm/all-providers".
-llm = ["dep:camel-component-llm"]
+# LLM component. Default enables mock plus all real providers (openai,
+# ollama) so the release binary works with real models out of the box.
+llm = ["dep:camel-component-llm", "camel-component-llm/all-providers"]
 # MCP component (Model Context Protocol, scheme `mcp:`): Consumer (server)
 # tool/resource routes + Producer (client) call/read dispatch.
 mcp = ["dep:camel-component-mcp"]
