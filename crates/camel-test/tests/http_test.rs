@@ -8,6 +8,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::find_free_port;
 use support::install_crypto_provider;
 
 use std::sync::Arc;
@@ -1615,14 +1616,4 @@ routes:
         .await
         .unwrap();
     assert_eq!(denied.status(), 401);
-}
-
-// ---------------------------------------------------------------------------
-// Helper: find a free port
-// ---------------------------------------------------------------------------
-
-fn find_free_port() -> u16 {
-    use std::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind to free port");
-    listener.local_addr().unwrap().port()
 }

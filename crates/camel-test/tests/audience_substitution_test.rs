@@ -27,6 +27,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::find_free_port;
 use support::install_crypto_provider;
 
 use std::sync::Arc;
@@ -60,15 +61,6 @@ static KEY_A_PRIVATE: &[u8] = include_bytes!("fixtures/subst_key_a_private.pem")
 static KEY_A_PUBLIC: &[u8] = include_bytes!("fixtures/subst_key_a_public.pem");
 static KEY_B_PRIVATE: &[u8] = include_bytes!("fixtures/subst_key_b_private.pem");
 static KEY_B_PUBLIC: &[u8] = include_bytes!("fixtures/subst_key_b_public.pem");
-
-fn find_free_port() -> u16 {
-    use std::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind to free port"); // allow-unwrap
-    listener
-        .local_addr()
-        .expect("bound socket has an addr")
-        .port() // allow-unwrap
-}
 
 /// JWKS serving exactly ONE public key — provider A's keyset holds only
 /// key-a, provider B's only key-b (disjoint by construction).

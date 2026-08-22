@@ -1,5 +1,15 @@
 pub mod wait;
 
+/// Binds an ephemeral loopback port and returns it. The listener is dropped
+/// immediately; a race between drop and rebind is possible but loud (bind
+/// failure) rather than silent, matching the historical per-test copies.
+#[allow(dead_code)] // not every test binary including `support` uses it
+pub fn find_free_port() -> u16 {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind to free port");
+    listener.local_addr().unwrap().port()
+}
+
 #[cfg(feature = "integration-tests")]
 use camel_api::Exchange;
 

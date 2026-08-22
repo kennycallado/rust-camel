@@ -163,12 +163,14 @@ async fn greeter_client(
     helloworld::greeter_client::GreeterClient::new(channel)
 }
 
-/// Start a kernel-secured server-streaming gRPC consumer on an ephemeral
-/// port (`streaming.StreamService/ServerList`). Same construction-order
-/// lifecycle as `start_consumer`; the security context is wired through
-/// `set_security_context` BEFORE start.
+/// Start a kernel-secured streaming gRPC consumer on an ephemeral port
+/// for the given `streaming.StreamService` method. Same
+/// construction-order lifecycle as `start_consumer`; the security
+/// context is wired through `set_security_context` BEFORE start.
 async fn start_streaming_consumer(
     sec_ctx: Option<SecurityContext>,
+    method: &str,
+    mode: GrpcMode,
 ) -> (u16, mpsc::Receiver<ExchangeEnvelope>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -177,11 +179,11 @@ async fn start_streaming_consumer(
     let mut consumer = GrpcConsumer::new(
         "127.0.0.1".to_string(),
         port,
-        "/streaming.StreamService/ServerList".to_string(),
+        format!("/streaming.StreamService/{method}"),
         proto_path,
         "streaming.StreamService".to_string(),
-        "ServerList".to_string(),
-        GrpcMode::ServerStreaming,
+        method.to_string(),
+        mode,
         test_rt(),
         GrpcServerConfig::default(),
     );
@@ -491,7 +493,8 @@ async fn grpc_server_streaming_pipeline_denial_regression() {
         .with_credential_sources(plan.credential_sources.clone())
         .with_plan(plan)
         .with_providers(providers);
-    let (port, mut route_rx) = start_streaming_consumer(Some(sec_ctx)).await;
+    let (port, mut route_rx) =
+        start_streaming_consumer(Some(sec_ctx), "ServerList", GrpcMode::ServerStreaming).await;
 
     let pipeline = tokio::spawn(async move {
         let envelope = route_rx
@@ -515,6 +518,152 @@ async fn grpc_server_streaming_pipeline_denial_regression() {
     );
     let mut stream = client
         .server_list(request)
+        .await
+        .expect("stream must open before the denial verdict")
+        .into_inner();
+    let err = stream
+        .next()
+        .await
+        .expect("denial must produce a stream frame")
+        .expect_err("pipeline policy denial must surface on the stream");
+    assert_eq!(
+        err.code(),
+        tonic::Code::PermissionDenied,
+        "pipeline policy denial must surface as PERMISSION_DENIED, got: {err}"
+    );
+
+    pipeline.await.expect("pipeline join");
+}
+
+#[tokio::test]
+async fn grpc_client_streaming_pipeline_denial_regression() {
+    // Client-streaming denial regression (bd rc-938k, sibling of the
+    // server-streaming case above): intermediate AND completion
+    // envelopes carry pipeline reply channels, so a kernel-authenticated
+    // request (valid token) still REACHES the route pipeline even when
+    // the route's policy would deny. Only the completion exchange's
+    // reply becomes the RPC verdict, and this arm's error mapping also
+    // turns a dropped reply sender into INTERNAL ("pipeline reply
+    // dropped") — asserting PERMISSION_DENIED pins the
+    // `pipeline_error_to_status` denial mapping specifically.
+    let providers = Arc::new(fixture_registry());
+    let plan = authenticated_plan(vec![CredentialSource::AuthorizationHeader]);
+    // Denying route policy: requires a role the fixture principal
+    // ("grpc-role") lacks. Inert at the transport — it stands as the
+    // route's declaration for the pipeline layer.
+    let policy = RolePolicy::new(vec!["other-role".to_string()], true);
+    let sec_ctx = SecurityContext::new(policy)
+        .with_credential_sources(plan.credential_sources.clone())
+        .with_plan(plan)
+        .with_providers(providers);
+    let (port, mut route_rx) =
+        start_streaming_consumer(Some(sec_ctx), "ClientSum", GrpcMode::ClientStreaming).await;
+
+    let pipeline = tokio::spawn(async move {
+        // Reply the denial idiom to every envelope: intermediate replies
+        // are discarded by design; the completion exchange's reply is
+        // the RPC verdict. Stop at the completion marker so the stand-in
+        // terminates while the consumer keeps serving.
+        loop {
+            let envelope = route_rx
+                .recv()
+                .await
+                .expect("kernel-authenticated request must reach the route pipeline");
+            // Pipeline-side enforcement stand-in (SecurityPolicyService
+            // denies with Unauthorized): the pipeline policy denial idiom.
+            if let Some(tx) = envelope.reply_tx {
+                let _ = tx.send(Err(CamelError::Unauthorized("missing role".to_string())));
+            }
+            let complete = matches!(
+                envelope
+                    .exchange
+                    .input
+                    .header("CamelGrpcClientStreamComplete"),
+                Some(serde_json::Value::Bool(true))
+            );
+            if complete {
+                break;
+            }
+        }
+    });
+
+    let mut client = stream_service_client(port).await;
+    let mut request = tonic::Request::new(tokio_stream::iter(vec![
+        streaming::NumberRequest { value: 1 },
+        streaming::NumberRequest { value: 2 },
+    ]));
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {TOKEN}")
+            .parse()
+            .expect("bearer metadata value"),
+    );
+    let err = client
+        .client_sum(request)
+        .await
+        .expect_err("pipeline policy denial must fail the RPC");
+    assert_eq!(
+        err.code(),
+        tonic::Code::PermissionDenied,
+        "pipeline policy denial must surface as PERMISSION_DENIED, got: {err}"
+    );
+
+    pipeline.await.expect("pipeline join");
+}
+
+#[tokio::test]
+async fn grpc_bidi_pipeline_denial_regression() {
+    // Bidi denial regression (bd rc-938k): every bidi envelope carries a
+    // pipeline reply channel, and a per-message watcher renders an Err
+    // reply through `pipeline_error_to_status` onto the response
+    // stream, so a kernel-authenticated request (valid token) still
+    // REACHES the route pipeline even when the route's policy would
+    // deny, and the denial surfaces on the stream as
+    // PERMISSION_DENIED. A dropped reply sender emits NOTHING (the
+    // watcher stays silent), so the asserted frame pins the denial
+    // verdict path specifically.
+    let providers = Arc::new(fixture_registry());
+    let plan = authenticated_plan(vec![CredentialSource::AuthorizationHeader]);
+    // Denying route policy: requires a role the fixture principal
+    // ("grpc-role") lacks. Inert at the transport — it stands as the
+    // route's declaration for the pipeline layer.
+    let policy = RolePolicy::new(vec!["other-role".to_string()], true);
+    let sec_ctx = SecurityContext::new(policy)
+        .with_credential_sources(plan.credential_sources.clone())
+        .with_plan(plan)
+        .with_providers(providers);
+    let (port, mut route_rx) =
+        start_streaming_consumer(Some(sec_ctx), "BidiEcho", GrpcMode::Bidi).await;
+
+    let pipeline = tokio::spawn(async move {
+        let envelope = route_rx
+            .recv()
+            .await
+            .expect("kernel-authenticated request must reach the route pipeline");
+        // Pipeline-side enforcement stand-in (SecurityPolicyService
+        // denies with Unauthorized): the pipeline policy denial idiom.
+        if let Some(tx) = envelope.reply_tx {
+            let _ = tx.send(Err(CamelError::Unauthorized("missing role".to_string())));
+        }
+    });
+
+    // Hold the request stream open past the verdict: the forward loop
+    // treats client-stream end as completion, and racing completion
+    // against the denial frame would make the first frame ambiguous.
+    let request_stream = tokio_stream::iter(vec![streaming::EchoRequest {
+        message: "hello".to_string(),
+    }])
+    .chain(tokio_stream::pending());
+    let mut request = tonic::Request::new(request_stream);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {TOKEN}")
+            .parse()
+            .expect("bearer metadata value"),
+    );
+    let mut client = stream_service_client(port).await;
+    let mut stream = client
+        .bidi_echo(request)
         .await
         .expect("stream must open before the denial verdict")
         .into_inner();

@@ -25,6 +25,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::find_free_port;
 use support::install_crypto_provider;
 
 use std::sync::Arc;
@@ -37,12 +38,6 @@ use camel_auth::{RolePolicy, TokenAuthenticator};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_http::HttpComponent;
 use camel_test::{CamelTestContext, SecurityConfigFixture};
-
-fn find_free_port() -> u16 {
-    use std::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind to free port");
-    listener.local_addr().unwrap().port()
-}
 
 /// Plain Public HTTP route: body `"<body>"` → 200, then `mock:<sink>`.
 fn public_route(

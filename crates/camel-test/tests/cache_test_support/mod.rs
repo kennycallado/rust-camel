@@ -55,6 +55,7 @@ pub async fn send_to_direct(
 /// consumer not yet registered) and returns any other `Err` — i.e. a route
 /// pipeline failure — to the caller. Used to assert fail-closed errors on a
 /// route.
+#[allow(dead_code)] // not every test binary including this module uses it
 pub async fn send_to_direct_result(
     h: &CamelTestContext,
     endpoint_uri: &str,
