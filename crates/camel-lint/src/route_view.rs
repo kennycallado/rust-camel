@@ -30,12 +30,32 @@ pub struct Spanned<T> {
 // LintOption, Endpoint, LintNode
 // ---------------------------------------------------------------------------
 
+/// The source origin of a [`LintOption`], mirroring the DSL lowering's
+/// vocabulary so rules can distinguish where an option key was declared.
+///
+/// - [`OptionOrigin::Query`] — parsed out of the raw URI query string
+///   (`?k=v`).
+/// - [`OptionOrigin::StepParameters`] — an entry of a `parameters:` map
+///   sibling of a URI-bearing key (`to`/`from`/`uri`), including the
+///   route-level `from`.
+/// - [`OptionOrigin::ConfigParameters`] — an entry of the `parameters:` map
+///   inside an object-form URI key (cf. `combine_params(config, step)` in
+///   `camel-dsl/src/yaml.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OptionOrigin {
+    Query,
+    StepParameters,
+    ConfigParameters,
+}
+
 /// An option key-value pair extracted from a URI query string (`?k=v`) or
 /// from an endpoint's sibling `parameters:` map entry.
 #[derive(Clone, Debug)]
 pub struct LintOption {
     pub key: Spanned<String>,
     pub value: Option<Spanned<String>>,
+    pub origin: OptionOrigin,
 }
 
 impl LintOption {
@@ -82,7 +102,11 @@ impl LintOption {
                         } else {
                             None
                         };
-                        options.push(LintOption { key, value });
+                        options.push(LintOption {
+                            key,
+                            value,
+                            origin: OptionOrigin::Query,
+                        });
                     }
                     None => {
                         // Value-less flag: `?flag`.
@@ -90,7 +114,11 @@ impl LintOption {
                             value: pair.to_string(),
                             span: Span::new(key_start, base + pair_end),
                         };
-                        options.push(LintOption { key, value: None });
+                        options.push(LintOption {
+                            key,
+                            value: None,
+                            origin: OptionOrigin::Query,
+                        });
                     }
                 }
             }

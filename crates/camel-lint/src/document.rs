@@ -14,7 +14,7 @@ use noyalib::cst;
 use crate::ROUTE_SCHEMA;
 use crate::diagnostic::{Fix, Span};
 use crate::error::LintError;
-use crate::route_view::{Endpoint, LintNode, LintOption, LintRoute, Spanned};
+use crate::route_view::{Endpoint, LintNode, LintOption, LintRoute, OptionOrigin, Spanned};
 
 // ---------------------------------------------------------------------------
 // ParseFailure + Document
@@ -53,7 +53,15 @@ impl Document {
                 let root: Value = (*noya_doc.as_value()).clone();
                 let mut from = None;
                 let mut from_parameters = Vec::new();
-                let nodes = walk(&root, "", &noya_doc, &mut from, &mut from_parameters, &[]);
+                let nodes = walk(
+                    &root,
+                    "",
+                    &noya_doc,
+                    &mut from,
+                    &mut from_parameters,
+                    &[],
+                    OptionOrigin::StepParameters,
+                );
                 Document {
                     raw,
                     route_view: LintRoute {
@@ -350,6 +358,7 @@ fn walk(
     from_slot: &mut Option<Spanned<String>>,
     from_parameters: &mut Vec<LintOption>,
     inherited: &[LintOption],
+    local_origin: OptionOrigin,
 ) -> Vec<Spanned<LintNode>> {
     let mut nodes = Vec::new();
     match value {
@@ -357,9 +366,14 @@ fn walk(
             // Collect the sibling `parameters:` map (if any) into spanned
             // options. They attach to every endpoint URI key emitted from this
             // mapping (or, for the route-level `from`, into `from_parameters`).
+            // Their origin is the caller's `local_origin`: StepParameters for
+            // a mapping that is a step (or the document root), ConfigParameters
+            // for the mapping inside an object-form URI key.
             let local: Vec<LintOption> = m
                 .get("parameters")
-                .map(|pv| collect_parameters(pv, &child_path(path, "parameters"), doc))
+                .map(|pv| {
+                    collect_parameters(pv, &child_path(path, "parameters"), doc, local_origin)
+                })
                 .unwrap_or_default();
             // Concatenate, never replace: step-level `parameters:` (inherited)
             // and the inner config map (`local`) both reach the endpoint.
@@ -398,7 +412,8 @@ fn walk(
                         // Object form (e.g. enrich: { uri: ... }): recurse to
                         // find the nested `uri`, which is itself a URI key,
                         // carrying the step-level parameters alongside the
-                        // inner config's own `parameters:` map.
+                        // inner config's own `parameters:` map. The inner
+                        // map's entries are ConfigParameters.
                         nodes.extend(walk(
                             child,
                             &cpath,
@@ -406,12 +421,21 @@ fn walk(
                             from_slot,
                             from_parameters,
                             &effective,
+                            OptionOrigin::ConfigParameters,
                         ));
                     } else {
                         emit_endpoints(child, &cpath, doc, &mut nodes, &effective);
                     }
                 } else if CONTAINER_KEYS.contains(k) {
-                    let children = walk(child, &cpath, doc, from_slot, from_parameters, &[]);
+                    let children = walk(
+                        child,
+                        &cpath,
+                        doc,
+                        from_slot,
+                        from_parameters,
+                        &[],
+                        OptionOrigin::StepParameters,
+                    );
                     let kind = Spanned {
                         value: key.clone(),
                         span: key_span_for(doc, &cpath),
@@ -428,7 +452,15 @@ fn walk(
         Value::Sequence(seq) => {
             for (i, item) in seq.iter().enumerate() {
                 let ipath = format!("{path}[{i}]");
-                nodes.extend(walk(item, &ipath, doc, from_slot, from_parameters, &[]));
+                nodes.extend(walk(
+                    item,
+                    &ipath,
+                    doc,
+                    from_slot,
+                    from_parameters,
+                    &[],
+                    OptionOrigin::StepParameters,
+                ));
             }
         }
         _ => {}
@@ -442,7 +474,12 @@ fn walk(
 /// A non-string value (rejected by the schema as `additionalProperties: string`)
 /// yields an option with `value: None`; the key is still captured so R-URI-known
 /// can resolve it.
-fn collect_parameters(value: &Value, path: &str, doc: &cst::Document) -> Vec<LintOption> {
+fn collect_parameters(
+    value: &Value,
+    path: &str,
+    doc: &cst::Document,
+    origin: OptionOrigin,
+) -> Vec<LintOption> {
     let Value::Mapping(m) = value else {
         return Vec::new();
     };
@@ -464,6 +501,7 @@ fn collect_parameters(value: &Value, path: &str, doc: &cst::Document) -> Vec<Lin
                 span: key_span,
             },
             value,
+            origin,
         });
     }
     out
@@ -1142,6 +1180,72 @@ steps:
         let val = period.value.as_ref().expect("period has a value span");
         assert_eq!(val.value, "1s");
         assert_eq!(slice_at(&doc.raw, &val.span), "1s");
+    }
+
+    // ---- Task 1.1: origin-tagged options ----
+
+    #[test]
+    fn query_options_carry_query_origin() {
+        let source = "steps:\n  - to: timer:foo?period=1s\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        assert_eq!(endpoints.len(), 1);
+        let period = endpoints[0]
+            .options
+            .iter()
+            .find(|o| o.key.value == "period")
+            .expect("query option `period` must be captured");
+        assert_eq!(period.origin, OptionOrigin::Query);
+    }
+
+    #[test]
+    fn step_parameters_carry_step_origin() {
+        let source = "steps:\n  - to: kafka:orders\n    parameters:\n      brokers: my-host:9092\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        assert_eq!(endpoints.len(), 1);
+        let brokers = endpoints[0]
+            .options
+            .iter()
+            .find(|o| o.key.value == "brokers")
+            .expect("parameters entry `brokers` must be captured");
+        assert_eq!(brokers.origin, OptionOrigin::StepParameters);
+    }
+
+    #[test]
+    fn nested_object_form_distinguishes_origins() {
+        let source = "steps:\n  - enrich:\n      uri: db:query\n      parameters:\n        dataSource: customers\n    parameters:\n      timeoutS: \"5000\"\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        assert_eq!(endpoints.len(), 1);
+        let ep = &endpoints[0];
+        assert_eq!(ep.uri.value, "db:query");
+        let opt = |key: &str| ep.options.iter().find(|o| o.key.value == key);
+        let data_source =
+            opt("dataSource").expect("inner config parameter `dataSource` must be captured");
+        assert_eq!(data_source.origin, OptionOrigin::ConfigParameters);
+        let timeout = opt("timeoutS").expect("step-level parameter `timeoutS` must be captured");
+        assert_eq!(timeout.origin, OptionOrigin::StepParameters);
+    }
+
+    #[test]
+    fn from_parameters_carry_step_origin() {
+        let source = "from: timer:tick\nparameters:\n  period: \"2500\"\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none(), "expected clean parse");
+        let endpoints = doc.route_view.endpoints();
+        assert_eq!(endpoints.len(), 1, "expected exactly the from endpoint");
+        let from_ep = &endpoints[0];
+        assert_eq!(from_ep.uri.value, "timer:tick");
+        let period = from_ep
+            .options
+            .iter()
+            .find(|o| o.key.value == "period")
+            .expect("route-level parameters entry `period` must be captured");
+        assert_eq!(period.origin, OptionOrigin::StepParameters);
     }
 
     #[test]

@@ -52,6 +52,7 @@ pub enum UriKnownSubCode {
     UnknownOption,
     MissingRequiredOption,
     KindMismatch,
+    DuplicateKey,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,8 +70,8 @@ impl std::fmt::Display for DiagnosticCode {
     /// This is the baseline's stable contract: `R-SYN`, `R-SCHEMA`,
     /// `R-SECRET`, `R-DEPRECATED`, and `R-URI-known:<sub>` where `<sub>` is
     /// `unverified-scheme` / `unknown-option` / `kind-mismatch` /
-    /// `missing-required-option`. Never rely on the `Debug` repr — it is not
-    /// a stability boundary.
+    /// `missing-required-option` / `duplicate-key`. Never rely on the
+    /// `Debug` repr — it is not a stability boundary.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DiagnosticCode::RSyn => f.write_str("R-SYN"),
@@ -83,6 +84,7 @@ impl std::fmt::Display for DiagnosticCode {
                     UriKnownSubCode::UnknownOption => "unknown-option",
                     UriKnownSubCode::KindMismatch => "kind-mismatch",
                     UriKnownSubCode::MissingRequiredOption => "missing-required-option",
+                    UriKnownSubCode::DuplicateKey => "duplicate-key",
                 };
                 write!(f, "R-URI-known:{s}")
             }

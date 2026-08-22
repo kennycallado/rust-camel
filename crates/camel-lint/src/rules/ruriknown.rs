@@ -6,6 +6,11 @@
 //! - **Absent scheme** → one informational `UnverifiedScheme` note on the
 //!   scheme token; no option diagnostics (the catalog cannot verify options
 //!   for a scheme it does not know).
+//! - **Cross-source duplicate key** (an option key in both the URI query
+//!   string and a `parameters:` map, or in config and step `parameters:`
+//!   maps) → one `DuplicateKey` error on the redundant occurrence, before
+//!   any catalog lookup — the collision fails lowering regardless of scheme
+//!   knowledge.
 //! - **Known-but-minimal scheme** (registered, no `uri_options`) → silent.
 //! - **Known scheme with `uri_options`** → each provided option is resolved
 //!   against `name`/`aliases`: an unresolved key yields an `UnknownOption`
@@ -23,7 +28,7 @@ use camel_api::component_metadata::{ComponentMetadataCatalog, OptionKind};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode, Severity, Span, UriKnownSubCode};
 use crate::document::Document;
-use crate::route_view::Endpoint;
+use crate::route_view::{Endpoint, OptionOrigin};
 use crate::rule::Rule;
 
 /// R-URI-known: validates endpoint schemes and options against the catalog.
@@ -49,12 +54,96 @@ impl Rule for RUriKnownRule {
     }
 }
 
+/// Flag option keys declared in more than one source origin for `ep`.
+///
+/// One error per colliding key, on the span of the FIRST non-Query
+/// occurrence: options arrive ordered query-first, then step-level
+/// parameters, then config parameters, so that span is the step-level key
+/// when both parameter sides collide and the parameter key for a
+/// query/parameters overlap — the side the lowering's duplicate-key errors
+/// name. Raw keys only; alias resolution plays no part. Repeated keys
+/// within the raw query alone are legal (the lowering preserves them).
+fn flag_cross_source_duplicates(ep: &Endpoint, diagnostics: &mut Vec<Diagnostic>) {
+    struct Seen {
+        query: bool,
+        step: bool,
+        config: bool,
+        first_non_query: Option<Span>,
+    }
+    let mut by_key: std::collections::BTreeMap<&str, Seen> = std::collections::BTreeMap::new();
+    for opt in &ep.options {
+        let seen = by_key.entry(opt.key.value.as_str()).or_insert(Seen {
+            query: false,
+            step: false,
+            config: false,
+            first_non_query: None,
+        });
+        match opt.origin {
+            OptionOrigin::Query => seen.query = true,
+            OptionOrigin::StepParameters => {
+                seen.step = true;
+                if seen.first_non_query.is_none() {
+                    seen.first_non_query = Some(opt.key.span.clone());
+                }
+            }
+            OptionOrigin::ConfigParameters => {
+                seen.config = true;
+                if seen.first_non_query.is_none() {
+                    seen.first_non_query = Some(opt.key.span.clone());
+                }
+            }
+        }
+    }
+    for (key, seen) in by_key {
+        // Fixed source vocabulary for the message, in lowering-check order.
+        let mut sources: Vec<&str> = Vec::new();
+        if seen.query {
+            sources.push("the URI query string");
+        }
+        if seen.step {
+            sources.push("step parameters");
+        }
+        if seen.config {
+            sources.push("config parameters");
+        }
+        if sources.len() < 2 {
+            continue;
+        }
+        // ≥2 sources always include a parameters-side occurrence, which
+        // recorded its key span above; kept total rather than `expect` to
+        // honor lint-unwrap on non-test code.
+        let Some(span) = seen.first_non_query else {
+            continue;
+        };
+        diagnostics.push(Diagnostic {
+            code: DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey),
+            severity: Severity::Error,
+            span,
+            message: format!(
+                "duplicate option key `{key}`: declared in {}",
+                sources.join(" and ")
+            ),
+            fix: None,
+        });
+    }
+}
+
 /// Analyze a single endpoint against the catalog, appending diagnostics.
 fn analyze_endpoint(
     ep: &Endpoint,
     catalog: &dyn ComponentMetadataCatalog,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    // Cross-source duplicate keys FIRST: the collision fails lowering
+    // regardless of catalog knowledge or a parseable scheme, so this pass
+    // runs before the scheme split and the catalog early-returns. It mirrors
+    // the lowering's two fail-closed paths (`EndpointUriError::DuplicateKey`
+    // for query/parameters overlap; `combine_params` for config/step
+    // parameters overlap). Raw keys only — alias resolution plays no part,
+    // and repeated keys within the raw query alone stay legal (the lowering
+    // preserves them in order).
+    flag_cross_source_duplicates(ep, diagnostics);
+
     let uri = &ep.uri.value;
     // Split the scheme: text before the first `:`. A URI without a colon has
     // no parseable scheme; skip it (structural issues are R-SCHEMA's domain).
@@ -139,7 +228,7 @@ fn analyze_endpoint(
 mod tests {
     use super::*;
     use crate::diagnostic::Span;
-    use crate::route_view::{LintOption, Spanned, resolve_option};
+    use crate::route_view::{LintOption, OptionOrigin, Spanned, resolve_option};
     use crate::test_support::StubCatalog;
     use camel_api::component_metadata::{
         ComponentCapabilities, ComponentMetadata, OptionKind, UriOption,
@@ -350,6 +439,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Helper: build a `LintOption` with a bare key (no value) at a dummy span.
+    /// Origin defaults to `Query`; tests that need another origin build the
+    /// literal directly.
     fn lint_option(key: &str) -> LintOption {
         LintOption {
             key: Spanned {
@@ -357,6 +448,7 @@ mod tests {
                 span: Span::new(0, key.len()),
             },
             value: None,
+            origin: OptionOrigin::Query,
         }
     }
 
@@ -502,5 +594,183 @@ mod tests {
         // All three distinct suffixes resolve to the SAME option.
         assert!(std::ptr::eq(hit_a, hit_b));
         assert!(std::ptr::eq(hit_a, hit_long));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-source duplicate key tests (Task 2.1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_key_display_string() {
+        assert_eq!(
+            DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey).to_string(),
+            "R-URI-known:duplicate-key"
+        );
+    }
+
+    #[test]
+    fn query_and_step_parameters_overlap_flagged() {
+        // Per the spec scenario: the catalog KNOWS `timer` with option
+        // `period` (non-Bool kind → silent), so the duplicate fires while
+        // the per-occurrence validation loop is active (coexistence path).
+        let catalog = StubCatalog::empty().with(
+            "timer",
+            meta_with_options(
+                "timer",
+                vec![UriOption::new(
+                    "period",
+                    "tick interval",
+                    OptionKind::String,
+                )],
+            ),
+        );
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?period=1000\n    parameters:\n      period: \"2500\"\n";
+        let diags = analyze(source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
+            1,
+            "expected exactly one DuplicateKey; got: {:?}",
+            ruriknown_only(&diags)
+                .iter()
+                .map(|d| (&d.code, slice(source, &d.span)))
+                .collect::<Vec<_>>()
+        );
+        let dup = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
+            .unwrap();
+        // Span lands on the `period` key inside the parameters map — the
+        // SECOND `period` occurrence in the source.
+        assert_eq!(slice(source, &dup.span), "period");
+        assert_eq!(
+            dup.span.start,
+            source.rfind("period").expect("parameters-side key present")
+        );
+        assert_eq!(dup.severity, Severity::Error);
+    }
+
+    #[test]
+    fn config_and_step_parameters_overlap_flagged() {
+        let catalog = StubCatalog::empty().with("db", meta_with_options("db", Vec::new()));
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - enrich:\n      uri: db:query\n      parameters:\n        timeout: \"1\"\n    parameters:\n      timeout: \"2\"\n";
+        let diags = analyze(source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
+            1,
+            "expected exactly one DuplicateKey; got: {:?}",
+            ruriknown_only(&diags)
+                .iter()
+                .map(|d| (&d.code, slice(source, &d.span)))
+                .collect::<Vec<_>>()
+        );
+        let dup = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
+            .unwrap();
+        // Span on the step-level `timeout` key — the second occurrence.
+        assert_eq!(slice(source, &dup.span), "timeout");
+        assert_eq!(
+            dup.span.start,
+            source.rfind("timeout").expect("step-level key present")
+        );
+    }
+
+    #[test]
+    fn repeated_query_keys_not_flagged() {
+        let catalog = StubCatalog::empty().with("timer", meta_with_options("timer", Vec::new()));
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: timer:foo?period=1&period=2\n";
+        let diags = analyze(source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
+            0,
+            "repeated keys within the raw query alone are legal; got: {:?}",
+            ruriknown_only(&diags)
+        );
+    }
+
+    #[test]
+    fn overlap_flagged_for_unregistered_scheme() {
+        // `kafka` absent from the catalog: the duplicate check still fires,
+        // alongside the informational unverified-scheme note. `direct` IS
+        // registered (known-but-minimal → silent) so the only unverified
+        // note is kafka's.
+        let catalog = StubCatalog::empty().with("direct", meta_with_options("direct", Vec::new()));
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: kafka:orders?brokers=h1\n    parameters:\n      brokers: \"h2\"\n";
+        let diags = analyze(source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
+            1,
+            "duplicate fires regardless of catalog knowledge; got: {:?}",
+            ruriknown_only(&diags)
+                .iter()
+                .map(|d| (&d.code, slice(source, &d.span)))
+                .collect::<Vec<_>>()
+        );
+        let dup = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
+            .unwrap();
+        assert_eq!(slice(source, &dup.span), "brokers");
+        assert_eq!(
+            dup.span.start,
+            source
+                .rfind("brokers")
+                .expect("parameters-side key present")
+        );
+        assert_eq!(count_subcode(&diags, UriKnownSubCode::UnverifiedScheme), 1);
+    }
+
+    #[test]
+    fn route_level_from_overlap_flagged() {
+        let catalog = StubCatalog::empty().with("timer", meta_with_options("timer", Vec::new()));
+        let source = "id: r1\nfrom: timer:tick?period=1s\nparameters:\n  period: \"2500\"\n";
+        let diags = analyze(source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
+            1,
+            "route-level from overlap must be flagged; got: {:?}",
+            ruriknown_only(&diags)
+                .iter()
+                .map(|d| (&d.code, slice(source, &d.span)))
+                .collect::<Vec<_>>()
+        );
+        let dup = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
+            .unwrap();
+        assert_eq!(slice(source, &dup.span), "period");
+        assert_eq!(
+            dup.span.start,
+            source.rfind("period").expect("route-level key present")
+        );
+    }
+
+    #[test]
+    fn all_three_sources_single_diagnostic() {
+        let catalog = StubCatalog::empty().with("timer", meta_with_options("timer", Vec::new()));
+        let source = "id: r1\nfrom: direct:start\nsteps:\n  - to:\n      uri: timer:foo?period=1s\n      parameters:\n        period: \"2\"\n    parameters:\n      period: \"3\"\n";
+        let diags = analyze(source, &catalog);
+        assert_eq!(
+            count_subcode(&diags, UriKnownSubCode::DuplicateKey),
+            1,
+            "one diagnostic per colliding key per endpoint, even across three sources; got: {:?}",
+            ruriknown_only(&diags)
+                .iter()
+                .map(|d| (&d.code, slice(source, &d.span)))
+                .collect::<Vec<_>>()
+        );
+        // Pin the span side: options arrive [query, step-inherited,
+        // config-local], so the first non-Query occurrence is the STEP-level
+        // key (value "3") — the last `period` in the source. A future reorder
+        // of the walk's `inherited ++ local` chain turns this red.
+        let dup = diags
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::DuplicateKey))
+            .unwrap();
+        assert_eq!(slice(source, &dup.span), "period");
+        assert_eq!(
+            dup.span.start,
+            source.rfind("period").expect("step-level key present")
+        );
     }
 }

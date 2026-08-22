@@ -27,7 +27,7 @@ The engine ships with 5 rules:
 |------|------|----------|-------------|
 | R-SYN | Syntax | Error | YAML/JSON parse failure; `RSynRule` reads the `parse_failure` field of `Document` (set by `Document::parse`) and emits one diagnostic |
 | R-SCHEMA | JSON Schema | Error | Validates the parsed document against the embedded route-schema.json, with per-keyword error anchoring |
-| R-URI-known | URI known | Error / Info | Validates endpoint schemes and options against the catalog; unknown scheme → Info, unknown option / kind mismatch / missing required → Error |
+| R-URI-known | URI known | Error / Info | Validates endpoint schemes and options against the catalog; unknown scheme → Info, unknown option / kind mismatch / missing required / duplicate key across query/parameters → Error |
 | R-SECRET | Secret | Warning | Detects literal credentials (passwords, tokens, API keys) in route source |
 | R-DEPRECATED | Deprecated | Warning | Flags deprecated component options |
 
@@ -35,13 +35,17 @@ The engine ships with 5 rules:
 `Endpoint` / `LintOption`), and an `apply_fix` hook.
 
 **Endpoint options come from three sources** — query string, `parameters:` maps, and (for
-object-form `enrich`/`poll_enrich`) the inner config map. `parameters:` entries are captured
-with byte-exact key/value spans, indistinguishable from query-string options for rule
-purposes. Step-level `parameters:` inherit into object-form URI keys and are CONCATENATED
-with the inner map (never either/or — dropping a side would hide entries from rules and
-false-flag `MissingRequiredOption`). A same key carried both in the query string and in
-`parameters:` reaches rules twice; the DSL lowering rejects that overlap (fail-closed) —
-pre-lowering overlap flagging is tracked in bd rc-j9v8.
+object-form `enrich`/`poll_enrich`) the inner config map. Each captured option carries its
+source origin (`Query` / `StepParameters` / `ConfigParameters` on `LintOption.origin`),
+distinguishable by rules; every option is still attached to the same endpoint and validated
+identically by the per-occurrence rules. `parameters:` entries are captured with byte-exact
+key/value spans. Step-level `parameters:` inherit into object-form URI keys and are
+CONCATENATED with the inner map (never either/or — dropping a side would hide entries from
+rules and false-flag `MissingRequiredOption`). A same key declared in more than one source
+(query string, step parameters, or config parameters) fails the DSL lowering
+(fail-closed, `EndpointUriError::DuplicateKey`); R-URI-known flags it pre-lowering with
+`R-URI-known:duplicate-key` on the redundant occurrence. Repeated keys within the raw
+query string alone stay legal.
 
 ## Catalog injection
 
@@ -84,7 +88,8 @@ _Avoid_: issue, warning, finding
 **DiagnosticCode**:
 Enum of all possible lint codes: `RSyntax`, `RSchema(RSchemaSubCode)`, `RUriKnown(UriKnownSubCode)`,
 `RSecret(RSecretSubCode)`, `RDeprecated(RDeprecatedSubCode)`. Each variant names the rule
-that produced it.
+that produced it. `R-URI-known:<sub>` stable strings: `unverified-scheme`, `unknown-option`,
+`kind-mismatch`, `missing-required-option`, `duplicate-key`.
 _Avoid_: error code, lint code (use DiagnosticCode for the enum)
 
 **Severity**:
