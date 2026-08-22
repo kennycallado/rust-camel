@@ -11,7 +11,8 @@
 //! against a fresh `tempfile::TempDir` fixture, waits until the file watcher
 //! reports itself armed, rewrites the colocated test doc (identical body plus
 //! one trailing newline), and asserts the run is still alive with no error
-//! naming the test doc. Design notes mirror `run_exec_guard_test.rs`:
+//! naming the test doc. Design notes mirror `run_exec_guard_test.rs`; the
+//! shared subprocess plumbing lives in `tests/common`:
 //!
 //! - stdout/stderr are piped and drained by two reader threads into separate
 //!   buffers so the OS pipe (64 KiB) never fills and deadlocks the child.
@@ -22,61 +23,15 @@
 //! - The post-save sleep is 2 s against the default `watch_debounce_ms` of
 //!   300 ms: comfortably past the debounce window plus the reload pass.
 
-use std::io::Read;
-use std::ops::{Deref, DerefMut};
+mod common;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Drain `reader` (a pipe from a child process) into `buffer` until EOF.
-/// Designed to be called inside a `std::thread::spawn` closure.
-fn drain_to_buffer<R: Read + Send + 'static>(mut reader: R, buffer: Arc<Mutex<String>>) {
-    let mut chunk = [0u8; 4096];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => return, // EOF
-            Ok(n) => {
-                let text = String::from_utf8_lossy(&chunk[..n]);
-                let mut guard = buffer.lock().expect("buffer lock poisoned");
-                guard.push_str(&text);
-            }
-            Err(e) => {
-                eprintln!("reader thread io error: {e}");
-                return;
-            }
-        }
-    }
-}
-
-/// Wrapper that force-kills the child on drop so a failed assertion mid-test
-/// cannot leak the process. After the child has been reaped, `Child::kill` is
-/// a no-op (std refuses to signal a possibly-recycled pid), so the guard is
-/// harmless on the normal exit path.
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        // Best-effort cleanup: ignore errors (child may have exited already).
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-impl Deref for KillOnDrop {
-    type Target = Child;
-
-    fn deref(&self) -> &Child {
-        &self.0
-    }
-}
-
-impl DerefMut for KillOnDrop {
-    fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
-    }
-}
+use common::{KillOnDrop, drain_to_buffer, send_term, wait_for_marker};
 
 /// Build the `Command` that launches the `camel` binary against `dir`'s
 /// `Camel.toml`, with both stdout and stderr piped. No `--no-watch` flag:
@@ -95,38 +50,6 @@ fn spawn_camel_run_watch(dir: &Path) -> KillOnDrop {
         .spawn()
         .expect("failed to spawn `camel` binary");
     KillOnDrop(child)
-}
-
-/// Poll both captured buffers until `marker` appears on either stream, the
-/// child dies, or `timeout` elapses. Returns `false` when the child died or
-/// the deadline hit; callers assert and print the captured output.
-fn wait_for_marker(
-    child: &mut Child,
-    out_buf: &Arc<Mutex<String>>,
-    err_buf: &Arc<Mutex<String>>,
-    marker: &str,
-    timeout: Duration,
-) -> bool {
-    let start = Instant::now();
-    let step = Duration::from_millis(25);
-    loop {
-        {
-            let out = out_buf.lock().expect("stdout buffer lock poisoned");
-            let err = err_buf.lock().expect("stderr buffer lock poisoned");
-            if out.contains(marker) || err.contains(marker) {
-                return true;
-            }
-        }
-        if start.elapsed() >= timeout {
-            return false;
-        }
-        // Bail out early if the child already died: the marker will never
-        // arrive and the caller's assert should show what was captured.
-        if let Ok(Some(_)) = child.try_wait() {
-            return false;
-        }
-        thread::sleep(step);
-    }
 }
 
 /// Wait for the child to exit, but at most `timeout`. If it is still alive
@@ -223,8 +146,7 @@ watch = true
     // watcher task and can print before the watch handles are registered).
     let armed = wait_for_marker(
         &mut child,
-        &out_buf,
-        &err_buf,
+        &[Arc::clone(&out_buf), Arc::clone(&err_buf)],
         "hot-reload: watching",
         Duration::from_secs(10),
     );
@@ -265,15 +187,7 @@ watch = true
     );
 
     // Send exactly ONE SIGTERM; the CLI handles it as graceful shutdown.
-    let kill_status = Command::new("kill")
-        .arg("-TERM")
-        .arg(child.id().to_string())
-        .status()
-        .expect("failed to spawn `kill -TERM`");
-    assert!(
-        kill_status.success(),
-        "`kill -TERM` returned non-zero: {kill_status:?}"
-    );
+    send_term(&child);
 
     let exited = wait_exit_bounded(&mut child, Duration::from_secs(10));
 

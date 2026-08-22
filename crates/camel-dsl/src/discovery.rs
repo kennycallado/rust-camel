@@ -171,6 +171,9 @@ pub fn is_test_document(path: &Path) -> bool {
 
 /// Returns true if the glob pattern contains no metacharacters (`* ? [ ] { }`),
 /// i.e. it names exactly one literal path rather than a set of paths.
+/// A lone `]` or `}` also counts as a metacharacter, so a pathologically
+/// named literal is skipped under wildcard rules rather than erroring
+/// (accepted behavior).
 fn pattern_is_literal(pattern: &str) -> bool {
     !pattern.contains(['*', '?', '[', ']', '{', '}'])
 }
@@ -1567,6 +1570,26 @@ routes:
             }
             other => panic!("expected JsonRequiresExplicitPattern, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_json_name_under_explicit_json_glob_parses_as_route() {
+        // `.test.json` is not a camel test document (the reserved suffix is
+        // YAML-only), so an explicit `.json` glob loads it as a route. Spec
+        // scenario: `routes/x.test.json` matched by `routes/*.json`.
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("x.test.json"),
+            r#"{"routes":[{"id":"j","from":"direct:s","steps":[{"to":"mock:m"}]}]}"#,
+        )
+        .unwrap();
+
+        let pattern = routes_dir.join("*.json").to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "j");
     }
 
     #[test]

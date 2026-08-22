@@ -31,41 +31,28 @@
 //!   short-circuit the moment the observation is seen / the child exits), so
 //!   the generous ceiling only buys headroom under load — it never slows the
 //!   fast path.
+//! - The shared subprocess plumbing (drain threads, kill-on-drop guard,
+//!   marker wait, single-SIGTERM send) lives in `tests/common`.
 
-use std::io::Read;
+mod common;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Drain `reader` (a pipe from a child process) into `buffer` line by line
-/// until EOF. Designed to be called inside a `std::thread::spawn` closure.
-fn drain_to_buffer<R: Read + Send + 'static>(mut reader: R, buffer: Arc<Mutex<String>>) {
-    let mut chunk = [0u8; 4096];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => return, // EOF
-            Ok(n) => {
-                let text = String::from_utf8_lossy(&chunk[..n]);
-                let mut guard = buffer.lock().expect("buffer lock poisoned");
-                guard.push_str(&text);
-            }
-            Err(e) => {
-                eprintln!("reader thread io error: {e}");
-                return;
-            }
-        }
-    }
-}
+use common::{KillOnDrop, drain_to_buffer, send_term, wait_for_marker};
 
 /// Build the `Command` that launches the `camel` binary against `dir`'s
 /// `Camel.toml`, with both stdout and stderr piped. The working dir is set
 /// to `dir` so that `camel run` resolves `routes = ["routes/*.yaml"]` and
 /// `[components.exec].workspace_root = "."` relative to the fixture root.
-fn spawn_camel_run(dir: &Path) -> Child {
+/// The child is wrapped in a kill-on-drop guard so a failed assertion
+/// mid-test cannot leak the process.
+fn spawn_camel_run(dir: &Path) -> KillOnDrop {
     let config_path = dir.join("Camel.toml");
-    Command::new(env!("CARGO_BIN_EXE_camel"))
+    let child = Command::new(env!("CARGO_BIN_EXE_camel"))
         .arg("run")
         .arg("--no-watch")
         .arg("--config")
@@ -75,7 +62,8 @@ fn spawn_camel_run(dir: &Path) -> Child {
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .spawn()
-        .expect("failed to spawn `camel` binary")
+        .expect("failed to spawn `camel` binary");
+    KillOnDrop(child)
 }
 
 /// Poll the child for up to `timeout`, returning the exit code if it
@@ -176,45 +164,17 @@ fn run_observe_then_signal(dir: &Path, observe: &str, timeout: Duration) -> (i32
     let out_handle = thread::spawn(move || drain_to_buffer(stdout, out_buf));
     let err_handle = thread::spawn(move || drain_to_buffer(stderr, err_buf));
 
-    // Poll the buffer for the expected observation.
-    let start = Instant::now();
-    let step = Duration::from_millis(25);
-    let observed = loop {
-        {
-            let guard = buffer.lock().expect("buffer lock poisoned");
-            if guard.contains(observe) {
-                break true;
-            }
-        }
-        if start.elapsed() >= timeout {
-            break false;
-        }
-        // Also bail out early if the child has already died — no point in
-        // waiting for an observation that will never come.
-        if let Ok(Some(_)) = child.try_wait() {
-            break false;
-        }
-        thread::sleep(step);
-    };
-
+    // Poll the buffer for the expected observation (bails out early if the
+    // child dies before the marker can arrive).
+    let observed = wait_for_marker(&mut child, &[Arc::clone(&buffer)], observe, timeout);
     assert!(
         observed,
         "did not observe {observe:?} within {timeout:?}; captured so far:\n{}",
         buffer.lock().expect("buffer lock poisoned")
     );
 
-    // Send exactly ONE SIGTERM. The CLI's `tokio::select!` arm handles
-    // SIGTERM → graceful shutdown → `Ok(())` → exit 0. A second signal
-    // would force `exit(1)`, so we must not double-tap.
-    let kill_status = Command::new("kill")
-        .arg("-TERM")
-        .arg(child.id().to_string())
-        .status()
-        .expect("failed to spawn `kill -TERM`");
-    assert!(
-        kill_status.success(),
-        "`kill -TERM` returned non-zero: {kill_status:?}"
-    );
+    // Send exactly ONE SIGTERM; a second signal would force `exit(1)`.
+    send_term(&child);
 
     let exit_code = wait_bounded(&mut child, Duration::from_secs(10));
 

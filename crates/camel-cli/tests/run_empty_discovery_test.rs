@@ -171,6 +171,59 @@ watch = false
     );
 }
 
+/// Wildcard-matches-ONLY-a-test-doc variant: the glob `routes/*.test.yaml`
+/// expands to a single reserved test document, which discovery skips. The
+/// observable behavior must be identical to an empty glob: the run stays
+/// alive, the zero-routes WARN fires naming the pattern, and NO discovery
+/// error names the test doc (only a literal `.test.yaml` pattern
+/// hard-errors; a wildcard skip is silent).
+#[test]
+fn wildcard_over_only_test_doc_warns_zero_routes_not_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.path().join("Camel.toml"),
+        r#"[default]
+routes = ["routes/*.test.yaml"]
+log_level = "INFO"
+watch = false
+"#,
+    )
+    .expect("write Camel.toml");
+    // Deliberately invalid route bytes: a test doc is never read by
+    // discovery, so this content must not surface as any error.
+    std::fs::write(
+        dir.path().join("routes/demo.test.yaml"),
+        "not: [a route document",
+    )
+    .expect("write demo.test.yaml");
+
+    let (exit_code, output, observed) = run_observe_then_signal(
+        dir.path(),
+        "matched zero route files",
+        Duration::from_secs(60),
+    );
+
+    assert!(
+        observed,
+        "expected the zero-routes WARN when the glob matches only a test \
+         doc and the run stays alive; got:\n{output}"
+    );
+    assert!(
+        output.contains("routes/*.test.yaml"),
+        "expected the WARN to name the discovery patterns; got:\n{output}"
+    );
+    assert!(
+        !output.contains("demo.test.yaml"),
+        "a wildcard match on a test doc must be skipped silently, not \
+         surfaced as a discovery error naming it; got:\n{output}"
+    );
+    assert_eq!(
+        exit_code, 0,
+        "expected the run to stay alive until SIGTERM and exit gracefully (0); got {exit_code}\n--- captured ---\n{output}\n--- end ---"
+    );
+}
+
 /// Default-path variant: NO `routes` key in Camel.toml and NO `routes/`
 /// directory. The default glob `routes/*.yaml` expands to zero files, so the
 /// WARN must name the raw default pattern — not the empty expanded list —

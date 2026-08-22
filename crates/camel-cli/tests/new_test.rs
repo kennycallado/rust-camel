@@ -1,13 +1,15 @@
+mod common;
+
 use std::fs;
-use std::io::Read;
-use std::ops::{Deref, DerefMut};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use camel_cli::commands::new::NewArgs;
 use camel_cli::template::ProfileLayout;
+
+use common::{KillOnDrop, drain_to_buffer, send_term, wait_for_marker};
 
 fn run_new(name: &str, template: &str, force: bool, profile_layout: ProfileLayout) {
     camel_cli::commands::new::run_new(NewArgs {
@@ -369,53 +371,6 @@ fn scaffolded_project_run_discovery_skips_test_doc() {
     assert_eq!(routes[0].route_id(), "hello");
 }
 
-/// Drain `reader` (a pipe from a child process) into `buffer` until EOF.
-/// Designed to be called inside a `std::thread::spawn` closure.
-fn drain_to_buffer<R: Read + Send + 'static>(mut reader: R, buffer: Arc<Mutex<String>>) {
-    let mut chunk = [0u8; 4096];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => return,
-            Ok(n) => {
-                let text = String::from_utf8_lossy(&chunk[..n]);
-                let mut guard = buffer.lock().expect("buffer lock poisoned");
-                guard.push_str(&text);
-            }
-            Err(e) => {
-                eprintln!("reader thread io error: {e}");
-                return;
-            }
-        }
-    }
-}
-
-/// Wrapper that force-kills the child on drop so a failed assertion mid-test
-/// cannot leak the process. After the child has been reaped, `Child::kill` is
-/// a no-op, so the guard is harmless on the normal exit path.
-struct KillOnDrop(Child);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        // Best-effort cleanup: ignore errors (child may have exited already).
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-impl Deref for KillOnDrop {
-    type Target = Child;
-
-    fn deref(&self) -> &Child {
-        &self.0
-    }
-}
-
-impl DerefMut for KillOnDrop {
-    fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
-    }
-}
-
 /// The scaffolded project (route + colocated test doc + wildcard
 /// `routes = ["routes/*.yaml"]`) runs under `camel run` without the test
 /// document tripping discovery. Pattern mirrors `run_exec_guard_test.rs`:
@@ -458,28 +413,14 @@ fn scaffolded_project_runs_under_camel_run() {
     };
 
     // Wait (up to 30 s) for the startup marker proving the context and its
-    // routes started. Bail out early if the child dies on its own.
-    // 30 s matches the repo precedent in run_exec_guard_test.rs: subprocess
-    // startup slows ~100x under whole-workspace cargo test load.
-    let start = Instant::now();
-    let step = Duration::from_millis(25);
-    let deadline = Duration::from_secs(30);
-    let observed = loop {
-        if stdout_buf
-            .lock()
-            .expect("buffer lock poisoned")
-            .contains("context started")
-        {
-            break true;
-        }
-        if start.elapsed() >= deadline {
-            break false;
-        }
-        if let Ok(Some(_)) = child.try_wait() {
-            break false;
-        }
-        thread::sleep(step);
-    };
+    // routes started. The 30 s ceiling rationale lives on
+    // `common::wait_for_marker`.
+    let observed = wait_for_marker(
+        &mut child,
+        &[Arc::clone(&stdout_buf)],
+        "context started",
+        Duration::from_secs(30),
+    );
     assert!(
         observed,
         "did not observe `context started` within 30s; captured stdout:\n{}",
@@ -487,18 +428,11 @@ fn scaffolded_project_runs_under_camel_run() {
     );
 
     // Send exactly ONE SIGTERM. A second signal would force exit(1).
-    let kill_status = Command::new("kill")
-        .arg("-TERM")
-        .arg(child.id().to_string())
-        .status()
-        .expect("failed to spawn `kill -TERM`");
-    assert!(
-        kill_status.success(),
-        "`kill -TERM` returned non-zero: {kill_status:?}"
-    );
+    send_term(&child);
 
     // Bounded wait for termination; force-kill at the deadline (the kill-on-
     // drop guard makes that force-kill best-effort idempotent).
+    let step = Duration::from_millis(25);
     let term_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match child.try_wait() {

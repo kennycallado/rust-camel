@@ -71,7 +71,8 @@ the git or workspace root. A walk that finds no `Camel.toml` fails with
 
 ### Rule 4: No in-string sigils
 
-The placement contract rejects every in-string location sigil.
+`routeFilesFromRoot` entries that start with a sigil never resolve; the
+load fails with a file-not-found error.
 
 - `@/` is frontend idiom. It imports meaning from a foreign ecosystem.
 - `$` collides with `${env:}` interpolation.

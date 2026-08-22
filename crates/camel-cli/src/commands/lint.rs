@@ -5,7 +5,9 @@
 //! [`crate::register_builtin_components_for_lint`], obtains the runtime
 //! metadata catalog, and runs all default lint rules over the file. Diagnostics
 //! are rendered with ariadne to stderr. Exit codes: 0 clean, 1 any
-//! error-severity diagnostic, 2 CLI misuse (missing/unreadable file).
+//! error-severity diagnostic, 2 CLI misuse (missing/unreadable file). camel
+//! test documents (`*.test.yaml`, `*.test.yml`) are skipped with an info
+//! line (exit 0).
 
 use std::path::Path;
 use std::sync::Arc;
