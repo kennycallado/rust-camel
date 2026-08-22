@@ -2057,6 +2057,7 @@ dependencies = [
  "camel-platform-kubernetes",
  "camel-processor",
  "camel-prometheus",
+ "camel-redis-repo",
  "camel-template",
  "config",
  "glob",
@@ -2491,6 +2492,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-redis-repo"
+version = "0.33.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component-redis",
+ "redis",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "camel-template"
 version = "0.33.0"
 dependencies = [
@@ -2571,6 +2584,7 @@ dependencies = [
  "camel-master",
  "camel-platform-kubernetes",
  "camel-processor",
+ "camel-redis-repo",
  "camel-xj",
  "camel-xslt",
  "dashmap 6.2.1",
@@ -8850,6 +8864,19 @@ dependencies = [
  "redis",
  "testcontainers",
  "testcontainers-modules",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "redis-repositories"
+version = "0.33.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-dsl",
  "tokio",
  "tracing-subscriber",
 ]

@@ -5,6 +5,10 @@
 //! cannot use the gated `support::send_to_direct`. This module holds the
 //! non-gated canonical copy.
 
+// Each cache test binary compiles this module independently; helpers used
+// by only one binary must not fail dead-code in the others.
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 use camel_api::{CamelError, Exchange};

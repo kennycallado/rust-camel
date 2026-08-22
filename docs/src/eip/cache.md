@@ -74,8 +74,14 @@ Use the Cache pattern when a route computes the same result more than once. API 
 
 The default repository is `"memory"` (moka-backed, size-eviction only). A persistent `"persistent"` repository (redb-backed) is available when `[default.cache_repo] backend = "redb"` is set. The redb backend survives process restarts. Its sweep task reclaims entries whose `expires_at + stale_retention` has passed. The memory backend does not run a sweep. Expired entries stay in memory until size pressure evicts them. `cache_size` is required for the redb backend (for example, `cache_size = "256MiB"`), bounding the redb page cache; `sweep_interval` is optional (default 1h).
 
+A shared `"redis"` repository (redis-backed) is available when `[default.cache_repo] backend = "redis"` is set. Every process that connects to the same Redis shares one cache, so cached entries work across processes. Redis expires each key at `expires_at + stale_retention`. The redis backend runs no background sweep task. `cache_size` and `sweep_interval` do not apply to it. See [ADR-0063](../adr/0063-redis-repository-service.md) for the design.
+
+```toml
+{{#include ../../../examples/redis-repositories/Camel.toml:cache-repo}}
+```
+
 The Cache differs from the [Claim Check](claim-check.md) and the [Idempotent Consumer](idempotent-consumer.md). All three use a repository trait. The Cache stores the full computed body with a TTL. The Claim Check stores the original payload without a TTL. The Idempotent Consumer stores only the deduplication key. A route that needs all three can chain them.
 
-Per [ADR-0056](../adr/0056-cache-repository-port.md), the `CacheRepository` trait lives in `camel-api`, with memory and redb backends in `camel-core`. The trait stores `CacheEntry { bytes, content_type, expires_at }` with in-band expiry. Both backends do size-eviction only. The `expires_at` field drives `get()` misses and `peek_stale()` reads. Per [ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md), each cache step compiles into a `Service<Exchange>` step in the Tower middleware pipeline. The processor contract is documented in [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).
+Per [ADR-0056](../adr/0056-cache-repository-port.md), the `CacheRepository` trait lives in `camel-api`, with memory and redb backends in `camel-core` and a redis backend in `camel-redis-repo` ([ADR-0063](../adr/0063-redis-repository-service.md)). The trait stores `CacheEntry { bytes, content_type, expires_at }` with in-band expiry. The memory and redb backends do size-eviction only. The `expires_at` field drives `get()` misses and `peek_stale()` reads. Per [ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md), each cache step compiles into a `Service<Exchange>` step in the Tower middleware pipeline. The processor contract is documented in [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).
 
 The example source is at [`examples/cache-example`](https://github.com/kennycallado/rust-camel/tree/main/examples/cache-example).

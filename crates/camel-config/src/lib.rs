@@ -24,6 +24,7 @@ pub use config::{
     KeycloakValidationConfig, ObservabilityConfig, OtelCamelConfig, SecurityConfig,
     StreamCachingConfig, SupervisionCamelConfig,
 };
+pub use context_ext::{redis_endpoint_from_cache_repo, redis_endpoint_from_idempotent_repo};
 pub use discovery::{
     DiscoveryError, discover_routes, discover_routes_with_threshold,
     discover_routes_with_threshold_and_security,

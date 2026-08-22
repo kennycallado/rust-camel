@@ -1,7 +1,7 @@
 # ADR-0056: Cache Repository Port
 
 **Date:** 2026-08-11
-**Status:** Accepted
+**Status:** Amended by ADR-0063 (originally Accepted)
 **References:** ADR-0001, ADR-0023, ADR-0028, ADR-0033, ADR-0046, ADR-0049, ADR-0055
 
 ## Decision
@@ -238,7 +238,11 @@ semantics.
 `CacheRepository` lives in `camel-api` (`crates/camel-api/src/cache.rs:63`).
 Any crate can implement it without depending on `camel-core`. Future backends
 (Redis in `camel-component-redis`, SQL in `camel-sql`) can implement the trait
-remotely.
+remotely. The Redis backend ships as the `camel-redis-repo` repository service
+crate (`Amended by: ADR-0063`), not inside the component. Its reclamation uses
+one `SET ... EXAT (expires_at + stale_retention)` write, so the server deadline
+is retention-bounded garbage collection, not expiry enforcement (ADR-0063
+Decision 8).
 
 ### Interface stability
 

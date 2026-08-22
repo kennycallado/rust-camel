@@ -55,7 +55,7 @@ pub use sentinel_component::{RedisSentinelComponent, RedissSentinelComponent};
 pub use sentinel_config::{SentinelConfig, TopologyKind};
 #[cfg(test)]
 pub use topology::FakeTopology;
-pub use topology::{RedisTopology, ServerKind, StandaloneTopology};
+pub use topology::{RedisTopology, ServerKind, StandaloneTopology, topology_from_config};
 
 pub struct RedisComponent {
     config: Option<RedisConfig>,

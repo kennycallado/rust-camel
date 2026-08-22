@@ -1,6 +1,6 @@
 use crate::config::{
-    CacheRepoConfig, CamelConfig, KubernetesPlatformCamelConfig, PlatformCamelConfig,
-    parse_byte_size,
+    CacheRepoConfig, CamelConfig, IdempotentRepoConfig, KubernetesPlatformCamelConfig,
+    PlatformCamelConfig, parse_byte_size,
 };
 #[cfg(feature = "otel")]
 use crate::config::{OtelProtocol, OtelSampler};
@@ -18,6 +18,9 @@ use camel_core::route::RouteDefinition;
 #[cfg(feature = "otel")]
 use camel_otel::{
     OtelConfig, OtelProtocol as OtelProtocolOtel, OtelSampler as OtelSamplerOtel, OtelService,
+};
+use camel_redis_repo::{
+    RedisCacheRepository, RedisEndpointConfig, RedisIdempotentRepository, TopologyKind,
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
@@ -168,6 +171,122 @@ async fn build_persistent_cache_repo(
     .await
 }
 
+/// Build a component `RedisEndpointConfig` from the redis `cache_repo` fields.
+///
+/// `url` maps to a standalone endpoint through the component's own URI
+/// parser; `sentinel_nodes` + `master_name` map to a sentinel topology whose
+/// node entries carry the `redis://` prefix exactly as `redis-sentinel://`
+/// URIs parse them. Sentinel credentials ride on the topology — the URI
+/// dialect has no slot for them. Rejections mirror `CamelConfig::validate()`
+/// (which deep-parses `url` with the same parser).
+pub fn redis_endpoint_from_cache_repo(
+    cfg: &CacheRepoConfig,
+) -> Result<RedisEndpointConfig, CamelError> {
+    redis_endpoint_from_fields(
+        "cache_repo",
+        cfg.url.as_deref(),
+        cfg.sentinel_nodes.as_deref(),
+        cfg.master_name.as_deref(),
+        cfg.sentinel_username.as_deref(),
+        cfg.sentinel_password.as_deref(),
+    )
+}
+
+/// Same mapping as [`redis_endpoint_from_cache_repo`], for the redis
+/// `idempotent_repo` fields (task 3.4). Shares the inner field-mapping so
+/// cache and idempotent endpoints cannot drift.
+pub fn redis_endpoint_from_idempotent_repo(
+    cfg: &IdempotentRepoConfig,
+) -> Result<RedisEndpointConfig, CamelError> {
+    redis_endpoint_from_fields(
+        "idempotent_repo",
+        cfg.url.as_deref(),
+        cfg.sentinel_nodes.as_deref(),
+        cfg.master_name.as_deref(),
+        cfg.sentinel_username.as_deref(),
+        cfg.sentinel_password.as_deref(),
+    )
+}
+
+/// Shared field-mapping core for redis endpoints. `field` is the config
+/// path prefix ("cache_repo" / "idempotent_repo") so rejections name the
+/// offending repository; both repo variants map through this core so their
+/// endpoints cannot drift.
+fn redis_endpoint_from_fields(
+    field: &str,
+    url: Option<&str>,
+    sentinel_nodes: Option<&[String]>,
+    master_name: Option<&str>,
+    sentinel_username: Option<&str>,
+    sentinel_password: Option<&str>,
+) -> Result<RedisEndpointConfig, CamelError> {
+    if let Some(url) = url {
+        if sentinel_nodes.is_some() {
+            return Err(CamelError::Config(format!(
+                "{field}.url: url and sentinel_nodes are mutually exclusive"
+            )));
+        }
+        return RedisEndpointConfig::from_uri(url)
+            .map_err(|e| CamelError::Config(format!("{field}.url: {e}")));
+    }
+    let nodes = sentinel_nodes.unwrap_or(&[]);
+    if nodes.is_empty() || nodes.iter().any(|n| n.trim().is_empty()) {
+        return Err(CamelError::Config(format!(
+            "{field}.sentinel_nodes: sentinel node entries must be non-empty"
+        )));
+    }
+    let master = master_name.unwrap_or("").trim();
+    if master.is_empty() {
+        return Err(CamelError::Config(format!(
+            "{field}.master_name must be set when sentinel_nodes is set"
+        )));
+    }
+    let joined = nodes.iter().map(|n| n.trim()).collect::<Vec<_>>().join(",");
+    let uri = format!("redis-sentinel://{joined}/{master}");
+    let mut endpoint = RedisEndpointConfig::from_uri(&uri)
+        .map_err(|e| CamelError::Config(format!("{field}.sentinel_nodes: {e}")))?;
+    if let TopologyKind::Sentinel(ref mut sentinel) = endpoint.topology_kind {
+        sentinel.username = sentinel_username.map(str::to_string);
+        sentinel.password = sentinel_password.map(str::to_string);
+    }
+    Ok(endpoint)
+}
+
+/// Build the redis-backed cache repository from a validated `CacheRepoConfig`.
+///
+/// Mirrors the redb path: stale retention defaults to 7 days when unset and a
+/// malformed duration is never silently coerced.
+async fn build_redis_cache_repo(
+    ccfg: &CacheRepoConfig,
+) -> Result<RedisCacheRepository, CamelError> {
+    let endpoint = redis_endpoint_from_cache_repo(ccfg)?;
+    let stale_retention = match ccfg.stale_retention.as_deref() {
+        None => Duration::from_secs(7 * 24 * 3600),
+        Some(s) => humantime::parse_duration(s).map_err(|_| {
+            CamelError::Config(format!(
+                "cache_repo.stale_retention: invalid duration '{s}'"
+            ))
+        })?,
+    };
+    let key_prefix = ccfg.key_prefix.as_deref().unwrap_or("camel:cache");
+    RedisCacheRepository::connect("redis", &endpoint, key_prefix, stale_retention)
+        .await
+        .map_err(|e| CamelError::Config(format!("cache_repo: {e}")))
+}
+
+/// Build the redis-backed idempotent repository from a validated
+/// `IdempotentRepoConfig`. The key prefix defaults to `"camel:idem"`
+/// (distinct from the cache repository's `"camel:cache"` default).
+async fn build_redis_idempotent_repo(
+    icfg: &IdempotentRepoConfig,
+) -> Result<RedisIdempotentRepository, CamelError> {
+    let endpoint = redis_endpoint_from_idempotent_repo(icfg)?;
+    let key_prefix = icfg.key_prefix.as_deref().unwrap_or("camel:idem");
+    RedisIdempotentRepository::connect("redis", &endpoint, key_prefix)
+        .await
+        .map_err(|e| CamelError::Config(format!("idempotent_repo: {e}")))
+}
+
 impl CamelConfig {
     /// Load routes from config file and return them (without adding to context yet)
     /// This allows components to be registered before routes are resolved
@@ -285,23 +404,49 @@ impl CamelConfig {
 
         let mut ctx = builder.build().await?;
 
-        // Opt-in persistent redb idempotent repository: when `idempotent_repo`
-        // is set, register a redb-backed repo under the name "redb". The
-        // default "memory" repo registered in CamelContextBuilder::build()
-        // remains in place either way.
+        // Opt-in idempotent repository: when `idempotent_repo` is set with
+        // `backend = "redb"` (the default), register a redb-backed repo
+        // under the name "redb"; with `backend = "redis"`, register a
+        // RedisIdempotentRepository under the name "redis". The default
+        // "memory" repo registered in CamelContextBuilder::build() remains
+        // in place either way.
         if let Some(ref icfg) = config.idempotent_repo {
-            let durability = camel_core::JournalDurability::from(icfg.durability.clone());
-            let repo =
-                camel_core::RedbIdempotentRepository::new("redb", icfg.path.clone(), durability)
-                    .await?;
-            ctx.register_idempotent_repository("redb", Arc::new(repo))
-                .map_err(|e| CamelError::Config(format!("register idempotent 'redb': {e:?}")))?;
+            match icfg.backend.as_str() {
+                "redb" => {
+                    // validate() guarantees a non-empty path for this arm.
+                    let path = std::path::PathBuf::from(icfg.path.as_deref().unwrap_or(""));
+                    // `None` means "immediate"; validate() restricts the
+                    // string to the two known values.
+                    let durability = match icfg.durability.as_deref() {
+                        Some("eventual") => camel_core::JournalDurability::Eventual,
+                        _ => camel_core::JournalDurability::Immediate,
+                    };
+                    let repo =
+                        camel_core::RedbIdempotentRepository::new("redb", path, durability).await?;
+                    ctx.register_idempotent_repository("redb", Arc::new(repo))
+                        .map_err(|e| {
+                            CamelError::Config(format!("register idempotent 'redb': {e:?}"))
+                        })?;
+                }
+                "redis" => {
+                    let repo = build_redis_idempotent_repo(icfg).await?;
+                    ctx.register_idempotent_repository("redis", Arc::new(repo))
+                        .map_err(|e| {
+                            CamelError::Config(format!(
+                                "idempotent_repo: register 'redis' idempotent repository: {e:?}"
+                            ))
+                        })?;
+                }
+                _ => {} // unreachable: validated in CamelConfig::validate()
+            }
         }
 
         // Opt-in cache repository: when `cache_repo` is set with
         // `backend = "redb"`, register a RedbCacheRepository alongside the
-        // default "memory" repo. When set with `backend = "memory"` and a
-        // custom `max_capacity`, replace the default memory repo.
+        // default "memory" repo. When set with `backend = "redis"`, register
+        // a RedisCacheRepository under the name "redis". When set with
+        // `backend = "memory"` and a custom `max_capacity`, replace the
+        // default memory repo.
         if let Some(ref ccfg) = config.cache_repo {
             match ccfg.backend.as_str() {
                 "redb" => {
@@ -310,6 +455,15 @@ impl CamelConfig {
                         .map_err(|e| {
                             CamelError::Config(format!(
                                 "register cache repository 'persistent': {e:?}"
+                            ))
+                        })?;
+                }
+                "redis" => {
+                    let repo = build_redis_cache_repo(ccfg).await?;
+                    ctx.register_cache_repository("redis", Arc::new(repo))
+                        .map_err(|e| {
+                            CamelError::Config(format!(
+                                "cache_repo: register 'redis' cache repository: {e:?}"
                             ))
                         })?;
                 }
@@ -1621,6 +1775,12 @@ mod tests {
             stale_retention: stale_retention.map(str::to_string),
             sweep_interval: sweep_interval.map(str::to_string),
             max_entries: None,
+            url: None,
+            sentinel_nodes: None,
+            master_name: None,
+            sentinel_username: None,
+            sentinel_password: None,
+            key_prefix: None,
         }
     }
 
@@ -1759,6 +1919,12 @@ mod tests {
             stale_retention: None,
             sweep_interval: None,
             max_entries: None,
+            url: None,
+            sentinel_nodes: None,
+            master_name: None,
+            sentinel_username: None,
+            sentinel_password: None,
+            key_prefix: None,
         };
 
         let err = build_persistent_cache_repo(&cfg, CancellationToken::new())
@@ -1768,6 +1934,79 @@ mod tests {
         assert!(
             err.to_string().contains("cache_repo.path"),
             "error must name cache_repo.path: {err}"
+        );
+    }
+
+    fn redis_cache_config(
+        url: Option<&str>,
+        sentinel_nodes: Option<Vec<&str>>,
+        master_name: Option<&str>,
+        sentinel_username: Option<&str>,
+        sentinel_password: Option<&str>,
+    ) -> CacheRepoConfig {
+        CacheRepoConfig {
+            backend: "redis".to_string(),
+            url: url.map(str::to_string),
+            sentinel_nodes: sentinel_nodes
+                .map(|nodes| nodes.into_iter().map(str::to_string).collect::<Vec<_>>()),
+            master_name: master_name.map(str::to_string),
+            sentinel_username: sentinel_username.map(str::to_string),
+            sentinel_password: sentinel_password.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn redis_endpoint_helper_maps_url_and_sentinel() {
+        // url-only → standalone endpoint via the component URI dialect
+        let cfg = redis_cache_config(Some("redis://cache.internal:6379"), None, None, None, None);
+        let endpoint = redis_endpoint_from_cache_repo(&cfg).unwrap();
+        assert!(
+            matches!(endpoint.topology_kind, TopologyKind::Standalone),
+            "url-only config must map to a standalone topology"
+        );
+        assert_eq!(endpoint.host.as_deref(), Some("cache.internal"));
+        assert_eq!(endpoint.port, Some(6379));
+
+        // nodes + master + credentials → sentinel topology carrying all three
+        let cfg = redis_cache_config(
+            None,
+            Some(vec!["s-a:26379", "s-b:26379"]),
+            Some("orders"),
+            Some("svc"),
+            Some("hunter2"),
+        );
+        let endpoint = redis_endpoint_from_cache_repo(&cfg).unwrap();
+        match &endpoint.topology_kind {
+            TopologyKind::Sentinel(sentinel) => {
+                assert_eq!(
+                    sentinel.nodes,
+                    vec![
+                        "redis://s-a:26379".to_string(),
+                        "redis://s-b:26379".to_string()
+                    ],
+                    "nodes must carry the redis:// prefix exactly as the component parses them"
+                );
+                assert_eq!(sentinel.master_name, "orders");
+                assert_eq!(sentinel.username.as_deref(), Some("svc"));
+                assert_eq!(sentinel.password.as_deref(), Some("hunter2"));
+            }
+            other => panic!("sentinel config must map to a sentinel topology, got {other:?}"),
+        }
+        assert_eq!(endpoint.db, 0);
+
+        // url + sentinel both → Err, mirroring validation
+        let cfg = redis_cache_config(
+            Some("redis://cache.internal:6379"),
+            Some(vec!["s-a:26379"]),
+            Some("orders"),
+            None,
+            None,
+        );
+        let err = redis_endpoint_from_cache_repo(&cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "url + sentinel_nodes must be rejected: {err}"
         );
     }
 }

@@ -54,6 +54,7 @@ k8s-openapi = { workspace = true, optional = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "any", "postgres", "tls-rustls"], optional = true }
 
 camel-config.workspace = true
+camel-redis-repo = { workspace = true, optional = true }
 camel-auth.workspace = true
 serde_json.workspace = true
 
@@ -125,6 +126,7 @@ integration-tests = [
     "dep:camel-component-grpc",
     "dep:camel-component-wasm",
     "dep:camel-component-llm",
+    "dep:camel-redis-repo",
 ]
 
 [lints]

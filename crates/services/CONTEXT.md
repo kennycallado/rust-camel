@@ -1,6 +1,6 @@
 # Services
 
-Cross-cutting infrastructure services that hook into the Runtime lifecycle. Covers observability (OpenTelemetry, Prometheus), auth/security, and platform integration (Kubernetes). Note: `camel-platform-kubernetes` lives in `crates/platforms/` but belongs to this context.
+Cross-cutting infrastructure services that hook into the Runtime lifecycle. Covers observability (OpenTelemetry, Prometheus), auth/security, platform integration (Kubernetes), and repository backends (`camel-redis-repo`). Note: `camel-platform-kubernetes` lives in `crates/platforms/` but belongs to this context.
 
 ## Language
 
@@ -97,6 +97,10 @@ _Avoid_: Keycloak mapping, claim parser
 **PermissionEvaluator**:
 Authorization engine for `security_policy.permission`; evaluates resource/action/scope requests and returns a PermissionDecision.
 _Avoid_: SecurityPolicy (SecurityPolicy is route boundary; PermissionEvaluator is one decision source)
+
+**Repository service**:
+Context-scoped, named infrastructure used during Exchange processing. A repository service crate implements a `camel-api` repository trait (`IdempotentRepository`, `CacheRepository`) and registers into `CamelContext` by name at context build time. EIP steps resolve it by name during route execution. Not necessarily a `Lifecycle` implementation: `camel-redis-repo` holds no background work, so it implements none. Established by ADR-0063.
+_Avoid_: service (unqualified), Component, repository adapter crate
 
 ## Example dialogue
 

@@ -1,0 +1,18 @@
+[package]
+name = "redis-repositories"
+description = "Redis cache and idempotent repository example for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-config.workspace = true
+camel-dsl.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -104,6 +104,7 @@ File: `crates/camel-core/src/claim_check/memory_repository.rs:55-56`, `crates/ca
 
 - ADR-0022: StepLifecycle trait and drain — `docs/adr/0022-steplifecycle-trait-and-drain.md`
 - ADR-0023: Idempotent Repository trait (structural parent) — `docs/adr/0023-idempotent-repository-trait.md`
+- ADR-0063: Redis repository service. The Redis backends form a separate port family from Claim Check. ADR-0063 records why the `StepLifecycle` guidance above does not apply to Redis repository connections: they hold no background work, so no connection lifecycle exists to manage — `docs/adr/0063-redis-repository-service.md`
 - ADR-0024: PipelineOutcome replaces CamelError::Stopped — `docs/adr/0024-pipeline-outcome-replaces-camel-error-stopped.md`
 - `NamedRegistry<T>`: `crates/camel-core/src/registry.rs:33-34`
 - `IdempotentRegistry` alias: `crates/camel-core/src/registry.rs:77-78`

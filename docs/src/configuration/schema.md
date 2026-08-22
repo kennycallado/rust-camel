@@ -295,26 +295,53 @@ The runtime event journal. When unset, runtime state is ephemeral and lost on re
 
 Persistent idempotent repository for the [Idempotent Consumer](../eip/idempotent-consumer.md) EIP. When unset, the runtime uses the in-memory `MemoryIdempotentRepository`, which is bounded and ephemeral.
 
+`backend` selects the store. `"redb"` is the default. The redb repository registers under the name `"redb"`. The redis repository registers under the name `"redis"`, and route steps select it with `repository = "redis"`. Redis keys survive a process restart and are shared by every process that connects to the same Redis.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `path` | string | (required) | Path to the `.redb` file. Must not be empty. |
-| `durability` | string | `"immediate"` | `immediate` fsyncs on every key. `eventual` skips fsync. |
+| `backend` | string | `"redb"` | `"redb"` (persistent on-disk store) or `"redis"` (persistent, shared across processes). |
+| `path` | string | (required for redb) | Path to the `.redb` file. Must not be empty. Redb only. |
+| `durability` | string | `"immediate"` | `immediate` fsyncs on every key. `eventual` skips fsync. Redb only. |
+| `url` | string | (required for redis) | Standalone endpoint, `redis://` or `rediss://`. Mutually exclusive with `sentinel_nodes`. Redis only. |
+| `sentinel_nodes` | string array | (alternative to `url`) | Sentinel node addresses. Mutually exclusive with `url`. Redis only. |
+| `master_name` | string | (required with `sentinel_nodes`) | Master name resolved through the sentinels. Redis only. |
+| `sentinel_username` | string | absent | Sentinel AUTH username. Redis only. |
+| `sentinel_password` | string | absent | Sentinel AUTH password. Redacted from `Debug` output. Redis only. |
+| `key_prefix` | string | `"camel:idem"` | Redis key prefix for this repository's keyspace. Allowed charset `[A-Za-z0-9:_-]`. Redis only. |
+
+A runnable redis configuration lives in `examples/redis-repositories`:
+
+```toml
+{{#include ../../../examples/redis-repositories/Camel.toml:idempotent-repo}}
+```
 
 ## [cache_repo]
 
-Optional cache repository configuration. When unset, only the default `"memory"` cache repository is registered. With `backend = "redb"`, a persistent `"persistent"` repository (redb-backed) is registered alongside `"memory"`.
+Optional cache repository configuration. When unset, only the default `"memory"` cache repository is registered. With `backend = "redb"`, a persistent `"persistent"` repository (redb-backed) is registered alongside `"memory"`. With `backend = "redis"`, a shared `"redis"` repository is registered alongside `"memory"`, and route steps select it with `repository = "redis"`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `backend` | string | `"memory"` | `"memory"` (moka-backed, size-eviction only) or `"redb"` (persistent, survives restarts). |
-| `path` | string | (required for redb) | Path to the `.redb` file. Created if it does not exist. Must not be empty. |
-| `stale_retention` | duration string | `7d` (wiring fallback) | How long after expiry a stale entry survives before the sweep reclaims it. Redb only. Accepts `"168h"`, `"7d"`, `"1w"`. |
+| `backend` | string | `"memory"` | `"memory"` (moka-backed, size-eviction only), `"redb"` (persistent, survives restarts), or `"redis"` (persistent, shared across processes). |
+| `path` | string | (required for redb) | Path to the `.redb` file. Created if it does not exist. Must not be empty. Redb only. |
+| `stale_retention` | duration string | `7d` (wiring fallback) | How long after expiry a stale entry stays readable. Redb: the sweep reclaims the entry after this window. Redis: the key expires at `expires_at + stale_retention`. Duration strings, for example `"168h"`, `"7d"`, `"30m"`. Redb and redis. |
 | `max_entries` | integer | `1000000` | Maximum entry count for the redb backend; new-key writes are rejected at the cap. Redb only. |
 | `cache_size` | byte-size string | (required for redb) | Bounds the redb page cache, e.g. `"384MB"`, `"256MiB"`, or plain bytes (`1073741824`). Decimal suffixes are powers of 1000, binary suffixes powers of 1024. Redb only. |
 | `sweep_interval` | duration string | `1h` | How often the redb background sweep runs. Must be positive. Redb only. |
 | `max_capacity` | integer | `10000` (default memory repo) | Entry cap for the memory backend. Memory only. |
+| `url` | string | (required for redis) | Standalone endpoint, `redis://` or `rediss://`. Mutually exclusive with `sentinel_nodes`. Redis only. |
+| `sentinel_nodes` | string array | (alternative to `url`) | Sentinel node addresses. Mutually exclusive with `url`. Redis only. |
+| `master_name` | string | (required with `sentinel_nodes`) | Master name resolved through the sentinels. Redis only. |
+| `sentinel_username` | string | absent | Sentinel AUTH username. Redis only. |
+| `sentinel_password` | string | absent | Sentinel AUTH password. Redacted from `Debug` output. Redis only. |
+| `key_prefix` | string | `"camel:cache"` | Redis key prefix for this repository's keyspace. Allowed charset `[A-Za-z0-9:_-]`. Redis only. |
 
 Fields that do not apply to the configured `backend` are rejected at validation (fail-closed), and a malformed `cache_size`, `sweep_interval`, or `stale_retention` fails validation with an error naming the field.
+
+A runnable redis configuration lives in `examples/redis-repositories`:
+
+```toml
+{{#include ../../../examples/redis-repositories/Camel.toml:cache-repo}}
+```
 
 ## [stream_caching]
 

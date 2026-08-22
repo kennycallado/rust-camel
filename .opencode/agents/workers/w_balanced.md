@@ -1,8 +1,8 @@
 ---
-description: Stable alias — default balanced implementation worker. Points to the current preferred balanced model.
+description: balanced - balanced implementation worker for simple tasks.
 mode: subagent
 temperature: 0.1
-model: zai-coding-plan/glm-5-turbo
+model: opencode-go/deepseek-v4-flash
 tools:
   write: true
   edit: true

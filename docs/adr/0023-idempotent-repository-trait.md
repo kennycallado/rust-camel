@@ -1,7 +1,7 @@
 # ADR-0023: Idempotent Repository Trait Boundary
 
 **Date:** 2026-06-27
-**Status:** Accepted (Phase 1)
+**Status:** Amended by ADR-0063 (originally Accepted, Phase 1)
 **References:** ADR-0024, ADR-0025
 **Related:** Phase 1 — Tasks 2, 3 (Idempotent Consumer EIP)
 
@@ -92,7 +92,7 @@ The auth crate's DashMap `NamedRegistry` (`crates/services/camel-auth/src/regist
 
 ### Trait location
 
-`IdempotentRepository` in `camel-api` (`idempotent.rs`) means any crate can implement it without depending on `camel-core`. Future backends (Redis in `camel-component-redis`, SQL in `camel-sql` via SQLx) can implement the trait remotely.
+`IdempotentRepository` in `camel-api` (`idempotent.rs`) means any crate can implement it without depending on `camel-core`. Future backends (Redis in `camel-component-redis`, SQL in `camel-sql` via SQLx) can implement the trait remotely. The Redis implementation ships as the `camel-redis-repo` repository service crate (`Amended by: ADR-0063`), not inside the component.
 
 ### Interface stability
 

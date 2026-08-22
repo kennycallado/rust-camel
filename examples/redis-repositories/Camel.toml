@@ -1,0 +1,15 @@
+[default]
+routes = ["routes.yaml"]
+
+# ANCHOR: cache-repo
+[default.cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+stale_retention = "30m"
+# ANCHOR_END: cache-repo
+
+# ANCHOR: idempotent-repo
+[default.idempotent_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+# ANCHOR_END: idempotent-repo

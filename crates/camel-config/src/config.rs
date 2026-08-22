@@ -25,11 +25,13 @@ pub struct CamelConfig {
     #[serde(default)]
     pub runtime_journal: Option<JournalConfig>,
 
-    /// Optional persistent redb idempotent repository.
+    /// Optional idempotent repository configuration.
     ///
     /// When unset, the in-memory idempotent repository is used (ephemeral,
-    /// bounded by `DEFAULT_MAX_ENTRIES`).
-    pub idempotent_repo: Option<RedbIdempotentConfig>,
+    /// bounded by `DEFAULT_MAX_ENTRIES`). Set `backend = "redb"` (default)
+    /// for a persistent on-disk store or `backend = "redis"` for a shared
+    /// store.
+    pub idempotent_repo: Option<IdempotentRepoConfig>,
 
     /// Optional cache repository configuration.
     ///
@@ -499,35 +501,121 @@ pub struct JournalConfig {
     pub compaction_threshold_events: u64,
 }
 
-/// Configuration for the persistent redb idempotent repository.
+/// Configuration for the idempotent repository.
+///
+/// Supports two backends: `"redb"` (persistent on-disk store, default) and
+/// `"redis"` (persistent, shared across process restarts and instances).
 ///
 /// When omitted from `Camel.toml`, the runtime uses the in-memory
 /// `MemoryIdempotentRepository` (ephemeral, bounded by `DEFAULT_MAX_ENTRIES`).
-/// Use this struct to opt into a durable on-disk store.
+/// Use this struct to opt into a durable store.
 ///
-/// # Durability trade-off
+/// # Durability trade-off (redb backend)
 ///
-/// `JournalDurability::Immediate` fsyncs the redb file on every added key,
-/// matching the runtime event journal's safety guarantee (at-most-once
-/// semantics survive OS/power crash). For high-throughput routes, set
-/// `durability = "eventual"` to skip fsync — accepted degradation is
-/// at-least-once (a key added just before a crash may be silently lost,
-/// allowing a duplicate replay).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// `durability = "immediate"` (the default) fsyncs the redb file on every
+/// added key, matching the runtime event journal's safety guarantee
+/// (at-most-once semantics survive OS/power crash). For high-throughput
+/// routes, set `durability = "eventual"` to skip fsync — accepted
+/// degradation is at-least-once (a key added just before a crash may be
+/// silently lost, allowing a duplicate replay).
+///
+/// # TOML example
+///
+/// ```toml
+/// [default.idempotent_repo]
+/// backend = "redis"
+/// url = "redis://cache.internal:6379?db=2"
+/// key_prefix = "camel:idem"
+/// ```
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct RedbIdempotentConfig {
-    /// Path to the `.redb` file. Created if it does not exist.
-    pub path: std::path::PathBuf,
+pub struct IdempotentRepoConfig {
+    /// Idempotent backend: `"redb"` (default) or `"redis"` (persistent,
+    /// shared).
+    #[serde(default = "default_idempotent_backend")]
+    pub backend: String,
 
-    /// Durability mode. Default: `immediate`.
+    /// Path to the `.redb` file. Required when `backend = "redb"`.
+    /// Created if it does not exist.
     #[serde(default)]
-    pub durability: JournalDurability,
+    pub path: Option<String>,
+
+    /// Durability mode for the redb backend: `"immediate"` (default) or
+    /// `"eventual"`. Ignored by the redis backend.
+    #[serde(default)]
+    pub durability: Option<String>,
+
+    /// Standalone Redis endpoint URL (`redis://` or `rediss://`). Mutually
+    /// exclusive with `sentinel_nodes`. Required for the redis backend
+    /// unless `sentinel_nodes` is set. The database is selected with the
+    /// `?db=N` query parameter (default 0); a `/N` path suffix is rejected.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// Sentinel node addresses (e.g. `["s-a:26379", "s-b:26379"]`). Mutually
+    /// exclusive with `url`. Requires `master_name`.
+    #[serde(default)]
+    pub sentinel_nodes: Option<Vec<String>>,
+
+    /// Master name to track in the Sentinel cluster. Only valid when
+    /// `sentinel_nodes` is set.
+    #[serde(default)]
+    pub master_name: Option<String>,
+
+    /// Username for Sentinel authentication. Only valid when
+    /// `sentinel_nodes` is set.
+    #[serde(default)]
+    pub sentinel_username: Option<String>,
+
+    /// Password for Sentinel authentication. Only valid when
+    /// `sentinel_nodes` is set. Redacted from `Debug` output.
+    #[serde(default)]
+    pub sentinel_password: Option<String>,
+
+    /// Redis key prefix for this repository's keyspace. Default:
+    /// `"camel:idem"` (applied at the registration site, not by serde, so
+    /// it stays consistent with the cache repository's `"camel:cache"`).
+    /// Only `[A-Za-z0-9:_-]` are allowed (glob metacharacters are
+    /// forbidden).
+    #[serde(default)]
+    pub key_prefix: Option<String>,
+}
+
+fn default_idempotent_backend() -> String {
+    "redb".to_string()
+}
+
+/// Hand-written redacting `Debug`: URL userinfo is replaced by `***` and the
+/// sentinel credentials render as `Some("***")` so credentials never reach
+/// logs. All other fields keep the derived representation.
+impl std::fmt::Debug for IdempotentRepoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdempotentRepoConfig")
+            .field("backend", &self.backend)
+            .field("path", &self.path)
+            .field("durability", &self.durability)
+            .field("url", &self.url.as_deref().map(redact_url))
+            .field("sentinel_nodes", &self.sentinel_nodes)
+            .field("master_name", &self.master_name)
+            .field(
+                "sentinel_username",
+                &self.sentinel_username.as_deref().map(|_| "***"),
+            )
+            .field(
+                "sentinel_password",
+                &self.sentinel_password.as_deref().map(|_| "***"),
+            )
+            .field("key_prefix", &self.key_prefix)
+            .finish()
+    }
 }
 
 /// Configuration for the cache repository.
 ///
-/// Supports two backends: `"memory"` (in-process, bounded by `max_capacity`, default)
-/// and `"redb"` (persistent on-disk store with background stale-entry sweep).
+/// Supports three backends: `"memory"` (in-process, bounded by
+/// `max_capacity`, default), `"redb"` (persistent on-disk store with
+/// background stale-entry sweep), and `"redis"` (persistent, shared across
+/// processes).
 ///
 /// When omitted from `Camel.toml`, the runtime uses the in-memory cache repository
 /// (ephemeral, bounded by 10_000 entries). Use `backend = "redb"` to opt into
@@ -544,10 +632,11 @@ pub struct RedbIdempotentConfig {
 /// sweep_interval = "1h"
 /// max_entries = 1_000_000
 /// ```
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CacheRepoConfig {
-    /// Cache backend: `"memory"` (default) or `"redb"` (persistent).
+    /// Cache backend: `"memory"` (default), `"redb"` (persistent), or
+    /// `"redis"` (persistent, shared).
     #[serde(default = "default_cache_backend")]
     pub backend: String,
 
@@ -567,9 +656,11 @@ pub struct CacheRepoConfig {
     #[serde(default)]
     pub cache_size: Option<String>,
 
-    /// How long after expiry a stale entry survives before the sweep reclaims it.
-    /// Redb backend only. Accepts human-readable strings like "168h", "7d", "1w".
-    /// When omitted, deserializes as `None`; the redb wiring then falls back to
+    /// How long after expiry a stale entry stays readable. Redb: the sweep
+    /// reclaims the entry after this window. Redis: the key expires at
+    /// `expires_at + stale_retention`. Applies to the redb and redis
+    /// backends. Accepts human-readable strings like "168h", "7d", "1w".
+    /// When omitted, deserializes as `None`; the wiring then falls back to
     /// 7 days (168h).
     #[serde(default = "default_stale_retention")]
     pub stale_retention: Option<String>,
@@ -582,6 +673,38 @@ pub struct CacheRepoConfig {
     /// Maximum entry count for the redb backend. Default: 1_000_000.
     #[serde(default)]
     pub max_entries: Option<usize>,
+
+    /// Standalone Redis endpoint URL (`redis://` or `rediss://`). Mutually
+    /// exclusive with `sentinel_nodes`. Required for the redis backend unless
+    /// `sentinel_nodes` is set. The database is selected with the `?db=N`
+    /// query parameter (default 0); a `/N` path suffix is rejected.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// Sentinel node addresses (e.g. `["s-a:26379", "s-b:26379"]`). Mutually
+    /// exclusive with `url`. Requires `master_name`.
+    #[serde(default)]
+    pub sentinel_nodes: Option<Vec<String>>,
+
+    /// Master name to track in the Sentinel cluster. Only valid when
+    /// `sentinel_nodes` is set.
+    #[serde(default)]
+    pub master_name: Option<String>,
+
+    /// Username for Sentinel authentication. Only valid when `sentinel_nodes`
+    /// is set.
+    #[serde(default)]
+    pub sentinel_username: Option<String>,
+
+    /// Password for Sentinel authentication. Only valid when `sentinel_nodes`
+    /// is set. Redacted from `Debug` output.
+    #[serde(default)]
+    pub sentinel_password: Option<String>,
+
+    /// Redis key prefix for this repository's keyspace. Default: `"camel:cache"`.
+    /// Only `[A-Za-z0-9:_-]` are allowed (glob metacharacters are forbidden).
+    #[serde(default)]
+    pub key_prefix: Option<String>,
 }
 
 fn default_cache_backend() -> String {
@@ -632,6 +755,118 @@ pub(crate) fn parse_byte_size(s: &str) -> Result<usize, String> {
         .map_err(|_| format!("cache_repo.cache_size: invalid byte size '{trimmed}'"))?;
     usize::try_from(value)
         .map_err(|_| format!("cache_repo.cache_size: overflow in byte size '{trimmed}'"))
+}
+
+/// Redis topology validation matrix shared by `cache_repo` and
+/// `idempotent_repo` (task 2.5 rules). `field` is the config path prefix
+/// ("cache_repo" / "idempotent_repo") so error messages name the offending
+/// repository and the two validation branches cannot drift.
+pub(crate) fn validate_redis_topology_fields(
+    field: &str,
+    url: Option<&str>,
+    sentinel_nodes: Option<&[String]>,
+    master_name: Option<&str>,
+    sentinel_username: Option<&str>,
+    sentinel_password: Option<&str>,
+    key_prefix: Option<&str>,
+) -> Result<(), CamelError> {
+    let has_url = url.is_some();
+    let has_nodes = sentinel_nodes.is_some();
+    if !has_url && !has_nodes {
+        return Err(CamelError::Config(format!(
+            "{field}.url: redis backend requires a topology: set url or sentinel_nodes"
+        )));
+    }
+    if has_url && has_nodes {
+        return Err(CamelError::Config(format!(
+            "{field}.url: url and sentinel_nodes are mutually exclusive"
+        )));
+    }
+    if let Some(nodes) = sentinel_nodes {
+        if nodes.is_empty() || nodes.iter().any(|n| n.trim().is_empty()) {
+            return Err(CamelError::Config(format!(
+                "{field}.sentinel_nodes: sentinel node entries must be non-empty"
+            )));
+        }
+        let master_empty = match master_name {
+            None => true,
+            Some(m) => m.trim().is_empty(),
+        };
+        if master_empty {
+            return Err(CamelError::Config(format!(
+                "{field}.master_name must be set when sentinel_nodes is set"
+            )));
+        }
+    } else {
+        if master_name.is_some() {
+            return Err(CamelError::Config(format!(
+                "{field}.master_name: only applies when sentinel_nodes is set"
+            )));
+        }
+        if sentinel_username.is_some() {
+            return Err(CamelError::Config(format!(
+                "{field}.sentinel_username: only applies when sentinel_nodes is set"
+            )));
+        }
+        if sentinel_password.is_some() {
+            return Err(CamelError::Config(format!(
+                "{field}.sentinel_password: only applies when sentinel_nodes is set"
+            )));
+        }
+    }
+    if let Some(url) = url {
+        if !url.starts_with("redis://") && !url.starts_with("rediss://") {
+            return Err(CamelError::Config(format!(
+                "{field}.url: only \"redis://\" and \"rediss://\" schemes are allowed, got '{url}'"
+            )));
+        }
+        // Deep-parse with the same component URI parser used at registration
+        // so grammar failures (e.g. a db number in the path — the dialect
+        // takes `?db=N`, not `/N`) surface at validate() time with the
+        // identical message registration would produce. Sentinel nodes get
+        // only the trim/format checks above; registration reports the rest.
+        camel_redis_repo::RedisEndpointConfig::from_uri(url)
+            .map_err(|e| CamelError::Config(format!("{field}.url: {e}")))?;
+    }
+    if let Some(prefix) = key_prefix {
+        camel_redis_repo::keyspace::validate_namespace_token(
+            &format!("{field}.key_prefix"),
+            prefix,
+        )?;
+    }
+    Ok(())
+}
+
+/// Canonical redis database identity for the cross-repository
+/// prefix-collision rule: standalone endpoints compare by host/port/db,
+/// sentinel topologies by (sorted, trimmed, scheme-normalized) node set +
+/// master + db. `None` means the endpoint could not be normalized — no
+/// collision is claimed on doubt; registration reports the underlying
+/// parse error later.
+fn redis_database_key(
+    url: Option<&str>,
+    sentinel_nodes: Option<&[String]>,
+    master_name: Option<&str>,
+) -> Option<String> {
+    if let Some(url) = url {
+        let endpoint = camel_redis_repo::RedisEndpointConfig::from_uri(url).ok()?;
+        // `redis://h` and `redis://h:6379` name the same database: fold the
+        // default port and case-fold the host so spelling variants of one
+        // endpoint produce the same key instead of silently bypassing the
+        // collision rule.
+        let host = endpoint.host.unwrap_or_default().to_lowercase();
+        let port = endpoint.port.unwrap_or(6379);
+        return Some(format!("standalone|{host}|{port}|{}", endpoint.db));
+    }
+    let nodes = sentinel_nodes?;
+    let mut normalized: Vec<String> = nodes
+        .iter()
+        .map(|n| n.trim().trim_start_matches("redis://").to_string())
+        .collect();
+    normalized.sort();
+    let master = master_name?.trim();
+    // Sentinel topology has no db slot in the config surface; db defaults to 0.
+    Some(format!("sentinel|{}|{master}|0", normalized.join(",")))
 }
 
 #[cfg(test)]
@@ -693,7 +928,56 @@ impl Default for CacheRepoConfig {
             stale_retention: None,
             sweep_interval: None,
             max_entries: None,
+            url: None,
+            sentinel_nodes: None,
+            master_name: None,
+            sentinel_username: None,
+            sentinel_password: None,
+            key_prefix: None,
         }
+    }
+}
+
+/// Replace URL userinfo with the literal `***`, keeping scheme, host, port,
+/// path, and query verbatim (`redis://user:secret@h:6379/0` →
+/// `redis://***@h:6379/0`). URLs without userinfo pass through unchanged.
+/// An `@` after the first `/` (path or query data) is not userinfo and stays.
+fn redact_url(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://")
+        && let Some(at) = rest.find('@')
+        && !rest[..at].contains('/')
+    {
+        return format!("{scheme}://***@{}", &rest[at + 1..]);
+    }
+    url.to_string()
+}
+
+/// Hand-written redacting `Debug`: URL userinfo is replaced by `***` and the
+/// sentinel credentials render as `Some("***")` so credentials never reach
+/// logs. All other fields keep the derived representation.
+impl std::fmt::Debug for CacheRepoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheRepoConfig")
+            .field("backend", &self.backend)
+            .field("max_capacity", &self.max_capacity)
+            .field("path", &self.path)
+            .field("cache_size", &self.cache_size)
+            .field("stale_retention", &self.stale_retention)
+            .field("sweep_interval", &self.sweep_interval)
+            .field("max_entries", &self.max_entries)
+            .field("url", &self.url.as_deref().map(redact_url))
+            .field("sentinel_nodes", &self.sentinel_nodes)
+            .field("master_name", &self.master_name)
+            .field(
+                "sentinel_username",
+                &self.sentinel_username.as_deref().map(|_| "***"),
+            )
+            .field(
+                "sentinel_password",
+                &self.sentinel_password.as_deref().map(|_| "***"),
+            )
+            .field("key_prefix", &self.key_prefix)
+            .finish()
     }
 }
 
@@ -1309,19 +1593,98 @@ impl CamelConfig {
                 ));
             }
         }
-        if let Some(ref repo) = self.idempotent_repo
-            && repo.path.as_os_str().is_empty()
-        {
-            return Err(CamelError::Config(
-                "idempotent_repo.path must not be empty".to_string(),
-            ));
+        if let Some(ref repo) = self.idempotent_repo {
+            match repo.backend.as_str() {
+                "redb" | "redis" => {}
+                other => {
+                    return Err(CamelError::Config(format!(
+                        "idempotent_repo.backend must be \"redb\" or \"redis\", got \"{other}\""
+                    )));
+                }
+            }
+            if repo.backend == "redb" {
+                if repo.url.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.url does not apply to the \"redb\" backend".to_string(),
+                    ));
+                }
+                if repo.sentinel_nodes.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.sentinel_nodes does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if repo.master_name.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.master_name does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if repo.sentinel_username.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.sentinel_username does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if repo.sentinel_password.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.sentinel_password does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if repo.key_prefix.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.key_prefix does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                let path_empty = match repo.path.as_deref() {
+                    None => true,
+                    Some(p) => p.is_empty(),
+                };
+                if path_empty {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.path must not be empty".to_string(),
+                    ));
+                }
+                if let Some(d) = repo.durability.as_deref()
+                    && d != "immediate"
+                    && d != "eventual"
+                {
+                    return Err(CamelError::Config(format!(
+                        "idempotent_repo.durability must be \"immediate\" or \"eventual\", got \"{d}\""
+                    )));
+                }
+            }
+            if repo.backend == "redis" {
+                if repo.path.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.path does not apply to the \"redis\" backend".to_string(),
+                    ));
+                }
+                if repo.durability.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.durability does not apply to the \"redis\" backend"
+                            .to_string(),
+                    ));
+                }
+                validate_redis_topology_fields(
+                    "idempotent_repo",
+                    repo.url.as_deref(),
+                    repo.sentinel_nodes.as_deref(),
+                    repo.master_name.as_deref(),
+                    repo.sentinel_username.as_deref(),
+                    repo.sentinel_password.as_deref(),
+                    repo.key_prefix.as_deref(),
+                )?;
+            }
         }
         if let Some(ref cache) = self.cache_repo {
             match cache.backend.as_str() {
-                "memory" | "redb" => {}
+                "memory" | "redb" | "redis" => {}
                 other => {
                     return Err(CamelError::Config(format!(
-                        "cache_repo.backend must be \"memory\" or \"redb\", got \"{other}\""
+                        "cache_repo.backend must be \"memory\", \"redb\", or \"redis\", got \"{other}\""
                     )));
                 }
             }
@@ -1355,12 +1718,92 @@ impl CamelConfig {
                             .to_string(),
                     ));
                 }
+                if cache.url.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.url does not apply to the \"memory\" backend".to_string(),
+                    ));
+                }
+                if cache.sentinel_nodes.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.sentinel_nodes does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.master_name.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.master_name does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.sentinel_username.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.sentinel_username does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.sentinel_password.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.sentinel_password does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.key_prefix.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.key_prefix does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+            }
+            // Duration parse check shared by every non-memory backend that
+            // carries the field (redb and redis): malformed values fail at
+            // validate() time, never silently at build time.
+            if cache.backend != "memory"
+                && let Some(stale) = cache.stale_retention.as_deref()
+            {
+                humantime::parse_duration(stale).map_err(|_| {
+                    CamelError::Config(format!(
+                        "cache_repo.stale_retention: invalid duration '{stale}'"
+                    ))
+                })?;
             }
             if cache.backend == "redb" {
                 if cache.max_capacity.is_some() {
                     return Err(CamelError::Config(
                         "cache_repo.max_capacity does not apply to the \"redb\" backend"
                             .to_string(),
+                    ));
+                }
+                if cache.url.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.url does not apply to the \"redb\" backend".to_string(),
+                    ));
+                }
+                if cache.sentinel_nodes.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.sentinel_nodes does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.master_name.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.master_name does not apply to the \"redb\" backend".to_string(),
+                    ));
+                }
+                if cache.sentinel_username.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.sentinel_username does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.sentinel_password.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.sentinel_password does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.key_prefix.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.key_prefix does not apply to the \"redb\" backend".to_string(),
                     ));
                 }
                 let path_empty = match &cache.path {
@@ -1392,13 +1835,71 @@ impl CamelConfig {
                         ));
                     }
                 }
-                if let Some(stale) = cache.stale_retention.as_deref() {
-                    humantime::parse_duration(stale).map_err(|_| {
-                        CamelError::Config(format!(
-                            "cache_repo.stale_retention: invalid duration '{stale}'"
-                        ))
-                    })?;
+            }
+            if cache.backend == "redis" {
+                if cache.path.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.path does not apply to the \"redis\" backend".to_string(),
+                    ));
                 }
+                if cache.cache_size.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.cache_size does not apply to the \"redis\" backend".to_string(),
+                    ));
+                }
+                if cache.sweep_interval.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.sweep_interval does not apply to the \"redis\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.max_entries.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.max_entries does not apply to the \"redis\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.max_capacity.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.max_capacity does not apply to the \"redis\" backend"
+                            .to_string(),
+                    ));
+                }
+                validate_redis_topology_fields(
+                    "cache_repo",
+                    cache.url.as_deref(),
+                    cache.sentinel_nodes.as_deref(),
+                    cache.master_name.as_deref(),
+                    cache.sentinel_username.as_deref(),
+                    cache.sentinel_password.as_deref(),
+                    cache.key_prefix.as_deref(),
+                )?;
+            }
+        }
+        // Cross-repository prefix collision (task 3.3): two redis
+        // repositories sharing one database must use distinct key prefixes,
+        // or `clear` on one repository would unlink the other's keyspace.
+        // The defaults ("camel:cache" vs "camel:idem") differ, so only
+        // user-set identical effective prefixes collide.
+        if let (Some(cache), Some(idem)) = (&self.cache_repo, &self.idempotent_repo)
+            && cache.backend == "redis"
+            && idem.backend == "redis"
+            && redis_database_key(
+                cache.url.as_deref(),
+                cache.sentinel_nodes.as_deref(),
+                cache.master_name.as_deref(),
+            ) == redis_database_key(
+                idem.url.as_deref(),
+                idem.sentinel_nodes.as_deref(),
+                idem.master_name.as_deref(),
+            )
+        {
+            let cache_prefix = cache.key_prefix.as_deref().unwrap_or("camel:cache");
+            let idem_prefix = idem.key_prefix.as_deref().unwrap_or("camel:idem");
+            if cache_prefix == idem_prefix {
+                return Err(CamelError::Config(format!(
+                    "cache_repo.key_prefix and idempotent_repo.key_prefix must be distinct when both repositories share one redis database (both resolve to '{cache_prefix}')"
+                )));
             }
         }
         for (name, bean) in &self.beans {
@@ -2519,8 +3020,9 @@ durability = "eventual"
         let repo = cfg
             .idempotent_repo
             .expect("idempotent_repo should populate via [default.idempotent_repo]");
-        assert_eq!(repo.path, std::path::PathBuf::from("profile.redb"));
-        assert_eq!(repo.durability, JournalDurability::Eventual);
+        assert_eq!(repo.backend, "redb");
+        assert_eq!(repo.path.as_deref(), Some("profile.redb"));
+        assert_eq!(repo.durability.as_deref(), Some("eventual"));
     }
 
     #[test]
@@ -2686,11 +3188,8 @@ durability = "immediate"
         let repo = cfg
             .idempotent_repo
             .expect("idempotent_repo should be present");
-        assert_eq!(
-            repo.path,
-            std::path::PathBuf::from("/override/idempotent.db")
-        );
-        assert_eq!(repo.durability, super::JournalDurability::Eventual);
+        assert_eq!(repo.path.as_deref(), Some("/override/idempotent.db"));
+        assert_eq!(repo.durability.as_deref(), Some("eventual"));
 
         // SAFETY: restore process env for test isolation.
         unsafe {
@@ -2834,7 +3333,8 @@ path = "x.redb"
 "#;
         let config: CamelConfig = toml::from_str(toml_str).unwrap();
         let repo = config.idempotent_repo.expect("idempotent_repo must parse");
-        assert_eq!(repo.durability, JournalDurability::Immediate);
+        // `None` means "immediate" — resolved at the registration site.
+        assert_eq!(repo.durability, None);
     }
 
     #[test]
@@ -2846,16 +3346,13 @@ durability = "eventual"
 "#;
         let config: CamelConfig = toml::from_str(toml_str).unwrap();
         let repo = config.idempotent_repo.expect("idempotent_repo must parse");
-        assert_eq!(repo.durability, JournalDurability::Eventual);
+        assert_eq!(repo.durability.as_deref(), Some("eventual"));
     }
 
     #[test]
     fn redb_idempotent_config_durability_roundtrips_to_core() {
-        let cfg = RedbIdempotentConfig {
-            path: std::path::PathBuf::from("x.redb"),
-            durability: JournalDurability::Eventual,
-        };
-        let core: camel_core::JournalDurability = cfg.durability.into();
+        let durability = JournalDurability::Eventual;
+        let core: camel_core::JournalDurability = durability.into();
         assert_eq!(core, camel_core::JournalDurability::Eventual);
     }
 
@@ -3024,9 +3521,16 @@ mod config_validation_tests {
     #[test]
     fn redb_idempotent_config_empty_path_rejected() {
         let config = CamelConfig {
-            idempotent_repo: Some(RedbIdempotentConfig {
-                path: std::path::PathBuf::from(""),
-                durability: JournalDurability::default(),
+            idempotent_repo: Some(IdempotentRepoConfig {
+                backend: "redb".to_string(),
+                path: Some(String::new()),
+                durability: None,
+                url: None,
+                sentinel_nodes: None,
+                master_name: None,
+                sentinel_username: None,
+                sentinel_password: None,
+                key_prefix: None,
             }),
             ..CamelConfig::default()
         };

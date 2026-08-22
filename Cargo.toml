@@ -131,6 +131,7 @@ camel-component-mcp = { path = "crates/components/camel-component-mcp", version 
 camel-component-exec = { path = "crates/components/camel-component-exec", version = "=0.33.0" }
 camel-component-cron = { path = "crates/components/camel-cron", version = "=0.33.0" }
 camel-component-surrealdb = { path = "crates/components/camel-component-surrealdb", version = "=0.33.0" }
+camel-redis-repo = { path = "crates/services/camel-redis-repo", version = "=0.33.0" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.26"

@@ -552,3 +552,434 @@ max_capacity = 5000
         "memory cache repository must be present"
     );
 }
+
+// ── Test 8: redis backend validation ──────────────────────────────────────
+
+#[test]
+fn cache_redis_no_topology_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.url") && msg.contains("sentinel_nodes"),
+        "validation error must name cache_repo.url and sentinel_nodes, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_url_and_sentinel_mutually_exclusive() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+sentinel_nodes = ["s-a:26379"]
+master_name = "orders"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.url") && msg.contains("mutually exclusive"),
+        "validation error must name cache_repo.url and mutual exclusion, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_empty_sentinel_entry_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379", ""]
+master_name = "orders"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_nodes"),
+        "validation error must name cache_repo.sentinel_nodes, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["   "]
+master_name = "orders"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_nodes"),
+        "whitespace-only sentinel entry must be rejected, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = []
+master_name = "orders"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_nodes"),
+        "empty sentinel_nodes list must be rejected, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_empty_master_name_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = ""
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.master_name"),
+        "validation error must name cache_repo.master_name, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_orphan_master_name_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+master_name = "orders"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.master_name") && msg.contains("sentinel_nodes"),
+        "validation error must name cache_repo.master_name and sentinel_nodes, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_orphan_sentinel_password_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+sentinel_password = "hunter2"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_password") && msg.contains("sentinel_nodes"),
+        "validation error must name cache_repo.sentinel_password and sentinel_nodes, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_invalid_url_scheme_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "http://cache.internal:6379"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.url") && msg.contains("redis://"),
+        "validation error must name cache_repo.url and the allowed schemes, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_glob_prefix_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+key_prefix = "camel:*"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.key_prefix"),
+        "validation error must name cache_repo.key_prefix, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_redb_fields_not_required() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+"#,
+    );
+
+    cfg.validate()
+        .expect("minimal redis config (backend + url) must pass validation");
+}
+
+#[test]
+fn cache_redis_rejects_redb_fields() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+path = "cache.redb"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.path"),
+        "validation error must name cache_repo.path, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+cache_size = "256MiB"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.cache_size"),
+        "validation error must name cache_repo.cache_size, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_rejects_memory_fields() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+max_capacity = 5000
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.max_capacity"),
+        "validation error must name cache_repo.max_capacity, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_memory_rejects_redis_fields() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+url = "redis://127.0.0.1:6379"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.url"),
+        "validation error must name cache_repo.url, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+key_prefix = "camel:cache"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.key_prefix"),
+        "validation error must name cache_repo.key_prefix, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redb_rejects_redis_fields() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+key_prefix = "camel:cache"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.key_prefix"),
+        "validation error must name cache_repo.key_prefix, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+url = "redis://127.0.0.1:6379"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.url"),
+        "validation error must name cache_repo.url, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_redis_malformed_stale_retention_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+stale_retention = "forever-ish"
+"#,
+    );
+
+    let err = cfg
+        .validate()
+        .expect_err("malformed stale_retention must fail at validate() for the redis backend");
+    assert!(
+        err.to_string().contains("cache_repo.stale_retention"),
+        "error must name the field, got: {err}"
+    );
+}
+
+// ── Test 9: Debug redaction of redis credentials ──────────────────────────
+
+#[test]
+fn cache_debug_redacts_credentials() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://user:secret@h:6379"
+sentinel_password = "hunter2"
+"#,
+    );
+
+    let rendered = format!("{:?}", cfg.cache_repo.expect("cache_repo must load"));
+    assert!(
+        !rendered.contains("secret") && !rendered.contains("hunter2"),
+        "Debug output must not leak credentials, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("redis://***@h:6379"),
+        "Debug output must redact URL userinfo as ***, got: {rendered}"
+    );
+}
+
+// ── Test 10: redis cache repository wiring ────────────────────────────────
+
+#[tokio::test]
+async fn redis_cache_arm_unreachable_url_fails_build_with_named_error() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:1/0"
+"#,
+    );
+
+    let err = match CamelConfig::configure_context(&cfg).await {
+        Ok(_) => panic!("an unreachable redis url must fail the context build"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("cache_repo"),
+        "build error must name cache_repo, got: {err}"
+    );
+}
+
+// ── db-in-path url grammar (Phase-3 review finding 1) ─────────────────────
+
+#[test]
+fn redis_url_db_in_path_rejected_at_validate() {
+    // The component URI dialect selects the database with the `?db=N` query
+    // parameter; a `/N` path suffix fails the grammar (`invalid port
+    // '6379/0'`). validate() deep-parses the url with the same parser used
+    // at registration, so the rejection surfaces here, not at build time.
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379/0"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.url") && msg.contains("invalid port '6379/0'"),
+        "validation error must name cache_repo.url and the invalid port, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[idempotent_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379/0"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("idempotent_repo.url") && msg.contains("invalid port '6379/0'"),
+        "validation error must name idempotent_repo.url and the invalid port, got: {msg}"
+    );
+}
+
+#[test]
+fn example_camel_toml_round_trips_validate_and_endpoints() {
+    // The checked-in example config must load, validate, and map to both
+    // redis endpoints — the exact path `cargo run` exercises at startup.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/redis-repositories/Camel.toml");
+    let cfg = CamelConfig::from_file(path.to_str().expect("path must be utf-8"))
+        .unwrap_or_else(|e| panic!("example Camel.toml must load: {e}"));
+
+    cfg.validate()
+        .expect("checked-in example must pass validate()");
+
+    let cache = cfg.cache_repo.as_ref().expect("example sets cache_repo");
+    let idem = cfg
+        .idempotent_repo
+        .as_ref()
+        .expect("example sets idempotent_repo");
+    camel_config::redis_endpoint_from_cache_repo(cache)
+        .expect("example cache_repo.url must build a redis endpoint");
+    camel_config::redis_endpoint_from_idempotent_repo(idem)
+        .expect("example idempotent_repo.url must build a redis endpoint");
+}

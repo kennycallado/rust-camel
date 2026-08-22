@@ -299,7 +299,7 @@ impl RedisTopology for SentinelTopology {
 ///
 /// Shared by the producer, the queue consumer, and the pubsub consumer so all
 /// three resolve the master through the same factory.
-pub(crate) fn topology_from_config(
+pub fn topology_from_config(
     config: &RedisEndpointConfig,
 ) -> Result<Arc<dyn RedisTopology>, CamelError> {
     match &config.topology_kind {

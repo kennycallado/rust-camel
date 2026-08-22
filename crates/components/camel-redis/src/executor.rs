@@ -263,9 +263,9 @@ impl MultiplexedExecutor {
 
     /// Return a cached connection, or resolve and build one on first use.
     ///
-    /// `pub(crate)` so the producer's `check_connection` (sibling module) can
-    /// reuse the same connection in Task 1.5.
-    pub(crate) async fn get_conn(&self) -> Result<MultiplexedConnection, CamelError> {
+    /// `pub` so out-of-crate services (repository service) can reuse the same
+    /// lazily-cached connection as the producer's `check_connection`.
+    pub async fn get_conn(&self) -> Result<MultiplexedConnection, CamelError> {
         // Fast path: reuse the cached connection.
         {
             let guard = self.conn.lock().await;
@@ -300,6 +300,23 @@ impl MultiplexedExecutor {
         let mut guard = self.conn.lock().await;
         *guard = Some(new_conn.clone());
         Ok(new_conn)
+    }
+
+    /// Clear the cached connection and resolve a fresh one through the
+    /// topology.
+    ///
+    /// Inherent `&self` counterpart of [`RedisCommandExecutor::reconnect`]
+    /// for callers that hold a shared (non-`mut`) executor, e.g. the
+    /// repository service. Mirrors the trait method: drops the cached
+    /// connection, then builds a new one via [`Self::get_conn`], which
+    /// re-resolves the master address.
+    pub async fn refresh(&self) -> Result<MultiplexedConnection, CamelError> {
+        // Drop the cached connection so the get_conn below re-resolves.
+        {
+            let mut guard = self.conn.lock().await;
+            *guard = None;
+        }
+        self.get_conn().await
     }
 
     /// Expose the shared connection Arc so sibling-module tests (producer) can
@@ -647,6 +664,36 @@ mod tests {
         assert!(
             matches!(result, Err(CamelError::ProcessorError(_))),
             "expected ProcessorError connecting to dead port, got: {result:?}"
+        );
+    }
+
+    // Failure-path only: get_conn failures are never cached (each call
+    // re-resolves), and refresh() clears the cache and re-resolves exactly
+    // once even when the reconnect attempt fails.
+    #[tokio::test]
+    async fn refresh_triggers_reresolution_and_failure_is_not_cached() {
+        let topology = Arc::new(FakeTopology::addrs(vec!["redis://127.0.0.1:1".into()]));
+        let executor = MultiplexedExecutor::new(test_config(), topology.clone());
+
+        // First get_conn: resolves (count 1), connect to dead port fails.
+        assert!(executor.get_conn().await.is_err());
+        assert_eq!(topology.resolve_call_count(), 1);
+
+        // Second get_conn: failure was not cached, so it re-resolves.
+        assert!(executor.get_conn().await.is_err());
+        assert_eq!(
+            topology.resolve_call_count(),
+            2,
+            "failed connections must not be cached"
+        );
+
+        // refresh(): clears the cache, re-resolves exactly once, and fails
+        // without caching anything.
+        assert!(executor.refresh().await.is_err());
+        assert_eq!(
+            topology.resolve_call_count(),
+            3,
+            "refresh should re-resolve exactly once more"
         );
     }
 

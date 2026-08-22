@@ -23,6 +23,7 @@ camel-otel = { workspace = true }
 camel-prometheus = { workspace = true }
 camel-health = { workspace = true }
 camel-processor.workspace = true
+camel-redis-repo.workspace = true
 config = { workspace = true }
 glob = { workspace = true }
 serde = { workspace = true }

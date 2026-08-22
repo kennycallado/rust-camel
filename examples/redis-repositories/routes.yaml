@@ -1,0 +1,33 @@
+# Redis-backed repositories: a shared cache and a shared idempotent store.
+routes:
+  - id: "redis-cache-demo"
+    from: "timer:tick?period=3000&repeatCount=3"
+    steps:
+      - set_header:
+          key: "cacheKey"
+          value: "user-profile-42"
+      # ANCHOR: redis-cache-route
+      - cache:
+          repository: "redis"
+          key: "${header.cacheKey}"
+          ttl: "60s"
+          on_miss:
+            - set_body: "computed-fresh-data"
+            - log: "cache MISS: body computed and stored"
+      # ANCHOR_END: redis-cache-route
+      - log: "after cache body is: ${body}"
+
+  - id: "redis-idempotent-demo"
+    from: "timer:tick?period=3000&repeatCount=5"
+    steps:
+      - set_header:
+          key: "messageId"
+          value: "msg-001"
+      # ANCHOR: redis-idempotent-route
+      - idempotent_consumer:
+          repository: "redis"
+          expression: "${header.messageId}"
+          steps:
+            - log: "processing unique message ${header.messageId}"
+            - to: "log:processed?showBody=true&showHeaders=true"
+      # ANCHOR_END: redis-idempotent-route

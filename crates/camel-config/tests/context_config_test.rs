@@ -1,7 +1,6 @@
 use camel_api::{CanonicalRouteSpec, RuntimeCommand};
-use camel_config::JournalDurability;
 use camel_config::config::{
-    CamelConfig, JournalConfig, PlatformCamelConfig, RedbIdempotentConfig, SecurityConfig,
+    CamelConfig, IdempotentRepoConfig, JournalConfig, PlatformCamelConfig, SecurityConfig,
     StreamCachingConfig,
 };
 #[cfg(feature = "otel")]
@@ -449,9 +448,16 @@ async fn context_registers_redb_idempotent_when_configured() {
         routes: vec![],
         watch: false,
         runtime_journal: None,
-        idempotent_repo: Some(RedbIdempotentConfig {
-            path: redb_path.clone(),
-            durability: JournalDurability::Immediate,
+        idempotent_repo: Some(IdempotentRepoConfig {
+            backend: "redb".to_string(),
+            path: Some(redb_path.to_string_lossy().to_string()),
+            durability: None,
+            url: None,
+            sentinel_nodes: None,
+            master_name: None,
+            sentinel_username: None,
+            sentinel_password: None,
+            key_prefix: None,
         }),
         cache_repo: None,
         log_level: "INFO".to_string(),

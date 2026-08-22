@@ -156,7 +156,8 @@ Key-only pluggable store for the Idempotent Consumer EIP (`trait IdempotentRepos
 `Result<bool, CamelError>` (NOT `bool`) — backends (Redis, SQL) propagate transient failures as
 `Err`, never as "not a duplicate" (Contract C1). Stores keys, not messages: it tracks *which*
 messages were seen, not *what* they contained. Payload-bearing storage is `ClaimCheckRepository`, a
-distinct trait. Canonical impl: `MemoryIdempotentRepository` in camel-core. Established by ADR-0023.
+distinct trait. Canonical impl: `MemoryIdempotentRepository` in camel-core. Redis backend:
+`RedisIdempotentRepository` in the `camel-redis-repo` repository service crate (ADR-0063). Established by ADR-0023.
 _Avoid_: idempotent store, dedup store, claim check (that is the payload-bearing trait)
 
 **ClaimCheckRepository**:
@@ -169,7 +170,7 @@ key-only vs payload-bearing split from `IdempotentRepository` is the central dec
 _Avoid_: claim store, payload cache, idempotent repository (that is the key-only trait)
 
 **CacheRepository**:
-TTL cache port for the Caching EIP (`trait CacheRepository`). Stores `CacheEntry { bytes: Vec<u8>, content_type, expires_at }` — materialized bytes, not `Body` (which is not Serialize and includes the un-cacheable `Stream` variant). `get` returns `Ok(None)` on miss OR in-band expiry (never silent on backend failure — Contract C1). `peek_stale` ignores in-band expiry. `set` computes `expires_at` from `ttl`. `invalidate_prefix` has a fail-closed default (`Err` naming the backend, never `Ok(0)`); `RedbCacheRepository` overrides it with range deletion. `stats().await` (async default method, bd rc-22wj) returns `CacheStats` with `peek_stale_served`, `invalidations`, and `bytes: Option<u64>` (`Some(sum)` for redb, `None` for the memory backend). Distinct from `IdempotentRepository` (key-only) and `ClaimCheckRepository` (payload-owning, no expiry). Canonical impls: `MemoryCacheRepository` (moka) and `RedbCacheRepository` in camel-core. Established by ADR-0056.
+TTL cache port for the Caching EIP (`trait CacheRepository`). Stores `CacheEntry { bytes: Vec<u8>, content_type, expires_at }` — materialized bytes, not `Body` (which is not Serialize and includes the un-cacheable `Stream` variant). `get` returns `Ok(None)` on miss OR in-band expiry (never silent on backend failure — Contract C1). `peek_stale` ignores in-band expiry. `set` computes `expires_at` from `ttl`. `invalidate_prefix` has a fail-closed default (`Err` naming the backend, never `Ok(0)`); `RedbCacheRepository` overrides it with range deletion. `stats().await` (async default method, bd rc-22wj) returns `CacheStats` with `peek_stale_served`, `invalidations`, and `bytes: Option<u64>` (`Some(sum)` for redb, `None` for the memory backend). Distinct from `IdempotentRepository` (key-only) and `ClaimCheckRepository` (payload-owning, no expiry). Canonical impls: `MemoryCacheRepository` (moka) and `RedbCacheRepository` in camel-core. Redis backend: `RedisCacheRepository` in the `camel-redis-repo` repository service crate (ADR-0063). Established by ADR-0056.
 _Avoid_: cache store, payload cache, idempotent repository (that is the key-only trait)
 
 **EndpointUri**:

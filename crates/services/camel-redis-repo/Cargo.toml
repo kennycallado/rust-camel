@@ -1,0 +1,31 @@
+[package]
+name = "camel-redis-repo"
+description = "Redis-backed CacheRepository and IdempotentRepository for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-redis-repo"
+readme = "README.md"
+keywords = ["camel", "redis", "cache", "idempotent", "integration"]
+categories = ["database", "asynchronous"]
+
+[dependencies]
+camel-api.workspace = true
+camel-component-redis = { workspace = true, features = ["sentinel"] }
+redis = { workspace = true, features = ["tokio-comp", "aio", "sentinel"] }
+tokio.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+
+[features]
+default = []
+tls = ["camel-component-redis/tls", "redis/tls-rustls-webpki-roots", "redis/tokio-rustls-comp"]
+# Test-only: forwards the component's `cluster` feature so the cluster-rejection
+# unit test (task 1.5) can construct a cluster-shaped topology. Never enabled
+# by default and never used by the repositories themselves.
+cluster = ["camel-component-redis/cluster"]
+
+[lints]
+workspace = true
