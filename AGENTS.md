@@ -23,6 +23,8 @@
 - **ULTRATHINK** → read .opencode/instructions/ultrathink.md
 - Code review critical/important issues must be resolved before continuing
 - Canonical workflow references use **stable aliases only** (`w_fast` / `w_balanced` / `w_heavy`, `r_glm` / `r_gpt`, `e_glm` / `e_gpt` / `e_opus`). Versioned worker files (`w_glm5.1`, `w_qwen3.7-pro`, …) are for experiments, never doc/prompt references.
+- **Never run cargo build/test/clippy/check in the main checkout** — always in your feature worktree. The main `./target` (shared, 75G) must stay cold so it can be purged; an agent build in main re-heats it for hours and risks ENOSPC for all concurrent agents. Humans may run pre-push tests in main.
+- **Profiles are debuginfo-free** (`debug=0`, dev/test). Panic messages still show `file:line` (track_caller) — triage works without DWARF. If a task truly needs line-level backtraces or gdb (segfault, dep-frame stacks), use `RUSTFLAGS="-Cdebuginfo=1"` for that single invocation only; never set it permanently (splits fingerprints and the sccache key).
 
 ## QUALITY GATES
 

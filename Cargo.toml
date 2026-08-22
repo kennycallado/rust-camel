@@ -258,11 +258,22 @@ opentelemetry-appender-tracing = { version = "0.32" }
 tracing-opentelemetry = { version = "0.33", features = [] }
 
 [profile.dev]
-debug = 1
+# No debug info by default: agents and humans triage via panic messages
+# (#[track_caller] gives file:line without DWARF). For gdb/lldb sessions:
+# RUSTFLAGS="-Cdebuginfo=1" cargo test ... (see README disk budget section)
+debug = 0
 split-debuginfo = "packed"
+
+[profile.test]
+debug = 0
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = 0
+
+[profile.test.package."*"]
+opt-level = 2
+debug = 0
 
 [profile.release]
 lto = "thin"

@@ -144,7 +144,7 @@
               # CARGO_TARGET_DIR stays deliberately unset here.
               # Export BEFORE start-server: the server caches its dir.
               export SCCACHE_DIR="/home/shared/sccache"
-              export SCCACHE_CACHE_SIZE="16G"
+              export SCCACHE_CACHE_SIZE="40G"
             else
               export CARGO_TARGET_DIR="$HOME/.cache/rust-camel-target"
             fi

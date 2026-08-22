@@ -468,13 +468,28 @@ CI gate set.
 
 ### Disk budget for build artifacts
 
-The dev profile sets `split-debuginfo = "packed"`, so every test/example binary
-gets a `.dwp` companion file of roughly 100-200 MiB. Cargo never
-garbage-collects these, nor the orphaned hash-suffixed test binaries left
-behind by rebuilds. Worktrees share `/home/shared`, so a batch of concurrent
-builds can fill the partition (45.6G of `.dwp` files observed).
+Profiles are debuginfo-free by default (`debug = 0` for workspace and deps
+in dev/test). Rationale: agents and humans triage via panic messages —
+`#[track_caller]` embeds `file:line` in `assert!`/`unwrap()` panics without
+DWARF, so test sessions no longer produce `.dwp` companions at all
+(previously ~12.5G per `cargo test --workspace` run; 45.6G observed
+historically before the profile change). This keeps 4-6 concurrent agent
+worktrees viable on the shared 201G partition.
 
-Reclaim space with:
+Need line-level debugging (gdb/lldb, backtraces through dependency frames,
+line-level profiling)? Opt in per invocation:
+
+```sh
+RUSTFLAGS="-Cdebuginfo=1" cargo test -p camel-core    # line tables for this run only
+RUSTFLAGS="-Cdebuginfo=2" cargo test -p camel-core    # full debug info
+```
+
+Note: RUSTFLAGS changes unit fingerprints — the target dir and sccache keys
+diverge from the default ones for that invocation. Use it, then return to
+the default; do not set it permanently.
+
+Legacy `.dwp` files (from before the profile change) and orphaned
+hash-suffixed test binaries are still worth sweeping occasionally:
 
 ```sh
 scripts/purge-target-gc.sh            # sweep */target under CWD, delete .dwp older than 7 days
@@ -482,15 +497,8 @@ scripts/purge-target-gc.sh -n         # dry run first
 scripts/purge-target-gc.sh -o -d 0    # also orphaned test binaries, older than ~24h
 ```
 
-Purged `.dwp` companions degrade line info in already-built binaries.
-Rebuild to restore. Files younger than one full 24h period survive even
-with `-d 0` (`find -mtime +0` semantics).
-
-Emergency one-liner (no script):
-
-```sh
-find /home/shared/rust-camel-worktrees -name '*.dwp' -delete
-```
+Files younger than one full 24h period survive even with `-d 0`
+(`find -mtime +0` semantics).
 
 ## Status & Roadmap
 
