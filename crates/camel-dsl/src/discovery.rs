@@ -54,6 +54,13 @@ pub enum DiscoveryError {
     )]
     JsonRequiresExplicitPattern { path: String, pattern: String },
 
+    /// Route file matched by a literal pattern uses the reserved '.test.yaml'
+    /// suffix, which names a camel test document, not a route.
+    #[error(
+        "Route file {path} uses the reserved '.test.yaml' suffix, which names a camel test document, not a route. Run it with 'camel test {path}', or rename it if it is a route."
+    )]
+    ReservedTestSuffix { path: String },
+
     /// A route id was produced more than once across regular + materialized routes.
     #[error("Duplicate route id '{route_id}' in {path}")]
     DuplicateRouteId { path: String, route_id: String },
@@ -153,6 +160,21 @@ fn pattern_targets_json(pattern: &str) -> bool {
         .is_some_and(|last_segment| last_segment.ends_with(".json"))
 }
 
+/// Returns true if the file name ends with the reserved `.test.yaml` or
+/// `.test.yml` suffix. Such files name camel test documents, not routes.
+pub fn is_test_document(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        name.ends_with(".test.yaml") || name.ends_with(".test.yml")
+    })
+}
+
+/// Returns true if the glob pattern contains no metacharacters (`* ? [ ] { }`),
+/// i.e. it names exactly one literal path rather than a set of paths.
+fn pattern_is_literal(pattern: &str) -> bool {
+    !pattern.contains(['*', '?', '[', ']', '{', '}'])
+}
+
 /// Extracts the lowercase file extension from a path, if any.
 fn file_extension(path: &Path) -> Option<String> {
     path.extension()
@@ -237,6 +259,17 @@ fn discover_routes_inner(
                 source: e.into(),
             })?;
             let path_str = path.to_string_lossy().to_string();
+
+            // Reserved test-document gate: `.test.yaml` / `.test.yml` files
+            // belong to `camel test`, not route discovery. A literal pattern
+            // naming one is a user error — fail with guidance. Under a
+            // wildcard, test docs are simply skipped (never read).
+            if is_test_document(&path) {
+                if pattern_is_literal(pattern) {
+                    return Err(DiscoveryError::ReservedTestSuffix { path: path_str });
+                }
+                continue;
+            }
 
             // Validate extension and JSON explicit-pattern gate BEFORE reading or
             // interpolating — rejects must not trigger env lookups.
@@ -1424,5 +1457,124 @@ templated_routes:
             }
             other => panic!("expected MaterializationFailures, got: {other:?}"),
         }
+    }
+
+    // ── Reserved test-document suffix (.test.yaml / .test.yml) ──────
+
+    #[test]
+    fn test_doc_skipped_under_wildcard_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("demo.yaml"),
+            r#"
+routes:
+  - id: "demo-route"
+    from: "timer:tick"
+    steps:
+      - to: "log:info"
+"#,
+        )
+        .unwrap();
+        // Any bytes — a test doc must never be read by route discovery.
+        fs::write(routes_dir.join("demo.test.yaml"), "not: [a route document").unwrap();
+
+        let pattern = routes_dir.join("*.yaml").to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "demo-route");
+    }
+
+    #[test]
+    fn test_doc_literal_pattern_hard_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(routes_dir.join("demo.test.yaml"), "not: [a route document").unwrap();
+
+        let pattern = routes_dir
+            .join("demo.test.yaml")
+            .to_string_lossy()
+            .to_string();
+        let err = match discover_routes(std::slice::from_ref(&pattern)) {
+            Ok(_) => panic!("expected ReservedTestSuffix error"),
+            Err(e) => e,
+        };
+        match &err {
+            DiscoveryError::ReservedTestSuffix { path } => {
+                assert_eq!(path, &pattern);
+            }
+            other => panic!("expected ReservedTestSuffix, got: {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("camel test"), "display was: {msg}");
+    }
+
+    #[test]
+    fn yml_test_doc_also_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(
+            routes_dir.join("demo.yml"),
+            r#"
+routes:
+  - id: "yml-demo-route"
+    from: "timer:tick"
+    steps:
+      - to: "log:info"
+"#,
+        )
+        .unwrap();
+        fs::write(routes_dir.join("demo.test.yml"), "not: [a route document").unwrap();
+
+        let pattern = routes_dir.join("*.yml").to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "yml-demo-route");
+    }
+
+    #[test]
+    fn wildcard_over_only_test_docs_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(routes_dir.join("demo.test.yaml"), "not: [a route document").unwrap();
+
+        let pattern = routes_dir.join("*.test.yaml").to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn test_json_name_not_test_suffixed() {
+        // `.test.json` is NOT a camel test document — the JSON explicit-pattern
+        // gate must still fire for it under a broad wildcard.
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(routes_dir.join("x.test.json"), "{}").unwrap();
+
+        let pattern = routes_dir.join("*").to_string_lossy().to_string();
+        let err = match discover_routes(&[pattern]) {
+            Ok(_) => panic!("expected JsonRequiresExplicitPattern"),
+            Err(e) => e,
+        };
+        match &err {
+            DiscoveryError::JsonRequiresExplicitPattern { path, .. } => {
+                assert!(path.ends_with("x.test.json"), "path was: {path}");
+            }
+            other => panic!("expected JsonRequiresExplicitPattern, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_test_document_predicate() {
+        assert!(is_test_document(Path::new("a.test.yaml")));
+        assert!(is_test_document(Path::new("a.test.yml")));
+        assert!(!is_test_document(Path::new("atest.yaml")));
+        assert!(!is_test_document(Path::new("a.yaml")));
+        assert!(!is_test_document(Path::new("x.test.json")));
     }
 }

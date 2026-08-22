@@ -1,0 +1,13 @@
+# Sample camel test document — run with: camel test routes/hello.test.yaml
+routeFiles: [hello.yaml]
+
+inputs:
+  - to: "direct:start"
+    body: "hello"
+
+expects:
+  mock:result:
+    count: 1
+    bodies: ["hello"]
+    headers:
+      source: "hello"

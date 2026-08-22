@@ -34,6 +34,8 @@ pub struct LintOutcome {
     pub exit_code: i32,
     /// CLI-misuse message printed to stderr when `exit_code == 2`.
     pub cli_error: Option<String>,
+    /// Informational message printed to stdout (e.g. skipped test document).
+    pub cli_info: Option<String>,
 }
 
 /// Build the production lint engine with the full builtin component catalog.
@@ -58,6 +60,23 @@ pub async fn production_engine() -> Result<LintEngine, String> {
 /// returned [`LintOutcome`] carries the exit code the CLI would emit so tests
 /// can assert on it without spawning a subprocess.
 pub async fn run_lint(path: &Path) -> LintOutcome {
+    // Test documents (`*.test.yaml`/`.test.yml`) are `camel test` inputs, not
+    // route definitions — linting them as routes would emit spurious
+    // diagnostics. Skip with an info line instead. The predicate is the
+    // single source of truth shared with route discovery.
+    if camel_dsl::discovery::is_test_document(path) {
+        return LintOutcome {
+            diagnostics: Vec::new(),
+            source: String::new(),
+            exit_code: 0,
+            cli_error: None,
+            cli_info: Some(format!(
+                "skipped: {} is a camel test document",
+                path.display()
+            )),
+        };
+    }
+
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -66,6 +85,7 @@ pub async fn run_lint(path: &Path) -> LintOutcome {
                 source: String::new(),
                 exit_code: 2,
                 cli_error: Some(format!("failed to read '{}': {e}", path.display())),
+                cli_info: None,
             };
         }
     };
@@ -78,6 +98,7 @@ pub async fn run_lint(path: &Path) -> LintOutcome {
                 source,
                 exit_code: 2,
                 cli_error: Some(e),
+                cli_info: None,
             };
         }
     };
@@ -91,6 +112,7 @@ pub async fn run_lint(path: &Path) -> LintOutcome {
         source,
         exit_code,
         cli_error: None,
+        cli_info: None,
     }
 }
 
@@ -99,6 +121,8 @@ pub async fn run(args: LintArgs) {
     let outcome = run_lint(Path::new(&args.file)).await;
     if let Some(err) = &outcome.cli_error {
         eprintln!("error: {err}");
+    } else if let Some(info) = &outcome.cli_info {
+        println!("{info}");
     } else {
         let file_id = args.file.as_str();
         for diag in &outcome.diagnostics {
@@ -186,6 +210,44 @@ mod tests {
         let outcome = run_lint(std::path::Path::new("/nonexistent/route-lint-missing.yaml")).await;
         assert_eq!(outcome.exit_code, 2);
         assert!(outcome.cli_error.is_some());
+        assert!(outcome.diagnostics.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lint_skips_test_document_with_info() {
+        let dir = tempfile::tempdir().unwrap(); // allow-unwrap
+        let path = dir.path().join("demo.test.yaml");
+        std::fs::write(&path, "routeFiles: [x]\nexpects: {}\n").unwrap(); // allow-unwrap
+
+        let outcome = run_lint(&path).await;
+        assert_eq!(
+            outcome.exit_code, 0,
+            "test document must be skipped with exit 0"
+        );
+        assert!(
+            outcome.diagnostics.is_empty(),
+            "test document must emit no diagnostics; got = {:?}",
+            outcome.diagnostics
+        );
+        let info = outcome.cli_info.expect("skip must set cli_info"); // allow-unwrap
+        assert!(
+            info.contains("camel test document"),
+            "info must say why the file was skipped; got = {info}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lint_routes_normal_yaml_unchanged() {
+        let yaml = "id: r1\nfrom: timer:foo?period=1s\nsteps:\n  - to: log:bar\n";
+        let mut tmp = tempfile::NamedTempFile::new().unwrap(); // allow-unwrap
+        write!(tmp, "{yaml}").unwrap(); // allow-unwrap
+
+        let outcome = run_lint(tmp.path()).await;
+        assert_eq!(outcome.exit_code, 0);
+        assert!(
+            outcome.cli_info.is_none(),
+            "normal route must not be skipped"
+        );
         assert!(outcome.diagnostics.is_empty());
     }
 

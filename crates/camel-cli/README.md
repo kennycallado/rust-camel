@@ -227,8 +227,9 @@ settle: "500ms"                    # optional quiet window (0 < settle <= 5s)
 ```
 
 - **Route source**: exactly one of `routeFiles` (paths resolved relative to the
-  test document's directory) or inline `routes` (same schema as route files).
-  Both or neither is an error.
+  test document's directory), `routeFilesFromRoot` (paths resolved against the
+  nearest ancestor `Camel.toml` directory), or inline `routes` (same schema as
+  route files). More than one or none is an error.
 - **Inputs**: `inputs.to` accepts `direct:` endpoints only. Bodies are string,
   object, or array; null/boolean/number scalars are rejected.
 - **Expects**: keys are `mock:`-prefixed endpoint URIs (`mock:result`); the
@@ -251,11 +252,12 @@ document plus a final `N passed, M failed` summary.
 
 ### Non-interference with `camel run`
 
-`camel test` does not change route files or `camel run` behavior. Default route
-discovery (initial load and watch reload) skips `*.test.yaml` documents, so
-test documents sitting next to route files are never loaded as routes — new
-route files still load on watch reload. An explicit `--routes` glob naming
-`*.test.yaml` and `Camel.toml` routes pass through untouched.
+`camel test` does not change route files or `camel run` behavior. Route
+discovery (initial load and watch reload) skips `*.test.yaml` and `*.test.yml`
+camel test documents on every pattern path: the default glob, `Camel.toml`
+`routes`, and `--routes`. Naming a test document literally, with no wildcards,
+fails with a reserved-suffix error pointing at `camel test`. Wildcard matches
+are skipped, so a glob matching only test documents yields no routes.
 
 ### Example
 

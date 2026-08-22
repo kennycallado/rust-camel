@@ -3,9 +3,11 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
 use camel_cli::commands::test::document::parse_test_document;
+use camel_cli::commands::test::run_tests;
 use camel_cli::commands::test::runner::run_test_doc;
 
 /// Create a unique temp directory for one test.
@@ -383,4 +385,175 @@ expects:
     assert_eq!(er.endpoint, "<settle>");
     let err = er.outcome.as_ref().expect_err("must fail"); // allow-unwrap
     assert!(err.contains("settle timeout"), "error text: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// routeFilesFromRoot (root-anchored test documents)
+// ---------------------------------------------------------------------------
+
+/// Write the standard `routeFilesFromRoot` project fixture under `root`:
+/// `Camel.toml` at the top, `routes/orders.yaml`, and a nested document at
+/// `tests/integration/orders.test.yaml`. Returns the absolute document path.
+fn write_from_root_project(root: &std::path::Path) -> PathBuf {
+    fs::write(root.join("Camel.toml"), "[default]\n").expect("write Camel.toml"); // allow-unwrap
+    fs::create_dir_all(root.join("routes")).expect("create routes/"); // allow-unwrap
+    fs::write(
+        root.join("routes/orders.yaml"),
+        r#"routes:
+  - id: orders
+    from: "direct:start"
+    steps:
+      - to: "mock:result"
+"#,
+    )
+    .expect("write routes/orders.yaml"); // allow-unwrap
+    let tests_dir = root.join("tests").join("integration");
+    fs::create_dir_all(&tests_dir).expect("create tests/integration/"); // allow-unwrap
+    let doc = tests_dir.join("orders.test.yaml");
+    fs::write(
+        &doc,
+        r#"routeFilesFromRoot:
+  - routes/orders.yaml
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:result:
+    count: 1
+"#,
+    )
+    .expect("write orders.test.yaml"); // allow-unwrap
+    doc
+}
+
+/// Run one document through the in-process `camel test` entry, returning the
+/// summary plus captured stdout/stderr text.
+async fn run_cli(
+    doc: &std::path::Path,
+) -> (camel_cli::commands::test::TestRunSummary, String, String) {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(std::slice::from_ref(&doc.to_path_buf()), &mut out, &mut err).await;
+    let out = String::from_utf8(out).expect("stdout utf-8"); // allow-unwrap
+    let err = String::from_utf8(err).expect("stderr utf-8"); // allow-unwrap
+    (summary, out, err)
+}
+
+/// A document nested under `tests/integration/` resolves its
+/// `routeFilesFromRoot` entries against the project root's `Camel.toml`.
+#[tokio::test(flavor = "multi_thread")]
+async fn route_files_from_root_nested_doc_passes() {
+    let dir = temp_dir("rfr-nested");
+    let doc = write_from_root_project(&dir);
+    let (summary, out, err) = run_cli(&doc).await;
+    assert_eq!(summary.exit_code, 0, "out:\n{out}\nerr:\n{err}");
+    assert_eq!(summary.failed, 0, "out:\n{out}\nerr:\n{err}");
+    let pass_lines = out.lines().filter(|l| l.starts_with("PASS ")).count();
+    assert_eq!(pass_lines, 1, "exactly one PASS line expected, out:\n{out}");
+}
+
+/// Nearest ancestor wins: the per-service `Camel.toml` under
+/// `services/orders/` anchors the document even though an outer `Camel.toml`
+/// also exists, and `routes/a.yaml` exists only under `services/orders/`.
+#[tokio::test(flavor = "multi_thread")]
+async fn route_files_from_root_nearest_ancestor_wins() {
+    let outer = temp_dir("rfr-ancestor");
+    fs::write(outer.join("Camel.toml"), "[default]\n").expect("write outer Camel.toml"); // allow-unwrap
+    let svc = outer.join("services").join("orders");
+    fs::create_dir_all(svc.join("routes")).expect("create services/orders/routes/"); // allow-unwrap
+    fs::create_dir_all(svc.join("tests")).expect("create services/orders/tests/"); // allow-unwrap
+    fs::write(svc.join("Camel.toml"), "[default]\n").expect("write svc Camel.toml"); // allow-unwrap
+    fs::write(
+        svc.join("routes").join("a.yaml"),
+        r#"routes:
+  - id: a
+    from: "direct:start"
+    steps:
+      - to: "mock:svc"
+"#,
+    )
+    .expect("write routes/a.yaml"); // allow-unwrap
+    let doc = svc.join("tests").join("a.test.yaml");
+    fs::write(
+        &doc,
+        r#"routeFilesFromRoot:
+  - routes/a.yaml
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:svc:
+    count: 1
+"#,
+    )
+    .expect("write a.test.yaml"); // allow-unwrap
+    let (summary, out, err) = run_cli(&doc).await;
+    assert_eq!(summary.exit_code, 0, "out:\n{out}\nerr:\n{err}");
+    assert_eq!(summary.failed, 0, "out:\n{out}\nerr:\n{err}");
+    let pass_lines = out.lines().filter(|l| l.starts_with("PASS ")).count();
+    assert_eq!(pass_lines, 1, "exactly one PASS line expected, out:\n{out}");
+}
+
+/// No `Camel.toml` in any ancestor: exit code 2 with a `NoProjectRoot`
+/// error naming the document directory (fail closed).
+#[tokio::test(flavor = "multi_thread")]
+async fn route_files_from_root_no_root_exit_2() {
+    let dir = temp_dir("rfr-no-root");
+    let doc = dir.join("orders.test.yaml");
+    fs::write(
+        &doc,
+        r#"routeFilesFromRoot:
+  - routes/orders.yaml
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:result:
+    count: 1
+"#,
+    )
+    .expect("write orders.test.yaml"); // allow-unwrap
+    let (summary, out, err) = run_cli(&doc).await;
+    assert_eq!(summary.exit_code, 2, "out:\n{out}\nerr:\n{err}");
+    assert!(
+        err.contains("NoProjectRoot"),
+        "error must identify NoProjectRoot, err:\n{err}"
+    );
+    let doc_dir = dir.display().to_string();
+    assert!(
+        err.contains(&doc_dir),
+        "error must name the document directory {doc_dir}, err:\n{err}"
+    );
+}
+
+/// cwd independence: a child `camel test <absolute doc path>` run from an
+/// unrelated working directory still resolves `routeFilesFromRoot` through
+/// the root walk-up, with no `../` climbing in the document. The test never
+/// mutates its own process working directory.
+#[test]
+fn route_files_from_root_cwd_independent_subprocess() {
+    let project = temp_dir("rfr-subproc-project");
+    let doc = write_from_root_project(&project);
+    let elsewhere = temp_dir("rfr-subproc-elsewhere");
+
+    let doc_text = fs::read_to_string(&doc).expect("read orders.test.yaml"); // allow-unwrap
+    assert!(
+        !doc_text.contains("../"),
+        "document must not climb with ../, doc:\n{doc_text}"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("test")
+        .arg(&doc)
+        .current_dir(&elsewhere)
+        .output()
+        .expect("spawn camel test"); // allow-unwrap
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "exit {:?} from cwd {};\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code(),
+        elsewhere.display(),
+    );
 }

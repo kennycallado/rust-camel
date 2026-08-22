@@ -1,5 +1,8 @@
 # <name>
 
+## Test
+camel test routes/hello.test.yaml
+
 ## Run
 camel run
 

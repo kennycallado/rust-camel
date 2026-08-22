@@ -62,7 +62,9 @@ fn collect(pattern: &str, out: &mut BTreeSet<PathBuf>) {
 /// `*.test.yaml` files are excluded too: they are `camel test` documents for
 /// the declarative mock testkit (`routeFiles`/`inputs`/`expects` keys), not
 /// route definitions — linting them as routes would emit spurious R-SCHEMA
-/// errors the same way.
+/// errors the same way. The exclusion uses
+/// `camel_dsl::discovery::is_test_document`, the same predicate `camel lint`
+/// and route discovery apply, so the gate cannot drift from the runtime skip.
 fn discover_corpus() -> Vec<(String, PathBuf)> {
     let root = workspace_root();
     let mut found = BTreeSet::new();
@@ -86,15 +88,13 @@ fn discover_corpus() -> Vec<(String, PathBuf)> {
         collect(&pat, &mut found);
     }
     // Exclude non-route payload schemas and camel-test documents (see
-    // function doc).
+    // function doc). The test-document predicate is shared with discovery
+    // and `camel lint`.
     let excluded = root.join("examples").join("validator").join("schemas");
     found
         .into_iter()
         .filter(|p| !p.starts_with(&excluded))
-        .filter(|p| {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
-            !matches!(&name, Some(n) if n.ends_with(".test.yaml") || n.ends_with(".test.yml"))
-        })
+        .filter(|p| !camel_dsl::discovery::is_test_document(p))
         .map(|p| {
             let rel = p
                 .strip_prefix(&root)

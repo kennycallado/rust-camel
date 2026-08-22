@@ -1,9 +1,9 @@
 //! Declarative mock test document: model, parsing, and validation.
 //!
 //! A `*.test.yaml` sidecar declares one executable test: a route source
-//! (`routeFiles` reference OR inline `routes`, never both), optional
-//! `direct:` inputs, non-empty `expects` keyed by `mock:` URIs, and an
-//! optional `settle` quiet window (`0 < settle <= 5s`). Unknown fields are
+//! (`routeFiles` or `routeFilesFromRoot` reference OR inline `routes`,
+//! exactly one), optional `direct:` inputs, non-empty `expects` keyed by
+//! `mock:` URIs, and an optional `settle` quiet window (`0 < settle <= 5s`). Unknown fields are
 //! rejected (`deny_unknown_fields`); input bodies are restricted to string,
 //! object, and array forms — null, boolean, and number scalars are document
 //! errors.
@@ -37,6 +37,9 @@ const SETTLE_MAX: Duration = Duration::from_secs(5);
 pub struct TestDocument {
     /// Route files to load, relative to the document's directory.
     pub route_files: Option<Vec<String>>,
+    /// Route files to load, resolved against the nearest ancestor
+    /// `Camel.toml` directory (the project root).
+    pub route_files_from_root: Option<Vec<String>>,
     /// Inline route definitions (same schema as route files).
     pub routes: Option<serde_yaml::Value>,
     /// Optional inputs; omitted means the routes must self-start (timer).
@@ -130,8 +133,14 @@ pub enum TestDocError {
     Yaml(String),
     /// `deny_unknown_fields` rejection.
     UnknownField(String),
-    /// `routeFiles` and `routes` are mutually exclusive; one is required.
-    RouteSourceConflict,
+    /// The declared route source keys (`routeFiles`, `routeFilesFromRoot`,
+    /// `routes`) number zero or more than one; `present` lists the declared
+    /// keys and is empty when none is declared.
+    RouteSourceConflict { present: Vec<&'static str> },
+    /// `routeFilesFromRoot` is declared but no `Camel.toml` exists in any
+    /// ancestor directory of the document. Raised during runner route
+    /// resolution, not during parsing.
+    NoProjectRoot { doc_dir: String },
     /// `expects` is missing or empty.
     ExpectsEmpty,
     /// An `expects` key lacks the required `mock:` scheme.
@@ -151,9 +160,30 @@ impl fmt::Display for TestDocError {
         match self {
             Self::Yaml(raw) => write!(f, "invalid test document: {raw}"),
             Self::UnknownField(raw) => write!(f, "unknown field in test document: {raw}"),
-            Self::RouteSourceConflict => write!(
+            Self::RouteSourceConflict { present } => {
+                if present.is_empty() {
+                    write!(
+                        f,
+                        "exactly one route source (`routeFiles`, `routeFilesFromRoot`, \
+                         or `routes`) is required"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "route sources {} are mutually exclusive; exactly one route \
+                         source is required",
+                        present
+                            .iter()
+                            .map(|key| format!("`{key}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
+            Self::NoProjectRoot { doc_dir } => write!(
                 f,
-                "routeFiles and routes are mutually exclusive; exactly one is required"
+                "NoProjectRoot: routeFilesFromRoot requires a Camel.toml in an ancestor \
+                 directory of {doc_dir}; none was found."
             ),
             Self::ExpectsEmpty => write!(f, "expects must declare at least one mock: endpoint"),
             Self::ExpectKeyMissingScheme { key } => {
@@ -199,17 +229,29 @@ fn classify_yaml_error(raw: &str) -> TestDocError {
 }
 
 /// Parses and validates a `*.test.yaml` document. Validation order:
-/// (a) exactly one route source; (b) non-empty `expects`; (c) every `expects`
-/// key uses the `mock:` scheme (then the map is rebuilt with bare endpoint
-/// names); (d) `count`/`minCount` exclusivity; (e) `settle` range; (f) every
+/// (a) exactly one route source (`routeFiles`, `routeFilesFromRoot`, or
+/// `routes`); (b) non-empty `expects`; (c) every `expects` key uses the
+/// `mock:` scheme (then the map is rebuilt with bare endpoint names);
+/// (d) `count`/`minCount` exclusivity; (e) `settle` range; (f) every
 /// input targets `direct:`.
 pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     let mut doc = serde_yaml::from_str::<TestDocument>(text)
         .map_err(|e| classify_yaml_error(&e.to_string()))?;
 
-    // (a) Exactly one route source: both present or both absent is a conflict.
-    if doc.route_files.is_some() == doc.routes.is_some() {
-        return Err(TestDocError::RouteSourceConflict);
+    // (a) Exactly one route source: collect the declared keys and require
+    // the count to be one — zero or several is a conflict.
+    let mut present: Vec<&'static str> = Vec::new();
+    if doc.route_files.is_some() {
+        present.push("routeFiles");
+    }
+    if doc.route_files_from_root.is_some() {
+        present.push("routeFilesFromRoot");
+    }
+    if doc.routes.is_some() {
+        present.push("routes");
+    }
+    if present.len() != 1 {
+        return Err(TestDocError::RouteSourceConflict { present });
     }
     // (b) `expects` is mandatory and non-empty.
     if doc.expects.is_empty() {
@@ -373,14 +415,161 @@ expects:
   mock:result:
     count: 1
 "#;
-        assert!(matches!(err_of(both), TestDocError::RouteSourceConflict));
+        assert!(matches!(
+            err_of(both),
+            TestDocError::RouteSourceConflict { .. }
+        ));
         // Neither source present is the same conflict.
         let neither = r#"
 expects:
   mock:result:
     count: 1
 "#;
-        assert!(matches!(err_of(neither), TestDocError::RouteSourceConflict));
+        assert!(matches!(
+            err_of(neither),
+            TestDocError::RouteSourceConflict { .. }
+        ));
+    }
+
+    #[test]
+    fn route_files_from_root_parses() {
+        let yaml = r#"
+routeFilesFromRoot: [config/routes.yaml]
+expects:
+  mock:result:
+    count: 1
+"#;
+        let doc = parse_test_document(yaml).expect("valid document should parse"); // allow-unwrap
+        assert_eq!(
+            doc.route_files_from_root,
+            Some(vec!["config/routes.yaml".to_string()])
+        );
+        assert!(doc.route_files.is_none());
+        assert!(doc.routes.is_none());
+    }
+
+    #[test]
+    fn route_files_from_root_plus_route_files_rejected() {
+        let yaml = r#"
+routeFiles: [config/routes.yaml]
+routeFilesFromRoot: [config/routes.yaml]
+expects:
+  mock:result:
+    count: 1
+"#;
+        let err = err_of(yaml);
+        let msg = err.to_string();
+        assert!(
+            matches!(
+                err,
+                TestDocError::RouteSourceConflict { ref present }
+                    if *present == ["routeFiles", "routeFilesFromRoot"]
+            ),
+            "expected RouteSourceConflict listing routeFiles + routeFilesFromRoot, got: {err:?}"
+        );
+        assert!(
+            msg.contains("routeFiles") && msg.contains("routeFilesFromRoot"),
+            "display must name both keys, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn route_files_from_root_plus_routes_rejected() {
+        let yaml = r#"
+routeFilesFromRoot: [config/routes.yaml]
+routes:
+  - id: r1
+    from: "direct:start"
+expects:
+  mock:result:
+    count: 1
+"#;
+        let err = err_of(yaml);
+        let msg = err.to_string();
+        assert!(
+            matches!(
+                err,
+                TestDocError::RouteSourceConflict { ref present }
+                    if *present == ["routeFilesFromRoot", "routes"]
+            ),
+            "expected RouteSourceConflict listing routeFilesFromRoot + routes, got: {err:?}"
+        );
+        assert!(
+            msg.contains("routeFilesFromRoot") && msg.contains("routes"),
+            "display must name both keys, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_route_source_rejected() {
+        let yaml = r#"
+expects:
+  mock:result:
+    count: 1
+"#;
+        let err = err_of(yaml);
+        let msg = err.to_string();
+        assert!(
+            matches!(
+                err,
+                TestDocError::RouteSourceConflict { ref present } if present.is_empty()
+            ),
+            "expected RouteSourceConflict with empty present, got: {err:?}"
+        );
+        assert!(
+            msg.contains("exactly one") && msg.contains("required"),
+            "display must state exactly one route source is required, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn all_three_route_sources_rejected() {
+        let yaml = r#"
+routeFiles: [config/routes.yaml]
+routeFilesFromRoot: [config/routes.yaml]
+routes:
+  - id: r1
+    from: "direct:start"
+expects:
+  mock:result:
+    count: 1
+"#;
+        let err = err_of(yaml);
+        assert!(
+            matches!(
+                err,
+                TestDocError::RouteSourceConflict { ref present }
+                    if *present == ["routeFiles", "routeFilesFromRoot", "routes"]
+            ),
+            "expected RouteSourceConflict listing all three keys, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn route_files_and_routes_still_rejected() {
+        let yaml = r#"
+routeFiles: [config/routes.yaml]
+routes:
+  - id: r1
+    from: "direct:start"
+expects:
+  mock:result:
+    count: 1
+"#;
+        let err = err_of(yaml);
+        let msg = err.to_string();
+        assert!(
+            matches!(
+                err,
+                TestDocError::RouteSourceConflict { ref present }
+                    if *present == ["routeFiles", "routes"]
+            ),
+            "expected RouteSourceConflict listing routeFiles + routes, got: {err:?}"
+        );
+        assert!(
+            msg.contains("routeFiles") && msg.contains("routes"),
+            "display must name both keys, got: {msg}"
+        );
     }
 
     #[test]

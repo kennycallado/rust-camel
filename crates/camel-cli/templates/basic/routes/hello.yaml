@@ -1,5 +1,9 @@
+# Sample route for camel test — see routes/hello.test.yaml
 routes:
   - id: "hello"
-    from: "timer:tick?period=2000"
+    from: "direct:start"
     steps:
-      - log: "Hello from camel-cli! Exchange #${header.CamelTimerCounter}"
+      - set_header:
+          key: "source"
+          value: "hello"
+      - to: "mock:result"

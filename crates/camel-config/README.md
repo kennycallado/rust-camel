@@ -33,6 +33,7 @@ Create a `Camel.toml` file in your project root:
 ```toml
 [default]
 routes = ["routes/*.yaml"]    # Default examples use YAML; explicit .json globs are also supported
+# Wildcard globs skip *.test.yaml / *.test.yml camel test documents (owned by `camel test`); naming one literally fails with the reserved-suffix error
 watch = false
 log_level = "info"
 drain_timeout_ms = 10000  # Graceful drain timeout for hot-reload restart/remove (default: 10s)
@@ -125,7 +126,7 @@ allow_internal = true  # Allow internal services in dev
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `routes` | `[String]` |  | Glob patterns for route files (default examples use YAML; explicit `.json` globs also supported) |
+| `routes` | `[String]` |  | Glob patterns for route files (default examples use YAML; explicit `.json` globs also supported). Wildcard globs skip `*.test.yaml` / `*.test.yml` camel test documents, which `camel test` owns. Naming one literally fails with the reserved-suffix error |
 | `watch` | `bool` |  | Enable hot reload on file changes |
 | `runtime_journal` | `[runtime_journal]` table | unset | Optional redb runtime event journal (`path`, `durability`, `compaction_threshold_events`); when set, enables local runtime journal replay |
 | `idempotent_repo` | `[idempotent_repo]` table | unset | Optional persistent redb idempotent repository (`path`, `durability`); when set, registers a `"redb"` backend for `idempotent_consumer` steps. The default `"memory"` repo remains available either way |

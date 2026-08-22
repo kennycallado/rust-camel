@@ -3,7 +3,7 @@
 //!
 //! Spec: openspec/changes/mock-declarative-testkit (design D3-D7).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ use noyalib::compat::serde_yaml;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
-use super::document::{ExpectSet, InputBody, TestDocument, TestInput};
+use super::document::{ExpectSet, InputBody, TestDocError, TestDocument, TestInput};
 
 /// Instability budget: traffic must quiesce within this window after the
 /// quiet window elapses, anchored at route-execution begin.
@@ -67,9 +67,28 @@ async fn boot_context() -> Result<(CamelContext, MockComponent), String> {
     Ok((ctx, mock))
 }
 
+/// Find the nearest ancestor directory of `start` (including `start`
+/// itself) that contains a `Camel.toml`.
+///
+/// The walk is STRICT: only `Camel.toml` marks a root here. This differs
+/// from [`crate::commands::plugin::find_camel_root`], which at each
+/// ancestor level accepts the nearest marker of either kind (`Camel.toml`
+/// OR a workspace `Cargo.toml`). Test documents must resolve
+/// `routeFilesFromRoot` against a real Camel project root, so the two
+/// walks must not be merged.
+pub(crate) fn find_camel_toml_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| dir.join("Camel.toml").exists())
+        .map(Path::to_path_buf)
+}
+
 /// Load route definitions from the document's route source.
 ///
-/// `routeFiles` paths resolve relative to `doc_dir` and load through
+/// `routeFilesFromRoot` paths resolve against the nearest ancestor
+/// `Camel.toml` directory found by [`find_camel_toml_root`]; no such root
+/// is a document error ([`TestDocError::NoProjectRoot`]). `routeFiles`
+/// paths resolve relative to `doc_dir`, and both file forms load through
 /// `camel_dsl::load_from_file` (the same per-file parser `camel run` uses,
 /// including the 16 MiB size cap and path-annotated errors). Inline `routes`
 /// are re-serialized to YAML and parsed through `camel_dsl::parse_yaml`.
@@ -77,7 +96,22 @@ async fn load_routes(
     doc: &TestDocument,
     doc_dir: &Path,
 ) -> Result<Vec<camel_core::RouteDefinition>, String> {
-    if let Some(files) = &doc.route_files {
+    if let Some(files) = &doc.route_files_from_root {
+        let root = find_camel_toml_root(doc_dir).ok_or_else(|| {
+            TestDocError::NoProjectRoot {
+                doc_dir: doc_dir.display().to_string(),
+            }
+            .to_string()
+        })?;
+        let mut defs = Vec::new();
+        for path in files {
+            let full = root.join(path);
+            let loaded =
+                camel_dsl::load_from_file(&full).map_err(|e| format!("{}: {e}", full.display()))?;
+            defs.extend(loaded);
+        }
+        Ok(defs)
+    } else if let Some(files) = &doc.route_files {
         let mut defs = Vec::new();
         for path in files {
             let full = doc_dir.join(path);
@@ -95,7 +129,7 @@ async fn load_routes(
             .map_err(|e| format!("failed to serialize inline routes: {e}"))?;
         camel_dsl::parse_yaml(&text).map_err(|e| format!("inline routes: {e}"))
     } else {
-        Err("document declares neither routeFiles nor routes".to_string())
+        Err("document declares none of routeFiles, routeFilesFromRoot, or routes".to_string())
     }
 }
 
@@ -342,4 +376,31 @@ pub async fn run_test_doc(doc: &TestDocument, doc_dir: &Path) -> (TestDocResult,
     }
 
     (result, mock)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_camel_toml_root_strict_walk() {
+        let root = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        std::fs::write(root.path().join("Camel.toml"), "").expect("write Camel.toml"); // allow-unwrap
+        let nested = root.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("create nested dir"); // allow-unwrap
+        assert_eq!(
+            find_camel_toml_root(&nested),
+            Some(root.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn find_camel_toml_root_no_marker_is_none() {
+        let root = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        // A workspace Cargo.toml is NOT an accepted marker for this walk.
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("write Cargo.toml"); // allow-unwrap
+        let nested = root.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir"); // allow-unwrap
+        assert_eq!(find_camel_toml_root(&nested), None);
+    }
 }
