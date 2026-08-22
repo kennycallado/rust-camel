@@ -63,11 +63,21 @@ impl Rule for RSchemaRule {
         // for every form:
         //   - array              -> legacy array form -> {routes: <array>}, depth 1
         //   - object with routes -> envelope form     -> as-is,            depth 0
+        //   - object with rest   -> rest-block form   -> R-SCHEMA skips (see below)
         //   - any other object   -> bare single route -> {routes: [value]}, depth 2
         //   - scalar/null        -> R-SCHEMA cannot validate; R-SYN owns it.
+        //
+        // A `{rest: [...]}` document is a valid DSL form (camel-dsl
+        // `RouteDslRest`, lowered by `expand_rest_into`), but ROUTE_SCHEMA
+        // does not model it; validating it as a bare route yields bogus
+        // `required`/`additionalProperties` errors (rc-xmbi). Skip the form
+        // until RestDsl defs land in the schema.
         let envelope_depth = match &value {
             serde_json::Value::Array(_) => 1,
             serde_json::Value::Object(map) if map.contains_key("routes") => 0,
+            serde_json::Value::Object(map) if map.contains_key("rest") => {
+                return Vec::new();
+            }
             serde_json::Value::Object(_) => 2,
             _ => return Vec::new(),
         };
@@ -420,6 +430,39 @@ steps:
         assert!(
             rschema.is_empty(),
             "a valid bare single route must produce no R-SCHEMA errors; got: {:?}",
+            rschema
+        );
+    }
+
+    #[test]
+    fn rschema_rest_form_document_is_silent() {
+        // A `rest:`-block document is a valid DSL form (camel-dsl
+        // `RouteDslRest`, lowered by `expand_rest_into`), but ROUTE_SCHEMA
+        // does not model it yet. The bare-route normalisation used to wrap it
+        // as `{routes: [{rest: ...}]}`, and `RouteDslRoute`'s
+        // `additionalProperties: false` rejected the `rest` key — a false
+        // positive on `examples/rest-crud/routes/secured.yaml` (rc-xmbi).
+        // Until RestDsl defs land in ROUTE_SCHEMA, R-SCHEMA skips the rest
+        // form entirely (same policy as scalar/null documents).
+        let source = "\
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api/users
+    security_policy:
+      roles: [\"user\"]
+      provider: native-demo
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+";
+        let diags = analyze(source);
+        let rschema = rschema_only(&diags);
+        assert!(
+            rschema.is_empty(),
+            "a rest-block document must not emit R-SCHEMA until the schema \
+             models the form; got: {:?}",
             rschema
         );
     }
