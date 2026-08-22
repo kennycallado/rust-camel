@@ -4,8 +4,8 @@
   Optional delivery-phase grouping. Omit this level entirely for
   single-phase changes (the change looks exactly like the pre-phase
   template). When used, the WHOLE tasks.md — including every Phase
-  block — is written and plan-blessed ONCE in PHASE 2. Phases are a
-  PHASE 3 implementation-ordering construct, not a blessing construct.
+  block — is written and plan-blessed ONCE in STAGE 2. Phases are a
+  STAGE 3 implementation-ordering construct, not a blessing construct.
 -->
 
 ## <Module/Crate 1>
@@ -67,7 +67,7 @@
 <!--
   OPTIONAL: example with phase grouping. Delete this block from real
   tasks.md. The phase heading sits ABOVE the <Module/Crate> level.
-  PHASE 3 iterates these groups in order, with an inter-phase r_glm
+  STAGE 3 iterates these groups in order, with an inter-phase r_glm
   review only between multi-task phases.
 
 ## Phase 1: <one-line phase goal>

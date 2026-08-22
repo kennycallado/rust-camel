@@ -1,13 +1,13 @@
 ---
 name: openspec-task-authoring
-description: Quality discipline for authoring OpenSpec tasks.md task blocks. Loaded by conductor-light in PHASE 2 before plan-bless. Enforces no-placeholders, executable test specs, concrete acceptance, NEW-symbol consistency, and phase-boundary coherence. Use when writing or revising task blocks under `## Phase N` headings in an expert-gated OpenSpec change.
+description: Quality discipline for authoring OpenSpec tasks.md task blocks. Loaded by conductor-light in STAGE 2 before plan-bless. Enforces no-placeholders, executable test specs, concrete acceptance, NEW-symbol consistency, and phase-boundary coherence. Use when writing or revising task blocks under `## Phase N` headings in an expert-gated OpenSpec change.
 ---
 
 # openspec-task-authoring
 
 ## Purpose
 
-Quality discipline for authoring OpenSpec `tasks.md` task blocks. Loaded by `conductor-light` during PHASE 2 of the expert-gated flow, before the plan-bless. It enforces a no-placeholders rule, a per-task quality bar, and a self-review pass that catches the failure modes downstream workers and reviewers cannot recover from cheaply.
+Quality discipline for authoring OpenSpec `tasks.md` task blocks. Loaded by `conductor-light` during STAGE 2 of the expert-gated flow, before the plan-bless. It enforces a no-placeholders rule, a per-task quality bar, and a self-review pass that catches the failure modes downstream workers and reviewers cannot recover from cheaply.
 
 ## No-placeholders rules
 
@@ -45,9 +45,9 @@ Run this before requesting the plan-bless. Each item is a hard pass/fail.
 3. **NEW-symbol consistency.** Symbols (types, functions, modules, error variants) introduced in one task must match the names and signatures used wherever later tasks reference them. References to EXISTING project code (already committed symbols the change does not own) are not in scope; only NEW symbols introduced by this change must agree.
 4. **Phase-boundary coherence.** For each `## Phase N: <name>` group, the tasks inside share a coherent goal. The phase boundary must match the `## Phases` section in `design.md` (one phase = one deliverable, with the same goal/deps/externally-visible types/exit-criteria the design recorded).
 
-## Scope-check (PHASE 2 start)
+## Scope-check (STAGE 2 start)
 
-The scope-check runs ONCE at the start of PHASE 2, AFTER phases were fixed at design time. It does NOT author the phase decomposition (that is a design-time decision in `design.md`, blessed with the spec); it only validates size and coherence.
+The scope-check runs ONCE at the start of STAGE 2, AFTER phases were fixed at design time. It does NOT author the phase decomposition (that is a design-time decision in `design.md`, blessed with the spec); it only validates size and coherence.
 
 - If a phase is too large (e.g. mixes independent subsystems, or contains > ~8 tasks without a sub-deliverable boundary), flag it.
 - If independent subsystems were collapsed into a single phase, flag it.
@@ -56,10 +56,10 @@ The scope-check runs ONCE at the start of PHASE 2, AFTER phases were fixed at de
 **Consequence of a failed scope-check (escape hatch).** A phase-validation failure is a SPEC-LEVEL defect, not a tasks-level defect. Do not patch `tasks.md` to mask a bad boundary. Instead:
 
 1. Delete the draft `tasks.md`.
-2. Return to PHASE 1.
+2. Return to STAGE 1.
 3. Revise `design.md` (and `specs/` if needed) to fix the phase decomposition.
 4. Obtain a fresh spec-bless.
-5. Restart PHASE 2 with a regenerated `tasks.md`.
+5. Restart STAGE 2 with a regenerated `tasks.md`.
 
 This rule exists because the once-blessed-full-plan design is load-bearing — the apply gate trusts the plan, and a bad boundary hidden by patching surfaces later as cross-phase drift the holistic review cannot cheaply untangle.
 

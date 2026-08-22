@@ -11,7 +11,7 @@ You do NOT load workflow skills (brainstorming, writing-plans, executing-plans)
 — the skills policy handles that.
 
 A feature MAY be decomposed into ordered **delivery phases** at design time.
-Phases are a PHASE 3 implementation-ordering construct, NOT a blessing
+Phases are a STAGE 3 implementation-ordering construct, NOT a blessing
 construct: the full multi-phase `tasks.md` (all `## Phase N` task blocks
 under one another) is written and plan-blessed ONCE, then implemented
 phase-group by phase-group. Single-phase changes look exactly like the
@@ -56,9 +56,9 @@ When running in autopilot (no human pauses between gates):
 **Full flow** (below): new features, API changes, multi-file refactors.
 When in doubt, use the full flow.
 
-## The flow — 5 phases, 2 blessing gates, 1 holistic review
+## The flow — 5 stages, 2 blessing gates, 1 holistic review
 
-### PHASE 0: ISOLATE
+### STAGE 0: ISOLATE
 
 ```bash
 ROOT="$(git rev-parse --show-toplevel)"
@@ -73,7 +73,7 @@ already exists for this change AND has commits beyond the merge-base
 with main, treat it as a RESUME — do NOT run the collision guard's
 force-remove. Reconstruct state from the durable progress ledger
 (git-tracked `tasks.md` checkboxes + `bd show --json` from repo root),
-then skip directly to the appropriate phase. The collision guard + worktree
+then skip directly to the appropriate stage. The collision guard + worktree
 add below run ONLY when the worktree does not exist OR has no progress.
 ```bash
 # Detect existing worktree for this change
@@ -81,16 +81,16 @@ if git -C "$ROOT" worktree list --porcelain | grep -q "^worktree $ROOT/.worktree
   # Worktree exists. Has it progressed beyond base?
   BASE="$(git -C "$ROOT/.worktrees/<name>" merge-base HEAD main 2>/dev/null || echo "")"
   if [ -n "$BASE" ] && [ "$(git -C "$ROOT/.worktrees/<name>" rev-list --count "$BASE"..HEAD)" -gt 0 ]; then
-    # RESUME branch: reconstruct state, then jump to the right phase
+    # RESUME branch: reconstruct state, then jump to the right stage
     WT="$ROOT/.worktrees/<name>"
     echo "RESUME: existing worktree at $WT with progress."
     # Reconstruct durable state (read-only — no destructive ops)
     # - tasks.md checkboxes (the hash-normalized progress ledger)
     # - bd show --json (ALWAYS from repo root, never from worktree)
     (cd "$ROOT" && bd show <id> --json)
-    # Jump to the right phase: first unchecked task wins
-    # (If blessed spec/plan not yet committed, jump to PHASE 1; else PHASE 3.)
-    # See PHASE 1 / PHASE 2 / PHASE 3 below.
+    # Jump to the right stage: first unchecked task wins
+    # (If blessed spec/plan not yet committed, jump to STAGE 1; else STAGE 3.)
+    # See STAGE 1 / STAGE 2 / STAGE 3 below.
   else
     # Exists but empty / no progress — fall through to collision guard
     git -C "$ROOT" worktree remove --force "$ROOT/.worktrees/<name>" 2>/dev/null
@@ -110,7 +110,7 @@ Link bd if provided (ALWAYS from repo root, never from worktree):
 (cd "$ROOT" && bd update <id> --claim)
 ```
 
-### PHASE 1: SPEC (inside worktree)
+### STAGE 1: SPEC (inside worktree)
 
 Create artifacts using openspec CLI with `cwd: "$WT"`:
 ```bash
@@ -128,7 +128,7 @@ cd "$WT" && openspec validate <name> --type change --json
 ```
 Gate the blessing on delta-structure errors only (e.g. "No delta
 sections found"). Completeness warnings (missing tasks, TBD scenarios)
-are non-blocking at this phase — tasks are authored in PHASE 2.
+are non-blocking at this stage — tasks are authored in STAGE 2.
 If delta-structure errors are found, fix the spec format before
 blessing. Do not proceed to blessing with unparseable deltas.
 
@@ -145,7 +145,7 @@ blessing. Do not proceed to blessing with unparseable deltas.
   ```
 - [INTERACTIVE] "Spec blessed. Continue to planning?"
 
-### PHASE 2: PLAN (inside worktree)
+### STAGE 2: PLAN (inside worktree)
 
 **Load the `openspec-task-authoring` skill** and apply its no-placeholders
 discipline and self-review (spec coverage, placeholder scan, NEW-symbol
@@ -155,10 +155,10 @@ subsystems were collapsed into one phase, this is a SPEC-LEVEL defect —
 do not patch tasks.md around it. Escape hatch:
 
 1. Delete the draft `tasks.md`.
-2. Return to PHASE 1.
+2. Return to STAGE 1.
 3. Revise `design.md` (and `specs/` if needed) to fix the phase decomposition.
 4. Obtain a fresh spec-bless.
-5. Restart PHASE 2 with a regenerated `tasks.md`.
+5. Restart STAGE 2 with a regenerated `tasks.md`.
 
 Create tasks.md using `openspec instructions tasks --change <name> --json`.
 Each task MUST have: files, steps, **executable tests** (name/arrange/act/assert),
@@ -188,12 +188,12 @@ identically to every task in every phase.
   ```
 - [INTERACTIVE] "Plan blessed. Continue to implementation?"
 
-### PHASE 3: IMPLEMENTATION (subagent-driven, autonomous loop)
+### STAGE 3: IMPLEMENTATION (subagent-driven, autonomous loop)
 
 **Load `subagent-driven-development` skill** — orchestrate ONE task per worker,
 review each result, then advance.
 
-**TASK LOOP — PHASE-AWARE.** The loop adapts to the presence of
+**TASK LOOP — DELIVERY-PHASE-AWARE.** The loop adapts to the presence of
 `## Phase N` headings in `tasks.md`:
 
 - **No `## Phase N` headings → single-phase.** Run the flat per-task
@@ -264,7 +264,7 @@ g. **Index-not-hold** (compaction safety). The conductor's context is
       with specific technical terms. Never search the unscoped KB.
 
    The conductor does NOT maintain an agent-written checkpoint file.
-   On resume (mid-PHASE-3 automatic compaction or session restart),
+   On resume (mid-STAGE-3 automatic compaction or session restart),
    reconstruct from `tasks.md` checkboxes + scoped KB recovery and
    resume at the next unchecked task.
 
@@ -294,14 +294,14 @@ i. Resolve legitimate minor issues before advancing — they are
 - The loop continues autonomously until all tasks (across all phase-groups)
   are done
 - [INTERACTIVE] pause when ALL tasks complete: "Implementation done. Review?"
-- [AUTOPILOT] proceed directly to PHASE 4
+- [AUTOPILOT] proceed directly to STAGE 4
 
-### PHASE 4: CLOSE
+### STAGE 4: CLOSE
 
 1. `openspec status --change <name> --json` (verify all tasks done)
 
 2. **QUALITY GATES** (mandatory, all must pass before review):
-   Run from `$WT`. Any failure → loop back to PHASE 3.
+   Run from `$WT`. Any failure → loop back to STAGE 3.
 
    **Source of truth**: the authoritative gate registry is the
    `## QUALITY GATES` block in `AGENTS.md` (repo root). Run every gate
@@ -362,7 +362,7 @@ i. Resolve legitimate minor issues before advancing — they are
       git -C "$WT" diff $(git -C "$WT" merge-base HEAD main)...HEAD
       ```
       NOTE: canonical spec merge (`openspec/specs/`) happens at
-      archive time (PHASE 4 step 7), not here. The reviewer sees delta
+      archive time (STAGE 4 step 7), not here. The reviewer sees delta
       specs from `openspec/changes/<name>/specs/` — that is
       sufficient for cross-task drift detection. If `openspec sync`
       becomes available in a future CLI version, stage it here for
@@ -377,7 +377,7 @@ i. Resolve legitimate minor issues before advancing — they are
       - Verdict: APPROVE | APPROVE-WITH-FINDINGS | REJECT
    c. Write `.review.json` (verdict + reviewer + impl_hash)
    d. REJECT / important / legitimate-minor findings → loop back to
-      PHASE 3 → re-review. Only absurd minors are discarded.
+      STAGE 3 → re-review. Only absurd minors are discarded.
    e. [INTERACTIVE] "Holistic review passed. Ready for merge review."
 
 4. Commit everything in the worktree:
@@ -387,11 +387,11 @@ i. Resolve legitimate minor issues before advancing — they are
    ```
 
 5. **SPEC VALIDATION** (safety net — catches delta spec drift from
-   subagent edits during PHASE 3):
+   subagent edits during STAGE 3):
    ```bash
    openspec validate <name> --type change --json  # cwd: "$WT"
    ```
-   If validation fails on delta-structure errors → loop back to PHASE 3.
+   If validation fails on delta-structure errors → loop back to STAGE 3.
    Do not merge unparseable delta specs. (If the change intentionally
    modifies no specs, ensure `skip_specs: true` is set in
    `.openspec.yaml` — validate will pass cleanly.)

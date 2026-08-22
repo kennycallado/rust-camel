@@ -50,7 +50,7 @@ These skills are REPLACED by OpenSpec. Do NOT load them:
 
 ## Skills available contextually (load only when explicitly relevant)
 
-- `openspec-task-authoring` — loaded by `conductor-light` during PHASE 2
+- `openspec-task-authoring` — loaded by `conductor-light` during STAGE 2
   (task authoring) before the plan-bless. This is the sanctioned
   in-tree replacement for `writing-plans`' task-authoring discipline
   (no placeholders, executable test specs, concrete acceptance, scope-

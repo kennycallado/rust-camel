@@ -21,7 +21,7 @@
   tasks.md together signal a single-phase change.
 
   Each phase is a design-time decision recorded BEFORE spec-bless.
-  Phases are a PHASE 3 implementation-ordering construct, not a
+  Phases are a STAGE 3 implementation-ordering construct, not a
   blessing construct: tasks.md is written and plan-blessed ONCE over
   the complete phase set, then implemented phase-group by phase-group.
 -->
