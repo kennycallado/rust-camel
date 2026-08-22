@@ -73,7 +73,7 @@ re-entry mechanism.
 - **THEN** STAGE 0 reconstructs state from `tasks.md` checkboxes and
   `bd show --json` instead of running the collision guard's force-remove.
 
-#### Scenario: mid-PHASE-3 compaction recovery
+#### Scenario: mid-STAGE-3 compaction recovery
 
 - **GIVEN** an automatic compaction fires during STAGE 3 with tasks
   remaining
@@ -200,10 +200,7 @@ STAGE 4: CLOSE). The word "Phase" SHALL be reserved exclusively for
 OpenSpec delivery phases (`design.md` "Phases" section, `tasks.md`
 `## Phase N` headings, phase-groups, inter-phase reviews). Conductor
 documentation, agent definitions, and skills SHALL NOT use "PHASE" to
-refer to conductor workflow stages. Exception: the legacy scenario header
-"mid-PHASE-3 compaction recovery" in this spec's Session Re-entrancy
-requirement SHALL remain until the openspec CLI supports scenario renames
-(a MODIFIED block cannot drop or rename an existing scenario header).
+refer to conductor workflow stages.
 
 #### Scenario: unambiguous stage reference
 
