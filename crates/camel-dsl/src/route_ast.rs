@@ -1381,6 +1381,9 @@ pub struct RouteDslTemplateParameter {
     /// Optional human-readable description.
     #[serde(default)]
     pub description: Option<String>,
+    /// The declared data type of this parameter.
+    #[serde(default, rename = "type")]
+    pub parameter_type: camel_api::template::TemplateParamType,
 }
 
 /// A request to instantiate a template with concrete parameter values.

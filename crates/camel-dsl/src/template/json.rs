@@ -76,6 +76,7 @@ fn json_param_to_spec(yp: RouteDslTemplateParameter) -> TemplateParameterSpec {
         name: yp.name,
         default_value: yp.default_value,
         description: yp.description,
+        parameter_type: yp.parameter_type,
     }
 }
 
@@ -120,6 +121,10 @@ mod tests {
         assert_eq!(
             specs[0].parameters[0].default_value.as_deref(),
             Some("/api")
+        );
+        assert_eq!(
+            specs[0].parameters[0].parameter_type,
+            camel_api::template::TemplateParamType::String
         );
         assert_eq!(specs[0].routes[0]["id"], "my-route");
         assert_eq!(specs[0].routes[0]["from"], "rest:{{path}}");

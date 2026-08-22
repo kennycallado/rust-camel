@@ -805,4 +805,107 @@ mod tests {
         assert!(debug.contains("r1"));
         assert!(debug.contains("Swap"));
     }
+
+    fn reload_action_id(a: &ReloadAction) -> String {
+        match a {
+            ReloadAction::Add { route_id }
+            | ReloadAction::Swap { route_id }
+            | ReloadAction::Restart { route_id }
+            | ReloadAction::Skip { route_id }
+            | ReloadAction::Remove { route_id } => route_id.clone(),
+        }
+    }
+
+    // --- template-compile-parity Task 4.3: per-instance reload semantics ---
+    // Hash constants stand in for compute_instance_source_hash outputs
+    // (camel-core cannot depend on camel-dsl); these tests pin the equality
+    // semantics of compute_reload_actions, not the hash formula.
+
+    #[tokio::test]
+    async fn param_change_triggers_swap_not_skip() {
+        let mut controller = make_controller();
+        let def = RouteDefinition::new("http://x", vec![])
+            .with_route_id("proxy-a")
+            .with_source_hash(100);
+        controller.add_route(def).await.unwrap();
+
+        let new_defs = vec![
+            RouteDefinition::new("http://x", vec![])
+                .with_route_id("proxy-a")
+                .with_source_hash(200),
+        ];
+        let actions = compute_reload_actions(&new_defs, &controller);
+        assert_eq!(
+            actions,
+            vec![ReloadAction::Swap {
+                route_id: "proxy-a".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_sibling_skips() {
+        let mut controller = make_controller();
+        for (id, hash) in [("proxy-a", 100u64), ("proxy-b", 200u64)] {
+            let def = RouteDefinition::new("http://x", vec![])
+                .with_route_id(id)
+                .with_source_hash(hash);
+            controller.add_route(def).await.unwrap();
+        }
+
+        let new_defs = vec![
+            RouteDefinition::new("http://x", vec![])
+                .with_route_id("proxy-a")
+                .with_source_hash(100),
+            RouteDefinition::new("http://x", vec![])
+                .with_route_id("proxy-b")
+                .with_source_hash(200),
+        ];
+        let mut actions = compute_reload_actions(&new_defs, &controller);
+        actions.sort_by_key(reload_action_id);
+        assert_eq!(
+            actions,
+            vec![
+                ReloadAction::Skip {
+                    route_id: "proxy-a".into()
+                },
+                ReloadAction::Skip {
+                    route_id: "proxy-b".into()
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_param_change_other_sibling_skips() {
+        let mut controller = make_controller();
+        for (id, hash) in [("proxy-a", 100u64), ("proxy-b", 200u64)] {
+            let def = RouteDefinition::new("http://x", vec![])
+                .with_route_id(id)
+                .with_source_hash(hash);
+            controller.add_route(def).await.unwrap();
+        }
+
+        let new_defs = vec![
+            RouteDefinition::new("http://x", vec![])
+                .with_route_id("proxy-a")
+                .with_source_hash(100),
+            RouteDefinition::new("http://x", vec![])
+                .with_route_id("proxy-b")
+                .with_source_hash(300),
+        ];
+        let mut actions = compute_reload_actions(&new_defs, &controller);
+        actions.sort_by_key(reload_action_id);
+        assert_eq!(
+            actions,
+            vec![
+                ReloadAction::Skip {
+                    route_id: "proxy-a".into()
+                },
+                ReloadAction::Swap {
+                    route_id: "proxy-b".into()
+                },
+            ]
+        );
+    }
 }

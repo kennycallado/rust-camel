@@ -78,6 +78,7 @@ fn yaml_param_to_spec(yp: RouteDslTemplateParameter) -> TemplateParameterSpec {
         name: yp.name,
         default_value: yp.default_value,
         description: yp.description,
+        parameter_type: yp.parameter_type,
     }
 }
 
@@ -239,5 +240,69 @@ templates:
 "#;
         let err = parse_yaml_templates(yaml).unwrap_err();
         assert!(err.to_string().contains("routes array is empty"));
+    }
+
+    #[test]
+    fn template_param_type_parses_from_yaml() {
+        let yaml = r#"
+routes: []
+templates:
+  - id: delay-tpl
+    parameters:
+      - name: delay
+        type: number
+    routes:
+      - id: delay-route
+        from: timer:tick
+"#;
+        let specs = parse_yaml_templates(yaml).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].parameters.len(), 1);
+        assert_eq!(specs[0].parameters[0].name, "delay");
+        assert_eq!(
+            specs[0].parameters[0].parameter_type,
+            camel_api::template::TemplateParamType::Number
+        );
+    }
+
+    #[test]
+    fn template_param_type_defaults_to_string() {
+        let yaml = r#"
+routes: []
+templates:
+  - id: delay-tpl
+    parameters:
+      - name: delay
+    routes:
+      - id: delay-route
+        from: timer:tick
+"#;
+        let specs = parse_yaml_templates(yaml).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].parameters.len(), 1);
+        assert_eq!(
+            specs[0].parameters[0].parameter_type,
+            camel_api::template::TemplateParamType::String
+        );
+    }
+
+    #[test]
+    fn template_param_type_unknown_value_fails_closed() {
+        // `int` is not a valid TemplateParamType variant — serde rejects
+        // the whole document at template parse time (fail-closed).
+        let yaml = r#"
+routes: []
+templates:
+  - id: bad-tpl
+    parameters:
+      - name: delay
+        type: int
+    routes: []
+"#;
+        let err = parse_yaml_templates(yaml).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("int"),
+            "error should name the unknown variant: {err}"
+        );
     }
 }

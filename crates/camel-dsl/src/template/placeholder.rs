@@ -1,12 +1,79 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
-use camel_api::template::TemplateError;
+use camel_api::template::{TemplateError, TemplateParamType};
 use regex::Regex;
 
 fn placeholder_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.\-]*)\s*\}\}").unwrap()) // allow-unwrap
+}
+
+/// Lowercase display name for a parameter type, matching the serde
+/// `rename_all = "lowercase"` form used in template authoring.
+pub(crate) fn param_type_name(ty: TemplateParamType) -> &'static str {
+    match ty {
+        TemplateParamType::String => "string",
+        TemplateParamType::Number => "number",
+        TemplateParamType::Boolean => "boolean",
+        _ => "unknown",
+    }
+}
+
+/// Parse a `number` parameter value into a JSON number.
+///
+/// Integral values prefer `u64`/`i64` so whole-node substitution renders
+/// clean JSON integers; non-finite values are rejected (matching
+/// `serde_json::Number::from_f64`).
+pub(crate) fn parse_typed_number(
+    name: &str,
+    raw: &str,
+) -> Result<serde_json::Number, TemplateError> {
+    let invalid =
+        || TemplateError::InvalidParameter(name.to_string(), "number".to_string(), raw.to_string());
+    // Exact integer parse first — avoids f64 saturation at the u64 boundary.
+    if let Ok(u) = raw.parse::<u64>() {
+        return Ok(serde_json::Number::from(u));
+    }
+    if let Ok(i) = raw.parse::<i64>() {
+        return Ok(serde_json::Number::from(i));
+    }
+    let v: f64 = raw.parse().map_err(|_| invalid())?;
+    if !v.is_finite() {
+        return Err(invalid());
+    }
+    serde_json::Number::from_f64(v).ok_or_else(invalid)
+}
+
+/// Parse a `boolean` parameter value. Only the exact strings `true` and
+/// `false` are coercible.
+pub(crate) fn parse_typed_bool(name: &str, raw: &str) -> Result<bool, TemplateError> {
+    match raw {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(TemplateError::InvalidParameter(
+            name.to_string(),
+            "boolean".to_string(),
+            other.to_string(),
+        )),
+    }
+}
+
+/// If `s` is EXACTLY one placeholder `{{name}}` (whole node, no surrounding
+/// text), return the parameter name. Mirrors the placeholder grammar
+/// (`[A-Za-z_][A-Za-z0-9_.\-]*` with surrounding whitespace inside braces).
+pub(crate) fn whole_node_placeholder(s: &str) -> Option<&str> {
+    let inner = s.strip_prefix("{{")?.strip_suffix("}}")?;
+    let name = inner.trim();
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        return None;
+    }
+    Some(name)
 }
 
 /// Replace `{{name}}` placeholders in `input` with values from `values`.
@@ -250,5 +317,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, TemplateError::UnknownParameter(ref n) if n == "typo"));
+    }
+
+    // --- Typed helpers (moved from materializer.rs) ---
+
+    #[test]
+    fn param_type_name_display() {
+        assert_eq!(param_type_name(TemplateParamType::String), "string");
+        assert_eq!(param_type_name(TemplateParamType::Number), "number");
+        assert_eq!(param_type_name(TemplateParamType::Boolean), "boolean");
+    }
+
+    #[test]
+    fn parse_typed_number_integers_and_float() {
+        assert_eq!(
+            parse_typed_number("n", "5000").unwrap(),
+            serde_json::Number::from(5000u64)
+        );
+        assert_eq!(
+            parse_typed_number("n", "-3").unwrap(),
+            serde_json::Number::from(-3i64)
+        );
+        assert_eq!(
+            parse_typed_number("n", "2.5").unwrap(),
+            serde_json::Number::from_f64(2.5).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_typed_number_rejects_non_finite_and_invalid() {
+        assert!(parse_typed_number("n", "abc").is_err());
+        assert!(parse_typed_number("n", "inf").is_err());
+        assert!(parse_typed_number("n", "NaN").is_err());
+    }
+
+    #[test]
+    fn parse_typed_bool_accepts_true_false() {
+        assert!(parse_typed_bool("f", "true").unwrap());
+        assert!(!parse_typed_bool("f", "false").unwrap());
+        assert!(parse_typed_bool("f", "yes").is_err());
+        assert!(parse_typed_bool("f", "True").is_err());
+    }
+
+    #[test]
+    fn whole_node_placeholder_detects_exact() {
+        assert_eq!(whole_node_placeholder("{{delay}}"), Some("delay"));
+        assert_eq!(whole_node_placeholder("{{  delay  }}"), Some("delay"));
+        assert_eq!(
+            whole_node_placeholder("{{config.host}}"),
+            Some("config.host")
+        );
+        assert_eq!(whole_node_placeholder("{{my-param}}"), Some("my-param"));
+        assert_eq!(whole_node_placeholder("x{{p}}"), None);
+        assert_eq!(whole_node_placeholder("{{p}} "), None);
+        assert_eq!(whole_node_placeholder("{{1bad}}"), None);
+        assert_eq!(whole_node_placeholder("{{}}"), None);
+        assert_eq!(whole_node_placeholder("{{ bad! }}"), None);
     }
 }

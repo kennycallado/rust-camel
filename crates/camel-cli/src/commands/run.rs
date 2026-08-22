@@ -526,8 +526,39 @@ pub async fn run(
             }
         }
         Err(e) => {
-            // log-policy: system-broken
-            tracing::error!("Failed to discover routes: {}", e);
+            match &e {
+                camel_dsl::DiscoveryError::MaterializationFailures { failures } => {
+                    // log-policy: system-broken
+                    tracing::error!("Failed to discover routes: template materialization failed:");
+                    for failure in failures {
+                        match &failure.route_id {
+                            Some(route_id) => {
+                                // log-policy: system-broken
+                                tracing::error!(
+                                    "  {} (template '{}', route '{}'): {}",
+                                    failure.path,
+                                    failure.template_ref,
+                                    route_id,
+                                    failure.error
+                                );
+                            }
+                            None => {
+                                // log-policy: system-broken
+                                tracing::error!(
+                                    "  {} (template '{}'): {}",
+                                    failure.path,
+                                    failure.template_ref,
+                                    failure.error
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // log-policy: system-broken
+                    tracing::error!("Failed to discover routes: {}", e);
+                }
+            }
             std::process::exit(1);
         }
     }

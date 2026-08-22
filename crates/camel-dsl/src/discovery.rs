@@ -11,10 +11,10 @@ use std::io;
 use std::path::Path;
 
 use crate::env_interpolation::interpolate_env;
-use crate::json::{parse_json, parse_json_with_threshold_and_security};
+use crate::json::parse_json_with_threshold_and_security;
 use crate::model::SecurityCompileContext;
 use crate::template::materializer::materialize_and_compile;
-use crate::yaml::{parse_yaml, parse_yaml_with_threshold_and_security};
+use crate::yaml::parse_yaml_with_threshold_and_security;
 
 /// Errors that can occur during route discovery.
 #[derive(Debug, thiserror::Error)]
@@ -54,10 +54,6 @@ pub enum DiscoveryError {
     )]
     JsonRequiresExplicitPattern { path: String, pattern: String },
 
-    /// Template reference points to a template id that was never defined.
-    #[error("Template '{template_id}' not found in {path}")]
-    TemplateNotFound { path: String, template_id: String },
-
     /// A route id was produced more than once across regular + materialized routes.
     #[error("Duplicate route id '{route_id}' in {path}")]
     DuplicateRouteId { path: String, route_id: String },
@@ -70,9 +66,47 @@ pub enum DiscoveryError {
         source: TemplateError,
     },
 
+    /// One or more template materialization failures, aggregated across files.
+    /// Rendered as a multi-line report listing every failure with its path.
+    #[error(
+        "template materialization failed:\n{}",
+        failures
+            .iter()
+            .map(|f| format!("  {f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )]
+    MaterializationFailures {
+        failures: Vec<MaterializationFailure>,
+    },
+
     /// Duplicate template id across files, or invalid template spec in file.
     #[error("Template error in {path}: {error}")]
     TemplateSpec { path: String, error: String },
+}
+
+/// A single template materialization failure, carrying the file path it
+/// originated from — Pass 2 iterates specs collected across multiple files.
+#[derive(Debug, Clone)]
+pub struct MaterializationFailure {
+    /// Path of the file declaring the templated route spec.
+    pub path: String,
+    /// The referenced template id.
+    pub template_ref: String,
+    /// Optional explicit route id of the failing instance.
+    pub route_id: Option<String>,
+    /// The classified template error.
+    pub error: TemplateError,
+}
+
+impl std::fmt::Display for MaterializationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} (template '{}'): {}",
+            self.path, self.template_ref, self.error
+        )
+    }
 }
 
 /// Maximum size for individual route files (YAML/JSON) during discovery.
@@ -170,6 +204,19 @@ pub fn discover_routes_with_threshold_and_security(
     discover_routes_inner(patterns, Some(stream_cache_threshold), Some(security_ctx))
 }
 
+/// Parse a `TemplateError::InvalidParameter` Display string
+/// (`parameter '<name>' declared type <ty> but value '<value>' is not
+/// coercible`) back into its fields, preserving the error class through
+/// Config-string propagation. Returns `None` for any other shape.
+fn parse_invalid_parameter_message(msg: &str) -> Option<(String, String, String)> {
+    let rest = msg.strip_prefix("parameter '")?;
+    let (name, rest) = rest.split_once("' ")?;
+    let rest = rest.strip_prefix("declared type ")?;
+    let (ty, rest) = rest.split_once(" but value '")?;
+    let value = rest.strip_suffix("' is not coercible")?;
+    Some((name.to_string(), ty.to_string(), value.to_string()))
+}
+
 fn discover_routes_inner(
     patterns: &[String],
     stream_cache_threshold: Option<usize>,
@@ -237,21 +284,16 @@ fn discover_routes_inner(
             match ext.as_deref() {
                 Some("yaml") | Some("yml") => {
                     // Parse regular routes
-                    let file_routes = match stream_cache_threshold {
-                        Some(threshold) => parse_yaml_with_threshold_and_security(
-                            &content,
-                            threshold,
-                            security_ctx.clone().unwrap_or_default(),
-                        )
-                        .map_err(|e| DiscoveryError::Yaml {
-                            path: path_str.clone(),
-                            error: e.to_string(),
-                        })?,
-                        None => parse_yaml(&content).map_err(|e| DiscoveryError::Yaml {
-                            path: path_str.clone(),
-                            error: e.to_string(),
-                        })?,
-                    };
+                    let file_routes = parse_yaml_with_threshold_and_security(
+                        &content,
+                        stream_cache_threshold
+                            .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
+                        security_ctx.clone().unwrap_or_default(),
+                    )
+                    .map_err(|e| DiscoveryError::Yaml {
+                        path: path_str.clone(),
+                        error: e.to_string(),
+                    })?;
                     for route in file_routes {
                         routes.push(route.with_source_hash(source_hash));
                     }
@@ -286,21 +328,16 @@ fn discover_routes_inner(
                 }
                 Some("json") => {
                     // Parse regular routes
-                    let file_routes = match stream_cache_threshold {
-                        Some(threshold) => parse_json_with_threshold_and_security(
-                            &content,
-                            threshold,
-                            security_ctx.clone().unwrap_or_default(),
-                        )
-                        .map_err(|e| DiscoveryError::Json {
-                            path: path_str.clone(),
-                            error: e.to_string(),
-                        })?,
-                        None => parse_json(&content).map_err(|e| DiscoveryError::Json {
-                            path: path_str.clone(),
-                            error: e.to_string(),
-                        })?,
-                    };
+                    let file_routes = parse_json_with_threshold_and_security(
+                        &content,
+                        stream_cache_threshold
+                            .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
+                        security_ctx.clone().unwrap_or_default(),
+                    )
+                    .map_err(|e| DiscoveryError::Json {
+                        path: path_str.clone(),
+                        error: e.to_string(),
+                    })?;
                     for route in file_routes {
                         routes.push(route.with_source_hash(source_hash));
                     }
@@ -343,32 +380,77 @@ fn discover_routes_inner(
         }
     }
 
-    // Pass 2: materialize all templated specs using the collected templates
+    // Pass 2: materialize all templated specs using the collected templates.
+    // Failures are aggregated — every spec is attempted so the caller sees
+    // the full set of broken templates, not just the first one.
     let mut seen_route_ids: HashSet<String> =
         routes.iter().map(|r| r.route_id().to_string()).collect();
+    let mut failures: Vec<MaterializationFailure> = Vec::new();
 
     for (path_str, spec) in &templated_specs {
-        let template = templates.get(&spec.route_template_ref).ok_or_else(|| {
-            DiscoveryError::TemplateNotFound {
+        let Some(template) = templates.get(&spec.route_template_ref) else {
+            failures.push(MaterializationFailure {
                 path: path_str.clone(),
-                template_id: spec.route_template_ref.clone(),
-            }
-        })?;
+                template_ref: spec.route_template_ref.clone(),
+                route_id: spec.route_id.clone(),
+                error: TemplateError::NotFound(spec.route_template_ref.clone()),
+            });
+            continue;
+        };
 
-        let compiled = materialize_and_compile(template, spec).map_err(|e| {
-            let source = match &e {
-                camel_api::CamelError::Config(msg) => TemplateError::InvalidBody(msg.clone()),
-                other => TemplateError::InvalidBody(other.to_string()),
-            };
-            DiscoveryError::MaterializationFailed {
-                path: path_str.clone(),
-                source,
+        let compiled = match materialize_and_compile(
+            template,
+            spec,
+            stream_cache_threshold
+                .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
+            security_ctx.clone().unwrap_or_default(),
+        ) {
+            Ok(compiled) => compiled,
+            Err(e) => {
+                let source = match &e {
+                    camel_api::CamelError::RouteError(msg)
+                        if msg.starts_with("route requires an authenticator") =>
+                    {
+                        TemplateError::SecurityRequired {
+                            template_id: spec.route_template_ref.clone(),
+                            detail: msg.clone(),
+                        }
+                    }
+                    // Typed-parameter coercion failures surface as Config
+                    // strings in the InvalidParameter display format —
+                    // parse the fields back so the class survives to the
+                    // aggregated surface instead of flattening to
+                    // InvalidBody. Unparseable text falls through below.
+                    camel_api::CamelError::Config(msg)
+                        if msg.starts_with("parameter '") && msg.contains("declared type") =>
+                    {
+                        match parse_invalid_parameter_message(msg) {
+                            Some((name, ty, value)) => {
+                                TemplateError::InvalidParameter(name, ty, value)
+                            }
+                            None => TemplateError::InvalidBody(msg.clone()),
+                        }
+                    }
+                    camel_api::CamelError::Config(msg) => TemplateError::InvalidBody(msg.clone()),
+                    other => TemplateError::InvalidBody(other.to_string()),
+                };
+                failures.push(MaterializationFailure {
+                    path: path_str.clone(),
+                    template_ref: spec.route_template_ref.clone(),
+                    route_id: spec.route_id.clone(),
+                    error: source,
+                });
+                continue;
             }
-        })?;
+        };
 
         for result in compiled {
             let rid = result.route_def.route_id().to_string();
             if !seen_route_ids.insert(rid.clone()) {
+                // Precedence decision: a duplicate id aborts immediately and
+                // preempts any materialization failures collected so far —
+                // identity conflicts poison the seen-id set, so continuing
+                // would attribute later failures to the wrong instance.
                 return Err(DiscoveryError::DuplicateRouteId {
                     path: path_str.clone(),
                     route_id: rid,
@@ -382,6 +464,10 @@ fn discover_routes_inner(
         }
     }
 
+    if !failures.is_empty() {
+        return Err(DiscoveryError::MaterializationFailures { failures });
+    }
+
     Ok(routes)
 }
 
@@ -391,6 +477,42 @@ mod tests {
     use std::env;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// Pin the display-format round-trip: `parse_invalid_parameter_message`
+    /// must recover the three fields from a REAL `TemplateError::InvalidParameter`
+    /// Display string. If the thiserror format string in camel-api changes,
+    /// this fails loudly instead of silently downgrading the error class to
+    /// InvalidBody at the aggregation surface.
+    #[test]
+    fn invalid_parameter_display_round_trip_pins_parser() {
+        let err = TemplateError::InvalidParameter(
+            "delay".to_string(),
+            "number".to_string(),
+            "abc".to_string(),
+        );
+        let parsed = parse_invalid_parameter_message(&err.to_string());
+        assert_eq!(
+            parsed,
+            Some(("delay".to_string(), "number".to_string(), "abc".to_string()))
+        );
+        // Values containing delimiter substrings must still round-trip
+        // (split_once binds first, strip_suffix binds last).
+        let tricky = TemplateError::InvalidParameter(
+            "p".to_string(),
+            "string".to_string(),
+            "' is not coercible' is not coercible".to_string(),
+        );
+        assert_eq!(
+            parse_invalid_parameter_message(&tricky.to_string()),
+            Some((
+                "p".to_string(),
+                "string".to_string(),
+                "' is not coercible' is not coercible".to_string()
+            ))
+        );
+        // Non-matching input yields None (falls back to InvalidBody).
+        assert_eq!(parse_invalid_parameter_message("parameter 'x' oops"), None);
+    }
 
     // ── pattern_targets_json ──────────────────────────────────────────
 
@@ -926,13 +1048,18 @@ templated_routes:
             Err(e) => e,
         };
         match &err {
-            DiscoveryError::TemplateNotFound {
-                path: _,
-                template_id,
-            } => {
-                assert_eq!(template_id, "nonexistent-template");
+            DiscoveryError::MaterializationFailures { failures } => {
+                assert_eq!(failures.len(), 1, "expected exactly one failure: {err:?}");
+                let failure = &failures[0];
+                assert_eq!(failure.template_ref, "nonexistent-template");
+                match &failure.error {
+                    TemplateError::NotFound(ref_) => {
+                        assert_eq!(ref_, "nonexistent-template");
+                    }
+                    other => panic!("expected NotFound, got: {other:?}"),
+                }
             }
-            other => panic!("expected TemplateNotFound error, got: {other:?}"),
+            other => panic!("expected MaterializationFailures, got: {other:?}"),
         }
     }
 
@@ -1013,20 +1140,25 @@ templated_routes:
     }
 
     #[test]
-    fn materialized_source_hash_reflects_template_body_not_instance_file() {
+    fn materialized_source_hash_is_instance_sensitive() {
         let dir = tempfile::tempdir().unwrap();
 
-        let template_body = serde_json::json!([{
+        let template_body = vec![serde_json::json!({
             "id": "same-route",
             "from": "direct:x",
             "steps": []
-        }]);
-        let template_hash = {
-            let s = serde_json::to_string(&template_body).unwrap();
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            s.hash(&mut h);
-            h.finish()
-        };
+        })];
+        let empty_params = std::collections::BTreeMap::new();
+        let hash_a = crate::template::materializer::compute_instance_source_hash(
+            &template_body,
+            &empty_params,
+            "inst-a",
+        );
+        let hash_b = crate::template::materializer::compute_instance_source_hash(
+            &template_body,
+            &empty_params,
+            "inst-b",
+        );
 
         let file_path = dir.path().join("two-instances.yaml");
         fs::write(
@@ -1054,13 +1186,26 @@ templated_routes:
         let routes = discover_routes(&[pattern]).unwrap();
         assert_eq!(routes.len(), 2);
 
+        let mut hashes_by_id = std::collections::HashMap::new();
         for route in &routes {
             let hash = route.source_hash().expect("should have source_hash");
-            assert_eq!(
-                hash, template_hash,
-                "materialized route source_hash must match template body hash, not instance file hash"
-            );
+            assert_ne!(hash, 0, "source_hash should be non-zero");
+            hashes_by_id.insert(route.route_id().to_string(), hash);
         }
+        assert_eq!(
+            hashes_by_id.get("inst-a"),
+            Some(&hash_a),
+            "inst-a hash must reflect body + params + its effective id"
+        );
+        assert_eq!(
+            hashes_by_id.get("inst-b"),
+            Some(&hash_b),
+            "inst-b hash must reflect body + params + its effective id"
+        );
+        assert_ne!(
+            hash_a, hash_b,
+            "instances differing only in override id must hash distinctly"
+        );
     }
 
     #[test]
@@ -1170,5 +1315,114 @@ templated_routes:
         assert_eq!(routes.len(), 2);
         assert_eq!(routes[0].route_id(), "step1-granada");
         assert_eq!(routes[1].route_id(), "step2-granada");
+    }
+
+    // ── threshold-less discovery threads security context ────────────
+
+    struct TestAuthenticator;
+
+    #[async_trait::async_trait]
+    impl camel_auth::TokenAuthenticator for TestAuthenticator {
+        async fn authenticate_bearer(
+            &self,
+            _token: &str,
+        ) -> Result<camel_api::security_policy::Principal, camel_api::CamelError> {
+            Ok(camel_api::security_policy::Principal {
+                subject: "test-user".into(),
+                issuer: "test-issuer".into(),
+                audience: vec![],
+                scopes: vec!["read:api".into()],
+                roles: vec!["admin".into()],
+                claims: serde_json::Value::Null,
+            })
+        }
+    }
+
+    #[test]
+    fn threshold_less_discovery_threads_security_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("route.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes:
+  - id: sec-route
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+    steps:
+      - to: log:info
+"#,
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let auth = std::sync::Arc::new(TestAuthenticator)
+            as std::sync::Arc<dyn camel_auth::TokenAuthenticator>;
+        let ctx = SecurityCompileContext::new(Some(auth), None);
+
+        // (None-threshold, Some-ctx) — only reachable through the private fn.
+        let routes =
+            discover_routes_inner(std::slice::from_ref(&pattern), None, Some(ctx)).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].security_authenticator().is_some());
+
+        // Fail-closed pin: public path (None ctx) must reject the secured route.
+        let err = match discover_routes_inner(&[pattern], None, None) {
+            Ok(_) => panic!("expected error for secured route without authenticator"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("route requires an authenticator"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn security_required_error_classified() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("secured-tpl.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes: []
+templates:
+  - id: secured-tpl
+    parameters: []
+    routes:
+      - id: "secured-route"
+        from: "direct:start"
+        security_policy:
+          roles: ["admin"]
+        steps:
+          - to: "log:info"
+templated_routes:
+  - route_template_ref: secured-tpl
+    parameters: {}
+"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+
+        // Fail-closed: default security ctx (no authenticator) must classify
+        // the failure as SecurityRequired, not InvalidBody.
+        let err = match discover_routes_inner(&[pattern], None, None) {
+            Ok(_) => panic!("expected secured templated route to fail closed"),
+            Err(e) => e,
+        };
+        match &err {
+            DiscoveryError::MaterializationFailures { failures } => {
+                assert_eq!(failures.len(), 1, "expected exactly one failure: {err:?}");
+                match &failures[0].error {
+                    TemplateError::SecurityRequired { template_id, .. } => {
+                        assert_eq!(template_id, "secured-tpl");
+                    }
+                    other => panic!("expected SecurityRequired, got: {other:?}"),
+                }
+            }
+            other => panic!("expected MaterializationFailures, got: {other:?}"),
+        }
     }
 }

@@ -5241,4 +5241,12 @@ mod tests {
             other => panic!("expected Cache, got {other:?}"),
         }
     }
+
+    #[test]
+    fn stream_cache_config_helper_resolves_threshold() {
+        // Pins the shared seam both the direct and template materialization
+        // paths consume the stream-cache threshold through.
+        assert_eq!(stream_cache_config(None, 7).threshold, 7);
+        assert_eq!(stream_cache_config(Some(3), 7).threshold, 3);
+    }
 }

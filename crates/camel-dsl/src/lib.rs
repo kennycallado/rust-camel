@@ -28,7 +28,7 @@ pub use compile::{
 };
 pub use contract::{DeclarativeStepKind, is_rust_only_kind, mandatory_declarative_step_kinds};
 pub use discovery::{
-    DiscoveryError, discover_routes, discover_routes_with_threshold,
+    DiscoveryError, MaterializationFailure, discover_routes, discover_routes_with_threshold,
     discover_routes_with_threshold_and_security,
 };
 pub use json::{

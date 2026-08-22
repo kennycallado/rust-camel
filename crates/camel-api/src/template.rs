@@ -2,6 +2,18 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
 
+/// The declared data type of a template parameter.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "lowercase")]
+pub enum TemplateParamType {
+    #[default]
+    String,
+    Number,
+    Boolean,
+}
+
 /// A single parameter that a route template accepts.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TemplateParameterSpec {
@@ -13,6 +25,9 @@ pub struct TemplateParameterSpec {
     /// Optional human-readable description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The declared data type of this parameter.
+    #[serde(default, rename = "type")]
+    pub parameter_type: TemplateParamType,
 }
 
 /// A reusable route template with declared parameters and a route body.
@@ -61,11 +76,30 @@ pub enum TemplateError {
     #[error("unknown parameter: {0}")]
     UnknownParameter(String),
 
+    /// A typed parameter was supplied a value that does not coerce to its
+    /// declared type (`number`/`boolean`). Carries the parameter name, the
+    /// declared type name, and the offending value.
+    #[error("parameter '{0}' declared type {1} but value '{2}' is not coercible")]
+    InvalidParameter(String, String, String),
+
     #[error("template already registered: {0}")]
     AlreadyRegistered(String),
 
     #[error("invalid template body: {0}")]
     InvalidBody(String),
+
+    /// The materialized route declares a security policy but no authenticator
+    /// was configured — fail-closed classification distinct from body errors.
+    ///
+    /// NOTE: the message field is named `detail`, not `source`, because thiserror
+    /// auto-detects any field literally named `source` as the error source and
+    /// requires it to implement `std::error::Error` (a `String` does not).
+    #[error("security policy requires an authenticator (template {template_id}): {detail}")]
+    SecurityRequired { template_id: String, detail: String },
+
+    /// The referenced template id was never defined.
+    #[error("template not found: {0}")]
+    NotFound(String),
 }
 
 #[cfg(test)]
@@ -86,6 +120,7 @@ mod tests {
             name: "host".into(),
             default_value: Some("localhost".into()),
             description: Some("The target host".into()),
+            parameter_type: TemplateParamType::String,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains("host"));
@@ -98,6 +133,7 @@ mod tests {
             name: "port".into(),
             default_value: None,
             description: None,
+            parameter_type: TemplateParamType::String,
         };
         let json = serde_json::to_string(&spec).unwrap();
         let round: TemplateParameterSpec = serde_json::from_str(&json).unwrap();
@@ -114,6 +150,7 @@ mod tests {
                 name: "path".into(),
                 default_value: None,
                 description: None,
+                parameter_type: TemplateParamType::String,
             }],
             routes: vec![serde_json::json!({"from": {"uri": "rest:{{path}}"}})],
         };
@@ -165,6 +202,10 @@ mod tests {
             (
                 TemplateError::InvalidBody("d".into()),
                 "invalid template body: d",
+            ),
+            (
+                TemplateError::InvalidParameter("delay".into(), "number".into(), "abc".into()),
+                "parameter 'delay' declared type number but value 'abc' is not coercible",
             ),
         ];
         for (err, expected) in cases {

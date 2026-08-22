@@ -1326,6 +1326,8 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::StreamCacheBody);
 
     // Template types
+    // TemplateParamType — camel-api type referenced by RouteDslTemplateParameter
+    ts_export!(ts_config, camel_api::template::TemplateParamType);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslTemplateParameter);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslTemplatedRoute);
 
