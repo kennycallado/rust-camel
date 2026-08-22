@@ -1248,6 +1248,7 @@ dependencies = [
  "tokio",
  "tower 0.5.3",
  "tracing",
+ "trybuild",
  "url",
  "wiremock",
  "zeroize",
@@ -1615,6 +1616,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -1771,6 +1773,7 @@ version = "0.32.0"
 dependencies = [
  "async-trait",
  "axum",
+ "axum-server",
  "base64 0.23.1",
  "camel-api",
  "camel-auth",
@@ -1781,10 +1784,13 @@ dependencies = [
  "jsonschema",
  "percent-encoding",
  "rmcp",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "toml 1.1.4+spec-1.1.0",
  "tower 0.5.3",
@@ -2428,6 +2434,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-api",
+ "camel-auth",
  "camel-component-api",
  "camel-language-api",
  "camel-language-simple",
@@ -2445,6 +2452,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
  "zip",
 ]
 
@@ -2569,6 +2577,7 @@ dependencies = [
  "flate2",
  "futures",
  "http",
+ "jsonwebtoken",
  "k8s-openapi",
  "kube",
  "percent-encoding",
@@ -2584,6 +2593,7 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "tokio-util",
  "toml 1.1.4+spec-1.1.0",
  "tonic",
@@ -9097,6 +9107,7 @@ name = "rest-crud"
 version = "0.32.0"
 dependencies = [
  "camel-api",
+ "camel-auth",
  "camel-builder",
  "camel-component-direct",
  "camel-component-http",

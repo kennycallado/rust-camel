@@ -121,6 +121,26 @@ available providers. An unknown provider name also fails the load. Like
 `credential_sources`, `provider` is valid only with the `roles` or `scopes`
 form.
 
+### REST block policy
+
+A `rest:` block accepts the same `security_policy` object, declared once
+on the block. Lowering copies it onto every route the block produces, so
+every operation enforces the same policy before its handler runs. The
+object takes the same five forms and passes the same load-time validation
+as the route-level key, including `credential_sources`, `provider`, and
+`audiences`.
+
+```yaml
+{{#include ../../../examples/rest-crud/routes/secured.yaml:rest-security}}
+```
+
+The source lives at
+[`examples/rest-crud/routes/secured.yaml`](https://github.com/kennycallado/rust-camel/tree/main/examples/rest-crud).
+Run the runnable variant with `cargo run -p rest-crud --bin secured`: a
+request without a credential gets `401` before any handler runs, and a
+token whose principal holds the required role is granted. A block without
+`security_policy` lowers to public routes.
+
 ## List-form variant
 
 The hot-reload subsystem consumes a flatter form. When a file holds only routes

@@ -821,7 +821,6 @@ Choose exactly one form: `roles`, `scopes`, `ref`, `wasm`, or `permission`.
 | `roles` | list | no | Required roles |
 | `scopes` | list | no | Required scopes |
 | `all_required` | bool | no | All roles/scopes required |
-| `trust_upstream_principal` | bool | no | Accept a pre-populated principal with no token |
 | `ref` | string | no | Reference to a policy |
 | `wasm` | string | no | WASM policy source |
 | `config` | map | no | Policy-specific config |
@@ -840,6 +839,7 @@ The `rest` key defines REST API blocks.
 | `host` | string | no | `0.0.0.0` | Listen host |
 | `port` | integer | no | `8080` | Listen port |
 | `path` | string | no | `""` | Base path |
+| `security_policy` | object | no | — | Block authorization copied to every lowered route |
 | `operations` | list | no | `[]` | HTTP operations |
 
 REST operation:

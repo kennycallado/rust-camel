@@ -275,6 +275,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: path.to_string(),
+            security_policy: None,
             operations,
         }
     }
@@ -552,6 +553,7 @@ mod tests {
             host: host.to_string(),
             port,
             path: path.to_string(),
+            security_policy: None,
             operations,
         }
     }

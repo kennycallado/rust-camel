@@ -87,6 +87,8 @@ rest: YAML ──parse_yaml──▶ http: routes (with to: direct:...)
 |--------------------------------------|-----------------------------------------------|
 | `examples/rest-crud/Cargo.toml`      | workspace deps (camel-dsl, components, …)    |
 | `examples/rest-crud/src/main.rs`     | entry point, REST YAML, route handlers        |
+| `examples/rest-crud/src/bin/secured.rs` | secured variant entry point (block `security_policy`) |
+| `examples/rest-crud/routes/secured.yaml` | secured variant REST YAML (the docs-anchored source) |
 | `examples/rest-crud/src/storage.rs`  | DashMap-backed `UserStore`                    |
 | `examples/rest-crud/static/`         | static mount directory                        |
 
@@ -101,3 +103,37 @@ rest: YAML ──parse_yaml──▶ http: routes (with to: direct:...)
   after unmarshaling. Failures return `ValidationError → 400` with
   details of which schema constraints were violated.
 - **Other pipeline errors → 500 Internal Server Error.**
+
+## Secured variant
+
+`cargo run -p rest-crud --bin secured` runs the same API from
+[`routes/secured.yaml`](routes/secured.yaml) with a block-level
+`security_policy`:
+
+```yaml
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api/users
+    security_policy:
+      roles: ["user"]
+      provider: "native-demo"
+    # operations: identical to the public variant
+```
+
+Lowering copies the block policy onto every lowered route, so all four
+endpoints enforce the same roles policy at the request boundary — before
+any `direct:` handler runs. The binary registers a
+`StaticTokenAuthenticator` under the `native-demo` provider name with one
+demo token:
+
+```bash
+# anonymous -> 401
+curl -i http://localhost:9090/api/users
+# valid demo token -> the API answers
+curl -H 'Authorization: Bearer demo-rest-token-4a5b6c7d' http://localhost:9090/api/users
+```
+
+The demo token is static for the example only. Production services
+replace it with an introspection endpoint or a JWT validator (see
+`docs/src/services/auth.md`).

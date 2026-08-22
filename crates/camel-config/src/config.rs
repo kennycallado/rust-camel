@@ -77,6 +77,14 @@ pub struct CamelConfig {
     #[serde(default)]
     pub security: SecurityConfig,
 
+    /// Per-bind public-exposure acknowledgements (ADR-0061).
+    ///
+    /// Keyed by bind address string (e.g. `"0.0.0.0:8080"`). A bind whose
+    /// routes compile to `Public` access refuses to start on non-loopback
+    /// addresses unless the operator acknowledges the exposure here.
+    #[serde(default)]
+    pub binds: HashMap<String, BindExposureConfig>,
+
     #[serde(default)]
     pub datasources: HashMap<String, DatasourceConfig>,
 
@@ -148,6 +156,7 @@ impl CamelConfigBuilder {
             beans: defaults.beans,
             languages: defaults.languages,
             security: defaults.security,
+            binds: defaults.binds,
             datasources: defaults.datasources,
             _extra: defaults._extra,
         }
@@ -174,6 +183,7 @@ impl Default for CamelConfig {
             beans: HashMap::new(),
             languages: crate::LanguagesConfig::default(),
             security: SecurityConfig::default(),
+            binds: HashMap::new(),
             datasources: HashMap::new(),
             _extra: HashMap::new(),
         }
@@ -721,6 +731,18 @@ pub struct BeanConfig {
 // ---------------------------------------------------------------------------
 // Security configuration (Keycloak etc.)
 // ---------------------------------------------------------------------------
+
+/// Per-bind public-exposure acknowledgement (ADR-0061). One entry under
+/// `[binds."<bind-address>"]` in `Camel.toml`.
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BindExposureConfig {
+    /// Operator acknowledges that Public (unauthenticated) routes will be
+    /// exposed on this non-loopback bind. Emits a permanent warning at
+    /// startup; never silences it.
+    #[serde(default)]
+    pub allow_public_exposure: bool,
+}
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -4554,6 +4576,25 @@ mod languages_config_integration_tests {
         assert_eq!(cfg.languages.rhai.limits.max_operations, Some(500_000));
         assert_eq!(cfg.languages.rhai.limits.execution_timeout_ms, Some(5000));
         assert_eq!(cfg.languages.rhai.limits.max_string_size, None);
+    }
+
+    #[test]
+    fn config_parses_binds_section() {
+        let cfg = parse(
+            r#"
+            [binds."0.0.0.0:8080"]
+            allow_public_exposure = true
+            "#,
+        );
+        assert_eq!(
+            cfg.binds
+                .get("0.0.0.0:8080")
+                .map(|b| b.allow_public_exposure),
+            Some(true)
+        );
+        // Absent section → empty map → gate unacknowledged everywhere.
+        let bare = parse("");
+        assert!(bare.binds.is_empty());
     }
 
     #[test]

@@ -41,10 +41,10 @@ policy evaluation.
   policy decisions, and future `AuthorizationDecision` variants. Query-token values are redacted
   before logging.
 - A route may declare `credential_sources` (ADR-0059). The consumer resolves them in declared
-  order through the shared camel-auth extraction. Roles/scope policies that use them require an
-  explicit `trust_upstream_principal`; without the flag the consumer rejects the token as
-  unauthenticated. URI logging redacts every declared query-parameter source name, plus the
-  `access_token` and `token` defaults.
+  order through the shared camel-auth extraction. The component authenticates the token itself and
+  passes the resulting principal to the policy; the removed `trust_upstream_principal` flag no
+  longer exists and exchange-property principal evidence never authorizes. URI logging redacts
+  every declared query-parameter source name, plus the `access_token` and `token` defaults.
 - `WsEndpointConfig::fmt` redacts TLS certificate and key paths. ADR-0051 does not classify paths
   as credential bytes, so this crate uses a stricter diagnostic policy.
 - ADR-0052 does not apply. `camel-ws` is an inbound data-plane component, not a diagnostic

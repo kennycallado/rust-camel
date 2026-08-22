@@ -1,26 +1,25 @@
-//! Route-level authentication for the MCP server role (ADR-0060 Rule 8).
+//! Route-level authentication for the MCP server role — kernel migration
+//! (ADR-0061, Task 2.6).
 //!
 //! The carry: the rmcp adapter copies inbound HTTP request headers into the
 //! dispatch payload, and the consumer bridge sets them as Exchange input
-//! headers before the pipeline runs. Enforcement is route-level — the
-//! route's `SecurityPolicy` evaluates against the Exchange exactly as
-//! camel-http routes do. A denial flows through the existing bridge error
-//! path: tools get an `isError` result and resources get the error body; the
-//! route body never sees a denied Exchange.
-//!
-//! Requests are driven with raw JSON-RPC over HTTP (a minimal
-//! `Connection: close` client over `tokio::net::TcpStream`) so the
-//! `Authorization` header is controlled precisely — the same seam
-//! `crates/components/camel-component-mcp/tests/server_protocol_test.rs` uses.
+//! headers before the pipeline runs. Authentication now happens at the
+//! adapter's request seam: the compiled `RouteSecurityPlan` (registered
+//! with the per-bind dispatch-security book by the consumer) drives
+//! extraction from the normalized headers and `kernel_authenticate` mints
+//! the typed carrier that rides the Exchange into the route pipeline.
+//! A denial is answered in the MCP idiom BEFORE dispatch — tools get an
+//! `isError` result carrying the denial and resources get the error body;
+//! the route body never sees a denied Exchange.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use camel_api::AuthPrincipal;
 use camel_api::Body;
-use camel_api::security_policy::{CredentialSource, Principal, SecurityPolicyConfig};
-use camel_auth::native_auth::{NativeCredential, NativeCredentialSecret, NativeCredentialStore};
-use camel_auth::{RolePolicy, StaticTokenAuthenticator, TokenAuthenticator};
+use camel_api::security_policy::{CredentialSource, SecurityPolicyConfig};
+use camel_auth::{RolePolicy, TokenAuthenticator, read_carrier};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::consumer::ExchangeEnvelope;
 use camel_component_api::{
@@ -30,14 +29,16 @@ use camel_component_api::{
 use camel_component_mcp::McpServerRegistry;
 use camel_component_mcp::component::McpComponent;
 use camel_component_mcp::config::{McpGlobalConfig, McpServerConfig};
-use camel_test::CamelTestContext;
+use camel_test::{CamelTestContext, SecurityConfigFixture};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Sentinel token — test fixture, not a real secret.
-const SENTINEL_MCP_TOKEN: &str = "mcp-test-token-1"; // allow-secret
-/// The role the test principal holds.
-const MCP_CLIENT_ROLE: &str = "mcp-client";
+/// Fixture provider name (`SecurityConfigFixture::single_static_provider`).
+const PROVIDER: &str = "idp-mcp";
+/// The fixture's token: `test-token-<name>` (test fixture, not a secret).
+const FIXTURE_TOKEN: &str = "test-token-idp-mcp"; // allow-secret
+/// The role the fixture principal holds.
+const FIXTURE_ROLE: &str = "test-role";
 
 /// One parsed raw HTTP JSON-RPC reply.
 struct RawJsonRpc {
@@ -173,42 +174,23 @@ fn resources_read(uri: &str) -> serde_json::Value {
     })
 }
 
-/// Build a route-level `RolePolicy` requiring `MCP_CLIENT_ROLE` over a native
-/// store seeded with `SENTINEL_MCP_TOKEN`.
-fn role_policy_config() -> (SecurityPolicyConfig, Arc<dyn TokenAuthenticator>) {
-    let principal = Principal {
-        subject: "mcp-user".into(),
-        issuer: "native".into(),
-        audience: vec![],
-        scopes: vec![],
-        roles: vec![MCP_CLIENT_ROLE.to_string()],
-        claims: serde_json::json!({}),
-    };
-    let store = NativeCredentialStore::try_new(vec![NativeCredential {
-        secret: NativeCredentialSecret::Plaintext {
-            value: SENTINEL_MCP_TOKEN.to_string().into(),
-        },
-        principal,
-    }])
-    .unwrap();
-    let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
-    let sources = vec![CredentialSource::AuthorizationHeader];
-    let policy = RolePolicy::new(
-        vec![MCP_CLIENT_ROLE.to_string()],
-        true,
-        false,
-        Arc::clone(&authenticator),
-        sources.clone(),
-    );
-    let config = SecurityPolicyConfig::new(policy).with_credential_sources(sources);
-    (config, authenticator)
+/// Build a full `CamelTestContext` running one MCP server route secured by a
+/// roles policy over the fixture provider (`test-token-idp-mcp` /
+/// `test-role`), returning the harness and the bound listener address. The
+/// route body is a `mock:result` producer so the test asserts whether an
+/// Exchange reached it. The sole registered provider resolves into the
+/// compiled plan (ADR-0061 Rule 5) and rides the SecurityContext provider
+/// snapshot into the bind's dispatch-security book (Task 2.6).
+async fn build_secure_mcp_route(bind: &str, from_uri: &str) -> (CamelTestContext, SocketAddr) {
+    build_secure_mcp_route_with_sources(bind, from_uri, vec![CredentialSource::AuthorizationHeader])
+        .await
 }
 
-/// Build a full `CamelTestContext` running one MCP server route protected by a
-/// route-level `RolePolicy`, returning the harness and the bound listener
-/// address. The route body is a `mock:result` producer so the test asserts
-/// whether an Exchange reached it.
-async fn build_secure_mcp_route(bind: &str, from_uri: &str) -> (CamelTestContext, SocketAddr) {
+async fn build_secure_mcp_route_with_sources(
+    bind: &str,
+    from_uri: &str,
+    sources: Vec<CredentialSource>,
+) -> (CamelTestContext, SocketAddr) {
     let cfg = server_cfg(bind);
     let component = component_with_server("crm", &cfg);
 
@@ -218,11 +200,21 @@ async fn build_secure_mcp_route(bind: &str, from_uri: &str) -> (CamelTestContext
         .build()
         .await;
 
-    let (policy, authenticator) = role_policy_config();
+    let fixture = SecurityConfigFixture::single_static_provider(PROVIDER);
+    let provider_registry = Arc::new(fixture.providers());
+    let authenticator: Arc<dyn TokenAuthenticator> = Arc::clone(
+        &provider_registry
+            .resolve(PROVIDER)
+            .expect("fixture provider") // allow-unwrap
+            .authenticator,
+    );
+    let policy = RolePolicy::new(vec![FIXTURE_ROLE.to_string()], true);
+    let config = SecurityPolicyConfig::new(policy).with_credential_sources(sources);
     let route = RouteBuilder::from(from_uri)
         .route_id(format!("mcp-auth-{from_uri}"))
-        .security_policy(policy)
+        .security_policy(config)
         .security_authenticator(authenticator)
+        .provider_registry(provider_registry)
         .to("mock:result")
         .build()
         .unwrap();
@@ -233,7 +225,7 @@ async fn build_secure_mcp_route(bind: &str, from_uri: &str) -> (CamelTestContext
     let addr = McpServerRegistry::global()
         .get_or_spawn(bind, &cfg)
         .await
-        .expect("shared listener")
+        .expect("shared listener") // allow-unwrap
         .local_addr;
 
     (h, addr)
@@ -306,7 +298,7 @@ async fn request_headers_reach_exchange() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tool_call_denied_without_credentials() {
+async fn mcp_kernel_denies_without_credentials() {
     let bind = "127.0.0.52:0";
     let schema = encoded(&id_schema().to_string());
     let (h, addr) =
@@ -324,8 +316,17 @@ async fn tool_call_denied_without_credentials() {
         "a call without credentials must be an isError result, got {}",
         response.value
     );
+    assert!(
+        response.value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Unauthenticated"),
+        "the isError result must carry the kernel denial, got {}",
+        response.value
+    );
 
-    // The route body never saw the denied Exchange.
+    // The route body never saw the denied Exchange (the adapter denies
+    // before dispatch — the pipeline is never entered).
     h.mock()
         .get_endpoint("result")
         .expect("mock endpoint must exist")
@@ -336,7 +337,7 @@ async fn tool_call_denied_without_credentials() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tool_call_granted_with_valid_token() {
+async fn mcp_kernel_grants_authorization_header() {
     let bind = "127.0.0.53:0";
     let schema = encoded(&id_schema().to_string());
     let (h, addr) =
@@ -348,7 +349,7 @@ async fn tool_call_granted_with_valid_token() {
         &[
             ("Mcp-Method", "tools/call"),
             ("Mcp-Name", "lookup"),
-            ("Authorization", &format!("Bearer {SENTINEL_MCP_TOKEN}")),
+            ("Authorization", &format!("Bearer {FIXTURE_TOKEN}")),
         ],
     )
     .await;
@@ -359,13 +360,25 @@ async fn tool_call_granted_with_valid_token() {
         response.value
     );
 
-    // The route body ran and the principal reached the Exchange.
+    // The route body ran and the typed carrier reached the Exchange.
     let endpoint = h
         .mock()
         .get_endpoint("result")
         .expect("mock endpoint must exist");
     endpoint.assert_exchange_count(1).await;
     let received = endpoint.get_received_exchanges().await;
+    let carrier = read_carrier(&received[0])
+        .expect("the granted Exchange must carry the kernel-minted typed carrier");
+    assert_eq!(
+        carrier.provider_id(),
+        PROVIDER,
+        "the carrier must be minted by the route's provider"
+    );
+    assert_eq!(
+        carrier.principal().subject,
+        format!("test-user-{PROVIDER}"),
+        "the carrier must hold the fixture principal"
+    );
     let roles: Vec<String> = serde_json::from_str(
         received[0]
             .property("camel.auth.roles")
@@ -376,10 +389,132 @@ async fn tool_call_granted_with_valid_token() {
     .unwrap();
     assert_eq!(
         roles,
-        vec![MCP_CLIENT_ROLE],
+        vec![FIXTURE_ROLE],
         "the granted Exchange must carry the principal's roles"
     );
 
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_cookie_credential_authenticates() {
+    let bind = "127.0.0.55:0";
+    let schema = encoded(&id_schema().to_string());
+    let (h, addr) = build_secure_mcp_route_with_sources(
+        bind,
+        &format!("mcp:crm/tool/lookup?schema={schema}"),
+        vec![CredentialSource::Cookie {
+            name: "session".to_string(),
+        }],
+    )
+    .await;
+
+    let response = raw_json_rpc_post(
+        addr,
+        &tools_call("lookup", serde_json::json!({ "id": "42" })),
+        &[
+            ("Mcp-Method", "tools/call"),
+            ("Mcp-Name", "lookup"),
+            ("Cookie", &format!("session={FIXTURE_TOKEN}")),
+        ],
+    )
+    .await;
+    assert_eq!(
+        response.value["result"]["isError"],
+        serde_json::json!(false)
+    );
+    h.mock()
+        .get_endpoint("result")
+        .expect("mock endpoint must exist")
+        .assert_exchange_count(1)
+        .await;
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_named_header_credential_authenticates() {
+    let bind = "127.0.0.56:0";
+    let schema = encoded(&id_schema().to_string());
+    let (h, addr) = build_secure_mcp_route_with_sources(
+        bind,
+        &format!("mcp:crm/tool/lookup?schema={schema}"),
+        vec![CredentialSource::Header {
+            name: "x-api-key".to_string(),
+        }],
+    )
+    .await;
+
+    let response = raw_json_rpc_post(
+        addr,
+        &tools_call("lookup", serde_json::json!({ "id": "42" })),
+        &[
+            ("Mcp-Method", "tools/call"),
+            ("Mcp-Name", "lookup"),
+            ("x-api-key", FIXTURE_TOKEN),
+        ],
+    )
+    .await;
+    assert_eq!(
+        response.value["result"]["isError"],
+        serde_json::json!(false)
+    );
+    h.mock()
+        .get_endpoint("result")
+        .expect("mock endpoint must exist")
+        .assert_exchange_count(1)
+        .await;
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_queryparam_rejected_at_compile() {
+    let bind = "127.0.0.57:0";
+    let cfg = server_cfg(bind);
+    let component = component_with_server("crm", &cfg);
+    let h = CamelTestContext::builder()
+        .with_component(component)
+        .with_mock()
+        .build()
+        .await;
+
+    let fixture = SecurityConfigFixture::single_static_provider(PROVIDER);
+    let provider_registry = Arc::new(fixture.providers());
+    let authenticator: Arc<dyn TokenAuthenticator> = Arc::clone(
+        &provider_registry
+            .resolve(PROVIDER)
+            .expect("fixture provider")
+            .authenticator,
+    );
+    let policy = RolePolicy::new(vec![FIXTURE_ROLE.to_string()], true);
+    let config = SecurityPolicyConfig::new(policy).with_credential_sources(vec![
+        CredentialSource::QueryParam {
+            param: "token".to_string(),
+        },
+    ]);
+    let route = RouteBuilder::from("mcp:crm/tool/lookup?schema=%7B%22type%22%3A%22object%22%7D")
+        .route_id("mcp-queryparam-rejected")
+        .security_policy(config)
+        .security_authenticator(authenticator)
+        .provider_registry(provider_registry)
+        .to("mock:result")
+        .build()
+        .expect("route definition should build before staging");
+
+    let error = h
+        .add_route(route)
+        .await
+        .expect_err("MCP QueryParam source must be rejected during staging");
+    let message = error.to_string();
+    assert!(
+        message.contains("QueryParam"),
+        "error must name source: {message}"
+    );
+    assert!(
+        message.contains("on mcp transport"),
+        "error must name transport: {message}"
+    );
     h.stop().await;
 }
 

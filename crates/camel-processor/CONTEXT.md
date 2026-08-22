@@ -37,7 +37,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `routing_slip` | RoutingSlip | dynamic routing | `src/lib.rs:29` |
 | `sampling` | Sampling | deterministic 1-of-N (period>0 enforced at build) | `src/lib.rs:30` |
 | `script_mutator` | ScriptMutator | script-backed mutation | `src/lib.rs:31` |
-| `security_policy_layer` | SecurityPolicyLayer | pre-pipeline authorization | `src/lib.rs:32`; ADR-0010 |
+| `security_policy_layer` | SecurityPolicyLayer | pre-pipeline authorization, carrier-only strict mode (ADR-0061: evaluates the kernel-minted typed carrier; raw Bearer without a carrier is denied) | `src/lib.rs:32`; ADR-0010, ADR-0061 |
 | `set_body` | SetBody | transformation | `src/lib.rs:33` |
 | `set_header` | SetHeader | transformation | `src/lib.rs:34` |
 | `set_property` | SetProperty | transformation | `src/lib.rs:35` |

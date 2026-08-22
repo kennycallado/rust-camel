@@ -4,9 +4,17 @@
 //! MCP server (Consumer role) and the tools and resources it exposes. It is
 //! structurally analogous to the `rest:` block — a plain AST that a later
 //! lowering pass turns into `mcp:<server>/tool/<name>` and
-//! `mcp:<server>/resource/<name>` consumer routes. The DSL carries no session
-//! or protocol-version keys to lower, so any such key in the block is a parse
-//! error via `deny_unknown_fields`.
+//! `mcp:<server>/resource/<name>` consumer routes. The block owns its
+//! listener configuration (spec: MCP listener ownership): `bind` always,
+//! and `tls`/`max_tools`/`max_resources` when declared, flow to the runtime
+//! as `mcp.declared.*` endpoint parameters on every lowered route, and ARE
+//! the runtime values for the shared listener. Caps and TLS are
+//! presence-based: the lowering emits a `mcp.declared.*` parameter ONLY
+//! when the block declares the value, so "declared" stays distinguishable
+//! from "defaulted" at the consumer merge (a defaulted cap must never
+//! conflict with — or overwrite — a TOML-declared one). The DSL carries no
+//! session or protocol-version keys to lower, so any such key in the block
+//! is a parse error via `deny_unknown_fields`.
 
 use camel_api::CamelError;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -14,6 +22,47 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 
 use crate::route_ast::{RouteDslRoute, RouteDslSecurityPolicy};
+
+fn non_empty_path<'de, D>(deserializer: D, field: &'static str) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path = String::deserialize(deserializer)?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(serde::de::Error::custom(format!(
+            "{field} must not be empty"
+        )));
+    }
+    Ok(path.to_owned())
+}
+
+fn deserialize_cert_path<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    non_empty_path(deserializer, "cert_path")
+}
+
+fn deserialize_key_path<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    non_empty_path(deserializer, "key_path")
+}
+
+/// TLS certificate and private-key paths declared by an MCP DSL server.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RouteDslMcpTlsConfig {
+    /// PEM-encoded server certificate chain.
+    #[serde(deserialize_with = "deserialize_cert_path")]
+    pub cert_path: String,
+    /// PEM-encoded server private key.
+    #[serde(deserialize_with = "deserialize_key_path")]
+    pub key_path: String,
+}
 
 /// A top-level MCP block (`mcp:` in YAML/JSON).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -33,12 +82,18 @@ pub struct RouteDslMcp {
 /// Server-role (Consumer) declaration for one named MCP server inside a
 /// `mcp:` block.
 ///
-/// The `name` is the sole field consumed by lowering for the runtime (it MUST
-/// match a `mcp.servers.<name>` key or consumer start fails). The
-/// `bind`/`tls`/`max_tools`/`max_resources` fields document declared intent
-/// only (declaration parity with `McpServerConfig`; runtime server config
-/// comes solely from TOML `mcp.servers.<name>`). The `security_policy` field
-/// is the exception: it is a real `RouteDslSecurityPolicy` (parse-time
+/// The block owns its listener configuration the way `rest:` does (spec: MCP
+/// listener ownership): `bind` always, and `tls`/`max_tools`/`max_resources`
+/// when declared, are lowered onto every route of the block as
+/// `mcp.declared.*` endpoint parameters and ARE the runtime values for
+/// listener construction/lookup. TOML `mcp.servers.<name>` must still carry
+/// the entry (the `name` MUST match a `mcp.servers.<name>` key or consumer
+/// start fails) and remains the source for keys with no DSL counterpart
+/// (`allowed_hosts`, `security_policy`); a key declared by BOTH sides with
+/// different values fails consumer start with an error naming both sources —
+/// no DSL field is silently ignored, and silence is never a disagreement
+/// (a cap declared by one side only is that side's value).
+/// The `security_policy` field is a real `RouteDslSecurityPolicy` (parse-time
 /// validated, mirroring the route field) and it DOES flow to the lowered
 /// consumer routes — enforcement is route-level (camel-api `SecurityPolicy`),
 /// the same mechanism camel-http routes use.
@@ -50,21 +105,25 @@ pub struct RouteDslMcpServer {
     pub name: String,
     /// Streamable-HTTP listen address (IP:port literal).
     pub bind: String,
-    /// Optional TLS configuration (shape is policy-defined; opaque here).
+    /// Optional TLS configuration.
     #[serde(default)]
-    pub tls: Option<serde_json::Value>,
+    pub tls: Option<RouteDslMcpTlsConfig>,
     /// Route-level authorization policy, propagated to every lowered route
     /// (tools AND resources). Evaluated per request against the carried
     /// HTTP headers; absent means no route-level policy (the TOML
     /// `security_policy` presence gate still applies fail-closed).
     #[serde(default)]
     pub security_policy: Option<RouteDslSecurityPolicy>,
-    /// Maximum number of tools this server may register.
-    #[serde(default = "default_mcp_cap")]
-    pub max_tools: usize,
-    /// Maximum number of resources this server may register.
-    #[serde(default = "default_mcp_cap")]
-    pub max_resources: usize,
+    /// Maximum number of tools this server may register (`None` when the
+    /// block declares no cap — the runtime default then applies, and the
+    /// lowering emits no `max_tools` parameter so a TOML-declared cap is
+    /// kept).
+    #[serde(default)]
+    pub max_tools: Option<usize>,
+    /// Maximum number of resources this server may register (`None` when
+    /// the block declares no cap).
+    #[serde(default)]
+    pub max_resources: Option<usize>,
 }
 
 /// A single MCP tool declaration, carrying its input JSON Schema.
@@ -87,10 +146,6 @@ pub struct RouteDslMcpResource {
     pub name: String,
     /// The MCP resource URI (operator config, e.g. `crm://customers`).
     pub uri: String,
-}
-
-fn default_mcp_cap() -> usize {
-    128
 }
 
 /// Validate an MCP server/tool/resource name against the closed charset
@@ -118,6 +173,34 @@ fn validate_mcp_name(kind: &str, name: &str) -> Result<(), CamelError> {
     }
 }
 
+/// Build the `mcp.declared.*` endpoint-parameter suffix carrying the block's
+/// listener declaration (`bind`/`tls`/caps) — the DSL lowering channel the
+/// consumer start merges into the TOML server config (spec: MCP listener
+/// ownership). `bind` is always emitted; caps and TLS are presence-based (a
+/// parameter is emitted ONLY when the block declares the value, so
+/// "declared" stays distinguishable from "defaulted" at the consumer merge).
+/// Values are percent-encoded like every other lowered parameter.
+fn declared_params(server: &RouteDslMcpServer) -> String {
+    let mut out = format!(
+        "&mcp.declared.bind={}",
+        utf8_percent_encode(&server.bind, NON_ALPHANUMERIC),
+    );
+    if let Some(max_tools) = server.max_tools {
+        out.push_str(&format!("&mcp.declared.max_tools={max_tools}"));
+    }
+    if let Some(max_resources) = server.max_resources {
+        out.push_str(&format!("&mcp.declared.max_resources={max_resources}"));
+    }
+    if let Some(tls) = &server.tls {
+        out.push_str(&format!(
+            "&mcp.declared.tls.cert_path={}&mcp.declared.tls.key_path={}",
+            utf8_percent_encode(&tls.cert_path, NON_ALPHANUMERIC),
+            utf8_percent_encode(&tls.key_path, NON_ALPHANUMERIC),
+        ));
+    }
+    out
+}
+
 /// Lower ALL MCP blocks in a document into consumer route entries.
 ///
 /// Each tool becomes a `mcp:<server>/tool/<name>?schema=<URL-encoded schema>`
@@ -126,19 +209,22 @@ fn validate_mcp_name(kind: &str, name: &str) -> Result<(), CamelError> {
 /// route. The schema and resource URI travel on the URI's query params — the
 /// same structural choice `rest.rs` makes putting `httpMethod` in the `from`
 /// query — never as Exchange headers or body content (the schema is operator
-/// config, not wire content).
+/// config, not wire content). The block's listener declaration
+/// (`bind`/`tls`/caps) rides the same channel as `mcp.declared.*`
+/// parameters so consumer start can enforce DSL listener ownership.
 pub fn lower_all_mcp_to_routes(blocks: &[RouteDslMcp]) -> Result<Vec<RouteDslRoute>, CamelError> {
     let mut routes = Vec::new();
 
     for block in blocks {
         validate_mcp_name("server", &block.server.name)?;
         let security_policy = block.server.security_policy.clone();
+        let declared = declared_params(&block.server);
         for tool in &block.tools {
             validate_mcp_name("tool", &tool.name)?;
             let schema =
                 utf8_percent_encode(&tool.input_schema.to_string(), NON_ALPHANUMERIC).to_string();
             let from = format!(
-                "mcp:{}/tool/{}?schema={schema}",
+                "mcp:{}/tool/{}?schema={schema}{declared}",
                 block.server.name, tool.name
             );
             routes.push(consumer_route(
@@ -151,7 +237,7 @@ pub fn lower_all_mcp_to_routes(blocks: &[RouteDslMcp]) -> Result<Vec<RouteDslRou
             validate_mcp_name("resource", &resource.name)?;
             let uri = utf8_percent_encode(&resource.uri, NON_ALPHANUMERIC).to_string();
             let from = format!(
-                "mcp:{}/resource/{}?uri={uri}",
+                "mcp:{}/resource/{}?uri={uri}{declared}",
                 block.server.name, resource.name
             );
             routes.push(consumer_route(
@@ -284,7 +370,10 @@ mcp:
     }
 
     #[test]
-    fn defaults_caps_128() {
+    fn caps_default_to_none() {
+        // A block with no cap keys parses to `None` caps — "declared" must
+        // stay distinguishable from "defaulted" (the 128 default is applied
+        // by the runtime after the TOML/DSL merge, never fabricated here).
         let yaml = r#"
 mcp:
   - server:
@@ -293,10 +382,33 @@ mcp:
 "#;
         let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         let mcp = &parsed.mcp[0];
-        assert_eq!(mcp.server.max_tools, 128);
-        assert_eq!(mcp.server.max_resources, 128);
+        assert_eq!(mcp.server.max_tools, None);
+        assert_eq!(mcp.server.max_resources, None);
         assert!(mcp.tools.is_empty());
         assert!(mcp.resources.is_empty());
+    }
+
+    #[test]
+    fn dsl_tls_block_parses_typed() {
+        // A `tls:` DSL block parses to the typed shape (cert/key paths,
+        // trimmed non-empty at deserialize) — Task 2.3 review follow-up.
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: /etc/certs/crm.pem
+        key_path: /etc/certs/crm-key.pem
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let tls = parsed.mcp[0]
+            .server
+            .tls
+            .as_ref()
+            .expect("tls block must parse to Some");
+        assert_eq!(tls.cert_path, "/etc/certs/crm.pem");
+        assert_eq!(tls.key_path, "/etc/certs/crm-key.pem");
     }
 
     // ── Carried mandatory minors from 3.1 review (deny_unknown_fields pins) ──
@@ -351,8 +463,8 @@ mcp:
                 bind: "127.0.0.1:9100".to_string(),
                 tls: None,
                 security_policy: None,
-                max_tools: 128,
-                max_resources: 128,
+                max_tools: None,
+                max_resources: None,
             },
             tools: vec![],
             resources: vec![],
@@ -396,16 +508,83 @@ mcp:
             .find(|r| r.from.starts_with("mcp:crm/tool/lookup?schema="))
             .expect("tool consumer route must be present");
 
-        // The schema query param URL-decodes back to the declared schema.
+        // The schema query param URL-decodes back to the declared schema
+        // (the declared-params suffix behind the first `&` is not part of
+        // the schema value).
         let encoded = tool_route
             .from
             .strip_prefix("mcp:crm/tool/lookup?schema=")
+            .unwrap()
+            .split('&')
+            .next()
             .unwrap();
         let decoded = percent_encoding::percent_decode_str(encoded)
             .decode_utf8()
             .unwrap()
             .to_string();
         assert_eq!(decoded, schema.to_string());
+    }
+
+    #[test]
+    fn lowering_carries_declared_params() {
+        // The listener declaration rides the lowered from-URI as
+        // `mcp.declared.*` parameters (percent-encoded values) — the channel
+        // consumer start consumes for DSL listener ownership. Without this
+        // pin a lowering regression could silently drop the declaration and
+        // the block would fall back to TOML-only behavior.
+        let mut block = make_block();
+        block.server.bind = "127.0.0.1:9100".to_string();
+        block.server.tls = Some(RouteDslMcpTlsConfig {
+            cert_path: "/etc/certs/crm.pem".to_string(),
+            key_path: "/etc/certs/crm-key.pem".to_string(),
+        });
+        block.server.max_tools = Some(200);
+        block.server.max_resources = Some(64);
+        block.tools = vec![RouteDslMcpTool {
+            name: "lookup".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }];
+
+        let routes = lower_all_mcp_to_routes(&[block]).unwrap();
+        let from = &routes[0].from;
+        // Decode round-trip instead of pinning the exact escape set: every
+        // declared value must survive the URI encoding intact.
+        let declared_value = |name: &str| {
+            from.split('&')
+                .find(|pair| pair.starts_with(name))
+                .and_then(|pair| pair.split_once('='))
+                .map(|(_, value)| {
+                    percent_encoding::percent_decode_str(value)
+                        .decode_utf8()
+                        .unwrap()
+                        .to_string()
+                })
+        };
+        assert_eq!(
+            declared_value("mcp.declared.bind").as_deref(),
+            Some("127.0.0.1:9100"),
+            "declared bind must ride the from-URI, got: {from}"
+        );
+        assert_eq!(
+            declared_value("mcp.declared.max_tools").as_deref(),
+            Some("200"),
+            "declared max_tools must ride the from-URI, got: {from}"
+        );
+        assert_eq!(
+            declared_value("mcp.declared.max_resources").as_deref(),
+            Some("64"),
+            "declared max_resources must ride the from-URI, got: {from}"
+        );
+        assert_eq!(
+            declared_value("mcp.declared.tls.cert_path").as_deref(),
+            Some("/etc/certs/crm.pem"),
+            "declared tls cert path must ride the from-URI, got: {from}"
+        );
+        assert_eq!(
+            declared_value("mcp.declared.tls.key_path").as_deref(),
+            Some("/etc/certs/crm-key.pem"),
+            "declared tls key path must ride the from-URI, got: {from}"
+        );
     }
 
     #[test]
@@ -425,6 +604,9 @@ mcp:
         let encoded = resource_route
             .from
             .strip_prefix("mcp:crm/resource/customers?uri=")
+            .unwrap()
+            .split('&')
+            .next()
             .unwrap();
         // The resource URI must be percent-encoded (non-alphanumerics escaped),
         // then decode back to the declared operator-config URI.
@@ -531,13 +713,13 @@ mcp:
             roles: Some(vec!["mcp-client".to_string()]),
             scopes: None,
             all_required: None,
-            trust_upstream_principal: None,
             r#ref: None,
             wasm: None,
             config: None,
             permission: None,
             credential_sources: None,
             provider: None,
+            audiences: None,
         };
         let mut block = make_block();
         block.server.security_policy = Some(policy);

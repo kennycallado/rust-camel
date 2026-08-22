@@ -256,6 +256,25 @@ pub async fn run(
     )
     .await?;
 
+    // ADR-0061: install per-bind public-exposure acknowledgements from
+    // `[binds."<addr>"]` before any route starts staging.
+    let bind_acks: std::collections::HashMap<String, bool> = camel_config
+        .binds
+        .iter()
+        .map(|(k, v)| (k.clone(), v.allow_public_exposure))
+        .collect();
+    // MCP binds are invisible to the route-level gate (`mcp:` from-URIs
+    // carry no authority; the listener binds via `McpServerConfig.bind`),
+    // so the same ack map threads into the MCP registry's per-bind gate
+    // (Task 2.6) — refuse-without-ack on non-loopback Public, warn when
+    // acked. Only when the mcp component is compiled in.
+    #[cfg(feature = "mcp")]
+    camel_component_mcp::McpServerRegistry::global().set_bind_exposure_acks(bind_acks.clone());
+    ctx.set_bind_exposure_acks(camel_core::route_controller::BindExposureAcks::new(
+        bind_acks,
+    ))
+    .await;
+
     // Define register_bundle! macro — looks up config key in ComponentsConfig::raw,
     // falling back to an empty table so bundles always register with their serde defaults.
     // Uses UFCS to invoke ComponentBundle methods without requiring trait in scope

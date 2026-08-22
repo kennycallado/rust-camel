@@ -11,6 +11,15 @@ use camel_api::security_policy::Principal;
 #[async_trait]
 pub trait JwtValidator: Send + Sync {
     async fn validate(&self, token: &str) -> Result<Principal, AuthError>;
+
+    /// Signature-only verification: constructor keyset verification, NO
+    /// issuer/audience check.
+    ///
+    /// The default delegates to [`validate`](Self::validate) for implementors
+    /// that do not distinguish signature-only from full validation.
+    async fn validate_signature(&self, token: &str) -> Result<Principal, AuthError> {
+        self.validate(token).await
+    }
 }
 
 /// Production JWT validator backed by a dynamic JWKS provider.
@@ -72,6 +81,26 @@ fn key_matches(k: &Jwk, kid: &str) -> bool {
 #[async_trait]
 impl JwtValidator for LocalJwtValidator {
     async fn validate(&self, token: &str) -> Result<Principal, AuthError> {
+        let principal = self.validate_signature(token).await?;
+
+        // Fixed-claims-check: enforce the constructor-configured audience/issuer.
+        //
+        // Fail-closed: an empty constructor audience/issuer rejects. This
+        // byte-preserves the old jsonwebtoken behavior where an empty configured
+        // set matched nothing (reject-all), preventing an empty-audience config
+        // from authenticating with zero audience scoping.
+        if self.audience.is_empty() || !principal.audience.iter().any(|a| self.audience.contains(a))
+        {
+            return Err(AuthError::TokenInvalid("invalid audience".into()));
+        }
+        if self.issuer.is_empty() || principal.issuer != self.issuer {
+            return Err(AuthError::TokenInvalid("invalid issuer".into()));
+        }
+
+        Ok(principal)
+    }
+
+    async fn validate_signature(&self, token: &str) -> Result<Principal, AuthError> {
         // Decode header to extract kid
         let header = decode_header(token)
             .map_err(|e| AuthError::TokenInvalid(format!("invalid JWT header: {e}")))?;
@@ -99,10 +128,9 @@ impl JwtValidator for LocalJwtValidator {
 
         let decoding_key = jwk_to_decoding_key(&jwk.n, &jwk.e)?;
 
-        // Configure validation
+        // Configure validation — signature/validity only, NO issuer/audience check.
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&self.audience);
-        validation.set_issuer(&[&self.issuer]);
+        validation.validate_aud = false;
 
         // Decode and verify
         let token_data =

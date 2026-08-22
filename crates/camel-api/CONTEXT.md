@@ -19,8 +19,8 @@ split into:
 
 | Category | Count | Posture |
 |---|---|---|
-| `#[non_exhaustive]` | 52 | 48 attributed by rc-3pw3; pre-existing exceptions include `CamelError`, `ConfigValidationError`, `TemplateError`. |
-| `exhaustive-by-contract` exception | 4 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService), and `CredentialSource` (the closed credential-source set; out-of-crate camel-auth extraction matches all variants). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
+| `#[non_exhaustive]` | 59 | 54 attributed; pre-existing exceptions include `CamelError`, `ConfigValidationError`, `TemplateError`. |
+| `exhaustive-by-contract` exception | 5 | `PipelineOutcome` (the ADR-0024 outcome algebra), `ExchangePattern` (the fixed InOnly/InOut MEP dichotomy), `ContentType` (the closed 4-variant cache content-type set matched by out-of-crate CacheService), `CredentialSource` (the closed credential-source set; out-of-crate camel-auth extraction matches all variants), and `AccessMode` (the closed kernel access-mode set; out-of-crate camel-auth enforcement matches all variants). Each carries a `/// exhaustive-by-contract:` rustdoc note and stays exhaustive. |
 
 New contract enums use `#[non_exhaustive]` from birth; a closed-set exception needs a
 `/// exhaustive-by-contract: <rationale>` note. ADR-0049 Rule 3 governs public structs (out of

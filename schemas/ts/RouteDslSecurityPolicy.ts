@@ -2,15 +2,7 @@
 import type { CredentialSourceDsl } from "./CredentialSourceDsl";
 import type { RouteDslPermissionPolicy } from "./RouteDslPermissionPolicy";
 
-export type RouteDslSecurityPolicy = { roles: Array<string> | null, scopes: Array<string> | null, all_required: boolean | null, 
-/**
- * When `true`, the policy accepts an already-populated
- * `camel.auth.principal` exchange property when no Bearer token is
- * present. Default `false` (fail-closed) — the principal must come
- * from token validation. See H1 in
- * `docs/superpowers/specs/v1-sec-stabilization-spec.md`.
- */
-trust_upstream_principal: boolean | null, ref: string | null, wasm: string | null, config: { [key in string]: string } | null, permission: RouteDslPermissionPolicy | null, 
+export type RouteDslSecurityPolicy = { roles: Array<string> | null, scopes: Array<string> | null, all_required: boolean | null, ref: string | null, wasm: string | null, config: { [key in string]: string } | null, permission: RouteDslPermissionPolicy | null, 
 /**
  * Declared extraction sources for the route's credential, in order.
  * Absent → compile-time default `[authorization_header]`. Valid only with
@@ -24,4 +16,13 @@ credential_sources: Array<CredentialSourceDsl> | null,
  * forms (validated at load time in `yaml.rs`), mirroring
  * `credential_sources`.
  */
-provider?: string | null, };
+provider?: string | null, 
+/**
+ * Route-level audience override for the compiled security plan. When
+ * present the plan's `audience_binding.audiences` uses these values
+ * (issuers still come from the provider); when absent the resolved
+ * provider's binding is copied verbatim. Valid only with the
+ * `roles`/`scopes` forms (validated at load time in `yaml.rs`),
+ * mirroring `provider`.
+ */
+audiences?: Array<string> | null, };

@@ -6,7 +6,8 @@ use crate::shared::components::domain::Registry;
 use arc_swap::ArcSwap;
 use camel_api::function::PrepareToken;
 use camel_api::security_policy::{
-    AuthorizationDecision, CredentialSource, Principal, SecurityPolicy, SecurityPolicyConfig,
+    AuthContext, AuthorizationDecision, CredentialSource, Principal, SecurityPolicy,
+    SecurityPolicyConfig,
 };
 use camel_api::{
     BoxProcessor, BoxProcessorExt, ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId,
@@ -165,6 +166,8 @@ fn helper_functions_cover_non_async_branches() {
         compiled: route_runtime_state::CompiledRoute {
             security_policy: None,
             security_authenticator: None,
+            provider_registry: None,
+            security_plan: None,
         },
     };
 
@@ -1793,6 +1796,8 @@ fn swap_pipeline_rejects_lifecycle_bearing_route() {
         compiled: route_runtime_state::CompiledRoute {
             security_policy: None,
             security_authenticator: None,
+            provider_registry: None,
+            security_plan: None,
         },
     };
 
@@ -1848,6 +1853,8 @@ fn swap_pipeline_rejects_agg_service_route() {
         compiled: route_runtime_state::CompiledRoute {
             security_policy: None,
             security_authenticator: None,
+            provider_registry: None,
+            security_plan: None,
         },
     };
 
@@ -1890,6 +1897,8 @@ fn swap_pipeline_raw_bypasses_lifecycle_rejection() {
         compiled: route_runtime_state::CompiledRoute {
             security_policy: None,
             security_authenticator: None,
+            provider_registry: None,
+            security_plan: None,
         },
     };
 
@@ -3196,6 +3205,7 @@ impl SecurityPolicy for CaptureSecCtxPolicy {
     async fn evaluate(
         &self,
         _exchange: &mut camel_api::Exchange,
+        _auth: &AuthContext<'_>,
     ) -> Result<AuthorizationDecision, CamelError> {
         Ok(AuthorizationDecision::Granted {
             principal: Principal {
@@ -3337,4 +3347,581 @@ async fn start_route_wires_declared_credential_sources() {
         sec_ctx.credential_sources, sources,
         "route-declared credential_sources must reach the consumer SecurityContext"
     );
+}
+
+#[cfg(test)]
+mod late_registration_gate {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use camel_api::security_policy::{
+        AuthContext, AuthorizationDecision, Principal, SecurityPolicy, SecurityPolicyConfig,
+    };
+    use camel_api::{BoxProcessor, Exchange, Message, OpaqueProcessor};
+    use camel_auth::{ProviderEntry, ProviderRegistry, TokenAuthenticator};
+    use tower::ServiceExt;
+
+    struct AllowPolicy;
+
+    #[async_trait::async_trait]
+    impl SecurityPolicy for AllowPolicy {
+        async fn evaluate(
+            &self,
+            _exchange: &mut Exchange,
+            _auth: &AuthContext<'_>,
+        ) -> Result<AuthorizationDecision, CamelError> {
+            Ok(AuthorizationDecision::Granted {
+                principal: Principal {
+                    subject: "tester".into(),
+                    issuer: "test".into(),
+                    audience: vec![],
+                    scopes: vec![],
+                    roles: vec![],
+                    claims: serde_json::Value::Null,
+                },
+            })
+        }
+    }
+
+    struct StubAuth;
+
+    #[async_trait::async_trait]
+    impl TokenAuthenticator for StubAuth {
+        async fn authenticate_bearer(&self, _token: &str) -> Result<Principal, CamelError> {
+            Ok(Principal {
+                subject: "tester".into(),
+                issuer: "test".into(),
+                audience: vec![],
+                scopes: vec![],
+                roles: vec![],
+                claims: serde_json::Value::Null,
+            })
+        }
+    }
+
+    fn sole_provider() -> Arc<ProviderRegistry> {
+        let registry = ProviderRegistry::new();
+        registry.register(
+            "idp-a",
+            ProviderEntry {
+                authenticator: Arc::new(StubAuth),
+                audience_binding: None,
+            },
+        );
+        Arc::new(registry)
+    }
+
+    async fn running_listener(bind: &str) -> DefaultRouteController {
+        let mut controller = build_controller_with_components();
+        controller
+            .add_route(
+                RouteDefinition::new("timer:late-registration-listener?period=60000", vec![])
+                    .with_route_id("listener"),
+            )
+            .await
+            .expect("listener route should register");
+        controller
+            .start_route("listener")
+            .await
+            .expect("listener route should start");
+
+        // The timer fixture supplies the existing running consumer task. The
+        // controller's gate only needs the listener URI and running handle;
+        // replacing the URI avoids binding a real socket in this unit suite.
+        controller
+            .routes
+            .get_mut("listener")
+            .expect("listener route exists")
+            .from_uri = bind.to_string();
+        controller
+    }
+
+    #[tokio::test]
+    async fn late_registration_gate_includes_preregistered_sibling_plans() {
+        let mut controller = build_controller_with_components();
+        // Pre-registered Public sibling on the target bind, added while the
+        // bind is not running (the start path owns that window).
+        controller
+            .add_route(
+                RouteDefinition::new("http://0.0.0.0:8080/sibling", vec![])
+                    .with_route_id("sibling-public"),
+            )
+            .await
+            .expect("sibling registers before bind runs");
+        controller
+            .add_route(
+                RouteDefinition::new("timer:late-registration-listener?period=60000", vec![])
+                    .with_route_id("listener"),
+            )
+            .await
+            .expect("listener route should register");
+        controller
+            .start_route("listener")
+            .await
+            .expect("listener route should start");
+        controller
+            .routes
+            .get_mut("listener")
+            .expect("listener route exists")
+            .from_uri = "http://0.0.0.0:8080".to_string();
+
+        // Authenticated candidate: its own plan alone would pass the gate,
+        // so the rejection can only come from the pre-registered sibling's
+        // Public plan — proving the late gate aggregates sibling plans.
+        let err = controller
+            .add_route(
+                RouteDefinition::new("http://0.0.0.0:8080/late-auth", vec![])
+                    .with_route_id("late-auth")
+                    .with_security_policy(SecurityPolicyConfig::new(AllowPolicy))
+                    .with_security_authenticator(Arc::new(StubAuth))
+                    .with_provider_registry(sole_provider()),
+            )
+            .await
+            .expect_err("sibling Public plan must trip the late gate");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("0.0.0.0:8080"),
+            "error must name bind: {message}"
+        );
+        assert!(
+            message.contains("late-auth"),
+            "error must name route: {message}"
+        );
+        assert!(!controller.routes.contains_key("late-auth"));
+
+        controller
+            .stop_route("listener")
+            .await
+            .expect("listener route should stop");
+    }
+
+    #[tokio::test]
+    async fn late_registration_with_generation_also_gates() {
+        let mut controller = running_listener("http://0.0.0.0:8090").await;
+
+        let err = controller
+            .add_route_with_generation(
+                RouteDefinition::new("http://0.0.0.0:8090/hot", vec![]).with_route_id("hot-public"),
+                1,
+            )
+            .await
+            .expect_err("hot-reload insertion must hit the same gate");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("0.0.0.0:8090"),
+            "error must name bind: {message}"
+        );
+        assert!(!controller.routes.contains_key("hot-public"));
+
+        controller
+            .stop_route("listener")
+            .await
+            .expect("listener route should stop");
+    }
+
+    #[tokio::test]
+    async fn late_public_route_nonloopback_rejected() {
+        let mut controller = running_listener("http://0.0.0.0:8080").await;
+
+        let err = controller
+            .add_route(
+                RouteDefinition::new("http://0.0.0.0:8080/late", vec![])
+                    .with_route_id("late-public"),
+            )
+            .await
+            .expect_err("unacknowledged non-loopback public route must be rejected");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("0.0.0.0:8080"),
+            "error must name bind: {message}"
+        );
+        assert!(
+            message.contains("late-public"),
+            "error must name route: {message}"
+        );
+        assert!(!controller.routes.contains_key("late-public"));
+        assert!(
+            controller
+                .routes_for_endpoint("http://0.0.0.0:8080/late")
+                .is_empty()
+        );
+
+        controller
+            .stop_route("listener")
+            .await
+            .expect("listener route should stop");
+    }
+
+    #[tokio::test]
+    async fn late_route_loopback_public_accepted() {
+        let mut controller = running_listener("http://127.0.0.1:0").await;
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let dispatched_by_route = Arc::clone(&dispatched);
+        let processor = BoxProcessor::from_fn(move |exchange: Exchange| {
+            dispatched_by_route.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(exchange) })
+        });
+
+        controller
+            .add_route(
+                RouteDefinition::new(
+                    "http://127.0.0.1:0/late",
+                    vec![BuilderStep::Processor(OpaqueProcessor(processor))],
+                )
+                .with_route_id("late-public"),
+            )
+            .await
+            .expect("loopback public route should register");
+
+        assert!(controller.routes.contains_key("late-public"));
+        assert_eq!(
+            controller.routes_for_endpoint("http://127.0.0.1:0/late"),
+            vec!["late-public".to_string()]
+        );
+
+        let pipeline = {
+            let managed = controller
+                .routes
+                .get("late-public")
+                .expect("late route exists");
+            crate::lifecycle::adapters::pipeline_runtime::get_pipeline(&managed.pipeline)
+        };
+        pipeline
+            .oneshot(Exchange::new(Message::new("late")))
+            .await
+            .expect("late route dispatch should succeed");
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+
+        controller
+            .stop_route("listener")
+            .await
+            .expect("listener route should stop");
+    }
+}
+
+#[cfg(test)]
+mod dispatch_enforcement {
+    //! ADR-0061 Task 2.9 strict-mode dispatch enforcement: a non-Public plan
+    //! requires the kernel-minted typed carrier on the Exchange. The
+    //! pre-pipeline check (route_controller_trait) denies a carrier-less
+    //! Exchange BEFORE the pipeline runs; the transport renders the denial
+    //! in its own idiom via reply_tx.
+
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use camel_api::security_policy::{
+        AccessMode, AuthContext, AuthorizationDecision, CredentialSource, Principal,
+        RouteSecurityPlan, SecurityPolicy, SecurityPolicyConfig, TransportId,
+    };
+    use camel_api::{Body, Exchange, Message, OpaqueProcessor};
+    use camel_auth::credential_source::ExtractedToken;
+    use camel_auth::{ProviderEntry, ProviderRegistry, TokenAuthenticator};
+
+    struct AllowPolicy;
+
+    #[async_trait::async_trait]
+    impl SecurityPolicy for AllowPolicy {
+        async fn evaluate(
+            &self,
+            _exchange: &mut Exchange,
+            _auth: &AuthContext<'_>,
+        ) -> Result<AuthorizationDecision, CamelError> {
+            Ok(AuthorizationDecision::Granted {
+                principal: Principal {
+                    subject: "tester".into(),
+                    issuer: "test".into(),
+                    audience: vec![],
+                    scopes: vec![],
+                    roles: vec![],
+                    claims: serde_json::Value::Null,
+                },
+            })
+        }
+    }
+
+    struct StubAuth;
+
+    #[async_trait::async_trait]
+    impl TokenAuthenticator for StubAuth {
+        async fn authenticate_bearer(&self, _token: &str) -> Result<Principal, CamelError> {
+            Ok(Principal {
+                subject: "tester".into(),
+                issuer: "test".into(),
+                audience: vec![],
+                scopes: vec![],
+                roles: vec![],
+                claims: serde_json::Value::Null,
+            })
+        }
+    }
+
+    fn sole_provider() -> Arc<ProviderRegistry> {
+        let registry = ProviderRegistry::new();
+        registry.register(
+            "idp-a",
+            ProviderEntry {
+                authenticator: Arc::new(StubAuth),
+                audience_binding: None,
+            },
+        );
+        Arc::new(registry)
+    }
+
+    /// Probe consumer: sends ONE Exchange (optionally carrying a pre-minted
+    /// carrier) through the route channel and records the pipeline's reply.
+    struct DispatchProbeConsumer {
+        outcome: Arc<std::sync::Mutex<Option<Result<Exchange, CamelError>>>>,
+        carrier: Option<camel_auth::AuthenticatedPrincipal>,
+    }
+
+    #[async_trait::async_trait]
+    impl Consumer for DispatchProbeConsumer {
+        async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+            let mut exchange = Exchange::new(Message::new("probe"));
+            if let Some(principal) = &self.carrier {
+                camel_auth::install_carrier(&mut exchange, principal);
+            }
+            let outcome = ctx.send_and_wait(exchange).await;
+            *self.outcome.lock().expect("probe lock") = Some(outcome);
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    struct DispatchProbeEndpoint {
+        uri: String,
+        outcome: Arc<std::sync::Mutex<Option<Result<Exchange, CamelError>>>>,
+        carrier: Option<camel_auth::AuthenticatedPrincipal>,
+    }
+
+    impl Endpoint for DispatchProbeEndpoint {
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+        ) -> Result<Box<dyn Consumer>, CamelError> {
+            Ok(Box::new(DispatchProbeConsumer {
+                outcome: Arc::clone(&self.outcome),
+                carrier: self.carrier.clone(),
+            }))
+        }
+        fn create_producer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
+            Err(CamelError::ProcessorError(
+                "dispatch probe does not support producers".into(),
+            ))
+        }
+    }
+
+    /// Poll the probe outcome until the pipeline replies (or panic).
+    async fn probe_outcome(
+        outcome: &Arc<std::sync::Mutex<Option<Result<Exchange, CamelError>>>>,
+    ) -> Result<Exchange, CamelError> {
+        for _ in 0..400 {
+            let found = {
+                let mut guard = outcome.lock().expect("probe lock");
+                guard.take()
+            };
+            if let Some(result) = found {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("probe outcome never arrived: pipeline did not reply within 10s");
+    }
+
+    #[tokio::test]
+    async fn dispatch_enforcement_denies_nonpublic_without_carrier() {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let outcome: Arc<std::sync::Mutex<Option<Result<Exchange, CamelError>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        {
+            let mut guard = registry.lock().expect("registry lock");
+            guard.register(Arc::new(DispatchProbeComponent {
+                outcome: Arc::clone(&outcome),
+                carrier: None,
+            }));
+        }
+        let mut controller = DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+
+        // Counting pipeline step: a granted dispatch must run exactly once;
+        // the denied dispatch must never reach it.
+        let dispatched = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&dispatched);
+        let processor = BoxProcessor::from_fn(move |mut exchange: Exchange| {
+            // Fn closure: clone the Arc for the owned future on each call.
+            let counter = Arc::clone(&counter);
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                exchange.input.body = Body::Text("ran".into());
+                Ok(exchange)
+            })
+        });
+
+        // Loopback http bind: Public-silently-allowed; the Authorized plan
+        // (policy + provider) makes the route non-Public.
+        controller
+            .add_route(
+                RouteDefinition::new(
+                    "http://127.0.0.1:1/secured",
+                    vec![BuilderStep::Processor(OpaqueProcessor(processor))],
+                )
+                .with_route_id("dispatch-deny-probe")
+                .with_security_policy(SecurityPolicyConfig::new(AllowPolicy))
+                .with_security_authenticator(Arc::new(StubAuth))
+                .with_provider_registry(sole_provider()),
+            )
+            .await
+            .expect("add_route");
+        controller
+            .start_route("dispatch-deny-probe")
+            .await
+            .expect("start_route");
+
+        // The probe's carrier-less Exchange is denied BEFORE the pipeline.
+        let result = probe_outcome(&outcome).await;
+        match result {
+            Err(CamelError::Unauthenticated(message)) => {
+                assert!(
+                    message.contains("no authenticated principal"),
+                    "denial must name the missing carrier: {message}"
+                );
+            }
+            other => panic!("expected Unauthenticated denial, got: {other:?}"),
+        }
+        assert_eq!(
+            dispatched.load(Ordering::SeqCst),
+            0,
+            "the pipeline step must never run for a carrier-less Exchange"
+        );
+
+        controller
+            .stop_route("dispatch-deny-probe")
+            .await
+            .expect("stop_route");
+    }
+
+    #[tokio::test]
+    async fn dispatch_enforcement_grants_nonpublic_with_carrier() {
+        // Control for the denial test: the same non-Public route with a
+        // kernel-minted carrier dispatches into the pipeline — the strict
+        // check gates, it does not block granted flows.
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let outcome: Arc<std::sync::Mutex<Option<Result<Exchange, CamelError>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        // Mint a real carrier through the kernel for this route's provider.
+        let providers = sole_provider();
+        let plan = RouteSecurityPlan {
+            access_mode: AccessMode::Authenticated,
+            provider_ref: Some("idp-a".to_string()),
+            transport: TransportId::Http,
+            credential_sources: vec![CredentialSource::AuthorizationHeader],
+            audience_binding: None,
+        };
+        let credentials = ExtractedToken {
+            token: "t-a".to_string(),
+            source: CredentialSource::AuthorizationHeader,
+        };
+        let carrier = camel_auth::kernel_authenticate(&plan, &providers, &credentials)
+            .await
+            .expect("kernel mints the carrier");
+        {
+            let mut guard = registry.lock().expect("registry lock");
+            guard.register(Arc::new(DispatchProbeComponent {
+                outcome: Arc::clone(&outcome),
+                carrier: Some(carrier),
+            }));
+        }
+        let mut controller = DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+
+        let dispatched = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&dispatched);
+        let processor = BoxProcessor::from_fn(move |mut exchange: Exchange| {
+            // Fn closure: clone the Arc for the owned future on each call.
+            let counter = Arc::clone(&counter);
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                exchange.input.body = Body::Text("ran".into());
+                Ok(exchange)
+            })
+        });
+
+        controller
+            .add_route(
+                RouteDefinition::new(
+                    "http://127.0.0.1:1/secured",
+                    vec![BuilderStep::Processor(OpaqueProcessor(processor))],
+                )
+                .with_route_id("dispatch-grant-probe")
+                .with_security_policy(SecurityPolicyConfig::new(AllowPolicy))
+                .with_security_authenticator(Arc::new(StubAuth))
+                .with_provider_registry(sole_provider()),
+            )
+            .await
+            .expect("add_route");
+        controller
+            .start_route("dispatch-grant-probe")
+            .await
+            .expect("start_route");
+
+        let result = probe_outcome(&outcome)
+            .await
+            .expect("a carrier-carrying Exchange must dispatch into the pipeline");
+        assert_eq!(
+            dispatched.load(Ordering::SeqCst),
+            1,
+            "the pipeline step must run exactly once for a granted dispatch"
+        );
+        assert!(
+            matches!(result.input.body, Body::Text(ref s) if s == "ran"),
+            "the step's mutation must be visible on the reply"
+        );
+
+        controller
+            .stop_route("dispatch-grant-probe")
+            .await
+            .expect("stop_route");
+    }
+
+    /// Component vending [`DispatchProbeEndpoint`] under the `http` scheme
+    /// (scheme choice matters: plan compilation only classifies listener
+    /// schemes, so the route actually gets a compiled non-Public plan).
+    struct DispatchProbeComponent {
+        outcome: Arc<std::sync::Mutex<Option<Result<Exchange, CamelError>>>>,
+        carrier: Option<camel_auth::AuthenticatedPrincipal>,
+    }
+
+    impl Component for DispatchProbeComponent {
+        fn scheme(&self) -> &str {
+            "http"
+        }
+        fn create_endpoint(
+            &self,
+            uri: &str,
+            _ctx: &dyn ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            Ok(Box::new(DispatchProbeEndpoint {
+                uri: uri.to_string(),
+                outcome: Arc::clone(&self.outcome),
+                carrier: self.carrier.clone(),
+            }))
+        }
+    }
 }

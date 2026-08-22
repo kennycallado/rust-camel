@@ -81,10 +81,11 @@ The Producer requires `transport=plaintext` or `transport=tls` in the URI (ADR-0
 
 ## Security
 
-The component enforces two security layers (ADR-0010, ADR-0032):
+The component enforces security through the unified transport auth kernel
+(ADR-0061 Rule 1):
 
-1. **Authentication**. The server handler parses `Authorization: Bearer <token>` and calls `TokenAuthenticator::authenticate_bearer`. Missing or invalid credentials return `Status::unauthenticated`.
-2. **Authorization**. The Consumer calls `SecurityPolicy::evaluate` before pipeline dispatch in all four RPC modes. `Denied` returns `Status::permission_denied`. Unknown future decisions fail closed.
+1. **Authentication**. The interceptor extracts credentials per the route plan's credential sources, authenticates via `kernel_authenticate`, and installs the typed principal carrier on a fresh Exchange per request in all four RPC modes. `AccessMode::Public` skips extraction entirely; missing or invalid credentials return `Status::unauthenticated` (provider-down maps to `unavailable`).
+2. **Authorization**. The route's compiled `RouteSecurityPlan` drives the pre-pipeline dispatch check: a non-Public route requires the kernel carrier on the Exchange or the dispatch is denied before the pipeline runs. Route-level policies evaluate in the pipeline layer against the carrier principal.
 
 Transport setup also fails closed (ADR-0033). Every Endpoint declares `transport=plaintext` or `transport=tls`. The component rejects `insecure_skip_verify=true`, an incomplete mTLS identity, and a TLS/plaintext mismatch on a shared listener.
 

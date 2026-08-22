@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use camel_api::security_policy::{
-    AuthorizationDecision, Principal, SecurityPolicy, principal_from_exchange,
-    store_principal_properties,
+    AuthContext, AuthPrincipal, AuthorizationDecision, Principal, SecurityPolicy, TransportId,
+    principal_from_exchange, store_principal_properties,
 };
 use camel_api::{Body, Exchange, Message};
 use camel_component_api::ComponentContext;
@@ -20,6 +20,20 @@ fn fixture_path() -> PathBuf {
 
 fn make_registry() -> Arc<dyn ComponentContext> {
     Arc::new(camel_component_api::NoOpComponentContext)
+}
+
+/// Throwaway `AuthPrincipal` for tests. The trait is open, so implementing it
+/// for a test stub is legal and grants no minting power — only the concrete
+/// `AuthenticatedPrincipal` (camel-auth kernel) is unforgeable.
+struct TestPrincipal(Principal);
+
+impl AuthPrincipal for TestPrincipal {
+    fn principal(&self) -> &Principal {
+        &self.0
+    }
+    fn provider_id(&self) -> &str {
+        "test"
+    }
 }
 
 #[tokio::test]
@@ -44,8 +58,13 @@ async fn wasm_security_policy_grants_when_admin_role_present() {
         claims: serde_json::Value::Null,
     };
     store_principal_properties(&mut exchange, &principal);
+    let typed = TestPrincipal(principal);
+    let auth = AuthContext {
+        principal: &typed,
+        transport: TransportId::Http,
+    };
 
-    let decision = policy.evaluate(&mut exchange).await;
+    let decision = policy.evaluate(&mut exchange, &auth).await;
     assert!(
         matches!(decision, Ok(AuthorizationDecision::Granted { .. })),
         "expected Granted, got: {decision:?}"
@@ -74,8 +93,13 @@ async fn wasm_security_policy_denies_when_admin_role_missing() {
         claims: serde_json::Value::Null,
     };
     store_principal_properties(&mut exchange, &principal);
+    let typed = TestPrincipal(principal);
+    let auth = AuthContext {
+        principal: &typed,
+        transport: TransportId::Http,
+    };
 
-    let decision = policy.evaluate(&mut exchange).await;
+    let decision = policy.evaluate(&mut exchange, &auth).await;
     assert!(
         matches!(decision, Ok(AuthorizationDecision::Denied { .. })),
         "expected Denied, got: {decision:?}"
@@ -104,8 +128,13 @@ async fn wasm_security_policy_granted_preserves_principal() {
         claims: serde_json::json!({"department": "engineering"}),
     };
     store_principal_properties(&mut exchange, &principal);
+    let typed = TestPrincipal(principal);
+    let auth = AuthContext {
+        principal: &typed,
+        transport: TransportId::Http,
+    };
 
-    let decision = policy.evaluate(&mut exchange).await;
+    let decision = policy.evaluate(&mut exchange, &auth).await;
     match decision {
         Ok(AuthorizationDecision::Granted { principal: p }) => {
             assert_eq!(p.subject, "admin-user");

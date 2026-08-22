@@ -65,20 +65,14 @@ Every extracted value flows through the same constant-time store lookup
 (`NativeCredentialStore::lookup`, `native_auth.rs`). Extraction differs per
 source; comparison does not. No source introduces an early-exit comparison path.
 
-**`trust_upstream_principal` semantics.** On a component-owned path (WS), the
-flag means "accept the principal the component authenticated". The component
-extracts the credential, validates it, stores the principal via
-`store_principal_properties`, then calls `policy.evaluate`. The spoof caveat
-(the property could be stamped by an upstream filter) applies only to the layer
-path, where a policy reads a principal that an arbitrary upstream step may have
-written. On the component path the component gates evaluation on successful
-authentication, so the caveat does not apply. The mechanism never sets the flag
-implicitly — only the route YAML does.
-
-The store/read pair for the preloaded principal is one format: a JSON string
-under `camel.auth.principal` (`store_principal_properties` writes it;
-`principal_from_exchange` reads it). The trust branch delegates to the canonical
-reader, so a component-stored principal round-trips (ADR-0059).
+**Typed principal.** On a component-owned path (WS), the component extracts
+the credential, validates it, stores the principal via
+`store_principal_properties`, then calls `policy.evaluate`. The removed
+`trust_upstream_principal` flag no longer exists: policies read the principal
+from the `AuthContext` (never from raw exchange properties), so a spoofed
+`camel.auth.principal` property never authorizes. `RolePolicy`/`ScopePolicy`
+are pure authorization policies — the typed principal arrives from the
+authentication path, not from the policy itself.
 
 The Bearer scheme is parsed per RFC 9110 (RFC 7235): case-insensitive and
 whitespace-tolerant. An empty token after the scheme is an absent source.
@@ -115,11 +109,14 @@ with 10s connect timeout and 30s request timeout.
 `CachingTokenIntrospector::new()` calls `build_ssrf_pinned_client()` on the introspection endpoint,
 with 5s connect timeout and 10s request timeout.
 
-### Introspection exp/nbf enforcement (`fn authenticate_bearer`, introspection_auth.rs:42-52)
+### Introspection exp/nbf enforcement (`fn introspect_principal`, introspection_auth.rs:30-60)
 
-`IntrospectionAuthenticator::authenticate()` enforces:
+`IntrospectionAuthenticator` enforces (via `introspect_principal`, shared by
+`authenticate_bearer` and `authenticate`):
 - `exp < now` → `AuthError::TokenExpired` (rejects expired tokens).
 - `nbf > now` → `AuthError::TokenInvalid` (rejects not-yet-valid tokens).
+- Request-scoped `accepted_issuers` / `audiences` (when non-empty) are enforced
+  against the introspected `iss` / `aud` claims on the `authenticate` path.
 
 ### JWT alg/use matching (`fn key_matches`, jwt.rs:60-70)
 

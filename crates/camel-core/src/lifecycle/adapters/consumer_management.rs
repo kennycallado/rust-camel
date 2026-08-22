@@ -529,6 +529,8 @@ mod tests {
             compiled: route_runtime_state::CompiledRoute {
                 security_policy: None,
                 security_authenticator: None,
+                provider_registry: None,
+                security_plan: None,
             },
         }
     }
@@ -853,6 +855,8 @@ mod tests {
                 compiled: route_runtime_state::CompiledRoute {
                     security_policy: None,
                     security_authenticator: None,
+                    provider_registry: None,
+                    security_plan: None,
                 },
             },
         );

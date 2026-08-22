@@ -267,6 +267,9 @@ pub fn spawn_controller_actor(
                 RouteControllerCommand::SetTracerConfig { config } => {
                     controller.set_tracer_config(&config);
                 }
+                RouteControllerCommand::SetBindExposureAcks { acks } => {
+                    controller.set_bind_exposure_acks(acks);
+                }
                 RouteControllerCommand::RouteCount { reply } => {
                     let _ = reply.send(controller.route_count());
                 }

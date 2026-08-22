@@ -5,7 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use wasmtime::AsContextMut;
 
-use camel_api::security_policy::{AuthorizationDecision, SecurityPolicy, principal_from_exchange};
+use camel_api::security_policy::{
+    AuthContext, AuthorizationDecision, SecurityPolicy, TransportId, store_principal_properties,
+};
 use camel_api::{CamelError, Exchange};
 use camel_component_api::ComponentContext;
 
@@ -35,7 +37,24 @@ impl WasmSecurityPolicy {
 
 #[async_trait]
 impl SecurityPolicy for WasmSecurityPolicy {
-    async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError> {
+    async fn evaluate(
+        &self,
+        exchange: &mut Exchange,
+        auth: &AuthContext<'_>,
+    ) -> Result<AuthorizationDecision, CamelError> {
+        // Pass the typed principal and transport through to the guest as
+        // serialized exchange properties. The guest reads auth context via
+        // `get-property("camel.auth.*")`; the `wasm-exchange` record is
+        // otherwise unchanged.
+        store_principal_properties(exchange, auth.principal.principal());
+        let transport = match auth.transport {
+            TransportId::Http => "http",
+            TransportId::Ws => "ws",
+            TransportId::Grpc => "grpc",
+            TransportId::Mcp => "mcp",
+        };
+        exchange.set_property("camel.auth.transport", transport);
+
         let mut store = self.ctx.create_store(exchange.properties.clone());
 
         let plugin = AuthorizationPolicyGuest::instantiate_async(
@@ -77,14 +96,9 @@ impl SecurityPolicy for WasmSecurityPolicy {
         )?;
 
         match result {
-            Ok(None) => {
-                let principal = principal_from_exchange(exchange).ok_or_else(|| {
-                    CamelError::ProcessorError(
-                        "authorization policy granted but no principal found in exchange".into(),
-                    )
-                })?;
-                Ok(AuthorizationDecision::Granted { principal })
-            }
+            Ok(None) => Ok(AuthorizationDecision::Granted {
+                principal: auth.principal.principal().clone(),
+            }),
             Ok(Some(reason)) => Ok(AuthorizationDecision::Denied {
                 reason,
                 required: vec![],

@@ -128,7 +128,11 @@ async fn unknown_resource_read_rejected_no_exchange() {
     let (tx, mut rx) = mpsc::channel::<McpResourceRead>(8);
     handle
         .resource_registry
-        .register("crm://customers".to_string(), tx)
+        .register(
+            "crm://customers".to_string(),
+            "dispatch-route".to_string(),
+            tx,
+        )
         .expect("resource must register");
     handle.resource_registry.mark_ready("crm://customers");
 

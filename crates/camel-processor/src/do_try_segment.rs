@@ -62,6 +62,10 @@ enum FinallyOutcome {
 /// Run the finally body if present and on_when permits.
 /// Free function (not a method) to avoid borrow conflict with
 /// `self.catches.iter_mut()` inside the catch loop.
+/// The `FinallyOutcome` variants move the `Exchange` (the catch loop needs
+/// its state); boxing would rewrite the segment call chain for a lint
+/// threshold.
+#[allow(clippy::result_large_err)]
 async fn run_finally_body(
     finally: &mut Option<FinallyClauseSegment>,
     ex: Exchange,

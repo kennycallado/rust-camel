@@ -51,9 +51,12 @@ impl std::fmt::Debug for Principal {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum AuthorizationDecision {
-    Granted {
-        principal: Principal,
-    },
+    /// Access granted.
+    ///
+    /// `principal` is the policy's advisory asserted principal, stored to
+    /// exchange properties for observability. It is NOT the authentication
+    /// identity; that always comes from the [`AuthContext`] principal.
+    Granted { principal: Principal },
     Denied {
         reason: String,
         required: Vec<String>,
@@ -72,9 +75,50 @@ impl std::fmt::Display for AuthorizationDecision {
     }
 }
 
+/// Transport kinds that can host a server route.
+///
+/// Closed set: `http:`, `ws:`, `grpc:`, and `mcp:` are the only transports
+/// that terminate requests and run authorization.
+///
+/// exhaustive-by-contract: closed transport set; a new transport is an
+/// architectural change, not additive growth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TransportId {
+    Http,
+    Ws,
+    Grpc,
+    Mcp,
+}
+
+/// Read-only view of the principal minted by the authentication path.
+///
+/// camel-api must never name a `camel-auth` type (no dependency cycle), so the
+/// concrete `AuthenticatedPrincipal` lives in `camel-auth` and this crate
+/// consumes it through this trait.
+pub trait AuthPrincipal: Send + Sync {
+    /// The authenticated principal.
+    fn principal(&self) -> &Principal;
+    /// The identifier of the provider that minted this principal.
+    fn provider_id(&self) -> &str;
+}
+
+/// Authentication context handed to a [`SecurityPolicy`] during evaluation.
+///
+/// Carries the authenticated principal and the transport that carried the
+/// request. The `AuthContext` principal is the authentication identity; a
+/// policy's `Granted { principal }` value is advisory only.
+pub struct AuthContext<'a> {
+    pub principal: &'a dyn AuthPrincipal,
+    pub transport: TransportId,
+}
+
 #[async_trait]
 pub trait SecurityPolicy: Send + Sync {
-    async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError>;
+    async fn evaluate(
+        &self,
+        exchange: &mut Exchange,
+        auth: &AuthContext<'_>,
+    ) -> Result<AuthorizationDecision, CamelError>;
 }
 
 /// Name of the input header camel-http uses to carry the raw HTTP query string.
@@ -180,6 +224,87 @@ impl std::fmt::Debug for SecurityPolicyConfig {
     }
 }
 
+/// Access classification for a compiled route.
+///
+/// `Public` needs no authentication. `Authenticated` requires a principal but
+/// no authorization policy. `Authorized` runs a policy against the
+/// authenticated principal.
+///
+/// exhaustive-by-contract: closed enforcement model; modes are kernel
+/// semantics, additions are deliberate breaking changes.
+pub enum AccessMode {
+    Public,
+    Authenticated,
+    Authorized(Arc<dyn SecurityPolicy>),
+}
+
+impl Clone for AccessMode {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Public => Self::Public,
+            Self::Authenticated => Self::Authenticated,
+            Self::Authorized(policy) => Self::Authorized(Arc::clone(policy)),
+        }
+    }
+}
+
+impl std::fmt::Debug for AccessMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Public => f.write_str("Public"),
+            Self::Authenticated => f.write_str("Authenticated"),
+            Self::Authorized(_) => f.write_str("Authorized(<SecurityPolicy>)"),
+        }
+    }
+}
+
+/// Accepted issuer and audience set for a route's authentication.
+///
+/// Reserved in Phase 1; enforcement and cache-key participation arrive in
+/// Phase 3. Every configured accepted audience is kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudienceBinding {
+    pub issuers: Vec<String>,
+    pub audiences: Vec<String>,
+}
+
+/// Compiled security plan for a single server route.
+///
+/// Produced at staging time, before any listener binds. `access_mode`
+/// classifies the route; `provider_ref` is mandatory for
+/// `Authenticated`/`Authorized` and absent for `Public`.
+pub struct RouteSecurityPlan {
+    pub access_mode: AccessMode,
+    pub provider_ref: Option<String>,
+    pub transport: TransportId,
+    pub credential_sources: Vec<CredentialSource>,
+    pub audience_binding: Option<AudienceBinding>,
+}
+
+impl Clone for RouteSecurityPlan {
+    fn clone(&self) -> Self {
+        Self {
+            access_mode: self.access_mode.clone(),
+            provider_ref: self.provider_ref.clone(),
+            transport: self.transport,
+            credential_sources: self.credential_sources.clone(),
+            audience_binding: self.audience_binding.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for RouteSecurityPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouteSecurityPlan")
+            .field("access_mode", &self.access_mode)
+            .field("provider_ref", &self.provider_ref)
+            .field("transport", &self.transport)
+            .field("credential_sources", &self.credential_sources)
+            .field("audience_binding", &self.audience_binding)
+            .finish()
+    }
+}
+
 // --- Principal property storage helpers ---
 
 /// Exchange property key for the principal's subject.
@@ -247,7 +372,7 @@ mod tests {
     }
 
     /// A `SecurityPolicy` that always grants to `test_principal(vec![], vec![])`.
-    fn test_policy() -> impl SecurityPolicy + 'static {
+    fn grant_policy() -> impl SecurityPolicy + 'static {
         struct GrantPolicy;
 
         #[async_trait]
@@ -255,6 +380,7 @@ mod tests {
             async fn evaluate(
                 &self,
                 _exchange: &mut Exchange,
+                _auth: &AuthContext<'_>,
             ) -> Result<AuthorizationDecision, CamelError> {
                 Ok(AuthorizationDecision::Granted {
                     principal: test_principal(vec![], vec![]),
@@ -300,7 +426,7 @@ mod tests {
 
     #[test]
     fn security_policy_config_debug_redacts_policy() {
-        let config = SecurityPolicyConfig::new(test_policy());
+        let config = SecurityPolicyConfig::new(grant_policy());
         let debug = format!("{config:?}");
         assert!(debug.contains("SecurityPolicyConfig"));
         assert!(debug.contains("<SecurityPolicy>"));
@@ -308,7 +434,7 @@ mod tests {
 
     #[test]
     fn security_policy_config_new_is_header_only() {
-        let config = SecurityPolicyConfig::new(test_policy());
+        let config = SecurityPolicyConfig::new(grant_policy());
         assert_eq!(
             config.credential_sources,
             vec![CredentialSource::AuthorizationHeader]
@@ -380,7 +506,7 @@ mod tests {
 
     #[test]
     fn security_policy_config_clone() {
-        let config = SecurityPolicyConfig::new(test_policy());
+        let config = SecurityPolicyConfig::new(grant_policy());
         let cloned = config.clone();
         // Both point to same Arc
         assert!(Arc::ptr_eq(&config.policy, &cloned.policy));
@@ -469,5 +595,50 @@ mod tests {
             s.contains("SENTINEL_CLAIM_VALUE_9kq2"),
             "serialization should preserve raw claim value"
         );
+    }
+
+    #[test]
+    fn access_mode_debug_redacts_policy() {
+        let mode = AccessMode::Authorized(Arc::new(grant_policy()));
+        let debug = format!("{mode:?}");
+        assert!(debug.contains("<SecurityPolicy>"));
+        assert!(!debug.contains("GrantPolicy"));
+    }
+
+    #[test]
+    fn transport_id_derives_all_four() {
+        fn name(t: TransportId) -> &'static str {
+            match t {
+                TransportId::Http => "http",
+                TransportId::Ws => "ws",
+                TransportId::Grpc => "grpc",
+                TransportId::Mcp => "mcp",
+            }
+        }
+        assert_eq!(name(TransportId::Http), "http");
+        assert_eq!(name(TransportId::Ws), "ws");
+        assert_eq!(name(TransportId::Grpc), "grpc");
+        assert_eq!(name(TransportId::Mcp), "mcp");
+    }
+
+    #[test]
+    fn route_security_plan_clone_debug() {
+        let plan = RouteSecurityPlan {
+            access_mode: AccessMode::Authenticated,
+            provider_ref: Some("idp-a".to_string()),
+            transport: TransportId::Http,
+            credential_sources: vec![CredentialSource::AuthorizationHeader],
+            audience_binding: None,
+        };
+        let cloned = plan.clone();
+        assert_eq!(cloned.provider_ref, plan.provider_ref);
+        assert_eq!(cloned.transport, plan.transport);
+        assert_eq!(cloned.credential_sources, plan.credential_sources);
+        assert!(matches!(cloned.access_mode, AccessMode::Authenticated));
+        assert!(cloned.audience_binding.is_none());
+
+        let debug = format!("{plan:?}");
+        assert!(debug.contains(r#"provider_ref: Some("idp-a")"#));
+        assert!(!debug.contains("GrantPolicy"));
     }
 }

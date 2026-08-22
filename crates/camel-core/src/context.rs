@@ -446,6 +446,16 @@ impl CamelContext {
         let _ = self.route_controller.set_error_handler(config).await;
     }
 
+    /// Install per-bind public-exposure acknowledgements (ADR-0061).
+    /// Built by the CLI from `CamelConfig.binds`; the per-bind gate fails
+    /// closed on non-loopback binds until acknowledged.
+    pub async fn set_bind_exposure_acks(
+        &mut self,
+        acks: crate::lifecycle::adapters::route_controller_trait::BindExposureAcks,
+    ) {
+        let _ = self.route_controller.set_bind_exposure_acks(acks).await;
+    }
+
     /// Enable or disable tracing globally.
     pub async fn set_tracing(&mut self, enabled: bool) {
         let _ = self

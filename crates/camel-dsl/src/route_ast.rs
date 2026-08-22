@@ -178,13 +178,6 @@ pub struct RouteDslSecurityPolicy {
     pub scopes: Option<Vec<String>>,
     #[serde(default)]
     pub all_required: Option<bool>,
-    /// When `true`, the policy accepts an already-populated
-    /// `camel.auth.principal` exchange property when no Bearer token is
-    /// present. Default `false` (fail-closed) — the principal must come
-    /// from token validation. See H1 in
-    /// `docs/superpowers/specs/v1-sec-stabilization-spec.md`.
-    #[serde(default)]
-    pub trust_upstream_principal: Option<bool>,
     #[serde(default)]
     pub r#ref: Option<String>,
     #[serde(default)]
@@ -205,6 +198,14 @@ pub struct RouteDslSecurityPolicy {
     /// `credential_sources`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Route-level audience override for the compiled security plan. When
+    /// present the plan's `audience_binding.audiences` uses these values
+    /// (issuers still come from the provider); when absent the resolved
+    /// provider's binding is copied verbatim. Valid only with the
+    /// `roles`/`scopes` forms (validated at load time in `yaml.rs`),
+    /// mirroring `provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audiences: Option<Vec<String>>,
 }
 
 /// Extraction source for a route's credential, as declared in YAML.
@@ -1414,6 +1415,15 @@ pub struct RouteDslRest {
     /// Base path for all operations in this block (e.g. `/api/users`).
     #[serde(default)]
     pub path: String,
+    /// Route-level authorization policy applied to EVERY operation in this
+    /// block (`unify-transport-auth`, Task 2.10). Lowering copies it onto
+    /// each lowered route, so enforcement is route-level — the same
+    /// mechanism `http:` routes use. Same surface and load-time validation
+    /// as `RouteDslRoute.security_policy` (the lowered routes run the shared
+    /// conversion in `yaml.rs`). Absent means the lowered routes carry no
+    /// policy (Public under the kernel gate).
+    #[serde(default)]
+    pub security_policy: Option<RouteDslSecurityPolicy>,
     /// Operations for this block, each carrying its own HTTP method.
     #[serde(default)]
     pub operations: Vec<RouteDslRestOperation>,

@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{error, info, warn};
 
+use camel_api::security_policy::RouteSecurityPlan;
 use camel_api::{CamelError, NoOpMetrics, StepLifecycle, StepShutdownReason};
 use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 
@@ -24,6 +25,127 @@ use crate::lifecycle::adapters::route_helpers::{
     DrainGuard, handle_is_running, inferred_lifecycle_label, ready_with_backoff,
 };
 use crate::lifecycle::adapters::route_registry::DEFAULT_SHUTDOWN_TIMEOUT;
+
+/// Operator acknowledgements for public exposure per bind address and the
+/// per-bind exposure gate (ADR-0061).
+///
+/// Canonical home is `camel_auth::bind_gate` (moved in Task 2.6 so
+/// transports — which may not reference `camel_core::`, see
+/// `xtask lint-component-deps` — enforce the same gate; MCP's registry is
+/// the first). Re-exported here so controller call sites, the CLI, and the
+/// gate tests keep their historical import paths.
+pub use camel_auth::bind_gate::{BindExposureAcks, enforce_bind_exposure_gate};
+
+/// Canonical gate key + loopback classification for a listener `from` URI.
+/// Only listener schemes (http/https/ws/wss/grpc) bind sockets, so only they gate;
+/// `mcp:` binds live in `McpServerConfig` (gated at the McpServerRegistry level,
+/// Task 2.6) and everything else (timer, direct) never binds.
+pub(super) struct BindKey {
+    pub(super) key: String,
+    pub(super) loopback: bool,
+}
+
+pub(super) fn bind_key_from_uri(uri: &str) -> Option<BindKey> {
+    let scheme = uri.split(':').next()?;
+    if !matches!(scheme, "http" | "https" | "ws" | "wss" | "grpc") {
+        return None;
+    }
+    let authority = uri.split("://").nth(1)?;
+    let authority = authority.split('/').next()?;
+    if authority.is_empty() {
+        return None;
+    }
+    if let Ok(addr) = authority.parse::<std::net::SocketAddr>() {
+        return Some(BindKey {
+            key: addr.to_string(),
+            loopback: addr.ip().is_loopback(),
+        });
+    }
+    // Hostname authority: loopback only for `localhost` (deterministic,
+    // fail-closed for every other hostname — no DNS). The host is the
+    // authority minus its port; bracketed IPv6 authorities are stripped
+    // to the bare host before the check.
+    let host = authority
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(authority)
+        .trim_matches(['[', ']']);
+    let loopback = host.eq_ignore_ascii_case("localhost");
+    Some(BindKey {
+        key: authority.to_string(),
+        loopback,
+    })
+}
+
+/// ADR-0061 Task 2.9 strict-mode dispatch check (the flip deferred from
+/// Task 2.2): every transport mints the typed carrier at its request
+/// boundary (grpc 2.1, mcp 2.6, ws 2.8, http 2.9), so a non-Public plan
+/// REQUIRES the carrier on the Exchange — absent or wrong-provider is
+/// denied BEFORE the pipeline runs; the transport renders the denial in
+/// its own idiom via `reply_tx`. Returns `true` when the dispatch was
+/// denied (caller must `continue`).
+fn strict_dispatch_denies(
+    dispatch_plan: &Option<camel_api::security_policy::RouteSecurityPlan>,
+    exchange: &camel_api::Exchange,
+    reply_tx: &mut Option<tokio::sync::oneshot::Sender<Result<camel_api::Exchange, CamelError>>>,
+    route_id: &str,
+) -> bool {
+    if let Some(plan) = dispatch_plan.as_ref()
+        && let Err(denial) = camel_auth::enforce_dispatch(plan, exchange)
+    {
+        if let Some(tx) = reply_tx.take() {
+            let _ = tx.send(Err(denial));
+        } else {
+            // log-policy: handler-owned
+            warn!(
+                route_id = %route_id,
+                error = %denial,
+                "dispatch denied: no kernel carrier on Exchange"
+            );
+        }
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod bind_key_tests {
+    use super::bind_key_from_uri;
+
+    #[test]
+    fn https_and_wss_listeners_gate() {
+        assert_eq!(
+            bind_key_from_uri("https://0.0.0.0:8443/api").map(|b| b.key),
+            Some("0.0.0.0:8443".to_string())
+        );
+        assert_eq!(
+            bind_key_from_uri("wss://0.0.0.0:9000").map(|b| b.key),
+            Some("0.0.0.0:9000".to_string())
+        );
+    }
+
+    #[test]
+    fn non_listener_schemes_skip() {
+        assert!(bind_key_from_uri("timer:tick?period=1s").is_none());
+        assert!(bind_key_from_uri("mcp:server/tool/x").is_none());
+    }
+
+    #[test]
+    fn bracketed_ipv6_hostname_check_uses_bare_host() {
+        let b = bind_key_from_uri("ws://[::1]:8080/path").expect("parses"); // allow-unwrap
+        assert!(b.loopback, "[::1] is loopback");
+    }
+
+    #[test]
+    fn localhost_authority_with_port_is_loopback() {
+        // Regression: rsplit(':') once compared the PORT segment ("8080"),
+        // never matching "localhost"; the host must exclude the port.
+        let b = bind_key_from_uri("http://localhost:8080/api").expect("parses"); // allow-unwrap
+        assert!(b.loopback, "localhost is loopback");
+        let b = bind_key_from_uri("http://myhost.example:8080").expect("parses"); // allow-unwrap
+        assert!(!b.loopback, "other hostnames stay non-loopback");
+    }
+}
 
 /// Best-effort, reverse-order shutdown of already-started `StepLifecycle`
 /// handles when `start_route` must abort. Used both mid-start-loop (the
@@ -80,7 +202,7 @@ impl camel_api::RouteController for DefaultRouteController {
         info!(route_id = %route_id, "Starting route");
 
         // Get the resolved route info
-        let (from_uri, pipeline, concurrency) = {
+        let (from_uri, pipeline, concurrency, dispatch_plan) = {
             let managed = self
                 .routes
                 .get(route_id)
@@ -89,8 +211,26 @@ impl camel_api::RouteController for DefaultRouteController {
                 managed.from_uri.clone(),
                 Arc::clone(&managed.pipeline),
                 managed.concurrency.clone(),
+                managed.compiled.security_plan.clone(),
             )
         };
+
+        // ADR-0061 per-bind exposure gate: refuse to start Public routes on
+        // non-loopback binds without operator acknowledgement. Runs before
+        // any lifecycle step starts, so nothing needs rolling back. All
+        // sibling plans on the same bind are aggregated so the error/warn
+        // names every Public route on the bind.
+        if let Some(bind) = bind_key_from_uri(&from_uri) {
+            let owned = self.plans_for_bind(&bind.key);
+            let siblings: Vec<(&str, &RouteSecurityPlan)> =
+                owned.iter().map(|(id, plan)| (id.as_str(), plan)).collect();
+            enforce_bind_exposure_gate(
+                &bind.key,
+                bind.loopback,
+                &siblings,
+                self.bind_acks.acknowledged(&bind.key),
+            )?;
+        }
 
         // ADR-0022: await each stateful step's `start()` before spawning the
         // pipeline or consumer. On the Nth failure, roll back the already-
@@ -158,9 +298,20 @@ impl camel_api::RouteController for DefaultRouteController {
             managed.compiled.security_authenticator.as_ref(),
         ) {
             use camel_component_api::SecurityContext;
-            let sec_ctx =
+            let mut sec_ctx =
                 SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator))
                     .with_credential_sources(sp_config.credential_sources.clone());
+            // Inject the route's named providers so Phase-2 transports (grpc
+            // 2.1, mcp 2.6, ws 2.8, http 2.9) can resolve them from the
+            // SecurityContext instead of holding their own authenticator.
+            if let Some(registry) = &managed.compiled.provider_registry {
+                sec_ctx = sec_ctx.with_providers(Arc::clone(registry));
+            }
+            // Thread the compiled plan (Task 1.8) so transports drive
+            // per-route dispatch enforcement from it.
+            if let Some(plan) = &managed.compiled.security_plan {
+                sec_ctx = sec_ctx.with_plan(plan.clone());
+            }
             consumer.set_security_context(sec_ctx);
         }
 
@@ -213,6 +364,8 @@ impl camel_api::RouteController for DefaultRouteController {
         // Spawn pipeline task with its own cancellation token
         let pipeline_handle = match effective_concurrency {
             ConcurrencyModel::Concurrent { max } => {
+                // Owned for the spawned 'static task (route_id is a borrow).
+                let route_id = route_id.to_string();
                 let sem = max.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
                 tokio::spawn(async move {
                     loop {
@@ -236,7 +389,26 @@ impl camel_api::RouteController for DefaultRouteController {
                             },
                             _ = pipeline_cancel.cancelled() => return,
                         };
-                        let ExchangeEnvelope { exchange, reply_tx } = envelope;
+                        let ExchangeEnvelope {
+                            exchange,
+                            mut reply_tx,
+                        } = envelope;
+                        // ADR-0061 Task 2.9 strict-mode dispatch check (the
+                        // flip deferred from Task 2.2): every transport now
+                        // mints the typed carrier at its request boundary
+                        // (grpc 2.1, mcp 2.6, ws 2.8, http 2.9), so a
+                        // non-Public plan REQUIRES the carrier on the
+                        // Exchange — absent or wrong-provider is denied
+                        // BEFORE the pipeline runs; the transport renders
+                        // the denial in its own idiom via reply_tx.
+                        if strict_dispatch_denies(
+                            &dispatch_plan,
+                            &exchange,
+                            &mut reply_tx,
+                            route_id.as_str(),
+                        ) {
+                            continue;
+                        }
                         let pipe_ref = Arc::clone(&pipeline);
                         let cancel = pipeline_cancel.clone();
                         let drain_clone = Arc::clone(&drain_in_flight);
@@ -277,6 +449,8 @@ impl camel_api::RouteController for DefaultRouteController {
             // override the route's `?concurrent=` setting explicitly so the
             // operator (not the wildcard) chooses the topology.
             _ => {
+                // Owned for the spawned 'static task (route_id is a borrow).
+                let route_id = route_id.to_string();
                 tokio::spawn(async move {
                     loop {
                         // Use select! to exit promptly on cancellation even when idle
@@ -290,7 +464,21 @@ impl camel_api::RouteController for DefaultRouteController {
                                 return;
                             }
                         };
-                        let ExchangeEnvelope { exchange, reply_tx } = envelope;
+                        let ExchangeEnvelope {
+                            exchange,
+                            mut reply_tx,
+                        } = envelope;
+
+                        // ADR-0061 Task 2.9 strict-mode dispatch check — see
+                        // the Concurrent branch above for the full contract.
+                        if strict_dispatch_denies(
+                            &dispatch_plan,
+                            &exchange,
+                            &mut reply_tx,
+                            route_id.as_str(),
+                        ) {
+                            continue;
+                        }
 
                         // Load current pipeline from ArcSwap (picks up hot-reloaded pipelines)
                         let mut pipeline = pipeline.load().processor.clone_inner();
@@ -473,6 +661,19 @@ impl camel_api::RouteController for DefaultRouteController {
         // Get from_uri and concurrency for creating new consumer
         let from_uri = managed.from_uri.clone();
 
+        // ADR-0061 per-bind exposure gate on resume too (see start path).
+        if let Some(bind) = bind_key_from_uri(&from_uri) {
+            let owned = self.plans_for_bind(&bind.key);
+            let siblings: Vec<(&str, &RouteSecurityPlan)> =
+                owned.iter().map(|(id, plan)| (id.as_str(), plan)).collect();
+            enforce_bind_exposure_gate(
+                &bind.key,
+                bind.loopback,
+                &siblings,
+                self.bind_acks.acknowledged(&bind.key),
+            )?;
+        }
+
         info!(route_id = %route_id, "Resuming route (spawning consumer only)");
 
         let consumer_component_ctx = Arc::new(ControllerComponentContext::new(
@@ -504,9 +705,17 @@ impl camel_api::RouteController for DefaultRouteController {
             managed.compiled.security_authenticator.as_ref(),
         ) {
             use camel_component_api::SecurityContext;
-            let sec_ctx =
+            let mut sec_ctx =
                 SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator))
                     .with_credential_sources(sp_config.credential_sources.clone());
+            // Inject the route's named providers (see start path above).
+            if let Some(registry) = &managed.compiled.provider_registry {
+                sec_ctx = sec_ctx.with_providers(Arc::clone(registry));
+            }
+            // Thread the compiled plan (Task 1.8; see start path above).
+            if let Some(plan) = &managed.compiled.security_plan {
+                sec_ctx = sec_ctx.with_plan(plan.clone());
+            }
             consumer.set_security_context(sec_ctx);
         }
 
@@ -598,3 +807,7 @@ impl camel_api::RouteController for DefaultRouteController {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "route_controller_trait_tests.rs"]
+mod bind_exposure_gate;

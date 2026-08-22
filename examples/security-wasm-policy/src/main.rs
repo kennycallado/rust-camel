@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use camel_api::security_policy::{
-    AuthorizationDecision, Principal, SecurityPolicy, SecurityPolicyConfig,
-    store_principal_properties,
+    AuthContext, AuthPrincipal, AuthorizationDecision, Principal, SecurityPolicy,
+    SecurityPolicyConfig, TransportId, store_principal_properties,
 };
 use camel_api::{CamelError, Exchange};
 use camel_auth::TokenAuthenticator;
@@ -32,6 +32,17 @@ use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_component_wasm::{WasmConfig, WasmSecurityPolicy};
 use camel_core::context::CamelContext;
+
+struct ExamplePrincipal(Principal);
+
+impl AuthPrincipal for ExamplePrincipal {
+    fn principal(&self) -> &Principal {
+        &self.0
+    }
+    fn provider_id(&self) -> &str {
+        "example"
+    }
+}
 
 struct AuthenticatedWasmPolicy {
     authenticator: Arc<dyn TokenAuthenticator>,
@@ -55,10 +66,19 @@ impl AuthenticatedWasmPolicy {
 
 #[async_trait]
 impl SecurityPolicy for AuthenticatedWasmPolicy {
-    async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError> {
+    async fn evaluate(
+        &self,
+        exchange: &mut Exchange,
+        _auth: &AuthContext<'_>,
+    ) -> Result<AuthorizationDecision, CamelError> {
         let principal = self.authenticator.authenticate_bearer(&self.token).await?;
         store_principal_properties(exchange, &principal);
-        self.inner.evaluate(exchange).await
+        let typed = ExamplePrincipal(principal);
+        let auth = AuthContext {
+            principal: &typed,
+            transport: TransportId::Http,
+        };
+        self.inner.evaluate(exchange, &auth).await
     }
 }
 

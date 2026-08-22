@@ -42,7 +42,7 @@ async fn http_consumer_lifecycle_start_stop_cleanup() {
         .build()
         .await;
 
-    let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/lifecycle"))
+    let route = RouteBuilder::from(&format!("http://127.0.0.1:{port}/lifecycle"))
         .route_id("http-lifecycle")
         .set_body(Value::String("handled".into()))
         .set_header("CamelHttpResponseCode", Value::Number(200.into()))
@@ -128,7 +128,7 @@ async fn http_multiple_mounts_same_port_isolation() {
         .build()
         .await;
 
-    let route_a = RouteBuilder::from(&format!("http://0.0.0.0:{port}/api/a"))
+    let route_a = RouteBuilder::from(&format!("http://127.0.0.1:{port}/api/a"))
         .route_id("http-mount-a")
         .set_body(Value::String("route-a".into()))
         .set_header("CamelHttpResponseCode", Value::Number(200.into()))
@@ -136,7 +136,7 @@ async fn http_multiple_mounts_same_port_isolation() {
         .build()
         .unwrap();
 
-    let route_b = RouteBuilder::from(&format!("http://0.0.0.0:{port}/api/b"))
+    let route_b = RouteBuilder::from(&format!("http://127.0.0.1:{port}/api/b"))
         .route_id("http-mount-b")
         .set_body(Value::String("route-b".into()))
         .set_header("CamelHttpResponseCode", Value::Number(200.into()))
@@ -332,7 +332,7 @@ async fn http_request_response_flow() {
         .build()
         .await;
 
-    let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/echo"))
+    let route = RouteBuilder::from(&format!("http://127.0.0.1:{port}/echo"))
         .route_id("http-echo")
         .set_header("CamelHttpResponseCode", Value::Number(201.into()))
         .set_header("X-Custom-Header", Value::String("custom-value".into()))
@@ -379,7 +379,7 @@ async fn http_pipeline_error_returns_500() {
         .build()
         .await;
 
-    let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/fail"))
+    let route = RouteBuilder::from(&format!("http://127.0.0.1:{port}/fail"))
         .route_id("http-fail")
         .process(|_ex| async { Err(CamelError::ProcessorError("intentional failure".into())) })
         .build()
@@ -412,7 +412,7 @@ async fn http_concurrent_requests() {
         .build()
         .await;
 
-    let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/concurrent"))
+    let route = RouteBuilder::from(&format!("http://127.0.0.1:{port}/concurrent"))
         .route_id("http-concurrent")
         .set_body(Value::String("ok".into()))
         .set_header("CamelHttpResponseCode", Value::Number(200.into()))
@@ -470,7 +470,7 @@ async fn http_shutdown_deregisters_path() {
         .build()
         .await;
 
-    let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/shutdown"))
+    let route = RouteBuilder::from(&format!("http://127.0.0.1:{port}/shutdown"))
         .route_id("http-shutdown")
         .set_body(Value::String("alive".into()))
         .set_header("CamelHttpResponseCode", Value::Number(200.into()))
@@ -632,7 +632,7 @@ async fn http_headers_forwarded_to_exchange() {
         .build()
         .await;
 
-    let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/headers"))
+    let route = RouteBuilder::from(&format!("http://127.0.0.1:{port}/headers"))
         .route_id("http-headers")
         .process(|mut ex| async move {
             // Verify HTTP headers are present
@@ -928,7 +928,7 @@ async fn http_route_stop_returns_204() {
         .build()
         .await;
 
-    let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/stop-test"))
+    let route = RouteBuilder::from(&format!("http://127.0.0.1:{port}/stop-test"))
         .route_id("http-stop-test")
         .set_body(Value::String("running".into()))
         .set_header("CamelHttpResponseCode", Value::Number(200.into()))
@@ -1210,20 +1210,29 @@ async fn build_secure_route(
     .unwrap();
     let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
 
+    // The kernel compiles plans against the provider registry (sole-provider
+    // rule); the bare authenticator alone is not a registered provider.
+    let provider_registry = {
+        let registry = camel_auth::ProviderRegistry::new();
+        registry.register(
+            "native",
+            camel_auth::ProviderEntry {
+                authenticator: Arc::clone(&authenticator),
+                audience_binding: None,
+            },
+        );
+        Arc::new(registry)
+    };
+
     let sources = sources.unwrap_or_else(|| vec![CredentialSource::AuthorizationHeader]);
-    let policy = RolePolicy::new(
-        vec![TILES_READER_ROLE.to_string()],
-        true,
-        false,
-        Arc::clone(&authenticator),
-        sources.clone(),
-    );
+    let policy = RolePolicy::new(vec![TILES_READER_ROLE.to_string()], true);
     let config = SecurityPolicyConfig::new(policy).with_credential_sources(sources);
 
     let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/{path}"))
         .route_id(format!("secure-http-{path}"))
         .security_policy(config)
         .security_authenticator(authenticator)
+        .provider_registry(provider_registry)
         .set_body(Value::String("img-ok".into()))
         .set_header("CamelHttpResponseCode", Value::Number(200.into()))
         .to(format!("mock:{path}"))

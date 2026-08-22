@@ -133,6 +133,7 @@ camel-component-cron = { path = "crates/components/camel-cron", version = "=0.32
 camel-component-surrealdb = { path = "crates/components/camel-component-surrealdb", version = "=0.32.0" }
 
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.26"
 tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 prost = { version = "0.14" }
 prost-reflect = { version = "0.16", features = ["serde"] }

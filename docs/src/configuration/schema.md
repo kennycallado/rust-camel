@@ -30,6 +30,24 @@ The fields below live directly under `[default]`. They are the spine of the file
 
 The watcher and the file are wired through `camel-core::reload_watcher::watch_and_reload` (see ADR-0004). The `--watch` and `--no-watch` CLI flags override this field at startup.
 
+## [binds."\<addr\>"]
+
+Per-bind public-exposure acknowledgements (ADR-0061 Rule 4). When any route
+on a NON-loopback bind (`http://0.0.0.0:8080`, `wss://0.0.0.0:9000`, an MCP
+`bind`, …) compiles to a `Public` security plan, startup refuses unless the
+bind carries an explicit acknowledgement; an acknowledged exposure warns
+permanently on every start (ADR-0052 rule 3). Loopback binds
+(`127.0.0.1`, `localhost`, `::1`) need no acknowledgement.
+
+```toml
+[binds."0.0.0.0:8080"]
+allow_public_exposure = true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `allow_public_exposure` | bool | `false` | Acknowledge that this bind intentionally serves unauthenticated routes. Required for non-loopback Public binds; refusal names the bind and the routes. |
+
 ## [components]
 
 Component configuration is untyped TOML keyed by component name. Each component bundle parses its own block. The schema below is the union of fields the runtime and core components recognize.

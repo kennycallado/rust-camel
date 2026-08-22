@@ -109,7 +109,7 @@ The client mode reconnects on transient failures with a shared `NetworkRetryPoli
 
 ## WebSocket security
 
-Auth rides on the per-route `SecurityContext` (see [Authentication and authorization](../services/auth.md)). When a path has a context, the upgrade handler authenticates the bearer token and evaluates the route's `SecurityPolicy` before completing the upgrade. Failed auth returns `401`. Failed policy returns `403`. Policy evaluation errors return `500` and increment the `e:ws:policy-eval` metric (ADR-0012 class e). The health pin becomes the operator signal for bind failures (ADR-0012 class g).
+Auth rides the unified transport auth kernel (ADR-0061; see [Authentication and authorization](../services/auth.md)). When a route carries a compiled security plan, the upgrade handler authenticates per the plan's credential sources via `kernel_authenticate` and stamps the typed principal carrier onto every message Exchange; a non-Public route without the carrier is denied pre-pipeline by the strict dispatch check. Failed authentication returns `401` at the upgrade. Policy evaluation errors return `500` and increment the `e:ws:policy-eval` metric (ADR-0012 class e). The health pin becomes the operator signal for bind failures (ADR-0012 class g).
 
 ## CXF URI
 

@@ -82,9 +82,10 @@ pub use error_handler::{
     StepDisposition,
 };
 pub use security_policy::{
-    AuthorizationDecision, PRINCIPAL_AUDIENCE_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_ISSUER_KEY,
-    PRINCIPAL_KEY, PRINCIPAL_ROLES_KEY, PRINCIPAL_SCOPES_KEY, PRINCIPAL_SUBJECT_KEY, Principal,
-    SecurityPolicy, SecurityPolicyConfig, store_principal_properties,
+    AccessMode, AudienceBinding, AuthContext, AuthPrincipal, AuthorizationDecision,
+    PRINCIPAL_AUDIENCE_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_ISSUER_KEY, PRINCIPAL_KEY,
+    PRINCIPAL_ROLES_KEY, PRINCIPAL_SCOPES_KEY, PRINCIPAL_SUBJECT_KEY, Principal, RouteSecurityPlan,
+    SecurityPolicy, SecurityPolicyConfig, TransportId, store_principal_properties,
 };
 // Backwards compatibility re-export (deprecated)
 pub use claim_check::ClaimCheckRepository;

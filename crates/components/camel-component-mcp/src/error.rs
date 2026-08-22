@@ -10,10 +10,6 @@ use camel_api::CamelError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum McpError {
-    /// A server-role (Consumer) endpoint must declare a `security_policy`.
-    #[error("missing security policy for server '{server}'")]
-    MissingSecurityPolicy { server: String },
-
     /// A remote MCP server (Producer role) does not speak protocol `2026-07-28`.
     #[error("incompatible remote '{server}': unsupported protocol version '{version}'")]
     IncompatibleRemote { server: String, version: String },
@@ -21,6 +17,20 @@ pub enum McpError {
     /// Catalog cardinality cap exceeded (tools or resources).
     #[error("cap exceeded: too many {kind} (max {max})")]
     CapExceeded { kind: String, max: usize },
+
+    /// The DSL `mcp:` block and TOML `mcp.servers.<name>` declare the same
+    /// key with different values (hard conflict, spec: MCP listener
+    /// ownership). The message names both sources and both values so the
+    /// operator knows exactly which declaration to align.
+    #[error(
+        "conflicting declarations for server '{server}': {key} is declared by both the DSL mcp: block and TOML mcp.servers.{server} with different values — dsl: {dsl}, toml: {toml}"
+    )]
+    ConfigConflict {
+        server: String,
+        key: &'static str,
+        dsl: String,
+        toml: String,
+    },
 
     /// Configuration deserialization/validation failure.
     #[error("config error: {0}")]
@@ -38,7 +48,7 @@ impl From<McpError> for CamelError {
             // `CamelError::ConfigValidation` carries fixed camel-api variants with
             // no MCP-shaped arm, so the stringly `Config` member of the same
             // "config" classification family is used.
-            McpError::MissingSecurityPolicy { .. } | McpError::CapExceeded { .. } => {
+            McpError::CapExceeded { .. } | McpError::ConfigConflict { .. } => {
                 CamelError::Config(e.to_string())
             }
             // Config deserialization failure — same "config" family.

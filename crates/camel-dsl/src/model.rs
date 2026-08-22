@@ -8,6 +8,12 @@ pub struct SecurityCompileContext {
         std::collections::HashMap<String, std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
     pub registry: Option<std::sync::Arc<camel_auth::SecurityPolicyRegistry>>,
     pub evaluator_registry: Option<std::sync::Arc<camel_auth::PermissionEvaluatorRegistry>>,
+    pub provider_bindings:
+        std::collections::HashMap<String, camel_api::security_policy::AudienceBinding>,
+    /// Pre-built provider registry (Task 3.2) — carries the authn result cache
+    /// when camel-cli wiring attached one. Route compilation prefers it over a
+    /// freshly built [`provider_registry`](Self::provider_registry).
+    pub provider_reg: Option<std::sync::Arc<camel_auth::ProviderRegistry>>,
 }
 
 impl Clone for SecurityCompileContext {
@@ -16,6 +22,8 @@ impl Clone for SecurityCompileContext {
             providers: self.providers.clone(),
             registry: self.registry.clone(),
             evaluator_registry: self.evaluator_registry.clone(),
+            provider_bindings: self.provider_bindings.clone(),
+            provider_reg: self.provider_reg.clone(),
         }
     }
 }
@@ -35,6 +43,8 @@ impl SecurityCompileContext {
             providers,
             registry,
             evaluator_registry: None,
+            provider_bindings: std::collections::HashMap::new(),
+            provider_reg: None,
         }
     }
 
@@ -45,6 +55,16 @@ impl SecurityCompileContext {
         auth: std::sync::Arc<dyn camel_auth::TokenAuthenticator>,
     ) -> Self {
         self.providers.insert(name.to_string(), auth);
+        self
+    }
+
+    /// Register an audience binding for a named provider.
+    pub fn with_provider_binding(
+        mut self,
+        name: &str,
+        binding: camel_api::security_policy::AudienceBinding,
+    ) -> Self {
+        self.provider_bindings.insert(name.to_string(), binding);
         self
     }
 
@@ -98,6 +118,35 @@ impl SecurityCompileContext {
         self.registry = Some(registry);
         self
     }
+
+    /// Attach a pre-built provider registry (e.g. one carrying the authn result
+    /// cache from camel-cli wiring). When present, route compilation prefers it
+    /// over a freshly built [`provider_registry`](Self::provider_registry).
+    pub fn with_provider_registry(
+        mut self,
+        registry: std::sync::Arc<camel_auth::ProviderRegistry>,
+    ) -> Self {
+        self.provider_reg = Some(registry);
+        self
+    }
+
+    /// Convert the named authenticators into a [`camel_auth::ProviderRegistry`].
+    ///
+    /// Each entry's `audience_binding` is copied from the matching
+    /// `provider_bindings` entry (`None` when absent).
+    pub fn provider_registry(&self) -> camel_auth::ProviderRegistry {
+        let registry = camel_auth::ProviderRegistry::new();
+        for (name, auth) in &self.providers {
+            registry.register(
+                name.clone(),
+                camel_auth::ProviderEntry {
+                    authenticator: auth.clone(),
+                    audience_binding: self.provider_bindings.get(name).cloned(),
+                },
+            );
+        }
+        registry
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,16 +167,20 @@ pub enum DeclarativeSecurityPolicy {
     Roles {
         roles: Vec<String>,
         all_required: bool,
-        trust_upstream_principal: bool,
         credential_sources: Option<Vec<CredentialSourceDsl>>,
         provider: Option<String>,
+        /// Route-level audience override for the compiled security plan
+        /// (Task 1.8). `None` → the resolved provider's binding is copied.
+        audiences: Option<Vec<String>>,
     },
     Scopes {
         scopes: Vec<String>,
         all_required: bool,
-        trust_upstream_principal: bool,
         credential_sources: Option<Vec<CredentialSourceDsl>>,
         provider: Option<String>,
+        /// Route-level audience override for the compiled security plan
+        /// (Task 1.8). `None` → the resolved provider's binding is copied.
+        audiences: Option<Vec<String>>,
     },
     Ref {
         name: String,
@@ -956,6 +1009,33 @@ mod tests {
             assert!(err.contains("saml"));
             assert!(err.contains("native"));
             assert!(err.contains("oidc"));
+        }
+
+        #[test]
+        fn compile_context_converts_to_registry() {
+            let ctx = SecurityCompileContext::default()
+                .with_named_authenticator("idp-a", test_authenticator("test-user"));
+            let registry = ctx.provider_registry();
+            let entry = registry
+                .resolve("idp-a")
+                .expect("expected idp-a to resolve");
+            assert!(entry.audience_binding.is_none());
+        }
+
+        #[test]
+        fn provider_registry_carries_audience_from_context() {
+            let binding = camel_api::security_policy::AudienceBinding {
+                issuers: vec!["https://a".to_string()],
+                audiences: vec!["api".to_string(), "api-2".to_string()],
+            };
+            let ctx = SecurityCompileContext::default()
+                .with_named_authenticator("idp-a", test_authenticator("test-user"))
+                .with_provider_binding("idp-a", binding.clone());
+            let registry = ctx.provider_registry();
+            let entry = registry
+                .resolve("idp-a")
+                .expect("expected idp-a to resolve");
+            assert_eq!(entry.audience_binding.as_ref(), Some(&binding));
         }
     }
 }

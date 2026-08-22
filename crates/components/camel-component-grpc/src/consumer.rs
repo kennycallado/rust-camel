@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::BytesMut;
+use camel_api::security_policy::{AuthContext, AuthPrincipal, Principal, TransportId};
 use camel_api::store_principal_properties;
 use camel_api::{AuthorizationDecision, Body, CamelError, Exchange, Message, Value};
-use camel_auth::CredentialSource;
+use camel_auth::{AuthenticatedPrincipal, CredentialSource, enforce_dispatch, install_carrier};
 use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
     SecurityContext,
@@ -24,9 +25,70 @@ use tracing::{debug, info};
 use crate::config::GrpcServerConfig;
 use crate::mode::GrpcMode;
 use crate::server::GrpcDispatchTable;
+use crate::server::GrpcKernelAuth;
 use crate::server::GrpcServerRegistry;
 
 static PROTO_CACHE: OnceLock<ProtoCache> = OnceLock::new();
+
+/// Transient `AuthPrincipal` adapter for the component-owned gRPC auth path.
+/// The component authenticates the token itself and passes the resulting
+/// principal to the policy; `provider_id` is `"legacy"` until the kernel
+/// carrier reaches this transport.
+struct GrpcPrincipal(Principal);
+
+impl AuthPrincipal for GrpcPrincipal {
+    fn principal(&self) -> &Principal {
+        &self.0
+    }
+    fn provider_id(&self) -> &str {
+        "legacy"
+    }
+}
+
+/// Per-request kernel authentication bundle: the sealed principal minted at
+/// the transport boundary plus the plan it must stay bound to
+/// (`unify-transport-auth`, Task 2.1).
+pub(crate) struct KernelRequestAuth {
+    plan: camel_api::security_policy::RouteSecurityPlan,
+    principal: AuthenticatedPrincipal,
+}
+
+impl KernelRequestAuth {
+    /// Install the typed carrier on a fresh request exchange, then enforce
+    /// the route binding. The carrier is installed BEFORE the pipeline runs
+    /// — a fresh exchange is created per request, so every dispatched
+    /// exchange must carry its own principal (the Task 2.9 dispatch check
+    /// relies on this). The principal is also mirrored to exchange
+    /// properties so route processors can observe the subject. The legacy
+    /// path only ever stamped a scratch exchange; the kernel path stamps
+    /// the real one. `enforce_dispatch` fails closed (`Public`
+    /// short-circuits to Ok) and denials map to the transport idiom.
+    fn apply_to(&self, exchange: &mut Exchange) -> Result<(), Status> {
+        store_principal_properties(exchange, self.principal.principal());
+        install_carrier(exchange, &self.principal);
+        enforce_dispatch(&self.plan, exchange).map_err(|e| match e {
+            CamelError::Unauthenticated(msg) => Status::unauthenticated(msg),
+            other => Status::internal(other.to_string()),
+        })
+    }
+}
+
+/// Bind a minted kernel principal to its route plan for one request.
+///
+/// `None` when the route has no kernel state (legacy path) or when the
+/// request carries no minted principal (Public plans pass through without
+/// extraction).
+fn kernel_request_auth(
+    kernel: Option<&GrpcKernelAuth>,
+    principal: Option<AuthenticatedPrincipal>,
+) -> Option<KernelRequestAuth> {
+    let kernel = kernel?;
+    let principal = principal?;
+    Some(KernelRequestAuth {
+        plan: kernel.plan.clone(),
+        principal,
+    })
+}
 
 fn proto_cache() -> &'static ProtoCache {
     PROTO_CACHE.get_or_init(ProtoCache::new)
@@ -115,30 +177,42 @@ pub(crate) enum GrpcReply {
     Err(tonic::Status),
 }
 
+/// Request envelope crossing the server→consumer boundary.
+///
+/// `principal` is the plain policy-evaluation view; `kernel_principal` is
+/// the sealed principal minted by `kernel_authenticate` at the transport
+/// boundary (`unify-transport-auth`, Task 2.1) and is installed as the
+/// exchange's typed carrier before the pipeline runs. At most one of the
+/// two is ever minted per request: the kernel path fills both views from
+/// one mint; the legacy path fills only `principal`.
 pub(crate) enum GrpcRequestEnvelope {
     Unary {
         metadata: tonic::metadata::MetadataMap,
         body: Vec<u8>,
         reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
         principal: Option<camel_api::security_policy::Principal>,
+        kernel_principal: Option<AuthenticatedPrincipal>,
     },
     ServerStreaming {
         metadata: tonic::metadata::MetadataMap,
         body: Vec<u8>,
         reply_tx: mpsc::Sender<GrpcStreamItem>,
         principal: Option<camel_api::security_policy::Principal>,
+        kernel_principal: Option<AuthenticatedPrincipal>,
     },
     ClientStreaming {
         metadata: tonic::metadata::MetadataMap,
         body_rx: mpsc::Receiver<Vec<u8>>,
         reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
         principal: Option<camel_api::security_policy::Principal>,
+        kernel_principal: Option<AuthenticatedPrincipal>,
     },
     Bidi {
         metadata: tonic::metadata::MetadataMap,
         body_rx: mpsc::Receiver<Vec<u8>>,
         reply_tx: mpsc::Sender<GrpcStreamItem>,
         principal: Option<camel_api::security_policy::Principal>,
+        kernel_principal: Option<AuthenticatedPrincipal>,
     },
 }
 
@@ -347,14 +421,26 @@ impl GrpcConsumer {
         Ok((method.input(), method.output()))
     }
 
+    /// Validate every credential-source list this route can extract from:
+    /// the configured sources and, when a compiled plan is present, the
+    /// plan's own sources (fail-closed at load, ADR-0033).
+    fn validate_route_credential_sources(&self) -> Result<(), CamelError> {
+        let Some(sec_ctx) = &self.security_ctx else {
+            return Ok(());
+        };
+        validate_credential_sources(&sec_ctx.credential_sources)?;
+        if let Some(plan) = &sec_ctx.plan {
+            validate_credential_sources(&plan.credential_sources)?;
+        }
+        Ok(())
+    }
+
     pub async fn start_with_listener(
         &mut self,
         ctx: ConsumerContext,
         listener: tokio::net::TcpListener,
     ) -> Result<(), CamelError> {
-        if let Some(sec_ctx) = &self.security_ctx {
-            validate_credential_sources(&sec_ctx.credential_sources)?;
-        }
+        self.validate_route_credential_sources()?;
         let dispatch = GrpcServerRegistry::global()
             .get_or_spawn_with_listener(
                 listener,
@@ -376,6 +462,16 @@ impl GrpcConsumer {
         let mode = self.mode;
 
         let (env_tx, mut env_rx) = mpsc::channel::<GrpcRequestEnvelope>(64);
+        // Kernel interceptor state is captured HERE, at dispatch-entry
+        // construction, from the security context wired before start
+        // (Task 2.1 construction-order lifecycle fix). The per-request
+        // handlers are built from this entry, so the plan is present
+        // before any request arrives — never patched on afterwards.
+        let kernel = self
+            .security_ctx
+            .as_ref()
+            .and_then(GrpcKernelAuth::from_security_context)
+            .map(Arc::new);
         {
             let mut table = dispatch.write().await;
             if table.contains_key(&self.path) {
@@ -393,7 +489,13 @@ impl GrpcConsumer {
             };
             table.insert(
                 self.path.clone(),
-                (env_tx, mode, authenticator, credential_sources),
+                (
+                    env_tx,
+                    mode,
+                    authenticator,
+                    credential_sources,
+                    kernel.clone(),
+                ),
             );
         }
 
@@ -436,6 +538,10 @@ impl GrpcConsumer {
                     let correlation_id = next_observer_id();
                     let path_for_log = path.clone();
                     let policy = self.security_ctx.as_ref().map(|ctx| ctx.policy.clone());
+                    // Kernel state captured at dispatch-entry construction,
+                    // cloned per request; the principal minted by the
+                    // interceptor binds to this plan for the carrier install.
+                    let kernel = kernel.clone();
 
                     debug!(
                         path = %path_for_log,
@@ -446,7 +552,7 @@ impl GrpcConsumer {
                     join_set.spawn(async move {
                         let _permit = permit;
                         match envelope {
-                            GrpcRequestEnvelope::Unary { metadata, body, reply_tx, principal } => {
+                            GrpcRequestEnvelope::Unary { metadata, body, reply_tx, principal, kernel_principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
@@ -457,7 +563,12 @@ impl GrpcConsumer {
                                 if let (Some(principal), Some(policy)) = (&principal, &policy) {
                                     let mut exchange = Exchange::new(Message::new(Body::Empty));
                                     store_principal_properties(&mut exchange, principal);
-                                    match policy.evaluate(&mut exchange).await {
+                                    let legacy = GrpcPrincipal(Principal::clone(principal));
+                                    let auth = AuthContext {
+                                        principal: &legacy,
+                                        transport: TransportId::Grpc,
+                                    };
+                                    match policy.evaluate(&mut exchange, &auth).await {
                                         Ok(AuthorizationDecision::Granted { .. }) => {
                                             tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
                                         }
@@ -480,8 +591,9 @@ impl GrpcConsumer {
                                     }
                                 }
 
+                                let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 let result = process_unary_request(
-                                    body, metadata, req_desc, resp_desc, sender,
+                                    body, metadata, req_desc, resp_desc, sender, kernel_auth,
                                 ).await;
                                 let reply = match result {
                                     Ok(bytes) => GrpcReply::Ok(bytes),
@@ -489,7 +601,7 @@ impl GrpcConsumer {
                                 };
                                 let _ = reply_tx.send(reply);
                             }
-                            GrpcRequestEnvelope::ServerStreaming { metadata, body, reply_tx, principal } => {
+                            GrpcRequestEnvelope::ServerStreaming { metadata, body, reply_tx, principal, kernel_principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
@@ -500,7 +612,12 @@ impl GrpcConsumer {
                                 if let (Some(principal), Some(policy)) = (&principal, &policy) {
                                     let mut exchange = Exchange::new(Message::new(Body::Empty));
                                     store_principal_properties(&mut exchange, principal);
-                                    match policy.evaluate(&mut exchange).await {
+                                    let legacy = GrpcPrincipal(Principal::clone(principal));
+                                    let auth = AuthContext {
+                                        principal: &legacy,
+                                        transport: TransportId::Grpc,
+                                    };
+                                    match policy.evaluate(&mut exchange, &auth).await {
                                         Ok(AuthorizationDecision::Granted { .. }) => {
                                             tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
                                         }
@@ -523,11 +640,12 @@ impl GrpcConsumer {
                                     }
                                 }
 
+                                let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_server_streaming_request(
-                                    body, metadata, req_desc, resp_desc, sender, reply_tx,
+                                    body, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth,
                                 ).await;
                             }
-                            GrpcRequestEnvelope::ClientStreaming { metadata, body_rx, reply_tx, principal } => {
+                            GrpcRequestEnvelope::ClientStreaming { metadata, body_rx, reply_tx, principal, kernel_principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
@@ -537,7 +655,12 @@ impl GrpcConsumer {
                                 if let (Some(principal), Some(policy)) = (&principal, &policy) {
                                     let mut exchange = Exchange::new(Message::new(Body::Empty));
                                     store_principal_properties(&mut exchange, principal);
-                                    match policy.evaluate(&mut exchange).await {
+                                    let legacy = GrpcPrincipal(Principal::clone(principal));
+                                    let auth = AuthContext {
+                                        principal: &legacy,
+                                        transport: TransportId::Grpc,
+                                    };
+                                    match policy.evaluate(&mut exchange, &auth).await {
                                         Ok(AuthorizationDecision::Granted { .. }) => {
                                             tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
                                         }
@@ -560,11 +683,12 @@ impl GrpcConsumer {
                                     }
                                 }
 
+                                let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_client_streaming_request(
-                                    body_rx, metadata, req_desc, resp_desc, sender, reply_tx,
+                                    body_rx, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth,
                                 ).await;
                             }
-                            GrpcRequestEnvelope::Bidi { metadata, body_rx, reply_tx, principal } => {
+                            GrpcRequestEnvelope::Bidi { metadata, body_rx, reply_tx, principal, kernel_principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
@@ -574,7 +698,12 @@ impl GrpcConsumer {
                                 if let (Some(principal), Some(policy)) = (&principal, &policy) {
                                     let mut exchange = Exchange::new(Message::new(Body::Empty));
                                     store_principal_properties(&mut exchange, principal);
-                                    match policy.evaluate(&mut exchange).await {
+                                    let legacy = GrpcPrincipal(Principal::clone(principal));
+                                    let auth = AuthContext {
+                                        principal: &legacy,
+                                        transport: TransportId::Grpc,
+                                    };
+                                    match policy.evaluate(&mut exchange, &auth).await {
                                         Ok(AuthorizationDecision::Granted { .. }) => {
                                             tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
                                         }
@@ -597,8 +726,9 @@ impl GrpcConsumer {
                                     }
                                 }
 
+                                let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_bidi_request(
-                                    body_rx, metadata, req_desc, resp_desc, sender, reply_tx,
+                                    body_rx, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth,
                                 ).await;
                             }
                         }
@@ -625,9 +755,7 @@ impl GrpcConsumer {
 #[async_trait]
 impl Consumer for GrpcConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-        if let Some(sec_ctx) = &self.security_ctx {
-            validate_credential_sources(&sec_ctx.credential_sources)?;
-        }
+        self.validate_route_credential_sources()?;
         info!(
             host = %self.host,
             port = self.port,
@@ -685,6 +813,7 @@ async fn process_unary_request(
     req_desc: MessageDescriptor,
     resp_desc: MessageDescriptor,
     sender: mpsc::Sender<ExchangeEnvelope>,
+    kernel_auth: Option<KernelRequestAuth>,
 ) -> Result<Vec<u8>, Status> {
     let req_dyn = DynamicMessage::decode(req_desc, body.as_slice())
         .map_err(|e| Status::invalid_argument(format!("failed to decode protobuf: {e}")))?;
@@ -698,7 +827,11 @@ async fn process_unary_request(
         msg.set_header(k, v);
     }
 
-    let exchange = Exchange::new(msg);
+    let mut exchange = Exchange::new(msg);
+    if let Some(auth) = kernel_auth.as_ref() {
+        // Carrier install + route-binding enforcement before the pipeline.
+        auth.apply_to(&mut exchange)?;
+    }
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let envelope = ExchangeEnvelope {
@@ -748,6 +881,7 @@ async fn process_server_streaming_request(
     resp_desc: MessageDescriptor,
     sender: mpsc::Sender<ExchangeEnvelope>,
     reply_tx: mpsc::Sender<GrpcStreamItem>,
+    kernel_auth: Option<KernelRequestAuth>,
 ) {
     let req_dyn = match DynamicMessage::decode(req_desc, body.as_slice()) {
         Ok(m) => m,
@@ -784,6 +918,12 @@ async fn process_server_streaming_request(
     let _guard = ObserverGuard::new(observer_id.clone());
 
     let mut exchange = Exchange::new(msg);
+    if let Some(auth) = kernel_auth.as_ref()
+        && let Err(status) = auth.apply_to(&mut exchange)
+    {
+        let _ = reply_tx.send(GrpcStreamItem::Error(status)).await;
+        return;
+    }
     exchange.set_property("CamelGrpcStreamObserverId", Value::String(observer_id));
 
     let envelope = ExchangeEnvelope {
@@ -815,6 +955,7 @@ async fn process_client_streaming_request(
     resp_desc: MessageDescriptor,
     sender: mpsc::Sender<ExchangeEnvelope>,
     reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
+    kernel_auth: Option<KernelRequestAuth>,
 ) {
     while let Some(body) = body_rx.recv().await {
         let req_dyn = match DynamicMessage::decode(req_desc.clone(), body.as_slice()) {
@@ -846,7 +987,13 @@ async fn process_client_streaming_request(
             serde_json::Value::Bool(true),
         );
 
-        let exchange = Exchange::new(msg);
+        let mut exchange = Exchange::new(msg);
+        if let Some(auth) = kernel_auth.as_ref()
+            && let Err(status) = auth.apply_to(&mut exchange)
+        {
+            let _ = reply_tx.send(GrpcReply::Err(status));
+            return;
+        }
         let (reply_tx_pipe, reply_rx_pipe) = tokio::sync::oneshot::channel();
         let envelope = ExchangeEnvelope {
             exchange,
@@ -876,7 +1023,13 @@ async fn process_client_streaming_request(
         serde_json::Value::Bool(true),
     );
 
-    let completion_exchange = Exchange::new(completion_msg);
+    let mut completion_exchange = Exchange::new(completion_msg);
+    if let Some(auth) = kernel_auth.as_ref()
+        && let Err(status) = auth.apply_to(&mut completion_exchange)
+    {
+        let _ = reply_tx.send(GrpcReply::Err(status));
+        return;
+    }
     let (reply_tx_pipe, reply_rx_pipe) = tokio::sync::oneshot::channel();
     let envelope = ExchangeEnvelope {
         exchange: completion_exchange,
@@ -935,6 +1088,7 @@ async fn process_bidi_request(
     resp_desc: MessageDescriptor,
     sender: mpsc::Sender<ExchangeEnvelope>,
     reply_tx: mpsc::Sender<GrpcStreamItem>,
+    kernel_auth: Option<KernelRequestAuth>,
 ) {
     let observer = GrpcStreamObserver::new(reply_tx.clone(), resp_desc);
     let observer_id = next_observer_id();
@@ -985,6 +1139,12 @@ async fn process_bidi_request(
             sequence += 1;
 
             let mut exchange = Exchange::new(msg);
+            if let Some(auth) = kernel_auth.as_ref()
+                && let Err(status) = auth.apply_to(&mut exchange)
+            {
+                let _ = observer.on_error(status).await;
+                break;
+            }
             exchange.set_property(
                 "CamelGrpcStreamObserverId",
                 Value::String(observer_id.clone()),

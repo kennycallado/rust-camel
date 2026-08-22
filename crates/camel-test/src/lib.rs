@@ -7,6 +7,9 @@
 mod harness;
 mod time;
 
+pub mod security_fixture;
+
 pub use camel_component_mock::MockComponent;
 pub use harness::{CamelTestContext, CamelTestContextBuilder, NoTimeControl, WithTimeControl};
+pub use security_fixture::SecurityConfigFixture;
 pub use time::TimeController;

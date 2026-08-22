@@ -453,6 +453,18 @@ pub(crate) fn route_dsl_to_declarative_route(
                     ));
                 }
             }
+            if let Some(audiences) = &sp.audiences {
+                if audiences.is_empty() {
+                    return Err(CamelError::RouteError(
+                        "security_policy audiences must not be empty".into(),
+                    ));
+                }
+                if sp.roles.is_none() && sp.scopes.is_none() {
+                    return Err(CamelError::RouteError(
+                        "security_policy audiences is only valid with the roles or scopes form".into(),
+                    ));
+                }
+            }
             if let Some(roles) = sp.roles {
                 if roles.is_empty() {
                     return Err(CamelError::RouteError(
@@ -462,9 +474,9 @@ pub(crate) fn route_dsl_to_declarative_route(
                 Ok(DeclarativeSecurityPolicy::Roles {
                     roles,
                     all_required: sp.all_required.unwrap_or(true),
-                    trust_upstream_principal: sp.trust_upstream_principal.unwrap_or(false),
                     credential_sources: sp.credential_sources,
                     provider: sp.provider,
+                    audiences: sp.audiences,
                 })
             } else if let Some(scopes) = sp.scopes {
                 if scopes.is_empty() {
@@ -475,9 +487,9 @@ pub(crate) fn route_dsl_to_declarative_route(
                 Ok(DeclarativeSecurityPolicy::Scopes {
                     scopes,
                     all_required: sp.all_required.unwrap_or(true),
-                    trust_upstream_principal: sp.trust_upstream_principal.unwrap_or(false),
                     credential_sources: sp.credential_sources,
                     provider: sp.provider,
+                    audiences: sp.audiences,
                 })
             } else if let Some(name) = sp.r#ref {
                 if sp.all_required.is_some() {
@@ -2407,13 +2419,12 @@ routes:
             DeclarativeSecurityPolicy::Roles {
                 roles,
                 all_required,
-                trust_upstream_principal,
                 credential_sources: _,
                 provider: _,
+                audiences: _,
             } => {
                 assert_eq!(roles, &vec!["admin".to_string(), "superuser".to_string()]);
                 assert!(!all_required);
-                assert!(!trust_upstream_principal);
             }
             _ => panic!("expected Roles"),
         }
@@ -2436,13 +2447,12 @@ routes:
             DeclarativeSecurityPolicy::Scopes {
                 scopes,
                 all_required,
-                trust_upstream_principal,
                 credential_sources: _,
                 provider: _,
+                audiences: _,
             } => {
                 assert_eq!(scopes, &vec!["read:api".to_string()]);
                 assert!(*all_required);
-                assert!(!trust_upstream_principal);
             }
             _ => panic!("expected Scopes"),
         }
@@ -2470,34 +2480,7 @@ routes:
     }
 
     #[test]
-    fn parse_security_policy_roles_trust_upstream_principal_default_false() {
-        let yaml = r#"
-routes:
-  - id: r-sec
-    from: direct:start
-    security_policy:
-      roles: ["admin"]
-    steps:
-      - to: log:info
-"#;
-        let routes = parse_yaml_to_declarative(yaml).unwrap();
-        let sp = routes[0].security_policy.as_ref().unwrap();
-        match sp {
-            DeclarativeSecurityPolicy::Roles {
-                trust_upstream_principal,
-                ..
-            } => {
-                assert!(
-                    !trust_upstream_principal,
-                    "trust_upstream_principal must default to false (fail-closed)"
-                );
-            }
-            _ => panic!("expected Roles"),
-        }
-    }
-
-    #[test]
-    fn parse_security_policy_roles_trust_upstream_principal_opt_in() {
+    fn trust_upstream_flag_fails_at_load() {
         let yaml = r#"
 routes:
   - id: r-sec
@@ -2508,20 +2491,15 @@ routes:
     steps:
       - to: log:info
 "#;
-        let routes = parse_yaml_to_declarative(yaml).unwrap();
-        let sp = routes[0].security_policy.as_ref().unwrap();
-        match sp {
-            DeclarativeSecurityPolicy::Roles {
-                trust_upstream_principal,
-                ..
-            } => {
-                assert!(
-                    *trust_upstream_principal,
-                    "trust_upstream_principal must be true when set in YAML"
-                );
-            }
-            _ => panic!("expected Roles"),
-        }
+        let result = parse_yaml_to_declarative(yaml);
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected load error for removed trust_upstream_principal flag"),
+        };
+        assert!(
+            err.contains("trust_upstream_principal"),
+            "load error must name the removed field, got: {err}"
+        );
     }
 
     #[test]
@@ -5436,6 +5414,73 @@ routes:
 "#;
         let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
         assert!(err.contains("provider"), "got: {err}");
+        assert!(err.contains("security_policy"), "got: {err}");
+    }
+
+    // ── Task 2.10: rest-block security_policy load-time validation ──
+    //
+    // The block policy is validated by the shared route conversion
+    // (`route_dsl_to_declarative_route`): lowering copies it onto every
+    // lowered route, so the route-level rules apply verbatim. These tests
+    // pin that mirror for the rest: entry point.
+
+    #[test]
+    fn rest_block_policy_without_form_fails_at_load() {
+        let yaml = r#"
+rest:
+  - host: 127.0.0.1
+    port: 18080
+    path: /api/users
+    security_policy:
+      all_required: false
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("exactly one of: roles, scopes, ref, wasm, permission"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn rest_block_policy_provider_on_ref_form_fails_at_load() {
+        let yaml = r#"
+rest:
+  - host: 127.0.0.1
+    port: 18080
+    path: /api/users
+    security_policy:
+      ref: "my-custom-policy"
+      provider: "idp-a"
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("provider is only valid with the roles or scopes form"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn dsl_route_audiences_validated_like_provider() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      ref: "my-custom-policy"
+      audiences: ["api-2"]
+    steps:
+      - to: log:info
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(err.contains("audiences"), "got: {err}");
         assert!(err.contains("security_policy"), "got: {err}");
     }
 }

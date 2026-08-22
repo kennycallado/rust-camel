@@ -6,7 +6,7 @@ use camel_api::security_policy::Principal;
 
 use crate::claims::ClaimsMapper;
 use crate::introspection::TokenIntrospector;
-use crate::token_authenticator::TokenAuthenticator;
+use crate::token_authenticator::{AuthnRequest, TokenAuthenticator};
 use crate::types::AuthError;
 
 pub struct IntrospectionAuthenticator {
@@ -24,11 +24,21 @@ impl IntrospectionAuthenticator {
             claims_mapper,
         }
     }
-}
 
-#[async_trait]
-impl TokenAuthenticator for IntrospectionAuthenticator {
-    async fn authenticate_bearer(&self, token: &str) -> Result<Principal, CamelError> {
+    /// Introspect a token and enforce the request-scoped audience/issuer sets
+    /// against the introspected claims.
+    ///
+    /// Fail-closed by design: when a non-empty request set is present, an absent
+    /// `iss`/`aud` introspection claim rejects. RFC 7662 makes these claims
+    /// optional and Keycloak may not return `aud`, so a provider relying on
+    /// request-scoped audience enforcement must ensure the introspection
+    /// response carries the claim.
+    async fn introspect_principal(
+        &self,
+        token: &str,
+        audiences: &[String],
+        issuers: &[String],
+    ) -> Result<Principal, CamelError> {
         let result = self.introspector.introspect(token).await?;
         if !result.active {
             return Err(AuthError::TokenInvalid("token is not active".into()).into());
@@ -54,12 +64,50 @@ impl TokenAuthenticator for IntrospectionAuthenticator {
             .into());
         }
 
+        // Request-scoped issuer enforcement.
+        if !issuers.is_empty() {
+            let iss = result
+                .iss
+                .as_deref()
+                .ok_or_else(|| AuthError::TokenInvalid("token missing issuer claim".into()))?;
+            if !issuers.iter().any(|i| i == iss) {
+                return Err(AuthError::TokenInvalid("token issuer not accepted".into()).into());
+            }
+        }
+
+        // Request-scoped audience enforcement (aud may be a string or array).
+        if !audiences.is_empty() {
+            let aud_values: Vec<String> = match &result.aud {
+                Some(serde_json::Value::String(s)) => vec![s.clone()],
+                Some(serde_json::Value::Array(arr)) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect(),
+                _ => vec![],
+            };
+            if !aud_values.iter().any(|a| audiences.contains(a)) {
+                return Err(AuthError::TokenInvalid("token audience not accepted".into()).into());
+            }
+        }
+
         let claims = serde_json::to_value(&result).map_err(|e| {
             AuthError::ConfigError(format!("introspection result serialization failed: {e}"))
         })?;
         self.claims_mapper
             .to_principal(&claims)
             .map_err(CamelError::from)
+    }
+}
+
+#[async_trait]
+impl TokenAuthenticator for IntrospectionAuthenticator {
+    async fn authenticate_bearer(&self, token: &str) -> Result<Principal, CamelError> {
+        self.introspect_principal(token, &[], &[]).await
+    }
+
+    async fn authenticate(&self, req: AuthnRequest<'_>) -> Result<Principal, CamelError> {
+        self.introspect_principal(req.token, req.audiences, req.accepted_issuers)
+            .await
     }
 }
 

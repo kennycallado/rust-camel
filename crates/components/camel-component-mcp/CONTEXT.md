@@ -45,27 +45,30 @@ Global TOML key: `mcp` (`McpBundle`).
   `max_tools`, `max_resources`, `allowed_hosts`.
 - `mcp.remotes.<name>` (`McpRemoteConfig`): `url`, `transport`.
 
-Runtime server config is TOML-owned: `mcp.servers.<name>` is the sole source
-of runtime server config. The DSL block's server fields (`bind`, `tls`,
-`max_tools`, `max_resources`) are a declaration/validation surface only —
-declaration parity with the TOML keys, but their values do NOT flow to the
-runtime. `security_policy` is the exception: the DSL block's value is a real
-`RouteDslSecurityPolicy` that propagates to every lowered tool and resource
-route, where the route-level `SecurityPolicy` enforces it per request. The
-DSL server `name` MUST match a `mcp.servers.<name>` key or consumer start
-fails cleanly (`McpError::Endpoint` naming the server); a DSL `bind` that
-diverges from the TOML `bind` is not reconciled (TOML wins).
+Server config merges by ownership (ADR-0061 Rule 9): when a route
+originates from a DSL `mcp:` block, the block's `bind`/`tls`/`max_tools`/
+`max_resources` ARE the runtime listener values; TOML and the DSL block
+declaring the same key with DIFFERENT values is a hard startup error naming
+both sources (never silent TOML-wins). Keys declared on one side only flow
+from that side; catalog caps default to 128 only when neither side declares
+them. The DSL block's `security_policy` is a real `RouteDslSecurityPolicy`
+that propagates to every lowered tool and resource route. The DSL server
+`name` MUST match a `mcp.servers.<name>` key or consumer start fails
+cleanly (`McpError::Endpoint` naming the server).
 
 `transport` accepts exactly `streamable-http`. The enum deserializer rejects
 any other string at config load; `deny_unknown_fields` applies to both config
-structs (ADR-0033). Server policy has two gates. The bind gate is
-presence-only, validated at consumer start, fail-closed: the TOML
-`security_policy` key must be set (ADR-0033 Require-Explicit-Choice), the
-bind is an IP literal, caps are nonzero, and a non-loopback bind emits a
-`warn!` (ADR-0052 rule 3). The enforcement gate is route-level: the adapter
-copies the inbound HTTP request headers onto the Exchange, and the route's
-`SecurityPolicy` evaluates each request against them (camel-api, ADR-0033).
-Remote URLs are validated at connect time, not at startup.
+structs (ADR-0033). Server policy follows the unified transport auth kernel
+(ADR-0061). The per-bind exposure gate runs at consumer start, fail-closed:
+the bind is an IP literal, caps are nonzero, and a non-loopback bind serving
+any `Public` route requires a `[binds."<addr>"] allow_public_exposure = true`
+acknowledgement or start fails naming the bind (`camel-auth` bind gate,
+ADR-0061 Rule 4); an acknowledged exposure warns permanently. Enforcement is
+kernel-owned: the adapter extracts credentials per the route plan's
+credential sources from the normalized request headers, authenticates via
+`kernel_authenticate`, and installs the typed carrier on the Exchange
+before the route pipeline; denial surfaces as the tool `isError`/resource
+error body. Remote URLs are validated at connect time, not at startup.
 Catalog caps default to 128 and ride the ADR-0038 per-item channel; a breach
 rejects the (N+1)th route with a clean `CamelError` (no silent truncation).
 

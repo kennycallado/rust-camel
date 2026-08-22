@@ -63,8 +63,25 @@ async fn second_consumer_reuses_listener() {
 
 #[tokio::test]
 async fn conflicting_bind_rejected() {
+    // Since unify-transport-auth Task 2.4 the typed TLS config is CONSUMED at
+    // listener construction (axum-server bind_rustls), so the first spawn
+    // needs real PEM material — the conflicting second lookup then trips the
+    // registry's tls conflict check as before.
+    use camel_component_api::test_support::tls as tls_support;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let bind = "127.0.0.3:0";
-    let with_tls = cfg(bind, Some(serde_json::json!({"cert": "x", "key": "y"})));
+    let (_ca, cert_pem, key_pem) = tls_support::gen_server_cert();
+    let cert_path = tls_support::write_pem_tmp("mcp-registry-cert.pem", &cert_pem);
+    let key_path = tls_support::write_pem_tmp("mcp-registry-key.pem", &key_pem);
+    let with_tls = cfg(
+        bind,
+        Some(serde_json::json!({
+            "cert_path": cert_path.to_str().expect("cert path is utf-8"),
+            "key_path": key_path.to_str().expect("key path is utf-8"),
+        })),
+    );
     let without_tls = cfg(bind, None);
 
     McpServerRegistry::global()
@@ -132,7 +149,7 @@ async fn conflicting_bind_max_tools_rejected() {
         .unwrap();
 
     let mut tools_diff = base.clone();
-    tools_diff.max_tools = 1;
+    tools_diff.max_tools = Some(1);
 
     let err = McpServerRegistry::global()
         .get_or_spawn(bind, &tools_diff)
@@ -156,7 +173,7 @@ async fn conflicting_bind_max_resources_rejected() {
         .unwrap();
 
     let mut resources_diff = base.clone();
-    resources_diff.max_resources = 1;
+    resources_diff.max_resources = Some(1);
 
     let err = McpServerRegistry::global()
         .get_or_spawn(bind, &resources_diff)
@@ -203,11 +220,21 @@ async fn conflicting_allowed_hosts_rejected() {
 fn duplicate_tool_registration_rejected() {
     let registry = McpToolRegistry::new(128);
     registry
-        .register("lookup".to_string(), tool_sender(), serde_json::json!({}))
+        .register(
+            "lookup".to_string(),
+            "route-1".to_string(),
+            tool_sender(),
+            serde_json::json!({}),
+        )
         .unwrap();
 
     let err = registry
-        .register("lookup".to_string(), tool_sender(), serde_json::json!({}))
+        .register(
+            "lookup".to_string(),
+            "route-1".to_string(),
+            tool_sender(),
+            serde_json::json!({}),
+        )
         .unwrap_err();
 
     assert!(
@@ -221,11 +248,19 @@ fn duplicate_tool_registration_rejected() {
 fn duplicate_resource_registration_rejected() {
     let registry = McpResourceRegistry::new(128);
     registry
-        .register("crm://customers".to_string(), resource_sender())
+        .register(
+            "crm://customers".to_string(),
+            "route-1".to_string(),
+            resource_sender(),
+        )
         .unwrap();
 
     let err = registry
-        .register("crm://customers".to_string(), resource_sender())
+        .register(
+            "crm://customers".to_string(),
+            "route-1".to_string(),
+            resource_sender(),
+        )
         .unwrap_err();
 
     assert!(
@@ -241,12 +276,22 @@ fn register_129th_tool_rejected() {
 
     for i in 0..128 {
         registry
-            .register(format!("tool_{i}"), tool_sender(), serde_json::json!({}))
+            .register(
+                format!("tool_{i}"),
+                format!("route-{i}"),
+                tool_sender(),
+                serde_json::json!({}),
+            )
             .unwrap();
     }
 
     let err = registry
-        .register("tool_128".to_string(), tool_sender(), serde_json::json!({}))
+        .register(
+            "tool_128".to_string(),
+            "route-128".to_string(),
+            tool_sender(),
+            serde_json::json!({}),
+        )
         .unwrap_err();
 
     assert!(
@@ -261,7 +306,12 @@ fn raised_cap_allows_150() {
 
     for i in 0..150 {
         registry
-            .register(format!("tool_{i}"), tool_sender(), serde_json::json!({}))
+            .register(
+                format!("tool_{i}"),
+                format!("route-{i}"),
+                tool_sender(),
+                serde_json::json!({}),
+            )
             .unwrap();
     }
 }
@@ -270,7 +320,12 @@ fn raised_cap_allows_150() {
 fn not_ready_tool_hidden_from_list() {
     let registry = McpToolRegistry::new(128);
     registry
-        .register("hidden".to_string(), tool_sender(), serde_json::json!({}))
+        .register(
+            "hidden".to_string(),
+            "route-1".to_string(),
+            tool_sender(),
+            serde_json::json!({}),
+        )
         .unwrap();
 
     assert!(
@@ -289,7 +344,12 @@ fn not_ready_tool_hidden_from_list() {
 fn stopped_tool_unregistered() {
     let registry = McpToolRegistry::new(128);
     registry
-        .register("lookup".to_string(), tool_sender(), serde_json::json!({}))
+        .register(
+            "lookup".to_string(),
+            "route-1".to_string(),
+            tool_sender(),
+            serde_json::json!({}),
+        )
         .unwrap();
     registry.mark_ready("lookup");
 
@@ -316,14 +376,26 @@ fn resource_cap_enforced() {
     let registry = McpResourceRegistry::new(2);
 
     registry
-        .register("crm://a".to_string(), resource_sender())
+        .register(
+            "crm://a".to_string(),
+            "route-a".to_string(),
+            resource_sender(),
+        )
         .unwrap();
     registry
-        .register("crm://b".to_string(), resource_sender())
+        .register(
+            "crm://b".to_string(),
+            "route-b".to_string(),
+            resource_sender(),
+        )
         .unwrap();
 
     let err = registry
-        .register("crm://c".to_string(), resource_sender())
+        .register(
+            "crm://c".to_string(),
+            "route-c".to_string(),
+            resource_sender(),
+        )
         .unwrap_err();
 
     assert!(

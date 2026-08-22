@@ -345,6 +345,18 @@ pub struct RouteDefinition {
     pub(crate) security_policy: Option<SecurityPolicyConfig>,
     /// Optional token authenticator for validating JWT/OAuth tokens.
     pub(crate) security_authenticator: Option<Arc<dyn TokenAuthenticator>>,
+    /// Named authentication providers for this route, injected into the
+    /// consumer `SecurityContext` so Phase-2 transports can resolve them.
+    pub(crate) provider_registry: Option<Arc<camel_auth::ProviderRegistry>>,
+    /// Declared provider name for plan compilation (`security_policy.provider`
+    /// in the DSL). Resolved against the provider registry at staging time;
+    /// a missing name fails compilation instead of downgrading to `Public`.
+    pub(crate) security_provider: Option<String>,
+    /// Route-level audience override for plan compilation. When present the
+    /// compiled `RouteSecurityPlan.audience_binding` uses these audiences
+    /// (issuers still come from the provider); when absent the resolved
+    /// provider's binding is copied verbatim.
+    pub(crate) security_audiences: Option<Vec<String>>,
     /// Optional Unit of Work config for in-flight tracking and completion hooks.
     pub(crate) unit_of_work: Option<UnitOfWorkConfig>,
     /// User override for the consumer's concurrency model. `None` means
@@ -370,6 +382,9 @@ impl RouteDefinition {
             circuit_breaker_fallback: Vec::new(),
             security_policy: None,
             security_authenticator: None,
+            provider_registry: None,
+            security_provider: None,
+            security_audiences: None,
             unit_of_work: None,
             concurrency: None,
             route_id: String::new(), // Will be set by with_route_id()
@@ -439,6 +454,38 @@ impl RouteDefinition {
     ) -> Self {
         self.security_authenticator = Some(authenticator);
         self
+    }
+
+    /// Set the named authentication providers for this route.
+    ///
+    /// The registry is injected into the consumer `SecurityContext` so
+    /// Phase-2 transports can resolve providers without holding their own
+    /// authenticator.
+    pub fn with_provider_registry(mut self, registry: Arc<camel_auth::ProviderRegistry>) -> Self {
+        self.provider_registry = Some(registry);
+        self
+    }
+
+    /// Set the declared provider name used by plan compilation.
+    pub fn with_security_provider(mut self, name: impl Into<String>) -> Self {
+        self.security_provider = Some(name.into());
+        self
+    }
+
+    /// Set the route-level audience override used by plan compilation.
+    pub fn with_security_audiences(mut self, audiences: Vec<String>) -> Self {
+        self.security_audiences = Some(audiences);
+        self
+    }
+
+    /// The declared provider name, if any.
+    pub fn security_provider(&self) -> Option<&str> {
+        self.security_provider.as_deref()
+    }
+
+    /// The route-level audience override, if any.
+    pub fn security_audiences(&self) -> Option<&[String]> {
+        self.security_audiences.as_deref()
     }
 
     /// Set a unit of work config for this route.
@@ -1327,7 +1374,7 @@ mod tests {
         use camel_api::CamelError;
         use camel_api::Exchange;
         use camel_api::security_policy::{
-            AuthorizationDecision, Principal, SecurityPolicy, SecurityPolicyConfig,
+            AuthContext, AuthorizationDecision, Principal, SecurityPolicy, SecurityPolicyConfig,
         };
 
         struct StubPolicy;
@@ -1336,6 +1383,7 @@ mod tests {
             async fn evaluate(
                 &self,
                 _exchange: &mut Exchange,
+                _auth: &AuthContext<'_>,
             ) -> Result<AuthorizationDecision, CamelError> {
                 Ok(AuthorizationDecision::Granted {
                     principal: Principal {

@@ -1,0 +1,38 @@
+# Secured variant of the rest-crud API (`unify-transport-auth`, Task 2.10).
+#
+# The `security_policy` key sits on the `rest:` BLOCK, not on individual
+# operations: lowering copies it onto every lowered route, so all four
+# CRUD endpoints enforce the same roles policy against the named
+# provider. A request without a credential gets 401 before any handler
+# runs; a token whose principal holds `user` is granted.
+# ANCHOR: rest-security
+rest:
+  - host: 0.0.0.0
+    port: 9090
+    path: /api/users
+    security_policy:
+      roles: ["user"]
+      provider: "native-demo"
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+        produces: application/json
+      - method: POST
+        operation_id: createUser
+        consumes: application/json
+        produces: application/json
+        success_status: 201
+        to: direct:createUser
+      - method: PUT
+        path: /{id}
+        operation_id: updateUser
+        consumes: application/json
+        produces: application/json
+        to: direct:updateUser
+      - method: DELETE
+        path: /{id}
+        operation_id: deleteUser
+        to: direct:deleteUser
+        success_status: 204
+# ANCHOR_END: rest-security

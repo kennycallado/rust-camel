@@ -48,6 +48,8 @@ fn native_principal(subject: &str, issuer: &str, roles: &[String], scopes: &[Str
 /// mirroring `camel-cli::native_authenticator`. camel-test cannot depend on
 /// camel-cli (ADR-0055), so the store synthesis is reproduced here from the
 /// same `camel_auth` primitives the CLI uses.
+/// Lockstep with `native_authenticator` (crates/camel-cli/src/security.rs)
+/// and `SecurityConfigFixture` (crates/camel-test/src/security_fixture.rs).
 fn native_store_from_config(
     native: &NativeAuthConfig,
 ) -> Result<NativeCredentialStore, CamelError> {
@@ -122,19 +124,28 @@ async fn build_secure_route(
     let store = native_store_from_config(native).expect("store builds from config");
     let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
 
-    let policy = RolePolicy::new(
-        required_roles,
-        true,
-        false,
-        Arc::clone(&authenticator),
-        sources.clone(),
-    );
+    // The kernel compiles plans against the provider registry (sole-provider
+    // rule); the bare authenticator alone is not a registered provider.
+    let provider_registry = {
+        let registry = camel_auth::ProviderRegistry::new();
+        registry.register(
+            "native",
+            camel_auth::ProviderEntry {
+                authenticator: Arc::clone(&authenticator),
+                audience_binding: None,
+            },
+        );
+        Arc::new(registry)
+    };
+
+    let policy = RolePolicy::new(required_roles, true);
     let config = SecurityPolicyConfig::new(policy).with_credential_sources(sources);
 
     let route = RouteBuilder::from(&format!("http://0.0.0.0:{port}/{path}"))
         .route_id(format!("secure-http-{path}"))
         .security_policy(config)
         .security_authenticator(authenticator)
+        .provider_registry(provider_registry)
         .set_body(Value::String("ok".into()))
         .set_header("CamelHttpResponseCode", Value::Number(200.into()))
         .to(format!("mock:{path}"))
@@ -154,8 +165,7 @@ fn load_camel_toml(toml_str: &str) -> CamelConfig {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let path = dir.path().join("Camel.toml");
     std::fs::write(&path, toml_str).expect("write Camel.toml");
-    let config = CamelConfig::from_file(path.to_str().unwrap()).expect("Camel.toml loads");
-    config
+    CamelConfig::from_file(path.to_str().unwrap()).expect("Camel.toml loads")
 }
 
 #[tokio::test(flavor = "multi_thread")]

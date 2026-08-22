@@ -115,9 +115,9 @@ credential, the request fails with `401` before policy evaluation. Store
 lookups run in constant time.
 
 `http://` and `ws://` consumers support the key. On a `ws://` route, a
-`roles` or `scopes` policy that uses a non-header source requires
-`trust_upstream_principal: true`; without the flag the consumer treats the
-token as unauthenticated.
+`roles` or `scopes` policy authenticates the token extracted from the
+declared sources; the removed `trust_upstream_principal` flag no longer
+exists, and exchange-property principal evidence never authorizes.
 
 Load-time validation rejects malformed declarations: an unknown source form,
 an empty cookie name, or a header name that is not a valid RFC 9110 token.

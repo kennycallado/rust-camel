@@ -51,9 +51,12 @@ stays consumed. No configuration override exists (Apache Camel
 A `security_policy` block on a `from: http://` route may declare a
 `credential_sources` list. It names where the credential comes from:
 `authorization_header`, a query parameter, a cookie, or a named custom header
-(`header: {name: X-API-Key}`). The list threads through
-`SecurityPolicyConfig` into `RolePolicy`/`ScopePolicy`, whose `authenticate()`
-extracts via `extract_token_multi` (ADR-0059). When the key is absent, the
+(`header: {name: X-API-Key}`). The list is validated at plan compilation
+(unsupported sources for the transport fail at load) and is consumed at the
+request boundary: `HttpKernelAuth` extracts via `extract_token_multi` and
+authenticates through `camel_auth::kernel_authenticate`, installing the
+typed principal carrier on the Exchange before the pipeline (ADR-0061
+Rule 1; extraction shapes per ADR-0059). When the key is absent, the
 default is `[authorization_header]` only (ADR-0033).
 
 ### Redact-by-construction

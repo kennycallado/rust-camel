@@ -87,60 +87,57 @@ fn map_credential_sources(
     }
 }
 
+/// A lowered security policy: the pipeline gate config, the resolved
+/// legacy authenticator, and the kernel plan inputs (declared provider name
+/// and route-level audience override, Task 1.8). The plan inputs are `None`
+/// for the authorization-only forms.
+struct CompiledSecurityPolicy {
+    config: camel_api::security_policy::SecurityPolicyConfig,
+    authenticator: Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
+    plan_provider: Option<String>,
+    plan_audiences: Option<Vec<String>>,
+}
+
 fn compile_security_policy(
     def: crate::model::DeclarativeSecurityPolicy,
     ctx: &SecurityCompileContext,
-) -> Result<
-    (
-        camel_api::security_policy::SecurityPolicyConfig,
-        Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
-    ),
-    CamelError,
-> {
+) -> Result<CompiledSecurityPolicy, CamelError> {
     match def {
         crate::model::DeclarativeSecurityPolicy::Roles {
             roles,
             all_required,
-            trust_upstream_principal,
             credential_sources,
             provider,
+            audiences,
         } => {
             let auth = require_authenticator(ctx, "roles", provider.as_deref())?;
             let sources = map_credential_sources(credential_sources);
-            let policy = camel_auth::RolePolicy::new(
-                roles,
-                all_required,
-                trust_upstream_principal,
-                std::sync::Arc::clone(&auth),
-                sources.clone(),
-            );
-            Ok((
-                camel_api::security_policy::SecurityPolicyConfig::new(policy)
+            let policy = camel_auth::RolePolicy::new(roles, all_required);
+            Ok(CompiledSecurityPolicy {
+                config: camel_api::security_policy::SecurityPolicyConfig::new(policy)
                     .with_credential_sources(sources),
-                Some(auth),
-            ))
+                authenticator: Some(auth),
+                plan_provider: provider,
+                plan_audiences: audiences,
+            })
         }
         crate::model::DeclarativeSecurityPolicy::Scopes {
             scopes,
             all_required,
-            trust_upstream_principal,
             credential_sources,
             provider,
+            audiences,
         } => {
             let auth = require_authenticator(ctx, "scopes", provider.as_deref())?;
             let sources = map_credential_sources(credential_sources);
-            let policy = camel_auth::ScopePolicy::new(
-                scopes,
-                all_required,
-                trust_upstream_principal,
-                std::sync::Arc::clone(&auth),
-                sources.clone(),
-            );
-            Ok((
-                camel_api::security_policy::SecurityPolicyConfig::new(policy)
+            let policy = camel_auth::ScopePolicy::new(scopes, all_required);
+            Ok(CompiledSecurityPolicy {
+                config: camel_api::security_policy::SecurityPolicyConfig::new(policy)
                     .with_credential_sources(sources),
-                Some(auth),
-            ))
+                authenticator: Some(auth),
+                plan_provider: provider,
+                plan_audiences: audiences,
+            })
         }
         crate::model::DeclarativeSecurityPolicy::Ref { name } => {
             let registry = ctx.registry.as_ref().ok_or_else(|| {
@@ -154,10 +151,12 @@ fn compile_security_policy(
                     name
                 ))
             })?;
-            Ok((
-                camel_api::security_policy::SecurityPolicyConfig::from_arc(policy),
-                None,
-            ))
+            Ok(CompiledSecurityPolicy {
+                config: camel_api::security_policy::SecurityPolicyConfig::from_arc(policy),
+                authenticator: None,
+                plan_provider: None,
+                plan_audiences: None,
+            })
         }
         crate::model::DeclarativeSecurityPolicy::Wasm { path, config } => {
             if !config.is_empty() {
@@ -179,10 +178,12 @@ fn compile_security_policy(
                     path
                 ))
             })?;
-            Ok((
-                camel_api::security_policy::SecurityPolicyConfig::from_arc(policy),
-                None,
-            ))
+            Ok(CompiledSecurityPolicy {
+                config: camel_api::security_policy::SecurityPolicyConfig::from_arc(policy),
+                authenticator: None,
+                plan_provider: None,
+                plan_audiences: None,
+            })
         }
         crate::model::DeclarativeSecurityPolicy::Permission {
             policy,
@@ -219,12 +220,14 @@ fn compile_security_policy(
                 scopes,
                 context,
             );
-            Ok((
-                camel_api::security_policy::SecurityPolicyConfig::from_arc(std::sync::Arc::new(
-                    policy,
-                )),
-                None,
-            ))
+            Ok(CompiledSecurityPolicy {
+                config: camel_api::security_policy::SecurityPolicyConfig::from_arc(
+                    std::sync::Arc::new(policy),
+                ),
+                authenticator: None,
+                plan_provider: None,
+                plan_audiences: None,
+            })
         }
     }
 }
@@ -278,11 +281,35 @@ pub fn compile_declarative_route_with_stream_cache_threshold(
     }
 
     if let Some(sp) = route.security_policy {
-        let (config, authenticator) = compile_security_policy(sp, &security_ctx)?;
-        definition = definition.with_security_policy(config);
-        if let Some(auth) = authenticator {
+        let compiled = compile_security_policy(sp, &security_ctx)?;
+        definition = definition.with_security_policy(compiled.config);
+        if let Some(auth) = compiled.authenticator {
             definition = definition.with_security_authenticator(auth);
         }
+        // Kernel plan inputs (Task 1.8): the declared provider name and
+        // route-level audience override ride on the definition; camel-core
+        // resolves them against the provider registry at staging time.
+        if let Some(provider) = compiled.plan_provider {
+            definition = definition.with_security_provider(provider);
+        }
+        if let Some(audiences) = compiled.plan_audiences {
+            definition = definition.with_security_audiences(audiences);
+        }
+    }
+
+    // Inject the named providers into the route so camel-core can attach them
+    // to the consumer SecurityContext (Phase-2 transports resolve providers
+    // from there). Empty registry is harmless; only attach when non-empty.
+    if security_ctx.provider_reg.is_some() || !security_ctx.providers.is_empty() {
+        // Prefer the pre-built registry (carries the authn result cache from
+        // camel-cli wiring); fall back to building one from the context.
+        // The guard ORs on `provider_reg` so a pre-built registry is never
+        // silently dropped when the named-providers map is empty.
+        let provider_registry = security_ctx
+            .provider_reg
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(security_ctx.provider_registry()));
+        definition = definition.with_provider_registry(provider_registry);
     }
 
     if let Some(uow) = route.unit_of_work {
@@ -4163,6 +4190,7 @@ mod tests {
         async fn evaluate(
             &self,
             _exchange: &mut camel_api::Exchange,
+            _auth: &camel_api::security_policy::AuthContext<'_>,
         ) -> Result<camel_api::security_policy::AuthorizationDecision, CamelError> {
             Ok(camel_api::security_policy::AuthorizationDecision::Granted {
                 principal: camel_api::security_policy::Principal {
@@ -4184,12 +4212,12 @@ mod tests {
         let def = DeclarativeSecurityPolicy::Roles {
             roles: vec!["admin".into()],
             all_required: true,
-            trust_upstream_principal: false,
             credential_sources: None,
             provider: None,
+            audiences: None,
         };
-        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
-        assert!(returned_auth.is_some());
+        let compiled = compile_security_policy(def, &ctx).unwrap();
+        assert!(compiled.authenticator.is_some());
     }
 
     #[test]
@@ -4199,12 +4227,12 @@ mod tests {
         let def = DeclarativeSecurityPolicy::Scopes {
             scopes: vec!["read".into()],
             all_required: false,
-            trust_upstream_principal: false,
             credential_sources: None,
             provider: None,
+            audiences: None,
         };
-        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
-        assert!(returned_auth.is_some());
+        let compiled = compile_security_policy(def, &ctx).unwrap();
+        assert!(compiled.authenticator.is_some());
     }
 
     #[test]
@@ -4213,9 +4241,9 @@ mod tests {
         let def = DeclarativeSecurityPolicy::Roles {
             roles: vec!["admin".into()],
             all_required: true,
-            trust_upstream_principal: false,
             credential_sources: None,
             provider: None,
+            audiences: None,
         };
         let result = compile_security_policy(def, &ctx);
         assert!(result.is_err());
@@ -4234,9 +4262,9 @@ mod tests {
             security_policy: Some(DeclarativeSecurityPolicy::Roles {
                 roles: vec!["admin".into()],
                 all_required: true,
-                trust_upstream_principal: false,
                 credential_sources: None,
                 provider: None,
+                audiences: None,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {
@@ -4260,8 +4288,8 @@ mod tests {
         let def = DeclarativeSecurityPolicy::Ref {
             name: "my-policy".into(),
         };
-        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
-        assert!(returned_auth.is_none());
+        let compiled = compile_security_policy(def, &ctx).unwrap();
+        assert!(compiled.authenticator.is_none());
     }
 
     #[test]
@@ -4294,8 +4322,8 @@ mod tests {
             path: "plugin.wasm".into(),
             config: Default::default(),
         };
-        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
-        assert!(returned_auth.is_none());
+        let compiled = compile_security_policy(def, &ctx).unwrap();
+        assert!(compiled.authenticator.is_none());
     }
 
     #[test]
@@ -4376,8 +4404,8 @@ mod tests {
             cache_ttl_secs: Some(60),
             cache_negative_ttl_secs: None,
         };
-        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
-        assert!(returned_auth.is_none());
+        let compiled = compile_security_policy(def, &ctx).unwrap();
+        assert!(compiled.authenticator.is_none());
     }
 
     #[test]
@@ -4428,9 +4456,9 @@ mod tests {
             security_policy: Some(DeclarativeSecurityPolicy::Roles {
                 roles: vec!["admin".into()],
                 all_required: true,
-                trust_upstream_principal: false,
                 credential_sources: None,
                 provider: None,
+                audiences: None,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {
@@ -4455,9 +4483,9 @@ mod tests {
             security_policy: Some(DeclarativeSecurityPolicy::Roles {
                 roles: vec!["admin".into()],
                 all_required: true,
-                trust_upstream_principal: false,
                 credential_sources: None,
                 provider: None,
+                audiences: None,
             }),
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef {

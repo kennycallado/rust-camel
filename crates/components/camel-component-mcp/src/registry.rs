@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 
+use camel_api::security_policy::RouteSecurityPlan;
+use camel_auth::ProviderRegistry;
+
 use crate::config::McpServerConfig;
 use crate::error::McpError;
 use crate::types::{McpResourceRead, McpToolInvocation};
@@ -19,6 +22,10 @@ use crate::types::{McpResourceRead, McpToolInvocation};
 /// consumers reuse the handle.
 pub struct McpServerRegistry {
     inner: Mutex<HashMap<String, Arc<BindSlot>>>,
+    /// Operator acknowledgements for public exposure per bind address
+    /// (ADR-0061), threaded from the CLI's `[binds."<addr>"]`
+    /// `allow_public_exposure` map. Fail-closed default: empty.
+    bind_acks: Mutex<HashMap<String, bool>>,
 }
 
 /// One bind's registry slot: a spawn counter that persists across dead-server
@@ -26,6 +33,11 @@ pub struct McpServerRegistry {
 struct BindSlot {
     spawn_count: Arc<AtomicUsize>,
     cell: OnceCell<Arc<McpListenerHandle>>,
+    /// Per-bind dispatch-security book (Task 2.6): compiled route plans +
+    /// provider snapshot for this bind. Created with the slot so it survives
+    /// dead-server eviction exactly like the spawn counter, and shared with
+    /// the rmcp adapter mounted on the slot's listener.
+    security: Arc<McpBindSecurity>,
 }
 
 impl BindSlot {
@@ -33,7 +45,94 @@ impl BindSlot {
         Self {
             spawn_count: carried.unwrap_or_else(|| Arc::new(AtomicUsize::new(0))),
             cell: OnceCell::new(),
+            security: Arc::new(McpBindSecurity::new()),
         }
+    }
+}
+
+/// Per-bind dispatch-security book (Task 2.6): the compiled
+/// [`RouteSecurityPlan`] of every route registered on this bind plus the
+/// [`ProviderRegistry`] snapshot the route controller threaded through the
+/// consumer's `SecurityContext`.
+///
+/// Two readers: the consumer start path (registers the plan, then runs the
+/// per-bind exposure gate over the full snapshot) and the rmcp adapter's
+/// request path (per tool/resource invocation: Public plan → pass-through;
+/// otherwise extract per `credential_sources` → `kernel_authenticate`).
+pub struct McpBindSecurity {
+    /// Plans by route id (one mcp: route serves exactly one tool or one
+    /// resource; the route id is the registration key).
+    plans: Mutex<HashMap<String, RouteSecurityPlan>>,
+    /// Provider registry snapshot (last registration wins; routes on one
+    /// bind share the process-wide registry in practice).
+    providers: Mutex<Option<Arc<ProviderRegistry>>>,
+}
+
+impl McpBindSecurity {
+    fn new() -> Self {
+        Self {
+            plans: Mutex::new(HashMap::new()),
+            providers: Mutex::new(None),
+        }
+    }
+
+    /// Register (or replace) `route_id`'s plan and, when present, refresh
+    /// the provider snapshot (last registration wins).
+    pub fn register_plan(
+        &self,
+        route_id: &str,
+        plan: RouteSecurityPlan,
+        providers: Option<Arc<ProviderRegistry>>,
+    ) {
+        self.plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(route_id.to_string(), plan);
+        if let Some(providers) = providers {
+            *self
+                .providers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(providers);
+        }
+    }
+
+    /// Remove `route_id`'s plan (consumer stop / refused start). A no-op
+    /// when no plan is registered.
+    pub fn unregister_plan(&self, route_id: &str) {
+        self.plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(route_id);
+    }
+
+    /// The plan registered for `route_id`, or `None` (pre-2.6 direct-drive
+    /// routes: no plan, pass-through).
+    pub fn plan_for(&self, route_id: &str) -> Option<RouteSecurityPlan> {
+        self.plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(route_id)
+            .cloned()
+    }
+
+    /// All registered plans as `(route_id, plan)` pairs (bind-gate input;
+    /// order unspecified).
+    pub fn plans_snapshot(&self) -> Vec<(String, RouteSecurityPlan)> {
+        self.plans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(id, plan)| (id.clone(), plan.clone()))
+            .collect()
+    }
+
+    /// The provider registry snapshot (fail-closed: `None` until a route
+    /// with providers registers).
+    pub fn providers(&self) -> Option<Arc<ProviderRegistry>> {
+        self.providers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -43,18 +142,72 @@ impl McpServerRegistry {
         static INSTANCE: OnceLock<McpServerRegistry> = OnceLock::new();
         INSTANCE.get_or_init(|| McpServerRegistry {
             inner: Mutex::new(HashMap::new()),
+            bind_acks: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Install per-bind public-exposure acknowledgements (ADR-0061).
+    ///
+    /// The CLI builds this from `CamelConfig.binds`
+    /// (`allow_public_exposure`) — the same map it hands the route
+    /// controller — so the per-bind gate enforced at consumer start
+    /// (Task 2.6) fails closed on non-loopback binds until acknowledged.
+    /// Replaces the whole map (tests reset it with an empty map).
+    pub fn set_bind_exposure_acks(&self, acks: HashMap<String, bool>) {
+        *self
+            .bind_acks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = acks;
+    }
+
+    /// Whether the operator acknowledged public exposure for `bind`
+    /// (bind address string as written, e.g. `"0.0.0.0:8080"`). Absent or
+    /// not set → false (fail-closed).
+    pub fn acknowledged(&self, bind: &str) -> bool {
+        self.bind_acks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(bind)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// The per-bind dispatch-security book for `bind`, creating the slot
+    /// (without spawning a listener) when absent.
+    ///
+    /// The consumer start path uses this to register its route's plan and
+    /// run the exposure gate BEFORE any socket is bound; the same `Arc`
+    /// later rides `McpListenerHandle::security` into the rmcp adapter.
+    pub fn bind_security(&self, bind: &str) -> Arc<McpBindSecurity> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(bind.to_string())
+            .or_insert_with(|| Arc::new(BindSlot::with_counter(None)))
+            .security
+            .clone()
     }
 
     /// Returns the shared listener handle for `bind`, spawning it on first use.
     ///
     /// A consumer whose config conflicts with an already-spawned bind (TLS
     /// mode, or tool/resource caps) is rejected with `McpError::Endpoint`.
+    ///
+    /// Caps are materialized to their EFFECTIVE values here (declared value
+    /// or the 128 default): this is the single funnel below the consumer's
+    /// TOML/DSL merge, so an undeclared cap becomes the default only AFTER
+    /// any conflict check, and every stored handle carries the runtime caps
+    /// its listener was actually spawned with.
     pub async fn get_or_spawn(
         &self,
         bind: &str,
         cfg: &McpServerConfig,
     ) -> Result<Arc<McpListenerHandle>, McpError> {
+        let mut effective = cfg.clone();
+        effective.max_tools = Some(cfg.effective_max_tools());
+        effective.max_resources = Some(cfg.effective_max_resources());
+        let cfg = &effective;
+
         let slot = {
             let mut guard = self
                 .inner
@@ -64,7 +217,9 @@ impl McpServerRegistry {
             // ServerRegistry dead-server eviction). The serve-loop JoinHandle's
             // `is_finished()` is a reliable proxy for the listener being gone
             // (crashed or aborted). The spawn counter is carried forward so a
-            // respawn continues the count instead of resetting it.
+            // respawn continues the count instead of resetting it; the
+            // security book dies with the slot — its plans belong to routes
+            // on the dead listener, which re-register on restart.
             let mut carried: Option<Arc<AtomicUsize>> = None;
             if let Some(slot) = guard.get(bind)
                 && let Some(handle) = slot.cell.get()
@@ -87,7 +242,12 @@ impl McpServerRegistry {
         let handle = slot
             .cell
             .get_or_try_init(|| {
-                Self::spawn(bind.to_string(), cfg.clone(), slot.spawn_count.clone())
+                Self::spawn(
+                    bind.to_string(),
+                    cfg.clone(),
+                    slot.spawn_count.clone(),
+                    slot.security.clone(),
+                )
             })
             .await?;
 
@@ -130,45 +290,112 @@ impl McpServerRegistry {
     /// Bind the address, mount the rmcp server adapter service, and spawn
     /// the serve loop. Process-lifetime: the listener is only torn down when
     /// the serve loop dies (then evicted and respawned by `get_or_spawn`).
+    ///
+    /// Plain binds use `TcpListener` + `axum::serve` (fail-fast on the bind,
+    /// resolved address available before the router is built). TLS binds
+    /// follow the camel-ws/camel-http precedent (`axum-server`
+    /// `bind_rustls`): the TCP bind happens inside the spawned serve
+    /// future, so bind success is awaited via `axum_server::Handle::listening()`
+    /// and the adapter identity uses the declared bind address (identical
+    /// for fixed ports; `:0` is a test convenience).
     async fn spawn(
         bind: String,
         cfg: McpServerConfig,
         spawn_count: Arc<AtomicUsize>,
+        security: Arc<McpBindSecurity>,
     ) -> Result<Arc<McpListenerHandle>, McpError> {
-        let listener = TcpListener::bind(&bind)
-            .await
-            .map_err(|e| McpError::Endpoint(format!("failed to bind {bind}: {e}")))?;
-        let local_addr = listener.local_addr().map_err(|e| {
-            McpError::Endpoint(format!("failed to read local address for {bind}: {e}"))
-        })?;
-
         // The registries are `Arc`ed because both the handle (route
         // registration/unregistration) and the rmcp server adapter
-        // (`server/discover`, dispatch) share one registry per listener.
-        let tool_registry = Arc::new(McpToolRegistry::new(cfg.max_tools));
-        let resource_registry = Arc::new(McpResourceRegistry::new(cfg.max_resources));
-        let app = crate::adapter::server::mcp_router(
-            tool_registry.clone(),
-            resource_registry.clone(),
-            &bind,
-            local_addr,
-            cfg.allowed_hosts.clone(),
-        );
-        // The serve loop IS the monitored task (no separate wrapper): storing
-        // its JoinHandle directly gives `get_or_spawn` a dead-server signal via
-        // `is_finished()` and gives tests a kill seam via `abort()`.
-        // `into_make_service_with_connect_info` feeds the rejection warn
-        // layer's peer field (spec: rejection warn names the peer).
-        let monitor_task = tokio::spawn(async move {
-            if let Err(e) = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "MCP server listener exited");
-            }
-        });
+        // (`server/discover`, dispatch) share one registry per listener; the
+        // security book rides the same shape (Task 2.6 per-invocation
+        // kernel authentication).
+        let tool_registry = Arc::new(McpToolRegistry::new(cfg.effective_max_tools()));
+        let resource_registry = Arc::new(McpResourceRegistry::new(cfg.effective_max_resources()));
+
+        let (local_addr, monitor_task) = if let Some(tls) = &cfg.tls {
+            let rustls_config = load_tls_config(&tls.cert_path, &tls.key_path)?;
+            let addr: SocketAddr = bind.parse().map_err(|_| {
+                McpError::Endpoint(format!(
+                    "bind '{bind}' is not an IP:port literal (hostnames are not allowed)"
+                ))
+            })?;
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls_config));
+            let listen_handle = axum_server::Handle::new();
+            let task_handle = listen_handle.clone();
+            let app = crate::adapter::server::mcp_router(
+                tool_registry.clone(),
+                resource_registry.clone(),
+                security.clone(),
+                &bind,
+                addr,
+                cfg.allowed_hosts.clone(),
+            );
+            // The serve loop IS the monitored task (no separate wrapper):
+            // storing its JoinHandle directly gives `get_or_spawn` a
+            // dead-server signal via `is_finished()` and gives tests a kill
+            // seam via `abort()`. Its terminal error is also fed to
+            // `bind_err_tx` so `spawn` can put the CAUSE in the startup
+            // error when the listener never comes up (a bare "did not come
+            // up" hides the reason); on the Ok path the sender is dropped
+            // unsent and the receiver falls back to a no-cause message.
+            let (bind_err_tx, bind_err_rx) = tokio::sync::oneshot::channel::<String>();
+            let monitor_task = tokio::spawn(async move {
+                if let Err(e) = axum_server::bind_rustls(addr, tls_config)
+                    .handle(task_handle)
+                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                    .await
+                {
+                    tracing::warn!(error = %e, "MCP server listener exited");
+                    let _ = bind_err_tx.send(e.to_string());
+                }
+            });
+            // `listening()` resolves `None` when the serve loop exited
+            // before binding (address in use, permissions) — surface that
+            // as the spawn failure WITH the serve-loop cause, the same way
+            // the plain path carries the TcpListener bind error.
+            let local_addr = match listen_handle.listening().await {
+                Some(local_addr) => local_addr,
+                None => {
+                    let cause = bind_err_rx
+                        .await
+                        .unwrap_or_else(|_| "the serve loop exited without an error".to_string());
+                    return Err(McpError::Endpoint(format!(
+                        "failed to bind {bind}: the TLS listener did not come up: {cause}"
+                    )));
+                }
+            };
+            (local_addr, monitor_task)
+        } else {
+            let listener = TcpListener::bind(&bind)
+                .await
+                .map_err(|e| McpError::Endpoint(format!("failed to bind {bind}: {e}")))?;
+            let local_addr = listener.local_addr().map_err(|e| {
+                McpError::Endpoint(format!("failed to read local address for {bind}: {e}"))
+            })?;
+            let app = crate::adapter::server::mcp_router(
+                tool_registry.clone(),
+                resource_registry.clone(),
+                security.clone(),
+                &bind,
+                local_addr,
+                cfg.allowed_hosts.clone(),
+            );
+            // Same serve-loop-as-monitored-task shape as the TLS branch.
+            // `into_make_service_with_connect_info` feeds the rejection warn
+            // layer's peer field (spec: rejection warn names the peer).
+            let monitor_task = tokio::spawn(async move {
+                if let Err(e) = axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "MCP server listener exited");
+                }
+            });
+            (local_addr, monitor_task)
+        };
 
         spawn_count.fetch_add(1, Ordering::SeqCst);
 
@@ -176,11 +403,43 @@ impl McpServerRegistry {
             local_addr,
             tool_registry,
             resource_registry,
+            security,
             cfg,
             spawn_count,
             monitor_task,
         }))
     }
+}
+
+/// Load PEM cert/key paths into a rustls server config (camel-ws/camel-http
+/// precedent). Fail-fast on unreadable or unparseable material, naming the
+/// offending path and cause.
+fn load_tls_config(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<tokio_rustls::rustls::ServerConfig, McpError> {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let cert_file = File::open(cert_path)
+        .map_err(|e| McpError::Endpoint(format!("TLS cert file '{cert_path}' error: {e}")))?;
+    let key_file = File::open(key_path)
+        .map_err(|e| McpError::Endpoint(format!("TLS key file '{key_path}' error: {e}")))?;
+
+    let certs = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| McpError::Endpoint(format!("TLS cert parse error ('{cert_path}'): {e}")))?;
+
+    let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
+        .map_err(|e| McpError::Endpoint(format!("TLS key parse error ('{key_path}'): {e}")))?
+        .ok_or_else(|| {
+            McpError::Endpoint(format!("TLS key file '{key_path}' carries no private key"))
+        })?;
+
+    tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| McpError::Endpoint(format!("TLS config error: {e}")))
 }
 
 /// Shared handle for one MCP server listener.
@@ -193,6 +452,11 @@ pub struct McpListenerHandle {
     /// Per-listener resource registry (URI → route sender + readiness).
     /// `Arc`-shared with the rmcp server adapter mounted on this listener.
     pub resource_registry: Arc<McpResourceRegistry>,
+    /// Per-bind dispatch-security book (Task 2.6): route plans + provider
+    /// snapshot. `Arc`-shared with the rmcp server adapter (per-invocation
+    /// kernel authentication) and the consumer start path (plan
+    /// registration + exposure gate). Same `Arc` as the registry slot's.
+    pub security: Arc<McpBindSecurity>,
     /// The server config this listener was spawned with (conflict detection).
     pub cfg: McpServerConfig,
     /// Spawn counter — total times this bind has been spawned across
@@ -206,8 +470,8 @@ pub struct McpListenerHandle {
     pub monitor_task: tokio::task::JoinHandle<()>,
 }
 
-/// Manual `Debug` — `cfg.tls` may embed certificate/key material, so it is
-/// redacted (camel-http credential-redaction pattern).
+/// Manual `Debug` — `cfg.tls` holds certificate/key PATHS (not material);
+/// summarized instead of printed to keep the output stable and small.
 impl std::fmt::Debug for McpListenerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpListenerHandle")
@@ -240,6 +504,9 @@ pub struct ToolEntry {
     pub sender: tokio::sync::mpsc::Sender<McpToolInvocation>,
     /// Declared JSON Schema for the tool's arguments.
     pub input_schema: serde_json::Value,
+    /// The serving route's id — the key into the bind's
+    /// [`McpBindSecurity`] plan map (dispatch-time authentication, Task 2.6).
+    pub route_id: String,
     /// Readiness flag — tools not yet ready are hidden from `tools/list`.
     pub ready: AtomicBool,
 }
@@ -252,6 +519,7 @@ impl Clone for ToolEntry {
         Self {
             sender: self.sender.clone(),
             input_schema: self.input_schema.clone(),
+            route_id: self.route_id.clone(),
             ready: AtomicBool::new(self.ready.load(Ordering::SeqCst)),
         }
     }
@@ -266,16 +534,24 @@ impl McpToolRegistry {
         }
     }
 
-    /// Registers `name` → (`sender`, `input_schema`).
+    /// Registers `name` → (`sender`, `input_schema`) for `route_id`.
     ///
     /// A duplicate `name` is rejected with an [`McpError::Endpoint`] — closing
     /// the check-then-register race in the consumer, where two concurrent
     /// same-name starts would otherwise silently replace the first
     /// registration (stranding the first route's channel). The (N+1)th
     /// distinct name is rejected with [`McpError::CapExceeded`].
+    /// # Security note
+    ///
+    /// Tools registered directly through this pub API carry no
+    /// `RouteSecurityPlan` and are served WITHOUT authentication (public
+    /// pass-through, invisible to the per-bind exposure gate).
+    /// Kernel-secured registration flows through the consumer's plan
+    /// registration instead.
     pub fn register(
         &self,
         name: String,
+        route_id: String,
         sender: tokio::sync::mpsc::Sender<McpToolInvocation>,
         input_schema: serde_json::Value,
     ) -> Result<(), McpError> {
@@ -299,6 +575,7 @@ impl McpToolRegistry {
             ToolEntry {
                 sender,
                 input_schema,
+                route_id,
                 ready: AtomicBool::new(false),
             },
         );
@@ -371,6 +648,9 @@ pub struct McpResourceRegistry {
 pub struct ResourceEntry {
     /// Sender that delivers an [`McpResourceRead`] to the resource route.
     pub sender: tokio::sync::mpsc::Sender<McpResourceRead>,
+    /// The serving route's id — the key into the bind's
+    /// [`McpBindSecurity`] plan map (dispatch-time authentication, Task 2.6).
+    pub route_id: String,
     /// Readiness flag — resources not yet ready are hidden from
     /// `resources/list`.
     pub ready: AtomicBool,
@@ -383,6 +663,7 @@ impl Clone for ResourceEntry {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            route_id: self.route_id.clone(),
             ready: AtomicBool::new(self.ready.load(Ordering::SeqCst)),
         }
     }
@@ -397,7 +678,7 @@ impl McpResourceRegistry {
         }
     }
 
-    /// Registers `uri` → `sender`.
+    /// Registers `uri` → `sender` for `route_id`.
     ///
     /// A duplicate `uri` is rejected with an [`McpError::Endpoint`] — closing
     /// the check-then-register race in the consumer. The (N+1)th distinct URI
@@ -405,6 +686,7 @@ impl McpResourceRegistry {
     pub fn register(
         &self,
         uri: String,
+        route_id: String,
         sender: tokio::sync::mpsc::Sender<McpResourceRead>,
     ) -> Result<(), McpError> {
         let mut entries = self
@@ -426,6 +708,7 @@ impl McpResourceRegistry {
             uri,
             ResourceEntry {
                 sender,
+                route_id,
                 ready: AtomicBool::new(false),
             },
         );

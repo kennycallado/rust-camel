@@ -146,7 +146,7 @@ The consumer deduplicates events using a bounded `IndexSet` keyed by event ID. T
 
 The realm's `/protocol/openid-connect/certs` endpoint is the JWKS source. The JWKS cache holds keys for `cache_ttl_secs` and refreshes `refresh_skew_secs` before expiry. The component DNS-pins the HTTP client to the JWKS host to close the TOCTOU window between SSRF validation and the first request.
 
-`[security.keycloak.validation]` controls local JWT validation. `method = "local"` performs signature and claim checks against the cached JWKS. `audience` lists the accepted `aud` claims. `clock_skew_secs` tolerates the difference between the local clock and the issuer clock.
+`[security.keycloak.validation]` controls local JWT validation. `method = "local"` performs signature and claim checks against the cached JWKS. `audience` lists the accepted `aud` claims and is REQUIRED — a keycloak or oidc provider without audiences fails at startup (ADR-0061: an unscoped audience binding would accept tokens minted for any client of the issuer). `clock_skew_secs` tolerates the difference between the local clock and the issuer clock.
 
 ## UMA permission evaluation
 

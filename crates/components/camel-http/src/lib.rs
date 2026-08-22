@@ -1353,6 +1353,36 @@ fn title_case_header(name: &str) -> String {
 // HttpConsumer
 // ---------------------------------------------------------------------------
 
+/// Kernel authentication state captured from a route's [`SecurityContext`]
+/// (`unify-transport-auth`, Task 2.9).
+///
+/// Same construction-order lifecycle as gRPC's `GrpcKernelAuth` (Task 2.1):
+/// the compiled plan and the provider registry arrive via
+/// `Consumer::set_security_context` before `start()` accepts requests. A
+/// context lacking either piece keeps `kernel = None` — a plan without
+/// providers can never mint a principal (fail-closed, never a silently
+/// unauthenticated route: the controller's strict-mode dispatch check then
+/// denies carrier-less Exchanges on non-Public plans).
+pub(crate) struct HttpKernelAuth {
+    pub(crate) plan: camel_api::security_policy::RouteSecurityPlan,
+    pub(crate) providers: Arc<camel_auth::ProviderRegistry>,
+}
+
+impl HttpKernelAuth {
+    /// Capture the kernel state from a route's security context.
+    ///
+    /// `None` unless both the compiled plan and the provider registry are
+    /// present.
+    pub(crate) fn from_security_context(
+        ctx: &camel_component_api::SecurityContext,
+    ) -> Option<Self> {
+        Some(Self {
+            plan: ctx.plan.clone()?,
+            providers: ctx.providers.clone()?,
+        })
+    }
+}
+
 /// Capacity for the per-route RequestEnvelope channel.
 ///
 /// Each in-flight request holds exactly one `maxInflightRequests` semaphore
@@ -1374,11 +1404,19 @@ pub struct HttpConsumer {
     config: HttpServerConfig,
     /// Runtime observability handle for ADR-0012 metrics and health calls.
     runtime: Arc<dyn RuntimeObservability>,
+    /// Kernel authentication state (plan + providers), set via
+    /// `set_security_context` before `start()` (Task 2.9). `None` for routes
+    /// without route-level security (Public under the per-bind gate).
+    kernel: Option<Arc<HttpKernelAuth>>,
 }
 
 impl HttpConsumer {
     pub fn new(config: HttpServerConfig, runtime: Arc<dyn RuntimeObservability>) -> Self {
-        Self { config, runtime }
+        Self {
+            config,
+            runtime,
+            kernel: None,
+        }
     }
 }
 
@@ -1436,6 +1474,7 @@ impl Consumer for HttpConsumer {
         let path = self.config.path.clone();
         let registry_for_cleanup = registry.clone();
         let cancel_token = ctx.cancel_token();
+        let kernel = self.kernel.clone();
         loop {
             tokio::select! {
                 _ = ctx.cancelled() => {
@@ -1502,6 +1541,22 @@ impl Consumer for HttpConsumer {
                     let sender = ctx.sender().clone();
                     let path_clone = path.clone();
                     let cancel = cancel_token.clone();
+                    // Task 2.9 boundary-auth inputs: the raw header map and
+                    // the request URI (path + query) feed kernel credential
+                    // extraction inside the per-request task.
+                    let auth_headers = envelope.headers.clone();
+                    let auth_uri: http::Uri = {
+                        let full = if envelope.query.is_empty() {
+                            envelope.path.clone()
+                        } else {
+                            format!("{}?{}", envelope.path, envelope.query)
+                        };
+                        // A malformed path cannot become a valid `Uri`; the
+                        // empty default then carries no credentials, so
+                        // extraction finds nothing and authn fails closed.
+                        full.parse().unwrap_or_default()
+                    };
+                    let kernel = kernel.clone();
 
                     // Spawn a task to handle this request concurrently
                     //
@@ -1537,6 +1592,67 @@ impl Consumer for HttpConsumer {
                                 body: HttpReplyBody::Bytes(bytes::Bytes::from("Service Unavailable")),
                             });
                             return;
+                        }
+
+                        // ADR-0061 Task 2.9: kernel authentication at the
+                        // request boundary. A `Public` plan passes through
+                        // with no extraction; any other mode extracts per
+                        // the plan's sources, authenticates through the
+                        // kernel, and installs the typed carrier BEFORE the
+                        // pipeline runs. A denial renders in the HTTP idiom
+                        // (401 via `pipeline_error_to_reply`) and the route
+                        // body never sees the request.
+                        if let Some(kernel) = kernel.as_ref()
+                            && !matches!(
+                                kernel.plan.access_mode,
+                                camel_api::security_policy::AccessMode::Public
+                            )
+                        {
+                            let principal = match camel_auth::extract_token_multi(
+                                &auth_headers,
+                                &auth_uri,
+                                &kernel.plan.credential_sources,
+                            ) {
+                                Some(extracted) => {
+                                    match camel_auth::kernel_authenticate(
+                                        &kernel.plan,
+                                        &kernel.providers,
+                                        &extracted,
+                                    )
+                                    .await
+                                    {
+                                        Ok(principal) => principal,
+                                        Err(e) => {
+                                            // log-policy: handler-owned
+                                            tracing::warn!(
+                                                path = %path_clone,
+                                                error = %e,
+                                                "HTTP request authentication failed"
+                                            );
+                                            let _ = reply_tx.send(pipeline_error_to_reply(
+                                                e,
+                                                &path_clone,
+                                            ));
+                                            return;
+                                        }
+                                    }
+                                }
+                                None => {
+                                    // log-policy: handler-owned
+                                    tracing::warn!(
+                                        path = %path_clone,
+                                        "HTTP request rejected: no credential found in any source"
+                                    );
+                                    let _ = reply_tx.send(pipeline_error_to_reply(
+                                        CamelError::Unauthenticated(
+                                            "no credential found in any source".to_string(),
+                                        ),
+                                        &path_clone,
+                                    ));
+                                    return;
+                                }
+                            };
+                            camel_auth::install_carrier(&mut exchange, &principal);
                         }
 
                         // Send through pipeline and await result
@@ -1667,6 +1783,12 @@ impl Consumer for HttpConsumer {
     // state.
     fn startup_mode(&self) -> camel_component_api::ConsumerStartupMode {
         camel_component_api::ConsumerStartupMode::Explicit
+    }
+
+    // Task 2.9: capture the kernel state (compiled plan + provider registry)
+    // wired by the route controller before start(). See `HttpKernelAuth`.
+    fn set_security_context(&mut self, ctx: camel_component_api::SecurityContext) {
+        self.kernel = HttpKernelAuth::from_security_context(&ctx).map(Arc::new);
     }
 }
 
@@ -8038,9 +8160,10 @@ mod tests {
     // (`camel_auth`, `camel_processor`, etc.) are NOT captured here. The
     // redaction contract for those crates is guarded by their own tests.
     // Revisit this capture scope if camel-auth ever logs on the auth path.
-    use camel_api::security_policy::{AuthorizationDecision, CredentialSource, SecurityPolicy};
+    use camel_api::security_policy::CredentialSource;
+    use camel_auth::credential_source::extract_token_from_exchange;
     use camel_auth::native_auth::NativeCredentialStore;
-    use camel_auth::{RolePolicy, StaticTokenAuthenticator, TokenAuthenticator};
+    use camel_auth::{StaticTokenAuthenticator, TokenAuthenticator};
 
     // Sentinel credential values — test fixtures only, not real secrets.
     const SENTINEL_QRY_42: &str = "SENTINEL_QRY_42"; // allow-secret
@@ -8074,10 +8197,12 @@ mod tests {
         Exchange::new(msg)
     }
 
-    /// Register a route whose responder authenticates each request against a
-    /// `RolePolicy` with the given credential sources and an empty native
-    /// store (so every presented credential fails lookup). Mirrors the
-    /// `SecurityPolicyLayer` decision mapping onto `CamelError`.
+    /// Register a route whose responder authenticates each request against an
+    /// empty native store, so every presented credential fails lookup with
+    /// `Unauthenticated` (401). Restores the pre-AuthContext `RolePolicy`
+    /// authentication step (extract per `sources` → authenticate → deny) so the
+    /// credential-extraction redaction contract is exercised on a real
+    /// authentication failure.
     async fn spawn_failing_auth_route(
         registry: &HttpRouteRegistry,
         path: &str,
@@ -8086,30 +8211,23 @@ mod tests {
         let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(
             NativeCredentialStore::try_new(vec![]).unwrap(),
         ));
-        let policy = Arc::new(RolePolicy::new(
-            vec!["tiles-reader".to_string()],
-            true,
-            false,
-            authenticator,
-            sources,
-        ));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
         registry.register_api_route(path.to_string(), tx).await;
         let path_owned = path.to_string();
         tokio::spawn(async move {
             while let Some(envelope) = rx.recv().await {
-                let mut exchange = envelope_to_exchange(&envelope);
+                let exchange = envelope_to_exchange(&envelope);
                 let reply_tx = envelope.reply_tx;
-                let result: Result<(), CamelError> = match policy.evaluate(&mut exchange).await {
-                    Ok(AuthorizationDecision::Granted { .. }) => Ok(()),
-                    Ok(AuthorizationDecision::Denied { reason, .. }) => {
-                        Err(CamelError::Unauthorized(format!("Access denied: {reason}")))
-                    }
-                    Err(e) => Err(e),
-                    _ => Err(CamelError::Unauthorized(
-                        "access denied by security policy".to_string(),
-                    )),
-                };
+                let result: Result<(), CamelError> = async {
+                    let token = extract_token_from_exchange(&exchange, &sources)
+                        .map(|extracted| extracted.token)
+                        .ok_or_else(|| {
+                            CamelError::Unauthenticated("no credential in any source".into())
+                        })?;
+                    authenticator.authenticate_bearer(&token).await?;
+                    Ok(())
+                }
+                .await;
                 let reply = match result {
                     Ok(()) => HttpReply {
                         status: 200,

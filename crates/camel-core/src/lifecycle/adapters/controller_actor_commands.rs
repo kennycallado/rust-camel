@@ -111,6 +111,9 @@ pub(crate) enum RouteControllerCommand {
     SetTracerConfig {
         config: TracerConfig,
     },
+    SetBindExposureAcks {
+        acks: crate::lifecycle::adapters::route_controller_trait::BindExposureAcks,
+    },
     RouteCount {
         reply: oneshot::Sender<usize>,
     },
@@ -673,6 +676,17 @@ impl RouteControllerHandle {
     pub async fn set_tracer_config(&self, config: TracerConfig) -> Result<(), CamelError> {
         self.tx
             .send(RouteControllerCommand::SetTracerConfig { config })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))
+    }
+
+    /// Install per-bind public-exposure acknowledgements (ADR-0061).
+    pub async fn set_bind_exposure_acks(
+        &self,
+        acks: crate::lifecycle::adapters::route_controller_trait::BindExposureAcks,
+    ) -> Result<(), CamelError> {
+        self.tx
+            .send(RouteControllerCommand::SetBindExposureAcks { acks })
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))
     }

@@ -319,6 +319,17 @@ pub struct SecurityContext {
     pub policy: Arc<dyn SecurityPolicy>,
     pub authenticator: Arc<dyn TokenAuthenticator>,
     pub credential_sources: Vec<CredentialSource>,
+    /// Compiled `RouteSecurityPlan` for the route, when one has been compiled.
+    ///
+    /// Phase-2 transports read the plan from here to drive per-route dispatch
+    /// enforcement. `None` until Task 1.8 compiles plans into the context.
+    pub plan: Option<camel_api::security_policy::RouteSecurityPlan>,
+    /// Provider registry carrying the route's named authenticators.
+    ///
+    /// Phase-2 transports read providers from here (grpc 2.1, mcp 2.6, ws 2.8,
+    /// http 2.9) instead of holding their own authenticator. `None` for routes
+    /// built before the registry injection path lands.
+    pub providers: Option<std::sync::Arc<camel_auth::ProviderRegistry>>,
 }
 
 impl SecurityContext {
@@ -330,6 +341,8 @@ impl SecurityContext {
             policy: Arc::new(policy),
             authenticator,
             credential_sources: vec![CredentialSource::AuthorizationHeader],
+            plan: None,
+            providers: None,
         }
     }
 
@@ -341,11 +354,28 @@ impl SecurityContext {
             policy,
             authenticator,
             credential_sources: vec![CredentialSource::AuthorizationHeader],
+            plan: None,
+            providers: None,
         }
     }
 
     pub fn with_credential_sources(mut self, sources: Vec<CredentialSource>) -> Self {
         self.credential_sources = sources;
+        self
+    }
+
+    /// Attach the compiled `RouteSecurityPlan` for this route.
+    pub fn with_plan(mut self, plan: camel_api::security_policy::RouteSecurityPlan) -> Self {
+        self.plan = Some(plan);
+        self
+    }
+
+    /// Attach the provider registry carrying this route's named authenticators.
+    pub fn with_providers(
+        mut self,
+        providers: std::sync::Arc<camel_auth::ProviderRegistry>,
+    ) -> Self {
+        self.providers = Some(providers);
         self
     }
 }
@@ -356,6 +386,8 @@ impl Clone for SecurityContext {
             policy: Arc::clone(&self.policy),
             authenticator: Arc::clone(&self.authenticator),
             credential_sources: self.credential_sources.clone(),
+            plan: self.plan.clone(),
+            providers: self.providers.as_ref().map(Arc::clone),
         }
     }
 }
@@ -366,6 +398,11 @@ impl std::fmt::Debug for SecurityContext {
             .field("policy", &"<SecurityPolicy>")
             .field("authenticator", &"<TokenAuthenticator>")
             .field("credential_sources", &self.credential_sources)
+            .field("plan", &self.plan)
+            .field(
+                "providers",
+                &self.providers.as_ref().map(|_| "<ProviderRegistry>"),
+            )
             .finish()
     }
 }
@@ -724,6 +761,7 @@ mod tests {
         async fn evaluate(
             &self,
             _exchange: &mut Exchange,
+            _auth: &camel_api::security_policy::AuthContext<'_>,
         ) -> Result<camel_api::security_policy::AuthorizationDecision, CamelError> {
             Ok(camel_api::security_policy::AuthorizationDecision::Granted {
                 principal: camel_api::security_policy::Principal {
@@ -813,5 +851,39 @@ mod tests {
             &ctx.credential_sources[0],
             camel_auth::CredentialSource::Cookie { .. }
         ));
+    }
+
+    #[test]
+    fn security_context_holds_plan_and_providers() {
+        use camel_api::security_policy::{AccessMode, RouteSecurityPlan, TransportId};
+
+        let plan = RouteSecurityPlan {
+            access_mode: AccessMode::Public,
+            provider_ref: None,
+            transport: TransportId::Http,
+            credential_sources: vec![],
+            audience_binding: None,
+        };
+
+        let registry = camel_auth::ProviderRegistry::new();
+        registry.register(
+            "default",
+            camel_auth::ProviderEntry {
+                authenticator: Arc::new(StubAuthenticator),
+                audience_binding: None,
+            },
+        );
+
+        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator))
+            .with_plan(plan)
+            .with_providers(Arc::new(registry));
+
+        let ctx_plan = ctx.plan.as_ref().expect("plan must be attached");
+        assert!(matches!(ctx_plan.access_mode, AccessMode::Public));
+        assert_eq!(ctx_plan.transport, TransportId::Http);
+
+        let providers = ctx.providers.as_ref().expect("providers must be attached");
+        let resolved = providers.resolve("default").expect("provider must resolve");
+        assert!(resolved.audience_binding.is_none());
     }
 }

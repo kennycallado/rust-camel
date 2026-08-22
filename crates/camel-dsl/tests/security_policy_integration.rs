@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use camel_api::security_policy::{
-    AuthorizationDecision, CredentialSource, Principal, SecurityPolicy,
+    AuthContext, AuthorizationDecision, CredentialSource, Principal, SecurityPolicy,
 };
 use camel_api::{CamelError, Exchange};
 use camel_auth::{
@@ -36,6 +36,7 @@ impl SecurityPolicy for TestPolicy {
     async fn evaluate(
         &self,
         _exchange: &mut Exchange,
+        _auth: &AuthContext<'_>,
     ) -> Result<AuthorizationDecision, CamelError> {
         Ok(AuthorizationDecision::Granted {
             principal: Principal {

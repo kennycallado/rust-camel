@@ -22,7 +22,11 @@ use axum::extract::{FromRequest, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Router, serve};
-use camel_api::security_policy::AuthorizationDecision;
+use camel_api::security_policy::{
+    AccessMode, AuthContext, AuthPrincipal, AuthorizationDecision, Principal, RouteSecurityPlan,
+    TransportId,
+};
+use camel_auth::{AuthenticatedPrincipal, ProviderRegistry};
 use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{
     Body as CamelBody, BoxProcessor, CamelError, Component, ComponentMetadata, ConcurrencyModel,
@@ -198,7 +202,7 @@ impl ServerRegistry {
     #[cfg(test)]
     pub fn reset() {
         let mut guard = Self::global().inner.lock().expect("ServerRegistry lock");
-        for (_, entry) in guard.iter() {
+        for entry in guard.values() {
             if let Some(handle) = entry.cell.get() {
                 handle._task.abort();
             }
@@ -379,6 +383,83 @@ impl WsConnectionRegistry {
     }
 }
 
+/// Transient `AuthPrincipal` adapter for the component-owned WS auth path.
+///
+/// The component authenticates the token itself and passes the resulting
+/// principal to the policy. `provider_id` is `"legacy"` until the kernel
+/// carrier (Task 1.4) reaches this transport.
+struct LegacyPrincipal(Principal);
+
+impl AuthPrincipal for LegacyPrincipal {
+    fn principal(&self) -> &Principal {
+        &self.0
+    }
+    fn provider_id(&self) -> &str {
+        "legacy"
+    }
+}
+
+/// Kernel authentication state for one ws path (`unify-transport-auth`,
+/// Task 2.8).
+///
+/// Construction-order (Task 2.1 lesson): the compiled plan and the
+/// provider registry ride the route's [`SecurityContext`], which the
+/// consumer publishes into the shared server state at `start()` — in the
+/// same step that makes the path dispatchable — so no handshake can reach
+/// an upgrade with half-captured state and nothing patches the entry
+/// afterwards. `None` unless both pieces are present: a plan without
+/// providers can never mint a principal, and a registry without a plan
+/// has nothing to enforce (fail-closed to the legacy path rather than a
+/// silently unauthenticated route).
+struct WsKernelAuth {
+    plan: RouteSecurityPlan,
+    providers: Arc<ProviderRegistry>,
+}
+
+impl WsKernelAuth {
+    fn from_security_context(ctx: &camel_component_api::SecurityContext) -> Option<Self> {
+        Some(Self {
+            plan: ctx.plan.clone()?,
+            providers: ctx.providers.clone()?,
+        })
+    }
+}
+
+/// Map an authentication failure to the upgrade-rejection response — the
+/// ws denial idiom is refusing the HTTP upgrade, so the handshake never
+/// completes and no close frame is needed.
+fn ws_upgrade_auth_error(e: &CamelError) -> axum::response::Response {
+    let (status, body) = match e {
+        CamelError::Unauthenticated(_) => (StatusCode::UNAUTHORIZED, "Unauthorized"),
+        CamelError::ProcessorError(msg) if msg.contains("auth provider unavailable") => {
+            (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
+    };
+    (status, body).into_response()
+}
+
+/// ADR-0051 defense-in-depth: when the accepted credential came from a
+/// query param, log the redacted URI in the upgrade debug record. ws
+/// forbids `QueryParam` at compile time since Task 1.8; the redaction
+/// stays so a future re-introduction can never leak the token value.
+fn debug_log_query_credential(
+    uri: &axum::http::Uri,
+    sources: &[camel_auth::CredentialSource],
+    accepted: &camel_auth::CredentialSource,
+) {
+    if !matches!(accepted, camel_auth::CredentialSource::QueryParam { .. }) {
+        return;
+    }
+    let mut sensitive: Vec<&str> = vec!["access_token", "token"];
+    sensitive.extend(sources.iter().filter_map(|source| match source {
+        camel_auth::CredentialSource::QueryParam { param } => Some(param.as_str()),
+        _ => None,
+    }));
+    let redacted = camel_auth::redact_query_params(uri, &sensitive);
+    tracing::debug!(path = %redacted, "WS upgrade with query token (redacted)");
+}
+
 pub async fn dispatch_handler(
     State(state): State<WsAppState>,
     req: Request<Body>,
@@ -414,93 +495,147 @@ pub async fn dispatch_handler(
     }
 
     let mut principal_opt: Option<camel_api::security_policy::Principal> = None;
+    let mut carrier_opt: Option<AuthenticatedPrincipal> = None;
     if let Some(sec_ctx) = state.path_policies.get(&path) {
-        let extracted =
-            camel_auth::extract_token_multi(req.headers(), req.uri(), &sec_ctx.credential_sources);
-
-        match extracted {
-            Some(extracted) => {
-                if matches!(
-                    extracted.source,
-                    camel_auth::CredentialSource::QueryParam { .. }
+        if let Some(kernel) = WsKernelAuth::from_security_context(&sec_ctx) {
+            // Kernel path (Task 2.8): `Public` skips credential extraction
+            // entirely (pass-through); any other mode extracts per the
+            // plan's sources and mints the sealed principal through the
+            // kernel. No local policy evaluation — authorization belongs
+            // to the pipeline's policy layer and Task 2.9's dispatch
+            // check, which read the typed carrier.
+            if matches!(kernel.plan.access_mode, AccessMode::Public) {
+                tracing::debug!(path = %path, "WS upgrade: public plan, skipping credential extraction");
+            } else {
+                match camel_auth::extract_token_multi(
+                    req.headers(),
+                    req.uri(),
+                    &kernel.plan.credential_sources,
                 ) {
-                    // Redact the declared query-param names (from this route's
-                    // credential_sources) plus the historical defaults, so a
-                    // DSL-reachable `QueryParam { param: sess }` never logs its
-                    // value in the upgrade debug record (ADR-0051).
-                    let mut sensitive: Vec<&str> = vec!["access_token", "token"];
-                    sensitive.extend(sec_ctx.credential_sources.iter().filter_map(|source| {
-                        match source {
-                            camel_auth::CredentialSource::QueryParam { param } => {
-                                Some(param.as_str())
-                            }
-                            _ => None,
-                        }
-                    }));
-                    let redacted = camel_auth::redact_query_params(req.uri(), &sensitive);
-                    tracing::debug!(path = %redacted, "WS upgrade with query token (redacted)");
-                }
-                match sec_ctx
-                    .authenticator
-                    .authenticate_bearer(&extracted.token)
-                    .await
-                {
-                    Ok(principal) => {
-                        let mut exchange = camel_api::Exchange::new(camel_api::Message::new(
-                            camel_api::Body::Empty,
-                        ));
-                        camel_api::store_principal_properties(&mut exchange, &principal);
-                        match sec_ctx.policy.evaluate(&mut exchange).await {
-                            Ok(AuthorizationDecision::Granted { principal: _p }) => {
-                                tracing::debug!(path = %path, subject = %principal.subject, "WS upgrade authorized");
-                                principal_opt = Some(principal);
-                            }
-                            Ok(AuthorizationDecision::Denied { reason, .. }) => {
-                                tracing::warn!(path = %path, reason = %reason, "WS upgrade denied");
-                                return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+                    Some(extracted) => {
+                        debug_log_query_credential(
+                            req.uri(),
+                            &kernel.plan.credential_sources,
+                            &extracted.source,
+                        );
+                        match camel_auth::kernel_authenticate(
+                            &kernel.plan,
+                            &kernel.providers,
+                            &extracted,
+                        )
+                        .await
+                        {
+                            Ok(carrier) => {
+                                tracing::debug!(
+                                    path = %path,
+                                    subject = %carrier.principal().subject,
+                                    provider = %carrier.provider_id(),
+                                    "WS upgrade authorized via kernel"
+                                );
+                                // The plain view feeds the advisory
+                                // exchange properties; the sealed carrier
+                                // rides the connection into every message
+                                // exchange.
+                                principal_opt = Some(carrier.principal().clone());
+                                carrier_opt = Some(carrier);
                             }
                             Err(e) => {
                                 state
                                     .runtime
                                     .metrics()
-                                    .increment_errors(&state.route_id, "e:ws:policy-eval");
-                                // log-policy: outside-contract
-                                tracing::error!(path = %path, error = %e, "Policy evaluation error during WS upgrade");
-                                return (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    "Internal Server Error",
-                                )
-                                    .into_response();
+                                    .increment_errors(&state.route_id, "e:ws:authn");
+                                tracing::warn!(path = %path, error = %e, "WS upgrade kernel authentication failed");
+                                return ws_upgrade_auth_error(&e);
                             }
-                            // Future AuthorizationDecision variants fail closed.
-                            _ => return (StatusCode::FORBIDDEN, "Forbidden").into_response(),
                         }
                     }
-                    Err(e) => {
-                        let (status, body) = match &e {
-                            camel_api::CamelError::Unauthenticated(_) => {
-                                (StatusCode::UNAUTHORIZED, "Unauthorized")
-                            }
-                            camel_api::CamelError::ProcessorError(msg)
-                                if msg.contains("auth provider unavailable") =>
-                            {
-                                (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
-                            }
-                            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
-                        };
-                        tracing::warn!(path = %path, error = %e, "WS upgrade authentication failed");
-                        return (status, body).into_response();
+                    None => {
+                        state
+                            .runtime
+                            .metrics()
+                            .increment_errors(&state.route_id, "e:ws:authn");
+                        tracing::warn!(path = %path, "WS upgrade rejected: no credential found in any source");
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            [("WWW-Authenticate", "Bearer".to_string())],
+                            "Unauthorized",
+                        )
+                            .into_response();
                     }
                 }
             }
-            None => {
-                tracing::warn!(path = %path, "WS upgrade rejected: no credential found in any source");
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    [("WWW-Authenticate", "Bearer".to_string())],
-                    "Unauthorized",
-                )
-                    .into_response();
+        } else {
+            // Legacy path (route without a compiled plan + providers):
+            // unchanged until the Task 2.9 migration deletes it.
+            let extracted = camel_auth::extract_token_multi(
+                req.headers(),
+                req.uri(),
+                &sec_ctx.credential_sources,
+            );
+
+            match extracted {
+                Some(extracted) => {
+                    debug_log_query_credential(
+                        req.uri(),
+                        &sec_ctx.credential_sources,
+                        &extracted.source,
+                    );
+                    match sec_ctx
+                        .authenticator
+                        .authenticate_bearer(&extracted.token)
+                        .await
+                    {
+                        Ok(principal) => {
+                            let mut exchange = camel_api::Exchange::new(camel_api::Message::new(
+                                camel_api::Body::Empty,
+                            ));
+                            camel_api::store_principal_properties(&mut exchange, &principal);
+                            let legacy = LegacyPrincipal(principal.clone());
+                            let auth = AuthContext {
+                                principal: &legacy,
+                                transport: TransportId::Ws,
+                            };
+                            match sec_ctx.policy.evaluate(&mut exchange, &auth).await {
+                                Ok(AuthorizationDecision::Granted { principal: _p }) => {
+                                    tracing::debug!(path = %path, subject = %principal.subject, "WS upgrade authorized");
+                                    principal_opt = Some(principal);
+                                }
+                                Ok(AuthorizationDecision::Denied { reason, .. }) => {
+                                    tracing::warn!(path = %path, reason = %reason, "WS upgrade denied");
+                                    return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+                                }
+                                Err(e) => {
+                                    state
+                                        .runtime
+                                        .metrics()
+                                        .increment_errors(&state.route_id, "e:ws:policy-eval");
+                                    // log-policy: outside-contract
+                                    tracing::error!(path = %path, error = %e, "Policy evaluation error during WS upgrade");
+                                    return (
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        "Internal Server Error",
+                                    )
+                                        .into_response();
+                                }
+                                // Future AuthorizationDecision variants fail closed.
+                                _ => return (StatusCode::FORBIDDEN, "Forbidden").into_response(),
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(path = %path, error = %e, "WS upgrade authentication failed");
+                            return ws_upgrade_auth_error(&e);
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(path = %path, "WS upgrade rejected: no credential found in any source");
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        [("WWW-Authenticate", "Bearer".to_string())],
+                        "Unauthorized",
+                    )
+                        .into_response();
+                }
             }
         }
     }
@@ -526,6 +661,7 @@ pub async fn dispatch_handler(
             remote_addr,
             upgrade_headers,
             principal_opt,
+            carrier_opt,
         )
     })
     .into_response()
@@ -539,6 +675,7 @@ async fn ws_handler(
     remote_addr: String,
     upgrade_headers: HashMap<String, String>,
     principal: Option<camel_api::security_policy::Principal>,
+    carrier: Option<AuthenticatedPrincipal>,
 ) {
     let connection_key = uuid::Uuid::new_v4().to_string();
     let path_config = state
@@ -710,6 +847,13 @@ async fn ws_handler(
                 if let Some(ref p) = principal {
                     camel_api::store_principal_properties(&mut exchange, p);
                 }
+                // Kernel-minted typed carrier (Task 2.8): a FRESH exchange is
+                // built per inbound message, so every one must carry the
+                // connection's authenticated principal — Task 2.9's dispatch
+                // enforcement reads it off each exchange, not just the first.
+                if let Some(ref carrier) = carrier {
+                    camel_auth::install_carrier(&mut exchange, carrier);
+                }
                 #[cfg(feature = "otel")]
                 {
                     camel_otel::extract_into_exchange(&mut exchange, &upgrade_headers);
@@ -753,6 +897,11 @@ async fn ws_handler(
                 let mut exchange = Exchange::new(message);
                 if let Some(ref p) = principal {
                     camel_api::store_principal_properties(&mut exchange, p);
+                }
+                // Kernel-minted typed carrier (Task 2.8): same mandate as the
+                // text site — every binary message exchange carries it too.
+                if let Some(ref carrier) = carrier {
+                    camel_auth::install_carrier(&mut exchange, carrier);
                 }
                 #[cfg(feature = "otel")]
                 {
@@ -1196,6 +1345,11 @@ impl Consumer for WsConsumer {
     }
 
     fn set_security_context(&mut self, ctx: camel_component_api::SecurityContext) {
+        // Construction-order (Task 2.1 lesson, applied at Task 2.8): the
+        // context must already carry the compiled plan and the provider
+        // registry here — `start()` publishes it into the shared server
+        // state in the same step that makes the path dispatchable, so no
+        // handshake can observe a half-patched policy.
         self.security_ctx = Some(ctx);
     }
 }

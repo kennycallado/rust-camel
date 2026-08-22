@@ -1907,6 +1907,16 @@
             "null"
           ]
         },
+        "audiences": {
+          "description": "Route-level audience override for the compiled security plan. When\npresent the plan's `audience_binding.audiences` uses these values\n(issuers still come from the provider); when absent the resolved\nprovider's binding is copied verbatim. Valid only with the\n`roles`/`scopes` forms (validated at load time in `yaml.rs`),\nmirroring `provider`.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "config": {
           "additionalProperties": {
             "type": "string"
@@ -1968,14 +1978,6 @@
           },
           "type": [
             "array",
-            "null"
-          ]
-        },
-        "trust_upstream_principal": {
-          "default": null,
-          "description": "When `true`, the policy accepts an already-populated\n`camel.auth.principal` exchange property when no Bearer token is\npresent. Default `false` (fail-closed) — the principal must come\nfrom token validation. See H1 in\n`docs/superpowers/specs/v1-sec-stabilization-spec.md`.",
-          "type": [
-            "boolean",
             "null"
           ]
         },

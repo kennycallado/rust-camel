@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, Version, header};
-use camel_api::security_policy::{AuthorizationDecision, Principal, SecurityPolicy};
+use camel_api::security_policy::{AuthContext, AuthorizationDecision, Principal, SecurityPolicy};
 use camel_api::{CamelError, Exchange};
 use camel_auth::TokenAuthenticator;
 use camel_component_api::{ExchangeEnvelope, SecurityContext};
@@ -39,6 +39,7 @@ impl SecurityPolicy for AlwaysGrantPolicy {
     async fn evaluate(
         &self,
         _exchange: &mut Exchange,
+        _auth: &AuthContext<'_>,
     ) -> Result<AuthorizationDecision, CamelError> {
         Ok(AuthorizationDecision::Granted {
             principal: test_principal(),
@@ -53,6 +54,7 @@ impl SecurityPolicy for AlwaysDenyPolicy {
     async fn evaluate(
         &self,
         _exchange: &mut Exchange,
+        _auth: &AuthContext<'_>,
     ) -> Result<AuthorizationDecision, CamelError> {
         Ok(AuthorizationDecision::Denied {
             reason: "no roles assigned".into(),
@@ -69,6 +71,7 @@ impl SecurityPolicy for FailPolicy {
     async fn evaluate(
         &self,
         _exchange: &mut Exchange,
+        _auth: &AuthContext<'_>,
     ) -> Result<AuthorizationDecision, CamelError> {
         Err(CamelError::ProcessorError("policy error".into()))
     }

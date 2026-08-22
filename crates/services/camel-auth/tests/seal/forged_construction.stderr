@@ -1,0 +1,9 @@
+error[E0451]: fields `principal` and `provider_id` of struct `AuthenticatedPrincipal` are private
+ --> tests/seal/forged_construction.rs:8:9
+  |
+7 |     let _ = camel_auth::AuthenticatedPrincipal {
+  |             ---------------------------------- in this type
+8 |         principal: todo!(),
+  |         ^^^^^^^^^ private field
+9 |         provider_id: todo!(),
+  |         ^^^^^^^^^^^ private field

@@ -1,5 +1,6 @@
 //! MCP server-role Consumer — bridges registry-dispatched tool invocations
-//! and resource reads into the route's Pipeline (Task 2.4).
+//! and resource reads into the route's Pipeline (Task 2.4; kernel
+//! migration Task 2.6).
 //!
 //! Follows the repo's request-reply bridge consumers (`MqttConsumer` in
 //! `camel-mqtt`, `KafkaConsumer` in `camel-kafka`, `SqlConsumer` in
@@ -12,6 +13,15 @@
 //! [`ConsumerContext::send_and_wait`] — the same request-reply handoff those
 //! consumers use, with the route's answer sent back on the invocation's
 //! oneshot `reply`.
+//!
+//! Security (Task 2.6): the route controller wires the compiled
+//! [`RouteSecurityPlan`] and provider snapshot through
+//! [`Consumer::set_security_context`] before `start()`; start registers
+//! them with the bind's dispatch-security book (keyed by route id) and runs
+//! the ADR-0061 per-bind exposure gate. The rmcp adapter then authenticates
+//! each invocation at the request seam (`kernel_authenticate`) and the
+//! bridge installs the minted principal as the Exchange's typed carrier
+//! before the pipeline runs.
 //!
 //! Lifecycle: `start()` resolves the named server's config (fail-fast on an
 //! unknown server or a bind-policy violation), spawns the shared listener if
@@ -27,10 +37,14 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use camel_api::security_policy::{AccessMode, RouteSecurityPlan, TransportId};
 use camel_api::{Body, CamelError, Exchange, Message};
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode};
+use camel_auth::install_carrier;
+use camel_component_api::{
+    ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, SecurityContext,
+};
 
-use crate::config::{BindPolicyWarning, McpServerConfig, validate_server_policy};
+use crate::config::{McpDeclaredServer, McpServerConfig, validate_server_policy};
 use crate::endpoint::McpEndpointUri;
 use crate::error::McpError;
 use crate::registry::{McpListenerHandle, McpServerRegistry};
@@ -44,6 +58,85 @@ const INVOCATION_BUFFER: usize = 64;
 /// Upper bound when materializing a streamed route output body.
 const MAX_STREAM_BODY_BYTES: usize = 10 << 20;
 
+/// Merge the DSL-declared listener values into the TOML server config
+/// (spec: MCP listener ownership).
+///
+/// The DSL `mcp:` block owns `bind`/`tls`/`max_tools`/`max_resources` when
+/// it declares them — they ARE the runtime values for listener
+/// construction/lookup. TOML `mcp.servers.<name>` remains the source for
+/// keys with no DSL counterpart (`allowed_hosts`, `security_policy`) and
+/// those still apply untouched.
+///
+/// Conflict rule: a key DECLARED by both sides with different values fails
+/// start with [`McpError::ConfigConflict`] naming both sources and both
+/// values. Caps and TLS are presence-based (`Option` on both sides): a
+/// value declared by exactly one side is that side's runtime value —
+/// silence on the other side is not a disagreement — and a cap declared by
+/// neither keeps the 128 default (`config::DEFAULT_CAP`), applied after
+/// this merge at listener materialization so the default can never
+/// conflict with or overwrite a declared value. `bind` is always declared
+/// by both sides and compared directly.
+fn merge_declared_server(
+    server: &str,
+    mut toml: McpServerConfig,
+    dsl: &McpDeclaredServer,
+) -> Result<McpServerConfig, McpError> {
+    if toml.bind != dsl.bind {
+        return Err(McpError::ConfigConflict {
+            server: server.to_string(),
+            key: "bind",
+            dsl: dsl.bind.clone(),
+            toml: toml.bind.clone(),
+        });
+    }
+    match (&dsl.tls, &toml.tls) {
+        // Both sides declared TLS with different paths — hard conflict.
+        (Some(dsl_tls), Some(toml_tls)) if dsl_tls != toml_tls => {
+            return Err(McpError::ConfigConflict {
+                server: server.to_string(),
+                key: "tls",
+                dsl: format!(
+                    "tls(cert_path={}, key_path={})",
+                    dsl_tls.cert_path, dsl_tls.key_path
+                ),
+                toml: format!(
+                    "tls(cert_path={}, key_path={})",
+                    toml_tls.cert_path, toml_tls.key_path
+                ),
+            });
+        }
+        _ => {}
+    }
+    // DSL declares TLS (TOML silent or equal) — the DSL value is runtime;
+    // DSL-silent keeps TOML's TLS untouched.
+    if let Some(dsl_tls) = &dsl.tls {
+        toml.tls = Some(dsl_tls.clone());
+    }
+    // Caps, presence-based: both declared and different → hard conflict
+    // naming both sources and both values.
+    for (key, dsl_cap, toml_cap) in [
+        ("max_tools", dsl.max_tools, toml.max_tools),
+        ("max_resources", dsl.max_resources, toml.max_resources),
+    ] {
+        if let (Some(dsl_value), Some(toml_value)) = (dsl_cap, toml_cap)
+            && dsl_value != toml_value
+        {
+            return Err(McpError::ConfigConflict {
+                server: server.to_string(),
+                key,
+                dsl: dsl_value.to_string(),
+                toml: toml_value.to_string(),
+            });
+        }
+    }
+    // One side declared → that side wins; neither → `None` stands (the
+    // 128 default is applied after this merge, at listener
+    // materialization — never here, where it could shadow a decision).
+    toml.max_tools = dsl.max_tools.or(toml.max_tools);
+    toml.max_resources = dsl.max_resources.or(toml.max_resources);
+    Ok(toml)
+}
+
 /// What a started consumer registered — drives `stop` cleanup.
 enum Registration {
     Tool { name: String },
@@ -54,6 +147,9 @@ enum Registration {
 struct Running {
     registration: Registration,
     handle: Arc<McpListenerHandle>,
+    /// Route id this consumer registered its plan under (Task 2.6) —
+    /// unregistered from the bind's security book on stop.
+    route_id: String,
     /// The bridge task (detached by `start`); taken by
     /// [`Consumer::background_task_handle`] for runtime monitoring.
     bridge: Option<JoinHandle<Result<(), CamelError>>>,
@@ -64,6 +160,11 @@ struct Running {
 pub struct McpConsumer {
     operation: McpEndpointUri,
     server_configs: Arc<HashMap<String, McpServerConfig>>,
+    /// Security context wired by the route controller before `start()`
+    /// (plan + provider snapshot, Task 1.8/2.6). `None` for routes without
+    /// route-level security — the consumer then registers a default
+    /// `Public` plan (ADR-0061 Rule 4: public by default, gated per bind).
+    security_ctx: Option<SecurityContext>,
     running: Option<Running>,
 }
 
@@ -75,6 +176,7 @@ impl McpConsumer {
         Self {
             operation,
             server_configs,
+            security_ctx: None,
             running: None,
         }
     }
@@ -87,26 +189,81 @@ impl Consumer for McpConsumer {
         // an unknown server (the producer resolves its remote at creation
         // instead) so bind-policy failures surface through the consumer.
         let server = self.operation.server().to_owned();
-        let cfg = self.server_configs.get(&server).cloned().ok_or_else(|| {
+        let toml_cfg = self.server_configs.get(&server).cloned().ok_or_else(|| {
             McpError::Endpoint(format!("MCP server '{server}' not found in config"))
         })?;
 
-        // (b) Bind policy: fail-closed errors propagate; a non-loopback bind
-        // warns exactly once per start, naming server and bind in the message
-        // (operator-visible, ADR-0012 advisory shape).
-        if let Some(BindPolicyWarning::NonLoopback) = validate_server_policy(&server, &cfg)? {
-            tracing::warn!(
-                "MCP server '{server}' binds non-loopback address '{}' — the listener is \
-                 reachable from the network",
-                cfg.bind
-            );
-        }
+        // (a2) DSL listener ownership: on a route lowered from an `mcp:` DSL
+        // block (the endpoint URI carries `mcp.declared.*` parameters), the
+        // DSL `bind`/`tls` and any DECLARED caps ARE the runtime values —
+        // merged into the TOML entry, which keeps supplying the keys with
+        // no DSL counterpart (`allowed_hosts`, `security_policy`). A key
+        // declared by both sides with different values fails start naming
+        // both sources (spec scenario 'TOML/DSL conflict fails startup');
+        // a route without declared parameters is TOML-only and takes the
+        // config verbatim.
+        let cfg = match self.operation.declared_server() {
+            Some(declared) => merge_declared_server(&server, toml_cfg, declared)?,
+            None => toml_cfg,
+        };
+
+        // (b) Bind policy: fail-closed config checks (IP-literal bind,
+        // non-zero caps) propagate; the loopback classification feeds the
+        // exposure gate below. The former `security_policy` presence gate was
+        // removed in Task 2.9 — public exposure is the kernel gate's call.
+        let is_loopback = validate_server_policy(&server, &cfg)?.is_none();
+
+        // (b2) Task 2.6 kernel migration: register this route's compiled
+        // plan with the per-bind dispatch-security book, then run the
+        // ADR-0061 per-bind exposure gate over every plan on the bind
+        // (this route's included). This REPLACES the former warn-only
+        // non-loopback advisory: non-loopback binds exposing Public routes
+        // refuse to start unless the operator acknowledged the bind
+        // (refuse-without-ack), and an acknowledged bind warns permanently
+        // (inside the gate). Runs before any socket is bound — a refused
+        // route never spawns a listener.
+        let registry = McpServerRegistry::global();
+        let route_id = ctx.route_id().to_owned();
+        let security = registry.bind_security(&cfg.bind);
+        let (plan, providers) = match self.security_ctx.as_ref() {
+            // A route the controller wires with a security context carries a
+            // compiled plan (Task 1.8 every-server-route invariant). A
+            // missing plan here means un-wired compilation — fail closed
+            // rather than downgrade declared security to Public
+            // (ADR-0061 Rule 5).
+            Some(sec_ctx) => match sec_ctx.plan.clone() {
+                Some(plan) => (plan, sec_ctx.providers.clone()),
+                None => {
+                    return Err(CamelError::RouteError(format!(
+                        "route '{route_id}' declares security but carries no compiled plan"
+                    )));
+                }
+            },
+            // No security context: the route declared no route-level
+            // security — Public by default, still gated (ADR-0061 Rule 4).
+            None => (default_public_plan(), None),
+        };
+        let owned = security.plans_snapshot();
+        let mut plan_refs: Vec<(&str, &RouteSecurityPlan)> =
+            owned.iter().map(|(id, plan)| (id.as_str(), plan)).collect();
+        plan_refs.push((route_id.as_str(), &plan));
+        camel_auth::enforce_bind_exposure_gate(
+            &cfg.bind,
+            is_loopback,
+            &plan_refs,
+            registry.acknowledged(&cfg.bind),
+        )?;
+        security.register_plan(&route_id, plan, providers);
 
         // (c) The shared listener for this bind (the first consumer spawns
         // it; later consumers reuse the handle).
-        let handle = McpServerRegistry::global()
-            .get_or_spawn(&cfg.bind, &cfg)
-            .await?;
+        let handle = match registry.get_or_spawn(&cfg.bind, &cfg).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                security.unregister_plan(&route_id);
+                return Err(e.into());
+            }
+        };
 
         // (d) Duplicate guard + register. The registry rejects duplicates
         // atomically (see `register`), so the pre-check here is only a
@@ -114,11 +271,14 @@ impl Consumer for McpConsumer {
         // spawning a bridge: the registry's atomic rejection is what actually
         // prevents two concurrent same-name starts from silently overwriting
         // the first registration (stranding the first route's channel).
+        // Any failure here unregisters the plan registered in (b2) — a
+        // refused start must leave no stale plan on the bind's gate.
         let (registration, bridge) = match self.operation.clone() {
             McpEndpointUri::Tool {
                 name, input_schema, ..
             } => {
                 if handle.tool_registry.resolve(&name).is_some() {
+                    security.unregister_plan(&route_id);
                     return Err(McpError::Endpoint(format!(
                         "tool '{name}' is already registered on MCP server '{server}' — a \
                          second consumer for the same tool name is refused"
@@ -126,9 +286,14 @@ impl Consumer for McpConsumer {
                     .into());
                 }
                 let (tx, rx) = mpsc::channel(INVOCATION_BUFFER);
-                handle
-                    .tool_registry
-                    .register(name.clone(), tx, input_schema)?;
+                if let Err(e) =
+                    handle
+                        .tool_registry
+                        .register(name.clone(), route_id.clone(), tx, input_schema)
+                {
+                    security.unregister_plan(&route_id);
+                    return Err(e.into());
+                }
                 (
                     Registration::Tool { name },
                     spawn_tool_bridge(rx, ctx.clone()),
@@ -136,6 +301,7 @@ impl Consumer for McpConsumer {
             }
             McpEndpointUri::Resource { resource_uri, .. } => {
                 if handle.resource_registry.resolve(&resource_uri).is_some() {
+                    security.unregister_plan(&route_id);
                     return Err(McpError::Endpoint(format!(
                         "resource '{resource_uri}' is already registered on MCP server \
                          '{server}' — a second consumer for the same resource URI is refused"
@@ -143,15 +309,21 @@ impl Consumer for McpConsumer {
                     .into());
                 }
                 let (tx, rx) = mpsc::channel(INVOCATION_BUFFER);
-                handle
-                    .resource_registry
-                    .register(resource_uri.clone(), tx)?;
+                if let Err(e) =
+                    handle
+                        .resource_registry
+                        .register(resource_uri.clone(), route_id.clone(), tx)
+                {
+                    security.unregister_plan(&route_id);
+                    return Err(e.into());
+                }
                 (
                     Registration::Resource { uri: resource_uri },
                     spawn_resource_bridge(rx, ctx.clone()),
                 )
             }
             operation => {
+                security.unregister_plan(&route_id);
                 return Err(CamelError::EndpointCreationFailed(format!(
                     "MCP consumer cannot start for producer operation {operation:?}"
                 )));
@@ -170,6 +342,7 @@ impl Consumer for McpConsumer {
         self.running = Some(Running {
             registration,
             handle,
+            route_id,
             bridge: Some(bridge),
         });
         Ok(())
@@ -181,11 +354,14 @@ impl Consumer for McpConsumer {
         };
 
         // Unregister FIRST: subsequent dispatch resolves `None` and maps to a
-        // clean MCP method error instead of awaiting a dead channel.
+        // clean MCP method error instead of awaiting a dead channel. The
+        // bind-security plan goes with it (stop releases everything the
+        // consumer registered on the bind).
         match &running.registration {
             Registration::Tool { name } => running.handle.tool_registry.unregister(name),
             Registration::Resource { uri } => running.handle.resource_registry.unregister(uri),
         }
+        running.handle.security.unregister_plan(&running.route_id);
 
         // Cancel the bridge if we still own it (it may be parked on `recv`
         // while external sender clones keep the channel open), then release
@@ -212,6 +388,24 @@ impl Consumer for McpConsumer {
 
     fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
         self.running.as_mut()?.bridge.take()
+    }
+
+    fn set_security_context(&mut self, ctx: SecurityContext) {
+        self.security_ctx = Some(ctx);
+    }
+}
+
+/// The default plan for a route that declared no route-level security
+/// (ADR-0061 Rule 4): Public, no providers, no credential sources. The
+/// per-bind exposure gate still sees it — a bare route on a non-loopback
+/// bind needs operator acknowledgement exactly like a declared-Public one.
+fn default_public_plan() -> RouteSecurityPlan {
+    RouteSecurityPlan {
+        access_mode: AccessMode::Public,
+        provider_ref: None,
+        transport: TransportId::Mcp,
+        credential_sources: vec![],
+        audience_binding: None,
     }
 }
 
@@ -249,7 +443,16 @@ fn spawn_tool_bridge(
                                     serde_json::Value::String(value.clone()),
                                 );
                             }
-                            ctx.send_and_wait(Exchange::new(msg)).await
+                            let mut exchange = Exchange::new(msg);
+                            // Kernel-minted carrier (Task 2.6): the adapter
+                            // authenticated this invocation before dispatch;
+                            // the typed principal rides the Exchange so the
+                            // pipeline's policy layer (and Task 2.9's
+                            // dispatch check) sees a verified identity.
+                            if let Some(principal) = &invocation.principal {
+                                install_carrier(&mut exchange, principal);
+                            }
+                            ctx.send_and_wait(exchange).await
                         };
                         // The structured `is_error` flag is set ONLY on a
                         // genuine failure: a failed exchange, or a body
@@ -294,7 +497,9 @@ fn spawn_resource_bridge(
                             // Body carries the requested resource URI — the
                             // route's representation of the read. Wire headers
                             // ride the Exchange input for the route-level
-                            // `SecurityPolicy` (see the tool bridge).
+                            // `SecurityPolicy` (see the tool bridge); the
+                            // adapter-minted carrier rides the Exchange the
+                            // same way (Task 2.6).
                             let mut msg = Message::new(Body::Text(read.uri.clone()));
                             for (name, value) in &read.headers {
                                 msg.set_header(
@@ -302,7 +507,11 @@ fn spawn_resource_bridge(
                                     serde_json::Value::String(value.clone()),
                                 );
                             }
-                            ctx.send_and_wait(Exchange::new(msg)).await
+                            let mut exchange = Exchange::new(msg);
+                            if let Some(principal) = &read.principal {
+                                install_carrier(&mut exchange, principal);
+                            }
+                            ctx.send_and_wait(exchange).await
                         };
                         let resource = match result {
                             Ok(out) => body_to_resource(out, &read.uri).await,

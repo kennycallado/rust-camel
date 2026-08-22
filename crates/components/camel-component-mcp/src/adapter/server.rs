@@ -61,8 +61,13 @@ use rmcp::transport::streamable_http_server::session::never::NeverSessionManager
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::registry::{McpResourceRegistry, McpToolRegistry};
+use crate::headers::normalize_repeated;
+use crate::registry::{McpBindSecurity, McpResourceRegistry, McpToolRegistry};
 use crate::types::{McpRequestHeaders, McpResource, McpResourceRead, McpToolInvocation};
+use camel_api::CamelError;
+use camel_api::security_policy::AccessMode;
+use camel_auth::AuthenticatedPrincipal;
+use camel_auth::{extract_token_multi, kernel_authenticate};
 
 /// The sole protocol version this server speaks (spec: baseline 2026-07-28).
 const SUPPORTED_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
@@ -101,6 +106,10 @@ const RMCP_DEFAULT_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 pub struct McpServerAdapter {
     tools: Arc<McpToolRegistry>,
     resources: Arc<McpResourceRegistry>,
+    /// Per-bind dispatch-security book (Task 2.6): route plans + provider
+    /// snapshot, consulted at the `request_headers` seam below for
+    /// per-invocation kernel authentication.
+    security: Arc<McpBindSecurity>,
     identity_name: String,
 }
 
@@ -170,11 +179,27 @@ impl rmcp::ServerHandler for McpServerAdapter {
         let arguments = serde_json::Value::Object(request.arguments.unwrap_or_default());
         validate_arguments(&name, &entry.input_schema, &arguments)?;
 
+        // Kernel gate at the request seam (Task 2.6): authenticate per the
+        // serving route's plan BEFORE dispatch. A denial is answered in the
+        // MCP idiom — an `isError` tool result carrying the denial — and
+        // the route never sees the invocation.
+        let headers = normalized_headers(&context);
+        let principal = match kernel_authn(&self.security, &entry.route_id, &headers).await {
+            KernelAuthn::Granted(principal) => Some(principal),
+            KernelAuthn::Public => None,
+            KernelAuthn::Denied(err) => {
+                return Ok(CallToolResponse::Complete(CallToolResult::error(vec![
+                    denial_content(&err),
+                ])));
+            }
+        };
+
         let (reply_tx, reply_rx) = oneshot::channel();
         let invocation = McpToolInvocation {
             name: name.clone(),
             arguments,
-            headers: request_headers(&context),
+            headers: mcp_request_headers(&headers),
+            principal,
             reply: reply_tx,
         };
         let label = format!("tool '{name}'");
@@ -234,10 +259,24 @@ impl rmcp::ServerHandler for McpServerAdapter {
         if !entry.ready.load(Ordering::SeqCst) {
             return Err(resource_unavailable(&uri));
         }
+        // Kernel gate at the request seam (Task 2.6): a denial is answered
+        // as the resource's error body — the route never sees the read.
+        let headers = normalized_headers(&context);
+        let principal = match kernel_authn(&self.security, &entry.route_id, &headers).await {
+            KernelAuthn::Granted(principal) => Some(principal),
+            KernelAuthn::Public => None,
+            KernelAuthn::Denied(err) => {
+                return Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+                    vec![ResourceContents::text(err.to_string(), uri)],
+                )));
+            }
+        };
+
         let (reply_tx, reply_rx) = oneshot::channel();
         let read = McpResourceRead {
             uri: uri.clone(),
-            headers: request_headers(&context),
+            headers: mcp_request_headers(&headers),
+            principal,
             reply: reply_tx,
         };
         let label = format!("resource '{uri}'");
@@ -303,37 +342,91 @@ fn resource_unavailable(uri: &str) -> ErrorData {
     )
 }
 
-/// Copy the inbound HTTP request headers from the request context into a
-/// [`McpRequestHeaders`] map.
+/// The inbound HTTP request headers, normalized per Task 2.5 (repeated
+/// headers joined deterministically), from the rmcp request context.
 ///
 /// rmcp injects the raw [`http::request::Parts`] (headers included) into the
 /// request's extensions, reachable through the handler's `RequestContext`.
 /// A request whose parts are absent (e.g. a non-HTTP transport) yields an
-/// empty map — the downstream `SecurityPolicy` then fails closed exactly as
-/// it would for a headerless request.
-fn request_headers(context: &RequestContext<RoleServer>) -> McpRequestHeaders {
-    let mut headers = McpRequestHeaders::new();
+/// empty map — credential extraction then finds nothing and the kernel
+/// fails closed exactly as it would for a headerless request.
+fn normalized_headers(context: &RequestContext<RoleServer>) -> http::HeaderMap {
     let Some(parts) = context.extensions.get::<http::request::Parts>() else {
-        return headers;
+        return http::HeaderMap::new();
     };
-    for (name, value) in parts.headers.iter() {
+    normalize_repeated(&parts.headers)
+}
+
+/// Project the normalized header map into the [`McpRequestHeaders`] map
+/// (lowercased names, UTF-8 values only) carried on dispatch payloads.
+fn mcp_request_headers(headers: &http::HeaderMap) -> McpRequestHeaders {
+    let mut map = McpRequestHeaders::new();
+    for (name, value) in headers.iter() {
         let Some(value) = value.to_str().ok() else {
             // Non-UTF-8 values cannot carry a credential; skipping keeps the
             // map honest (empty would fabricate a present-but-blank header).
             continue;
         };
-        let key = name.as_str().to_ascii_lowercase();
-        // HTTP treats repeated headers as comma-joined; preserve both so a
-        // Cookie-source credential in the second header is not lost.
-        headers
-            .entry(key)
-            .and_modify(|existing| {
-                existing.push_str(", ");
-                existing.push_str(value);
-            })
-            .or_insert_with(|| value.to_owned());
+        map.insert(name.as_str().to_ascii_lowercase(), value.to_owned());
     }
-    headers
+    map
+}
+
+/// Outcome of per-invocation kernel authentication (Task 2.6).
+enum KernelAuthn {
+    /// Public plan (or no registered plan — pre-2.6 direct-drive route):
+    /// no extraction, pass-through.
+    Public,
+    /// Non-Public plan + valid credential: the kernel-minted principal.
+    Granted(AuthenticatedPrincipal),
+    /// Non-Public plan + missing/invalid credential or wiring: the denial
+    /// the caller renders in the MCP idiom.
+    Denied(CamelError),
+}
+
+/// Authenticate one dispatch against the serving route's plan (ADR-0061
+/// Rule 1: transports extract, the kernel authenticates).
+///
+/// `Public` plans (and routes with no registered plan) skip extraction
+/// entirely; anything else extracts per `plan.credential_sources` from the
+/// NORMALIZED headers (Task 2.5) — first-match-wins source order — and
+/// hands the token to `kernel_authenticate`. QueryParam sources never
+/// appear here: plan compilation rejects them for the MCP transport
+/// (Task 1.8 capability check), and the adapter has no URI to read one
+/// from anyway (the empty URI keeps `extract_token_multi` honest).
+async fn kernel_authn(
+    security: &McpBindSecurity,
+    route_id: &str,
+    headers: &http::HeaderMap,
+) -> KernelAuthn {
+    let Some(plan) = security.plan_for(route_id) else {
+        return KernelAuthn::Public;
+    };
+    if matches!(plan.access_mode, AccessMode::Public) {
+        return KernelAuthn::Public;
+    }
+    let Some(providers) = security.providers() else {
+        return KernelAuthn::Denied(CamelError::Unauthenticated(format!(
+            "route '{route_id}' has no provider registry snapshot; cannot authenticate"
+        )));
+    };
+    let credentials = extract_token_multi(headers, &http::Uri::default(), &plan.credential_sources);
+    let Some(credentials) = credentials else {
+        return KernelAuthn::Denied(CamelError::Unauthenticated(format!(
+            "no credential found for route '{route_id}' (credential sources exhausted)" // allow-secret
+        )));
+    };
+    match kernel_authenticate(&plan, &providers, &credentials).await {
+        Ok(principal) => KernelAuthn::Granted(principal),
+        Err(e) => KernelAuthn::Denied(e),
+    }
+}
+
+/// The tool-result content block carrying a kernel denial — the same
+/// `{"error": ...}` shape the bridge error path produces for a failed
+/// exchange, so hosts see one denial idiom.
+fn denial_content(err: &CamelError) -> ContentBlock {
+    ContentBlock::text(serde_json::json!({ "error": err.to_string() }).to_string())
 }
 
 /// One dispatch under the shared bound ([`TOOL_DISPATCH_TIMEOUT`]): send
@@ -476,6 +569,7 @@ fn capabilities() -> ServerCapabilities {
 pub(crate) fn mcp_router(
     tools: Arc<McpToolRegistry>,
     resources: Arc<McpResourceRegistry>,
+    security: Arc<McpBindSecurity>,
     bind: &str,
     local_addr: SocketAddr,
     allowed_hosts: Option<Vec<String>>,
@@ -483,6 +577,7 @@ pub(crate) fn mcp_router(
     let adapter = McpServerAdapter {
         tools,
         resources,
+        security,
         // The servers-map name is not visible at the shared-listener layer
         // (one bind may host many named servers), so the identity comes from
         // the config field that identifies the listener: its resolved bind

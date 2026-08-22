@@ -64,6 +64,13 @@ Counts (verified mechanically, HEAD `745b2732`): **27** `pub struct`, **0** `#[n
 
 ## Architecture notes
 
+**`[binds]` public-exposure acknowledgements (ADR-0061 Rule 4).**
+`CamelConfig.binds` maps bind addresses (`"0.0.0.0:8080"`) to
+`BindExposureConfig { allow_public_exposure }`. The CLI threads the map to
+the route controller and the MCP registry; a non-loopback bind serving any
+Public route refuses startup without an acknowledgement. Config-shape only —
+the gate lives in `camel-auth::bind_gate`.
+
 **Two-layer enum split (config shape vs runtime shape).**
 `OtelProtocol` and `OtelSampler` in camel-config are serde-parse shapes (`Grpc` / `Http`;
 `AlwaysOn` / `AlwaysOff` / `Ratio`). camel-otel owns the runtime shapes (`HttpProtobuf`,

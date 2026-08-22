@@ -97,6 +97,9 @@ pub mod route {
 #[cfg(feature = "export-internal-adapters")]
 pub mod route_controller {
     pub use crate::lifecycle::adapters::route_controller::*;
+    pub use crate::lifecycle::adapters::route_controller_trait::{
+        BindExposureAcks, enforce_bind_exposure_gate,
+    };
 }
 
 pub mod supervising_route_controller {

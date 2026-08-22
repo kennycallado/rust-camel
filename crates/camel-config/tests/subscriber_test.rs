@@ -51,6 +51,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         beans: HashMap::new(),
         languages: camel_config::LanguagesConfig::default(),
         security: SecurityConfig::default(),
+        binds: Default::default(),
         datasources: HashMap::new(),
         _extra: HashMap::new(),
     }

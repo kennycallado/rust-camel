@@ -128,7 +128,12 @@ async fn tools_list_hides_not_ready_tool() {
     let (tx, _rx) = mpsc::channel::<McpToolInvocation>(8);
     handle
         .tool_registry
-        .register("lookup".to_string(), tx, id_schema())
+        .register(
+            "lookup".to_string(),
+            "dispatch-route".to_string(),
+            tx,
+            id_schema(),
+        )
         .expect("tool must register");
 
     let listed = rmcp_client(addr)
@@ -171,7 +176,12 @@ async fn valid_args_reach_route() {
     let (tx, mut rx) = mpsc::channel::<McpToolInvocation>(8);
     handle
         .tool_registry
-        .register("lookup".to_string(), tx, id_schema())
+        .register(
+            "lookup".to_string(),
+            "dispatch-route".to_string(),
+            tx,
+            id_schema(),
+        )
         .expect("tool must register");
     handle.tool_registry.mark_ready("lookup");
 
@@ -219,7 +229,12 @@ async fn invalid_args_rejected_no_exchange() {
     let (tx, mut rx) = mpsc::channel::<McpToolInvocation>(8);
     handle
         .tool_registry
-        .register("lookup".to_string(), tx, id_schema())
+        .register(
+            "lookup".to_string(),
+            "dispatch-route".to_string(),
+            tx,
+            id_schema(),
+        )
         .expect("tool must register");
     handle.tool_registry.mark_ready("lookup");
 
@@ -247,7 +262,12 @@ async fn unknown_tool_call_returns_clean_error() {
     let (tx, mut rx) = mpsc::channel::<McpToolInvocation>(8);
     handle
         .tool_registry
-        .register("known".to_string(), tx, id_schema())
+        .register(
+            "known".to_string(),
+            "dispatch-route".to_string(),
+            tx,
+            id_schema(),
+        )
         .expect("tool must register");
     handle.tool_registry.mark_ready("known");
 
@@ -323,7 +343,12 @@ async fn error_shaped_success_content_stays_success_and_flag_drives_error() {
     let (tx, mut rx) = mpsc::channel::<McpToolInvocation>(8);
     handle
         .tool_registry
-        .register("lookup".to_string(), tx, id_schema())
+        .register(
+            "lookup".to_string(),
+            "dispatch-route".to_string(),
+            tx,
+            id_schema(),
+        )
         .expect("tool must register");
     handle.tool_registry.mark_ready("lookup");
 

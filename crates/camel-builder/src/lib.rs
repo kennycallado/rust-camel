@@ -380,6 +380,7 @@ pub struct RouteBuilder {
     circuit_breaker_config: Option<CircuitBreakerConfig>,
     security_policy_config: Option<camel_api::security_policy::SecurityPolicyConfig>,
     security_authenticator: Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
+    provider_registry: Option<std::sync::Arc<camel_auth::ProviderRegistry>>,
     concurrency: Option<ConcurrencyModel>,
     route_id: Option<String>,
     auto_startup: Option<bool>,
@@ -418,6 +419,7 @@ impl RouteBuilder {
             circuit_breaker_config: None,
             security_policy_config: None,
             security_authenticator: None,
+            provider_registry: None,
             concurrency: None,
             route_id: None,
             auto_startup: None,
@@ -564,6 +566,17 @@ impl RouteBuilder {
         auth: std::sync::Arc<dyn camel_auth::TokenAuthenticator>,
     ) -> Self {
         self.security_authenticator = Some(auth);
+        self
+    }
+
+    /// Named provider registry for security plan compilation (ADR-0061):
+    /// routes declaring security resolve their provider here; staging
+    /// aborts when the registry cannot satisfy the declaration.
+    pub fn provider_registry(
+        mut self,
+        registry: std::sync::Arc<camel_auth::ProviderRegistry>,
+    ) -> Self {
+        self.provider_registry = Some(registry);
         self
     }
 
@@ -820,6 +833,11 @@ impl RouteBuilder {
         };
         let definition = if let Some(auth) = self.security_authenticator {
             definition.with_security_authenticator(auth)
+        } else {
+            definition
+        };
+        let definition = if let Some(registry) = self.provider_registry {
+            definition.with_provider_registry(registry)
         } else {
             definition
         };

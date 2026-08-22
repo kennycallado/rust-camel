@@ -207,6 +207,7 @@ async fn master_route_uses_kubernetes_platform_from_config() {
         beans: Default::default(),
         languages: Default::default(),
         security: SecurityConfig::default(),
+        binds: Default::default(),
         datasources: Default::default(),
         idempotent_repo: None,
         cache_repo: None,

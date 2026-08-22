@@ -44,6 +44,7 @@ async fn main() -> Result<(), CamelError> {
         security: Default::default(),
         languages: Default::default(),
         cache_repo: None,
+        binds: Default::default(),
         _extra: Default::default(),
     };
 

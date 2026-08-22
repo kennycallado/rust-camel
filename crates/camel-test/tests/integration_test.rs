@@ -2612,7 +2612,7 @@ async fn http_concurrent_pipeline() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18080/concurrent-test")
+    let route = RouteBuilder::from("http://127.0.0.1:18093/concurrent-test")
         .route_id("test-route-38")
         .process(|ex| async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2636,7 +2636,7 @@ async fn http_concurrent_pipeline() {
         let client = client.clone();
         handles.push(tokio::spawn(async move {
             client
-                .get(format!("http://127.0.0.1:18080/concurrent-test?i={i}"))
+                .get(format!("http://127.0.0.1:18093/concurrent-test?i={i}"))
                 .send()
                 .await
                 .unwrap()
@@ -2678,7 +2678,7 @@ async fn http_sequential_override() {
         .await;
 
     // Same slow processor, but forced sequential via .sequential()
-    let route = RouteBuilder::from("http://0.0.0.0:18081/sequential-test")
+    let route = RouteBuilder::from("http://127.0.0.1:18081/sequential-test")
         .route_id("test-route-39")
         .sequential()
         .process(|ex| async move {
@@ -2750,7 +2750,7 @@ async fn http_concurrent_with_semaphore_limit() {
     let current_clone = current.clone();
 
     // Limit to 2 concurrent pipeline executions
-    let route = RouteBuilder::from("http://0.0.0.0:18082/semaphore-test")
+    let route = RouteBuilder::from("http://127.0.0.1:18082/semaphore-test")
         .route_id("test-route-40")
         .concurrent(2)
         .process(move |ex| {
@@ -2822,7 +2822,7 @@ async fn http_concurrent_with_circuit_breaker() {
         .await;
 
     // Use short open_duration (1s) so circuit closes quickly and requests can complete
-    let route = RouteBuilder::from("http://0.0.0.0:18083/cb-test")
+    let route = RouteBuilder::from("http://127.0.0.1:18083/cb-test")
         .route_id("test-route-41")
         .process_fn(failing_step("concurrent cb failure"))
         .circuit_breaker(
@@ -2912,7 +2912,7 @@ async fn http_concurrent_shutdown_drains_inflight() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18084/shutdown-test")
+    let route = RouteBuilder::from("http://127.0.0.1:18084/shutdown-test")
         .route_id("test-route-42")
         .process(|ex| async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2971,7 +2971,7 @@ async fn http_concurrent_error_propagation() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18085/error-test")
+    let route = RouteBuilder::from("http://127.0.0.1:18085/error-test")
         .route_id("test-route-43")
         .process(|ex| async move {
             // Check query param "fail"
@@ -3484,7 +3484,7 @@ async fn http_consumer_string_status_code_e2e() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18091/string-status")
+    let route = RouteBuilder::from("http://127.0.0.1:18091/string-status")
         .route_id("test-string-status-code")
         .set_header("CamelHttpResponseCode", Value::String("202".into()))
         .build()
@@ -3525,7 +3525,7 @@ async fn http_consumer_invalid_string_status_code_fallback_e2e() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18092/invalid-status")
+    let route = RouteBuilder::from("http://127.0.0.1:18092/invalid-status")
         .route_id("test-invalid-status-code")
         .set_header(
             "CamelHttpResponseCode",
@@ -3569,7 +3569,7 @@ async fn http_consumer_overflow_status_code_fallback_e2e() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18086/overflow-status")
+    let route = RouteBuilder::from("http://127.0.0.1:18086/overflow-status")
         .route_id("test-overflow-status-code")
         .set_header("CamelHttpResponseCode", Value::String("70000".into()))
         .build()
@@ -3601,7 +3601,7 @@ async fn http_consumer_stop_returns_exchange_state_e2e() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18090/stop-route")
+    let route = RouteBuilder::from("http://127.0.0.1:18090/stop-route")
         .route_id("test-stop-route")
         .set_body("stopped-payload")
         .stop()
@@ -3638,7 +3638,7 @@ async fn http_consumer_headers_arrive_title_case_e2e() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18087/title-case-headers")
+    let route = RouteBuilder::from("http://127.0.0.1:18087/title-case-headers")
         .route_id("test-title-case-headers")
         .process(|mut ex: camel_api::Exchange| {
             let auth = ex.input.header("Authorization").cloned();
@@ -3735,7 +3735,7 @@ async fn http_on_exception_steps_returns_custom_error_e2e() {
         .handled(true)
         .build();
 
-    let route = RouteBuilder::from("http://0.0.0.0:18088/on-exception-steps")
+    let route = RouteBuilder::from("http://127.0.0.1:18088/on-exception-steps")
         .route_id("test-on-exception-steps")
         .process(|_ex: camel_api::Exchange| {
             Box::pin(async move { Err(CamelError::RouteError("Unauthorized".into())) })
@@ -3798,7 +3798,7 @@ async fn http_on_exception_handled_false_propagates_e2e() {
         .handled(false)
         .build();
 
-    let route = RouteBuilder::from("http://0.0.0.0:18089/on-exception-propagate")
+    let route = RouteBuilder::from("http://127.0.0.1:18089/on-exception-propagate")
         .route_id("test-on-exception-propagate")
         .process(|_ex: camel_api::Exchange| {
             Box::pin(async move { Err(CamelError::RouteError("fail".into())) })

@@ -171,8 +171,7 @@ mod tests {
     use crate::TokenAuthenticator;
     use crate::built_in::RolePolicy;
     use crate::built_in::ScopePolicy;
-    use camel_api::security_policy::CredentialSource;
-    use camel_api::security_policy::SecurityPolicy;
+    use camel_api::security_policy::{AuthContext, AuthPrincipal, SecurityPolicy, TransportId};
     use camel_api::{Exchange, Message};
 
     fn test_principal(subject: &str, roles: Vec<&str>, scopes: Vec<&str>) -> Principal {
@@ -183,6 +182,24 @@ mod tests {
             scopes: scopes.iter().map(|s| s.to_string()).collect(),
             roles: roles.iter().map(|s| s.to_string()).collect(),
             claims: serde_json::Value::Null,
+        }
+    }
+
+    struct TestPrincipal(Principal);
+
+    impl AuthPrincipal for TestPrincipal {
+        fn principal(&self) -> &Principal {
+            &self.0
+        }
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+    }
+
+    fn auth_ctx<'a>(principal: &'a TestPrincipal) -> AuthContext<'a> {
+        AuthContext {
+            principal,
+            transport: TransportId::Http,
         }
     }
 
@@ -355,18 +372,15 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = RolePolicy::new(
-            vec!["admin".to_string()],
-            true,
-            false,
-            authenticator,
-            vec![CredentialSource::AuthorizationHeader],
-        );
+        let principal = authenticator
+            .authenticate_bearer("test-token")
+            .await
+            .unwrap();
+        let typed = TestPrincipal(principal);
+        let policy = RolePolicy::new(vec!["admin".to_string()], true);
         let mut exchange = Exchange::new(Message::default());
-        exchange
-            .input
-            .set_header("authorization", "Bearer test-token");
-        let decision = policy.evaluate(&mut exchange).await.unwrap();
+        let auth = auth_ctx(&typed);
+        let decision = policy.evaluate(&mut exchange, &auth).await.unwrap();
         assert!(matches!(
             decision,
             camel_api::security_policy::AuthorizationDecision::Granted { .. }
@@ -384,18 +398,15 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = ScopePolicy::new(
-            vec!["api:read".to_string()],
-            true,
-            false,
-            authenticator,
-            vec![CredentialSource::AuthorizationHeader],
-        );
+        let principal = authenticator
+            .authenticate_bearer("scoped-token")
+            .await
+            .unwrap();
+        let typed = TestPrincipal(principal);
+        let policy = ScopePolicy::new(vec!["api:read".to_string()], true);
         let mut exchange = Exchange::new(Message::default());
-        exchange
-            .input
-            .set_header("authorization", "Bearer scoped-token");
-        let decision = policy.evaluate(&mut exchange).await.unwrap();
+        let auth = auth_ctx(&typed);
+        let decision = policy.evaluate(&mut exchange, &auth).await.unwrap();
         assert!(matches!(
             decision,
             camel_api::security_policy::AuthorizationDecision::Granted { .. }
@@ -413,18 +424,15 @@ mod tests {
         .unwrap();
         let authenticator: std::sync::Arc<dyn TokenAuthenticator> =
             std::sync::Arc::new(StaticTokenAuthenticator::new(store));
-        let policy = RolePolicy::new(
-            vec!["admin".to_string()],
-            true,
-            false,
-            authenticator,
-            vec![CredentialSource::AuthorizationHeader],
-        );
+        let principal = authenticator
+            .authenticate_bearer("user-token")
+            .await
+            .unwrap();
+        let typed = TestPrincipal(principal);
+        let policy = RolePolicy::new(vec!["admin".to_string()], true);
         let mut exchange = Exchange::new(Message::default());
-        exchange
-            .input
-            .set_header("authorization", "Bearer user-token");
-        let decision = policy.evaluate(&mut exchange).await.unwrap();
+        let auth = auth_ctx(&typed);
+        let decision = policy.evaluate(&mut exchange, &auth).await.unwrap();
         assert!(matches!(
             decision,
             camel_api::security_policy::AuthorizationDecision::Denied { .. }

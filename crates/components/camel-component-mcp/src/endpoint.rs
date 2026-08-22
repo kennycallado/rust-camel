@@ -31,7 +31,7 @@ use camel_api::{BoxProcessor, CamelError, StepLifecycle};
 use camel_component_api::{Consumer, Endpoint, ProducerContext, RuntimeObservability};
 
 use crate::client::McpServerMapHandle;
-use crate::config::{McpRemoteConfig, McpServerConfig};
+use crate::config::{McpDeclaredServer, McpRemoteConfig, McpServerConfig};
 use crate::consumer::McpConsumer;
 use crate::error::McpError;
 use crate::producer::{McpProducer, McpProducerLifecycle};
@@ -51,6 +51,10 @@ pub enum McpEndpointUri {
         /// Declared JSON Schema for the tool's arguments (the DSL lowering
         /// channel — carried URL-encoded on the URI, decoded by parsing).
         input_schema: serde_json::Value,
+        /// DSL-declared listener values (`mcp.declared.*` parameters; the
+        /// DSL lowering channel for `bind`/`tls`/caps). `None` on a
+        /// TOML-only route.
+        declared: Option<McpDeclaredServer>,
     },
     /// `mcp:<server>/resource/<name>?uri=<mcp-uri>` — consumer: serve one
     /// resource from the shared server listener.
@@ -59,6 +63,10 @@ pub enum McpEndpointUri {
         name: String,
         /// The declared MCP resource URI (operator config; the registry key).
         resource_uri: String,
+        /// DSL-declared listener values (`mcp.declared.*` parameters; the
+        /// DSL lowering channel for `bind`/`tls`/caps). `None` on a
+        /// TOML-only route.
+        declared: Option<McpDeclaredServer>,
     },
 }
 
@@ -125,6 +133,10 @@ impl McpEndpointUri {
             return Err(reject());
         }
 
+        // DSL-declared listener values ride the same query channel as
+        // `schema`/`uri` (absent on a TOML-only route).
+        let declared = McpDeclaredServer::from_endpoint_params(params)?;
+
         match kind {
             "tool" => {
                 let raw_schema = params.get("schema").ok_or_else(|| {
@@ -150,6 +162,7 @@ impl McpEndpointUri {
                     server: server.to_string(),
                     name: name.to_string(),
                     input_schema,
+                    declared,
                 })
             }
             "resource" => {
@@ -158,6 +171,7 @@ impl McpEndpointUri {
                     server: server.to_string(),
                     name: name.to_string(),
                     resource_uri,
+                    declared,
                 })
             }
             _ => Err(reject()),
@@ -172,6 +186,18 @@ impl McpEndpointUri {
             | McpEndpointUri::Read { server, .. }
             | McpEndpointUri::Tool { server, .. }
             | McpEndpointUri::Resource { server, .. } => server,
+        }
+    }
+
+    /// The DSL-declared listener values for consumer shapes (`None` on a
+    /// TOML-only route or a producer shape) — the values the consumer start
+    /// merges into the TOML server config (spec: MCP listener ownership).
+    pub fn declared_server(&self) -> Option<&McpDeclaredServer> {
+        match self {
+            McpEndpointUri::Tool { declared, .. } | McpEndpointUri::Resource { declared, .. } => {
+                declared.as_ref()
+            }
+            McpEndpointUri::Call { .. } | McpEndpointUri::Read { .. } => None,
         }
     }
 }

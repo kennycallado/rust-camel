@@ -21,17 +21,29 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use camel_api::security_policy::{
-    AuthorizationDecision, Principal, SecurityPolicy, SecurityPolicyConfig,
+    AuthContext, AuthPrincipal, AuthorizationDecision, Principal, SecurityPolicy,
+    SecurityPolicyConfig, TransportId,
 };
 use camel_api::{CamelError, Exchange, Value};
 use camel_auth::native_auth::{
     NativeCredential, NativeCredentialSecret, NativeCredentialStore, StaticTokenAuthenticator,
 };
-use camel_auth::{CredentialSource, RolePolicy, TokenAuthenticator};
+use camel_auth::{RolePolicy, TokenAuthenticator};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
+
+struct ExamplePrincipal(Principal);
+
+impl AuthPrincipal for ExamplePrincipal {
+    fn principal(&self) -> &Principal {
+        &self.0
+    }
+    fn provider_id(&self) -> &str {
+        "example"
+    }
+}
 
 struct BearerInjectingPolicy {
     token: String,
@@ -46,12 +58,16 @@ impl BearerInjectingPolicy {
 
 #[async_trait]
 impl SecurityPolicy for BearerInjectingPolicy {
-    async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError> {
+    async fn evaluate(
+        &self,
+        exchange: &mut Exchange,
+        auth: &AuthContext<'_>,
+    ) -> Result<AuthorizationDecision, CamelError> {
         exchange.input.headers.insert(
             "authorization".to_string(),
             Value::String(format!("Bearer {}", self.token)), // allow-secret
         );
-        self.inner.evaluate(exchange).await
+        self.inner.evaluate(exchange, auth).await
     }
 }
 
@@ -123,13 +139,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ANCHOR: keycloak-role-policy
     println!("--- Role-Based Security Policy ---");
-    let admin_policy: Arc<dyn SecurityPolicy> = Arc::new(RolePolicy::new(
-        vec!["admin".to_string()],
-        true,
-        false,
-        authenticator.clone(),
-        vec![CredentialSource::AuthorizationHeader],
-    ));
+    let admin_policy: Arc<dyn SecurityPolicy> =
+        Arc::new(RolePolicy::new(vec!["admin".to_string()], true));
 
     let mut alice_exchange = Exchange::default();
     alice_exchange.input.headers.insert(
@@ -143,8 +154,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Value::String(format!("Bearer {}", bob_token)), // allow-secret
     );
 
-    let alice_decision = admin_policy.evaluate(&mut alice_exchange).await;
-    let bob_decision = admin_policy.evaluate(&mut bob_exchange).await;
+    let alice_principal = authenticator.authenticate_bearer(alice_token).await?;
+    let alice_typed = ExamplePrincipal(alice_principal);
+    let alice_auth = AuthContext {
+        principal: &alice_typed,
+        transport: TransportId::Http,
+    };
+
+    let bob_principal = authenticator.authenticate_bearer(bob_token).await?;
+    let bob_typed = ExamplePrincipal(bob_principal);
+    let bob_auth = AuthContext {
+        principal: &bob_typed,
+        transport: TransportId::Http,
+    };
+
+    let alice_decision = admin_policy
+        .evaluate(&mut alice_exchange, &alice_auth)
+        .await;
+    let bob_decision = admin_policy.evaluate(&mut bob_exchange, &bob_auth).await;
 
     match alice_decision {
         Ok(AuthorizationDecision::Granted { principal }) => {
@@ -181,13 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
-    let role_policy = RolePolicy::new(
-        vec!["admin".to_string()],
-        true,
-        false,
-        authenticator.clone(),
-        vec![CredentialSource::AuthorizationHeader],
-    );
+    let role_policy = RolePolicy::new(vec!["admin".to_string()], true);
     let wrapped = BearerInjectingPolicy::new(alice_token.to_string(), role_policy);
 
     let secured_route = RouteBuilder::from("timer:tick?period=2000&repeatCount=2")

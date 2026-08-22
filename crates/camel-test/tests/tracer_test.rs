@@ -105,6 +105,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
         beans: Default::default(),
         languages: Default::default(),
         security: SecurityConfig::default(),
+        binds: Default::default(),
         datasources: Default::default(),
         _extra: HashMap::new(),
     };

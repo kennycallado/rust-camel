@@ -354,7 +354,10 @@ fn lower_operation(
         concurrent: None,
         error_handler: None,
         circuit_breaker: None,
-        security_policy: None,
+        // Block policy rides every lowered route (Task 2.10), mirroring the
+        // mcp.rs copy pattern: enforcement is route-level, so the block
+        // `security_policy` must travel with each operation's route.
+        security_policy: rest.security_policy.clone(),
         on_complete: None,
         on_failure: None,
     })
@@ -453,6 +456,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/users".to_string(),
+            security_policy: None,
             operations,
         }
     }
@@ -576,6 +580,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/users".to_string(),
+            security_policy: None,
             operations: vec![RouteDslRestOperation {
                 method: "put".to_string(),
                 path: "/{id}".to_string(),
@@ -714,6 +719,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: base.to_string(),
+            security_policy: None,
             operations,
         }
     }
@@ -837,6 +843,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/users".to_string(),
+            security_policy: None,
             operations: vec![],
         };
         let err = lower_all_rest_to_routes(&[rest])
@@ -1022,6 +1029,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/api".to_string(),
+            security_policy: None,
             operations: vec![
                 RouteDslRestOperation {
                     method: "GET".to_string(),
@@ -1052,6 +1060,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/api".to_string(),
+            security_policy: None,
             operations: vec![
                 RouteDslRestOperation {
                     method: "GET".to_string(),
@@ -1082,6 +1091,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/api".to_string(),
+            security_policy: None,
             operations: vec![],
         };
         let err = lower_all_rest_to_routes(&[rest])
@@ -1096,6 +1106,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/api".to_string(),
+            security_policy: None,
             operations: vec![
                 RouteDslRestOperation {
                     method: "GET".to_string(),
@@ -1122,5 +1133,110 @@ mod tests {
             "expected second id to contain 'healthCheck', got: {}",
             routes[1].id
         );
+    }
+
+    // ── Task 2.10: block security_policy declaration ──
+
+    #[test]
+    fn rest_block_policy_copies_to_lowered_routes() {
+        let yaml = r#"
+rest:
+  - host: 127.0.0.1
+    port: 18080
+    path: /api/users
+    security_policy:
+      roles: ["admin"]
+      provider: "idp-a"
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+      - method: POST
+        operation_id: createUser
+        to: direct:createUser
+"#;
+        // Named provider "idp-a" mirrors the fixture registries the kernel
+        // tests use; lowering + conversion + compile run through the shared
+        // `parse_yaml_with_threshold_and_security` path.
+        let ctx = crate::model::SecurityCompileContext::default()
+            .with_named_authenticator("idp-a", crate::test_support::test_authenticator("a-user"));
+        let defs = crate::yaml::parse_yaml_with_threshold_and_security(yaml, 1024, ctx)
+            .expect("rest block with roles policy must lower + compile");
+        assert_eq!(defs.len(), 2, "both operations must lower to routes");
+
+        for def in &defs {
+            // Plan inputs per Task 1.8: a policy config on the definition
+            // compiles to AccessMode::Authorized, and the declared provider
+            // name becomes the plan's provider_ref. The Authorized +
+            // provider_ref Some("idp-a") mapping itself is proven in
+            // camel-core `route_compiler_ext_tests`
+            // (`compilation_roles_named_provider_resolves_with_audience`);
+            // the DSL layer owns producing these definition-level inputs.
+            assert!(
+                def.security_policy_config().is_some(),
+                "route '{}' must carry the block policy (Authorized plan input)",
+                def.route_id()
+            );
+            assert_eq!(
+                def.security_provider(),
+                Some("idp-a"),
+                "route '{}' must carry provider_ref 'idp-a'",
+                def.route_id()
+            );
+            assert!(
+                def.security_authenticator().is_some(),
+                "route '{}' must carry the resolved 'idp-a' authenticator",
+                def.route_id()
+            );
+        }
+
+        // Lowering level: every lowered RouteDslRoute carries the block
+        // policy verbatim (the mcp.rs copy pattern).
+        let parsed: crate::route_ast::RouteDslRoutes =
+            noyalib::compat::serde_yaml::from_str(yaml).unwrap();
+        let lowered = lower_all_rest_to_routes(&parsed.rest).unwrap();
+        assert_eq!(lowered.len(), 2);
+        for route in &lowered {
+            let sp = route
+                .security_policy
+                .as_ref()
+                .expect("every lowered route must carry the block policy");
+            assert_eq!(sp.roles, Some(vec!["admin".to_string()]));
+            assert_eq!(sp.provider.as_deref(), Some("idp-a"));
+        }
+    }
+
+    #[test]
+    fn bare_rest_block_lowers_public() {
+        let yaml = r#"
+rest:
+  - host: 127.0.0.1
+    port: 18081
+    path: /api/items
+    operations:
+      - method: GET
+        operation_id: listItems
+        to: direct:listItems
+"#;
+        let parsed: crate::route_ast::RouteDslRoutes =
+            noyalib::compat::serde_yaml::from_str(yaml).unwrap();
+        let lowered = lower_all_rest_to_routes(&parsed.rest).unwrap();
+        assert_eq!(lowered.len(), 1);
+        assert!(
+            lowered[0].security_policy.is_none(),
+            "a rest block without security_policy must lower to Public routes"
+        );
+
+        // Through the full compile path the definition declares no security
+        // either (kernel gate classifies it Public).
+        let defs = crate::yaml::parse_yaml_with_threshold_and_security(
+            yaml,
+            1024,
+            crate::model::SecurityCompileContext::default(),
+        )
+        .expect("bare rest block must compile without a security context");
+        assert_eq!(defs.len(), 1);
+        assert!(defs[0].security_policy_config().is_none());
+        assert!(defs[0].security_provider().is_none());
     }
 }

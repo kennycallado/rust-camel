@@ -43,7 +43,9 @@ fn native_authenticator(
     native: &camel_config::config::NativeAuthConfig,
 ) -> Result<Arc<dyn camel_auth::TokenAuthenticator>, CamelError> {
     // Mirrored by `native_store_from_config` in
-    // crates/camel-test/tests/auth_multi_credential_test.rs — update in lockstep.
+    // crates/camel-test/tests/auth_multi_credential_test.rs and by
+    // `SecurityConfigFixture` in crates/camel-test/src/security_fixture.rs
+    // — update in lockstep.
 
     let issuer = native.issuer.clone().unwrap_or_else(|| "native".into());
     let mut credentials: Vec<camel_auth::NativeCredential> = Vec::new();
@@ -229,51 +231,145 @@ async fn oidc_authenticator(
     Ok(Arc::new(oidc_validator(oidc, jwks)))
 }
 
+/// OIDC provider audience binding: single issuer, every configured audience.
+fn oidc_binding(
+    oidc: &camel_config::config::OidcSecurityConfig,
+) -> camel_api::security_policy::AudienceBinding {
+    camel_api::security_policy::AudienceBinding {
+        issuers: vec![oidc.issuer.clone()],
+        audiences: oidc.audience.clone(),
+    }
+}
+
+/// Keycloak provider audience binding: issuer derived from `server_url`/`realm`
+/// (mirrors `KeycloakRealmConfig::realm_url` trailing-slash normalization).
+fn keycloak_binding(
+    keycloak: &camel_config::config::KeycloakSecurityConfig,
+) -> camel_api::security_policy::AudienceBinding {
+    camel_api::security_policy::AudienceBinding {
+        issuers: vec![format!(
+            "{}/realms/{}",
+            keycloak.server_url.trim_end_matches('/'),
+            keycloak.realm
+        )],
+        audiences: keycloak.validation.audience.clone(),
+    }
+}
+
+/// Fail-closed guard for JWT-backed provider bindings (ADR-0061 audience
+/// enforcement): a binding with exactly one empty set would enter the
+/// kernel's REPLACEMENT path (the non-empty set), which skips the empty
+/// dimension entirely — no audience scoping for an empty `audiences`, the
+/// audience-confusion replay Phase 3 exists to stop. Native providers are
+/// exempt (static tokens carry no issuer/audience semantics).
+fn ensure_jwt_binding_complete(
+    provider: &str,
+    binding: &camel_api::security_policy::AudienceBinding,
+) -> Result<(), camel_api::CamelError> {
+    if binding.issuers.is_empty() {
+        return Err(camel_api::CamelError::Config(format!(
+            "security.{provider}: JWT-backed provider binding declares no accepted issuers \
+             (security.{provider} issuer derivation produced an empty set)"
+        )));
+    }
+    if binding.audiences.is_empty() {
+        return Err(camel_api::CamelError::Config(format!(
+            "security.{provider}: JWT-backed provider binding declares no audiences; \
+             set security.{provider}.audience (oidc) or \
+             security.{provider}.validation.audience (keycloak) — an unscoped \
+             audience binding would accept tokens minted for any client of the \
+             issuer"
+        )));
+    }
+    Ok(())
+}
+
+/// Native provider audience binding: reservation only — static tokens have no
+/// issuer/audience semantics.
+fn native_binding() -> camel_api::security_policy::AudienceBinding {
+    camel_api::security_policy::AudienceBinding {
+        issuers: vec![],
+        audiences: vec![],
+    }
+}
+
 /// Resolve every configured authenticator provider from `[security.*]`.
 ///
 /// Builds a `("keycloak", _)`, `("oidc", _)`, and `("native", _)` entry for
 /// each configured block — all of them, with no XOR restriction. Returns an
 /// empty vec when none is configured (anonymous routes allowed). A failure
 /// from any one provider aborts the whole resolution, so a broken config
-/// never yields a partially-registered set.
+/// never yields a partially-registered set. Also returns the parallel
+/// audience-binding map keyed by provider name, built from the existing
+/// config schema (issuer/audience fields — no new config fields).
 async fn resolve_authenticators(
     security: &camel_config::config::SecurityConfig,
-) -> Result<Vec<(String, Arc<dyn camel_auth::TokenAuthenticator>)>, CamelError> {
+) -> Result<
+    (
+        Vec<(String, Arc<dyn camel_auth::TokenAuthenticator>)>,
+        std::collections::HashMap<String, camel_api::security_policy::AudienceBinding>,
+    ),
+    CamelError,
+> {
     let mut providers: Vec<(String, Arc<dyn camel_auth::TokenAuthenticator>)> = Vec::new();
+    let mut bindings = std::collections::HashMap::new();
 
     if let Some(ref keycloak) = security.keycloak {
+        // Validate the binding before building the authenticator: a config
+        // error must surface before any network prefetch.
+        let binding = keycloak_binding(keycloak);
+        ensure_jwt_binding_complete("keycloak", &binding)?;
         providers.push((
             "keycloak".to_string(),
             keycloak_authenticator(keycloak).await?,
         ));
+        bindings.insert("keycloak".to_string(), binding);
     }
     if let Some(ref oidc) = security.oidc {
+        let binding = oidc_binding(oidc);
+        ensure_jwt_binding_complete("oidc", &binding)?;
         providers.push((
             "oidc".to_string(),
             oidc_authenticator(oidc, &camel_api::SsrfPolicy::PublicHttpsOnly).await?,
         ));
+        bindings.insert("oidc".to_string(), binding);
     }
     if let Some(ref native) = security.native {
         providers.push(("native".to_string(), native_authenticator(native)?));
+        bindings.insert("native".to_string(), native_binding());
     }
 
-    Ok(providers)
+    Ok((providers, bindings))
 }
 
 /// Register resolved providers onto a [`SecurityCompileContext`].
 ///
 /// Every provider (first included) is registered by name onto a default
-/// context. A single named provider therefore resolves unnamed routes to it;
-/// the reserved `"default"` provider is never synthesized here. An empty
-/// provider list returns a default context (the anonymous-routes case).
+/// context, together with its audience binding. A single named provider
+/// therefore resolves unnamed routes to it; the reserved `"default"` provider
+/// is never synthesized here. An empty provider list returns a default context
+/// (the anonymous-routes case).
 fn register_providers(
     providers: Vec<(String, Arc<dyn camel_auth::TokenAuthenticator>)>,
+    bindings: std::collections::HashMap<String, camel_api::security_policy::AudienceBinding>,
 ) -> SecurityCompileContext {
     let mut registered = SecurityCompileContext::new(None, None);
 
     for (name, auth) in providers {
         registered = registered.with_named_authenticator(&name, auth);
     }
+    for (name, binding) in bindings {
+        registered = registered.with_provider_binding(&name, binding);
+    }
+
+    // Task 3.2: build the provider registry WITH the authn result cache and
+    // store it on the context so compiled routes carry the cached registry
+    // (kernel_authenticate consults it via providers.authn_cache()).
+    let cache = std::sync::Arc::new(camel_auth::AuthnCache::new(
+        camel_auth::AuthnCacheOptions::default(),
+    ));
+    let registry = registered.provider_registry().with_authn_cache(cache);
+    registered = registered.with_provider_registry(std::sync::Arc::new(registry));
 
     registered
 }
@@ -314,8 +410,8 @@ pub(crate) async fn build_security_compile_context_from_config(
 ) -> Result<SecurityCompileContext, CamelError> {
     let wasm_ctx: Arc<dyn camel_component_api::ComponentContext> =
         Arc::new(camel_core::RegistryComponentContext::new(registry));
-    let providers = resolve_authenticators(&camel_config.security).await?;
-    let mut security_ctx = register_providers(providers);
+    let (providers, bindings) = resolve_authenticators(&camel_config.security).await?;
+    let mut security_ctx = register_providers(providers, bindings);
 
     let evaluator_registry = camel_auth::PermissionEvaluatorRegistry::new();
 
@@ -364,8 +460,8 @@ pub(crate) async fn build_security_compile_context_from_config(
         ));
     }
 
-    let providers = resolve_authenticators(&camel_config.security).await?;
-    let mut security_ctx = register_providers(providers);
+    let (providers, bindings) = resolve_authenticators(&camel_config.security).await?;
+    let mut security_ctx = register_providers(providers, bindings);
 
     let evaluator_registry = camel_auth::PermissionEvaluatorRegistry::new();
 
@@ -469,12 +565,162 @@ mod tests {
         )
         .expect("config parses");
 
-        let providers = super::resolve_authenticators(&cfg.security)
+        let (providers, bindings) = super::resolve_authenticators(&cfg.security)
             .await
             .expect("native provider resolves");
 
         assert_eq!(providers.len(), 1, "expected a single provider");
         assert_eq!(providers[0].0, "native", "expected the native name");
+        assert!(
+            bindings.contains_key("native"),
+            "expected a native audience binding"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Audience-binding wiring tests (task 1.6). The oidc/keycloak binding
+    // construction is exercised in isolation (no network): their JWKS fetch is
+    // SSRF-gated (PublicHttpsOnly) and cannot run against a local mock, so the
+    // pure binding helpers are tested directly — the same seam
+    // `oidc_validator_authenticates_jwt` uses to test the validator without
+    // network. The native case runs through `resolve_authenticators` end to
+    // end, proving the parallel binding map threads correctly.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn oidc_binding_maps_issuer_and_audience() {
+        let cfg: camel_config::config::CamelConfig = toml::from_str(
+            r#"
+        [security.oidc]
+        issuer = "https://a"
+        audience = ["api", "api-2"]
+        "#,
+        )
+        .expect("config parses");
+
+        let oidc = cfg.security.oidc.expect("oidc configured");
+        let binding = super::oidc_binding(&oidc);
+
+        assert_eq!(binding.issuers, vec!["https://a".to_string()]);
+        assert_eq!(
+            binding.audiences,
+            vec!["api".to_string(), "api-2".to_string()],
+            "all configured audiences must be kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn keycloak_binding_without_audience_fails_closed() {
+        let cfg: camel_config::config::CamelConfig = toml::from_str(
+            r#"
+        [security.keycloak]
+        server_url = "https://kc"
+        realm = "demo"
+        client_id = "camel"
+        client_secret = "secret"
+        "#,
+        )
+        .expect("config parses (audience defaults empty)");
+
+        let err = super::resolve_authenticators(&cfg.security)
+            .await
+            .err()
+            .expect("empty audience binding must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("keycloak"), "names provider: {msg}");
+        assert!(msg.contains("audience"), "names field: {msg}");
+    }
+
+    #[tokio::test]
+    async fn oidc_binding_without_audience_fails_closed() {
+        let cfg: camel_config::config::CamelConfig = toml::from_str(
+            r#"
+        [security.oidc]
+        issuer = "https://issuer.example.com/realms/test"
+        "#,
+        )
+        .expect("config parses (audience defaults empty)");
+
+        let err = super::resolve_authenticators(&cfg.security)
+            .await
+            .err()
+            .expect("empty audience binding must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("oidc"), "names provider: {msg}");
+        assert!(msg.contains("audience"), "names field: {msg}");
+    }
+
+    #[test]
+    fn keycloak_binding_maps_validation_audience() {
+        let cfg: camel_config::config::CamelConfig = toml::from_str(
+            r#"
+        [security.keycloak]
+        server_url = "https://kc"
+        realm = "demo"
+        client_id = "camel"
+        client_secret = "secret"
+
+        [security.keycloak.validation]
+        audience = ["api"]
+        "#,
+        )
+        .expect("config parses");
+
+        let keycloak = cfg.security.keycloak.expect("keycloak configured");
+        let binding = super::keycloak_binding(&keycloak);
+
+        assert_eq!(binding.audiences, vec!["api".to_string()]);
+        assert_eq!(
+            binding.issuers,
+            vec!["https://kc/realms/demo".to_string()],
+            "issuer is derived from server_url + realm"
+        );
+    }
+
+    #[test]
+    fn keycloak_binding_strips_trailing_slash() {
+        let cfg: camel_config::config::CamelConfig = toml::from_str(
+            r#"
+        [security.keycloak]
+        server_url = "https://kc/"
+        realm = "demo"
+        client_id = "camel"
+        client_secret = "secret"
+        "#,
+        )
+        .expect("config parses");
+
+        let keycloak = cfg.security.keycloak.expect("keycloak configured");
+        let binding = super::keycloak_binding(&keycloak);
+
+        assert_eq!(binding.issuers, vec!["https://kc/realms/demo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn native_binding_is_reservation_only() {
+        let cfg: camel_config::config::CamelConfig = toml::from_str(
+            r#"
+        [security.native]
+        subject = "dev-user"
+        issuer = "native"
+        bearer_token = "dev-token"
+        "#,
+        )
+        .expect("config parses");
+
+        let (_providers, bindings) = super::resolve_authenticators(&cfg.security)
+            .await
+            .expect("native provider resolves");
+
+        let binding = bindings.get("native").expect("native binding present");
+        assert!(
+            binding.issuers.is_empty(),
+            "static tokens have no issuer semantics"
+        );
+        assert!(
+            binding.audiences.is_empty(),
+            "static tokens have no audience semantics"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -751,9 +997,22 @@ mod tests {
     mod multi_provider {
         use std::sync::Arc;
 
-        use camel_api::security_policy::AuthorizationDecision;
+        use camel_api::security_policy::{
+            AuthContext, AuthPrincipal, AuthorizationDecision, Principal, TransportId,
+        };
 
         use super::{InMemoryJwks, TEST_RSA_PRIVATE_PEM, TEST_RSA_PUBLIC_PEM, oidc_config};
+
+        struct CliPrincipal(Principal);
+
+        impl AuthPrincipal for CliPrincipal {
+            fn principal(&self) -> &Principal {
+                &self.0
+            }
+            fn provider_id(&self) -> &str {
+                "test"
+            }
+        }
 
         fn native_config_with_bearer(
             bearer_token: &str,
@@ -880,10 +1139,13 @@ mod tests {
             .expect("native store builds");
             let oidc_auth = oidc_auth_arc();
 
-            let ctx = super::super::register_providers(vec![
-                ("native".to_string(), native_auth),
-                ("oidc".to_string(), oidc_auth),
-            ]);
+            let ctx = super::super::register_providers(
+                vec![
+                    ("native".to_string(), native_auth),
+                    ("oidc".to_string(), oidc_auth),
+                ],
+                std::collections::HashMap::new(),
+            );
 
             assert!(ctx.authenticator_for(Some("native")).unwrap().is_some());
             assert!(ctx.authenticator_for(Some("oidc")).unwrap().is_some());
@@ -905,10 +1167,13 @@ mod tests {
             .expect("native store builds");
             let oidc_auth = oidc_auth_arc();
 
-            let ctx = super::super::register_providers(vec![
-                ("native".to_string(), native_auth),
-                ("oidc".to_string(), oidc_auth),
-            ]);
+            let ctx = super::super::register_providers(
+                vec![
+                    ("native".to_string(), native_auth),
+                    ("oidc".to_string(), oidc_auth),
+                ],
+                std::collections::HashMap::new(),
+            );
 
             let yaml = r#"
 routes:
@@ -928,6 +1193,15 @@ routes:
       - to: log:info
 "#;
 
+            let native_authenticator = ctx
+                .authenticator_for(Some("native"))
+                .unwrap()
+                .expect("native provider resolves");
+            let oidc_authenticator = ctx
+                .authenticator_for(Some("oidc"))
+                .unwrap()
+                .expect("oidc provider resolves");
+
             let defs = camel_dsl::parse_yaml_with_threshold_and_security(yaml, 1024, ctx)
                 .expect("routes compile");
             assert_eq!(defs.len(), 2);
@@ -936,19 +1210,38 @@ routes:
             let oidc_policy = defs[1].security_policy_config().expect("oidc policy");
 
             // native token against route A (provider: native) -> granted (200).
+            let principal = native_authenticator
+                .authenticate_bearer("dev-token")
+                .await
+                .unwrap();
+            let typed = CliPrincipal(principal);
+            let auth = AuthContext {
+                principal: &typed,
+                transport: TransportId::Http,
+            };
             let mut ex = exchange_with_bearer("dev-token");
-            let decision = native_policy.policy.evaluate(&mut ex).await.unwrap();
+            let decision = native_policy.policy.evaluate(&mut ex, &auth).await.unwrap();
             assert!(matches!(decision, AuthorizationDecision::Granted { .. }));
 
             // JWT against route B (provider: oidc) -> granted (200).
             let token = admin_jwt();
+            let principal = oidc_authenticator
+                .authenticate_bearer(&token)
+                .await
+                .unwrap();
+            let typed = CliPrincipal(principal);
+            let auth = AuthContext {
+                principal: &typed,
+                transport: TransportId::Http,
+            };
             let mut ex = exchange_with_bearer(&token);
-            let decision = oidc_policy.policy.evaluate(&mut ex).await.unwrap();
+            let decision = oidc_policy.policy.evaluate(&mut ex, &auth).await.unwrap();
             assert!(matches!(decision, AuthorizationDecision::Granted { .. }));
 
-            // native token against route B -> unauthenticated (401).
-            let mut ex = exchange_with_bearer("dev-token");
-            let result = oidc_policy.policy.evaluate(&mut ex).await;
+            // native token against route B -> the oidc authenticator rejects it
+            // (unauthenticated); provider isolation is the kernel's job, not
+            // the policy's.
+            let result = oidc_authenticator.authenticate_bearer("dev-token").await;
             assert!(
                 matches!(result, Err(camel_api::CamelError::Unauthenticated(_))),
                 "native token must not authenticate against the oidc provider, got: {result:?}"

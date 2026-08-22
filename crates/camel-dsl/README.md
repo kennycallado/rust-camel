@@ -727,7 +727,7 @@ routes:
 
 Sources are tried in declared order; the first one that supplies a credential wins. A missing credential on every source maps to `401` before policy evaluation.
 
-> **Note** -- Load-time validation rejects unknown forms, an empty cookie name, and header names that are not valid RFC 9110 tokens. On `ws://` routes, `roles`/`scopes` policies that use a non-header source require `trust_upstream_principal: true`. Diagnostic records never render a declared credential value (ADR-0051). See the [Authorization](../../docs/src/services/auth.md) page and ADR-0059 for the full contract.
+> **Note** -- Load-time validation rejects unknown forms, an empty cookie name, and header names that are not valid RFC 9110 tokens. The removed `trust_upstream_principal` key is rejected at load (unknown field). Diagnostic records never render a declared credential value (ADR-0051). See the [Authorization](../../docs/src/services/auth.md) page and ADR-0059 for the full contract.
 
 ### Limitations
 

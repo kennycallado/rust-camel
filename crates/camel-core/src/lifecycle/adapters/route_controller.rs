@@ -12,6 +12,9 @@ use tokio_util::sync::CancellationToken;
 use tower::{Layer, ServiceExt};
 use tracing::{debug, info, warn};
 
+use super::route_controller_trait::{
+    BindExposureAcks, bind_key_from_uri, enforce_bind_exposure_gate,
+};
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 #[allow(unused_imports)]
@@ -26,7 +29,9 @@ pub use camel_processor::aggregator::SharedLanguageRegistry;
 
 use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
-use crate::lifecycle::adapters::route_compiler_ext::{RouteCompilerExt, build_eh_config_pipeline};
+use crate::lifecycle::adapters::route_compiler_ext::{
+    RouteCompilerExt, build_eh_config_pipeline, transport_from_uri,
+};
 use crate::lifecycle::adapters::route_helpers::{
     AggregateSplitInfo, CrashNotification, ManagedRoute, assert_no_mixed_top_level_splits,
     handle_is_running, inferred_lifecycle_label, is_pending,
@@ -88,6 +93,9 @@ pub struct DefaultRouteController {
     pub(super) prepared_staging: HashMap<String, ManagedRoute>,
     /// Source endpoint URI to route_id index (one-to-many).
     pub(super) endpoint_index: super::endpoint_index::EndpointIndex,
+    /// Operator acknowledgements for per-bind public exposure (ADR-0061).
+    /// Empty by default → the gate fails closed on non-loopback binds.
+    pub(super) bind_acks: super::route_controller_trait::BindExposureAcks,
 }
 
 impl DefaultRouteController {
@@ -146,6 +154,7 @@ impl DefaultRouteController {
             cache_repositories: Arc::new(crate::CacheRegistry::new()),
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
+            bind_acks: Default::default(),
         }
     }
 
@@ -174,6 +183,7 @@ impl DefaultRouteController {
             cache_repositories: Arc::new(crate::CacheRegistry::new()),
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
+            bind_acks: Default::default(),
         }
     }
 
@@ -202,6 +212,7 @@ impl DefaultRouteController {
             cache_repositories: Arc::new(crate::CacheRegistry::new()),
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
+            bind_acks: Default::default(),
         }
     }
 
@@ -250,6 +261,84 @@ impl DefaultRouteController {
     }
 
     /// Set a global error handler applied to all routes without a per-route handler.
+    /// Install operator acknowledgements for per-bind public exposure
+    /// (ADR-0061). Built by the CLI from `CamelConfig.binds`.
+    pub fn set_bind_exposure_acks(&mut self, acks: BindExposureAcks) {
+        self.bind_acks = acks;
+    }
+
+    /// All compiled security plans whose routes bind the same listener
+    /// address (bind key), for the per-bind exposure gate. Routes still
+    /// staging (no plan yet) are skipped — classification failures already
+    /// aborted their own staging (Task 1.8).
+    pub(super) fn plans_for_bind(
+        &self,
+        bind_key: &str,
+    ) -> Vec<(String, camel_api::security_policy::RouteSecurityPlan)> {
+        self.routes
+            .iter()
+            .filter_map(|(route_id, managed)| {
+                let plan = managed.compiled.security_plan.as_ref()?;
+                let bind = bind_key_from_uri(&managed.from_uri)?;
+                if bind.key == bind_key {
+                    Some((route_id.clone(), plan.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Return whether a listener for `bind_key` is already serving a route.
+    ///
+    /// This is deliberately based on the consumer handle, rather than on the
+    /// presence of a compiled route: the exposure gate applies only to late
+    /// registration against an already-running bind (Task 2.2). Startup and
+    /// resume perform their own gate checks in the lifecycle implementation.
+    fn bind_is_running(&self, bind_key: &str) -> bool {
+        self.routes.iter().any(|(_, managed)| {
+            bind_key_from_uri(&managed.from_uri).is_some_and(|bind| {
+                bind.key == bind_key && handle_is_running(&managed.consumer_handle)
+            })
+        })
+    }
+
+    /// Gate a route before it is inserted into a listener that is already
+    /// running. The candidate is included with all sibling plans so the gate
+    /// has the same aggregation semantics as the start path.
+    fn enforce_late_registration_gate(
+        &self,
+        from_uri: &str,
+        route_id: &str,
+        plan: Option<&camel_api::security_policy::RouteSecurityPlan>,
+    ) -> Result<(), CamelError> {
+        let Some(bind) = bind_key_from_uri(from_uri) else {
+            return Ok(());
+        };
+        if !self.bind_is_running(&bind.key) {
+            return Ok(());
+        }
+
+        let mut owned = self.plans_for_bind(&bind.key);
+        if let Some(plan) = plan {
+            owned.push((route_id.to_string(), plan.clone()));
+        }
+        let plans: Vec<(&str, &camel_api::security_policy::RouteSecurityPlan)> =
+            owned.iter().map(|(id, plan)| (id.as_str(), plan)).collect();
+        enforce_bind_exposure_gate(
+            &bind.key,
+            bind.loopback,
+            &plans,
+            self.bind_acks.acknowledged(&bind.key),
+        )
+        .map_err(|err| {
+            CamelError::RouteError(format!(
+                "late registration of route '{route_id}' rejected for bind '{}': {err}",
+                bind.key
+            ))
+        })
+    }
+
     pub fn set_error_handler(&mut self, config: ErrorHandlerConfig) {
         self.global_error_handler = Some(config);
     }
@@ -362,6 +451,18 @@ impl DefaultRouteController {
             }
         };
 
+        // A running listener can observe a newly inserted route immediately.
+        // Gate the complete sibling set before committing function staging or
+        // inserting the route, so a rejected late registration is unreachable.
+        if let Err(err) = self.enforce_late_registration_gate(
+            &from_uri,
+            &route_id,
+            managed.compiled.security_plan.as_ref(),
+        ) {
+            self.discard_function_staging();
+            return Err(err);
+        }
+
         if let Some(invoker) = &self.function_invoker
             && let Err(err) = invoker.commit_staged().await
         {
@@ -384,6 +485,22 @@ impl DefaultRouteController {
         let route_id = definition.route_id().to_string();
 
         let definition_info = definition.to_info();
+
+        // Security plan compilation (Task 1.8): consumer-backed routes get a
+        // plan BEFORE any consumer starts; a declared route that fails
+        // classification aborts staging (never a Public downgrade). Routes
+        // without a provider registry compile against an empty view.
+        let empty_providers;
+        let providers = match &definition.provider_registry {
+            Some(registry) => registry.as_ref(),
+            None => {
+                empty_providers = camel_auth::ProviderRegistry::new();
+                &empty_providers
+            }
+        };
+        let security_plan =
+            super::route_compiler_ext::compile_route_security_plan(&definition, providers)?;
+
         let RouteDefinition {
             from_uri,
             steps,
@@ -392,6 +509,7 @@ impl DefaultRouteController {
             circuit_breaker_fallback,
             security_policy,
             security_authenticator,
+            provider_registry,
             unit_of_work,
             concurrency,
             ..
@@ -420,6 +538,7 @@ impl DefaultRouteController {
         lifecycle.extend(fallback_lifecycle);
         let route_id_for_tracing = route_id.clone();
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
+        let transport = transport_from_uri(&from_uri);
 
         let mut pipeline = build_eh_config_pipeline(
             eh_config.as_ref(),
@@ -434,6 +553,7 @@ impl DefaultRouteController {
             self.tracing_enabled,
             self.tracer_detail_level.clone(),
             security_policy.clone(),
+            transport,
             circuit_breaker,
         )?;
 
@@ -482,6 +602,8 @@ impl DefaultRouteController {
             compiled: route_runtime_state::CompiledRoute {
                 security_policy,
                 security_authenticator,
+                provider_registry,
+                security_plan,
             },
         })
     }
@@ -506,6 +628,17 @@ impl DefaultRouteController {
             definition,
             &super::step_resolution::FunctionStagingMode::HotReload { generation },
         )?;
+
+        // Symmetric with `add_route`: an already-running bind must never
+        // observe an ungated insertion through the hot-reload path.
+        if let Err(err) = self.enforce_late_registration_gate(
+            &from_uri,
+            &route_id,
+            managed.compiled.security_plan.as_ref(),
+        ) {
+            self.discard_function_staging();
+            return Err(err);
+        }
 
         self.routes.insert(route_id.clone(), managed);
 

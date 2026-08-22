@@ -19,7 +19,6 @@ pub type McpRequestHeaders = HashMap<String, String>;
 /// A tool-call invocation dispatched to a tool route.
 ///
 /// Not `Clone`/`Sync` — the `oneshot::Sender` reply channel is neither.
-#[derive(Debug)]
 pub struct McpToolInvocation {
     /// Tool name (route key).
     pub name: String,
@@ -28,8 +27,32 @@ pub struct McpToolInvocation {
     /// Inbound HTTP request headers, set as Exchange input headers by the
     /// bridge before the pipeline (and its `SecurityPolicy`) runs.
     pub headers: McpRequestHeaders,
+    /// Kernel-minted principal (Task 2.6): the adapter authenticates per
+    /// invocation (`kernel_authenticate`) BEFORE dispatch; the bridge
+    /// installs it as the Exchange's typed carrier via `install_carrier`
+    /// so the route pipeline (and Task 2.9's dispatch check) sees a
+    /// verified identity. `None` for Public plans and unregistered routes
+    /// (pass-through, no extraction).
+    pub principal: Option<camel_auth::AuthenticatedPrincipal>,
     /// One-shot reply channel carrying the route's [`McpToolResult`].
     pub reply: oneshot::Sender<McpToolResult>,
+}
+
+/// Manual `Debug` — the kernel-minted principal is a sealed type without
+/// `Debug` (its contents never render); the presence bit is enough.
+impl std::fmt::Debug for McpToolInvocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpToolInvocation")
+            .field("name", &self.name)
+            .field("arguments", &self.arguments)
+            .field("headers", &self.headers)
+            .field(
+                "principal",
+                &self.principal.as_ref().map(|_| "<authenticated>"),
+            )
+            .field("reply", &"<oneshot>")
+            .finish()
+    }
 }
 
 /// The result of a tool invocation, returned by the tool route.
@@ -46,15 +69,32 @@ pub struct McpToolResult {
 /// A resource read dispatched to a resource route.
 ///
 /// Not `Clone`/`Sync` — the `oneshot::Sender` reply channel is neither.
-#[derive(Debug)]
 pub struct McpResourceRead {
     /// The declared MCP resource URI to read.
     pub uri: String,
     /// Inbound HTTP request headers, set as Exchange input headers by the
     /// bridge before the pipeline (and its `SecurityPolicy`) runs.
     pub headers: McpRequestHeaders,
+    /// Kernel-minted principal (Task 2.6) — see
+    /// [`McpToolInvocation::principal`].
+    pub principal: Option<camel_auth::AuthenticatedPrincipal>,
     /// One-shot reply channel carrying the route's [`McpResource`].
     pub reply: oneshot::Sender<McpResource>,
+}
+
+/// Manual `Debug` — see [`McpToolInvocation`].
+impl std::fmt::Debug for McpResourceRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpResourceRead")
+            .field("uri", &self.uri)
+            .field("headers", &self.headers)
+            .field(
+                "principal",
+                &self.principal.as_ref().map(|_| "<authenticated>"),
+            )
+            .field("reply", &"<oneshot>")
+            .finish()
+    }
 }
 
 /// A resource returned by a resource route.

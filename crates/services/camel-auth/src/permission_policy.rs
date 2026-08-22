@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use camel_api::security_policy::{AuthorizationDecision, SecurityPolicy, principal_from_exchange};
+use camel_api::security_policy::{AuthContext, AuthorizationDecision, SecurityPolicy};
 use camel_api::{CamelError, Exchange};
 
 use crate::permission::{
@@ -101,9 +101,12 @@ impl PermissionPolicy {
 
 #[async_trait]
 impl SecurityPolicy for PermissionPolicy {
-    async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError> {
-        let principal = principal_from_exchange(exchange)
-            .ok_or_else(|| CamelError::Unauthenticated("no principal in exchange".into()))?;
+    async fn evaluate(
+        &self,
+        exchange: &mut Exchange,
+        auth: &AuthContext<'_>,
+    ) -> Result<AuthorizationDecision, CamelError> {
+        let principal = auth.principal.principal().clone();
         let resource = Self::resolve_source(&self.resource, exchange)
             .ok_or_else(|| CamelError::Unauthorized("cannot resolve permission resource".into()))?;
         let action = Self::resolve_source(&self.action, exchange)
@@ -137,7 +140,7 @@ mod tests {
     };
     use crate::types::AuthError;
     use camel_api::Message;
-    use camel_api::security_policy::{Principal, store_principal_properties};
+    use camel_api::security_policy::{AuthContext, AuthPrincipal, Principal, TransportId};
     use serde_json::json;
 
     fn test_principal() -> Principal {
@@ -151,10 +154,22 @@ mod tests {
         }
     }
 
-    fn exchange_with_principal(principal: &Principal) -> Exchange {
-        let mut ex = Exchange::new(Message::default());
-        store_principal_properties(&mut ex, principal);
-        ex
+    struct TestPrincipal(Principal);
+
+    impl AuthPrincipal for TestPrincipal {
+        fn principal(&self) -> &Principal {
+            &self.0
+        }
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+    }
+
+    fn auth_ctx<'a>(principal: &'a TestPrincipal) -> AuthContext<'a> {
+        AuthContext {
+            principal,
+            transport: TransportId::Http,
+        }
     }
 
     // --- Mock evaluators ---
@@ -249,7 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn grants_when_evaluator_grants() {
-        let principal = test_principal();
+        let principal = TestPrincipal(test_principal());
         let policy = PermissionPolicy::new(
             Arc::new(GrantEvaluator),
             PermissionValueSource::Literal("/orders".into()),
@@ -257,8 +272,9 @@ mod tests {
             vec![],
             default_context_config(),
         );
-        let mut ex = exchange_with_principal(&principal);
-        let decision = policy.evaluate(&mut ex).await.unwrap();
+        let mut ex = Exchange::new(Message::default());
+        let auth = auth_ctx(&principal);
+        let decision = policy.evaluate(&mut ex, &auth).await.unwrap();
         match decision {
             AuthorizationDecision::Granted { principal: p } => {
                 assert_eq!(p.subject, "alice");
@@ -270,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn denies_when_evaluator_denies() {
-        let principal = test_principal();
+        let principal = TestPrincipal(test_principal());
         let policy = PermissionPolicy::new(
             Arc::new(DenyEvaluator {
                 reason: "insufficient scope".into(),
@@ -280,8 +296,9 @@ mod tests {
             vec![],
             default_context_config(),
         );
-        let mut ex = exchange_with_principal(&principal);
-        let decision = policy.evaluate(&mut ex).await.unwrap();
+        let mut ex = Exchange::new(Message::default());
+        let auth = auth_ctx(&principal);
+        let decision = policy.evaluate(&mut ex, &auth).await.unwrap();
         match decision {
             AuthorizationDecision::Denied { reason, .. } => {
                 assert_eq!(reason, "insufficient scope");
@@ -292,26 +309,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unauthenticated_when_no_principal() {
-        let policy = PermissionPolicy::new(
-            Arc::new(GrantEvaluator),
-            PermissionValueSource::Literal("/orders".into()),
-            PermissionValueSource::Literal("read".into()),
-            vec![],
-            default_context_config(),
-        );
-        let mut ex = Exchange::new(Message::default());
-        let result = policy.evaluate(&mut ex).await;
-        assert!(
-            matches!(result, Err(CamelError::Unauthenticated(ref msg)) if msg.contains("no principal")),
-            "expected Unauthenticated error, got {:?}",
-            result
-        );
-    }
-
-    #[tokio::test]
     async fn resolves_header_source() {
-        let principal = test_principal();
+        let principal = TestPrincipal(test_principal());
         let policy = PermissionPolicy::new(
             Arc::new(CheckEvaluator {
                 expected_resource: "res-from-header".into(),
@@ -321,9 +320,10 @@ mod tests {
             vec![],
             default_context_config(),
         );
-        let mut ex = exchange_with_principal(&principal);
+        let mut ex = Exchange::new(Message::default());
         ex.input.set_header("X-Resource", "res-from-header");
-        let decision = policy.evaluate(&mut ex).await.unwrap();
+        let auth = auth_ctx(&principal);
+        let decision = policy.evaluate(&mut ex, &auth).await.unwrap();
         assert!(
             matches!(decision, AuthorizationDecision::Granted { .. }),
             "expected Granted, got {:?}",
@@ -333,7 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthorized_when_resource_cannot_be_resolved() {
-        let principal = test_principal();
+        let principal = TestPrincipal(test_principal());
         let policy = PermissionPolicy::new(
             Arc::new(GrantEvaluator),
             PermissionValueSource::Header("X-Resource".into()),
@@ -341,9 +341,10 @@ mod tests {
             vec![],
             default_context_config(),
         );
-        let mut ex = exchange_with_principal(&principal);
+        let mut ex = Exchange::new(Message::default());
         // X-Resource header NOT set → cannot resolve
-        let result = policy.evaluate(&mut ex).await;
+        let auth = auth_ctx(&principal);
+        let result = policy.evaluate(&mut ex, &auth).await;
         assert!(
             matches!(result, Err(CamelError::Unauthorized(ref msg)) if msg.contains("cannot resolve permission resource")),
             "expected Unauthorized error for unresolved resource, got {:?}",
@@ -353,7 +354,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_includes_only_configured_fields() {
-        let principal = test_principal();
+        let principal = TestPrincipal(test_principal());
         let context_config = PermissionContextConfig {
             include_headers: vec!["X-Tenant".into()],
             include_properties: vec![],
@@ -368,10 +369,11 @@ mod tests {
             vec![],
             context_config,
         );
-        let mut ex = exchange_with_principal(&principal);
+        let mut ex = Exchange::new(Message::default());
         ex.input.set_header("X-Tenant", "acme");
         ex.input.set_header("X-Other", "should-not-appear");
-        let decision = policy.evaluate(&mut ex).await.unwrap();
+        let auth = auth_ctx(&principal);
+        let decision = policy.evaluate(&mut ex, &auth).await.unwrap();
         assert!(
             matches!(decision, AuthorizationDecision::Granted { .. }),
             "expected Granted, got {:?}",

@@ -1,9 +1,9 @@
 //! Integration tests for the credential-sources activation on the WS consumer.
 //!
-//! Task 3.1: these tests assert the code-truth semantics documented in
-//! `openspec/changes/credential-sources/design.md` — the grant flows through the
-//! preloaded-principal branch, so a WS `roles` route needs explicit
-//! `trust_upstream_principal: true`; the mechanism never sets the flag itself.
+//! The component authenticates a token extracted from the route-declared
+//! credential sources and passes the resulting principal to the policy; the
+//! `trust_upstream_principal` flag is removed (pre-1.0 breaking) so these
+//! routes no longer carry an exchange-property trust branch.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,23 +38,15 @@ fn principal() -> Principal {
     }
 }
 
-/// Build the consumer `SecurityContext` the way the route controller does after
-/// Task 3.1: the `RolePolicy` carries the declared trust flag and source list,
-/// and the consumer `SecurityContext` carries the same declared source list via
+/// Build the consumer `SecurityContext`: the `RolePolicy` requires the role and
+/// the consumer `SecurityContext` carries the declared source list via
 /// `with_credential_sources`. The native store holds `SENTINEL_CRED_1`.
-fn security_context(
-    trust_upstream_principal: bool,
-    sources: Vec<CredentialSource>,
-) -> SecurityContext {
-    security_context_with_token(trust_upstream_principal, sources, SENTINEL_CRED_1)
+fn security_context(sources: Vec<CredentialSource>) -> SecurityContext {
+    security_context_with_token(sources, SENTINEL_CRED_1)
 }
 
 /// `security_context` with a caller-chosen native-store credential value.
-fn security_context_with_token(
-    trust_upstream_principal: bool,
-    sources: Vec<CredentialSource>,
-    token: &str,
-) -> SecurityContext {
+fn security_context_with_token(sources: Vec<CredentialSource>, token: &str) -> SecurityContext {
     let store = NativeCredentialStore::try_new(vec![NativeCredential {
         secret: NativeCredentialSecret::Plaintext {
             value: token.to_string().into(),
@@ -63,13 +55,7 @@ fn security_context_with_token(
     }])
     .unwrap();
     let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
-    let policy: Arc<dyn SecurityPolicy> = Arc::new(RolePolicy::new(
-        vec![ROLE.into()],
-        true,
-        trust_upstream_principal,
-        Arc::clone(&authenticator),
-        sources.clone(),
-    ));
+    let policy: Arc<dyn SecurityPolicy> = Arc::new(RolePolicy::new(vec![ROLE.into()], true));
     SecurityContext::from_arc(policy, authenticator).with_credential_sources(sources)
 }
 
@@ -157,15 +143,12 @@ async fn upgrade_query(port: u16, query: &str) -> Result<(), u16> {
 }
 
 #[tokio::test]
-async fn ws_cookie_source_authenticates_with_explicit_trust() {
+async fn ws_cookie_source_authenticates() {
     let state = make_app_state(
         PATH,
-        security_context(
-            true,
-            vec![CredentialSource::Cookie {
-                name: "session".into(),
-            }],
-        ),
+        security_context(vec![CredentialSource::Cookie {
+            name: "session".into(),
+        }]),
     );
     let (port, server) = spawn_server(state).await;
     let cookie = format!("session={SENTINEL_CRED_1}");
@@ -178,19 +161,15 @@ async fn ws_cookie_source_authenticates_with_explicit_trust() {
 }
 
 #[tokio::test]
-async fn ws_no_flag_rejects_even_with_valid_token() {
-    // Same cookie-only route as the trust test, but WITHOUT
-    // `trust_upstream_principal`. A valid token presented in the Authorization
-    // header (not a declared source) is rejected: the mechanism never implies
-    // the trust flag, so the route stays fail-closed.
+async fn ws_token_outside_declared_sources_rejected() {
+    // Cookie-only route. A valid token presented in the Authorization header
+    // (not a declared source) is rejected: the component extracts credentials
+    // only from declared sources, so the route stays fail-closed.
     let state = make_app_state(
         PATH,
-        security_context(
-            false,
-            vec![CredentialSource::Cookie {
-                name: "session".into(),
-            }],
-        ),
+        security_context(vec![CredentialSource::Cookie {
+            name: "session".into(),
+        }]),
     );
     let (port, server) = spawn_server(state).await;
     let auth = format!("Bearer {SENTINEL_CRED_1}");
@@ -201,11 +180,11 @@ async fn ws_no_flag_rejects_even_with_valid_token() {
 
 #[tokio::test]
 async fn ws_default_header_only_unchanged() {
-    // Roles route with `trust_upstream_principal: true` and NO
-    // `credential_sources` — the default source list stays header-only.
+    // Roles route with NO `credential_sources` — the default source list stays
+    // header-only.
     let state = make_app_state(
         PATH,
-        security_context(true, vec![CredentialSource::AuthorizationHeader]),
+        security_context(vec![CredentialSource::AuthorizationHeader]),
     );
     let (port, server) = spawn_server(state).await;
 
@@ -232,18 +211,14 @@ async fn ws_default_header_only_unchanged() {
 
 #[tokio::test]
 async fn ws_no_credential_rejected_before_eval() {
-    // Declared cookie source + `trust_upstream_principal: true`, but the client
-    // presents no credential in any declared source. The WS no-source path
-    // rejects with 401 before policy evaluation runs; the trust flag does not
-    // implicitly admit an empty credential.
+    // Declared cookie source, but the client presents no credential in any
+    // declared source. The WS no-source path rejects with 401 before policy
+    // evaluation runs.
     let state = make_app_state(
         PATH,
-        security_context(
-            true,
-            vec![CredentialSource::Cookie {
-                name: "session".into(),
-            }],
-        ),
+        security_context(vec![CredentialSource::Cookie {
+            name: "session".into(),
+        }]),
     );
     let (port, server) = spawn_server(state).await;
     let result = upgrade(port, None, None).await;
@@ -293,7 +268,6 @@ async fn ws_query_param_sentinel_redacted_in_upgrade_logs() {
     let state = make_app_state(
         PATH,
         security_context_with_token(
-            true,
             vec![CredentialSource::QueryParam {
                 param: "sess".into(),
             }],

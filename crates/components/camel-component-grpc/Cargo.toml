@@ -38,6 +38,7 @@ futures.workspace = true
 arc-swap = { workspace = true }
 
 [dev-dependencies]
+zeroize.workspace = true
 camel-component-api = { workspace = true, features = ["test-support"] }
 tonic.workspace = true
 prost.workspace = true

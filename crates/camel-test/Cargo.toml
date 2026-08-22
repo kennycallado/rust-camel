@@ -53,9 +53,14 @@ kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "any", "postgres", "tls-rustls"], optional = true }
 
+camel-config.workspace = true
+camel-auth.workspace = true
+serde_json.workspace = true
+
 [dev-dependencies]
 camel-master = { workspace = true }
 camel-config = { workspace = true, features = ["kubernetes"] }
+toml.workspace = true
 camel-language-api.workspace = true
 camel-language-rhai.workspace = true
 camel-language-jsonpath.workspace = true
@@ -68,7 +73,6 @@ camel-component-cron.workspace = true
 camel-component-sql.workspace = true
 camel-component-opensearch.workspace = true
 camel-component-container.workspace = true
-camel-auth.workspace = true
 camel-component-mcp.workspace = true
 percent-encoding.workspace = true
 serde.workspace = true
@@ -81,7 +85,6 @@ reqwest = { workspace = true }
 axum.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 redis = { workspace = true, features = ["tokio-comp", "aio"] }
-toml.workspace = true
 futures.workspace = true
 http.workspace = true
 dashmap.workspace = true
@@ -93,6 +96,8 @@ camel-bridge.workspace = true
 rcgen = { workspace = true }
 tonic = { workspace = true }
 rustls.workspace = true
+jsonwebtoken.workspace = true
+tokio-tungstenite.workspace = true
 
 [features]
 integration-tests = [

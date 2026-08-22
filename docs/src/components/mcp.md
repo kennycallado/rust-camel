@@ -33,7 +33,16 @@ Consumer URIs come from DSL lowering. The `schema` and `uri` values travel on th
 
 One Streamable-HTTP listener serves each bind address. Every tool and resource route on that server shares it. The first consumer on a bind starts the listener. A later consumer with a conflicting config (`tls`, `allowed_hosts`, catalog caps) is rejected. Registration of a duplicate tool name or resource URI is also rejected.
 
-Each server must declare a `security_policy`. Without one, the server does not start (the TOML presence gate). The DSL block's `security_policy` propagates to every lowered tool and resource route. The route-level `SecurityPolicy` evaluates each request against the carried HTTP headers. Catalog caps (`max_tools`, `max_resources`, default 128 each) reject surplus registrations at start.
+Security follows the unified transport auth kernel (ADR-0061): a server
+without a `security_policy` starts **Public by default**, and the per-bind
+exposure gate applies — a non-loopback bind serving any Public route
+requires a `[binds."<addr>"] allow_public_exposure = true` acknowledgement
+or start fails naming the bind (an acknowledged exposure warns permanently).
+The DSL block's `security_policy` propagates to every lowered tool and
+resource route; the kernel authenticates each request per the route plan's
+credential sources (normalized RFC 9110 headers) and installs the typed
+principal before the pipeline. Catalog caps (`max_tools`, `max_resources`,
+default 128 each) reject surplus registrations at start.
 
 Remote hosts that announce a protocol version other than `2026-07-28` get a `-32022` rejection and one `warn!` record per event. The server reads no `Mcp-Session-Id` header.
 
@@ -43,6 +52,6 @@ Remote hosts that announce a protocol version other than `2026-07-28` get a `-32
 
 ## Configuration
 
-Server runtime config lives in `Camel.toml` under `[mcp.servers.<name>]` (bind, tls, security_policy, max_tools, max_resources, allowed_hosts). Remotes live under `[mcp.remotes.<name>]` (url, transport). A DSL `mcp:` block names a server; that name must match a TOML key or the consumer start fails.
+Server runtime config lives in `Camel.toml` under `[mcp.servers.<name>]` (bind, tls, security_policy, max_tools, max_resources, allowed_hosts). Remotes live under `[mcp.remotes.<name>]` (url, transport). A DSL `mcp:` block names a server; that name must match a TOML key or the consumer start fails. When the block declares `bind`/`tls`/`max_tools`/`max_resources`, those values ARE the runtime listener values; TOML and the DSL declaring the same key with different values fails startup naming both sources (ADR-0061 Rule 9 — never silent TOML-wins). TOML-only keys (`allowed_hosts`) still apply.
 
 **Reference**: [MCP crate CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-mcp/CONTEXT.md), [ADR-0060](https://github.com/kennycallado/rust-camel/blob/main/docs/adr/0060-mcp-first-class-component.md). Example source: [`examples/mcp-example`](https://github.com/kennycallado/rust-camel/tree/main/examples/mcp-example).
