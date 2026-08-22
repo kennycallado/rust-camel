@@ -87,7 +87,7 @@ never replace or weaken a blessing gate.
 #### Scenario: prose pass before spec blessing
 
 - **GIVEN** a writer has drafted proposal, design, and specs artifacts during
-  PHASE 1
+  STAGE 1
 - **WHEN** the writer prepares for the spec blessing
 - **THEN** `ste-writing` MAY run as a prose pass on those artifacts, after
   which the blessing hash SHALL be computed over the resulting files
