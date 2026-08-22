@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use camel_api::security_policy::SecurityPolicy;
 use camel_api::{CamelError, Exchange};
-use camel_auth::{CredentialSource, TokenAuthenticator};
+use camel_auth::CredentialSource;
 
 /// A message sent from a consumer to the route pipeline.
 ///
@@ -312,12 +312,11 @@ impl ConsumerContext {
 
 /// Security context passed to a consumer before `start()`.
 ///
-/// Carries the `SecurityPolicy` and `TokenAuthenticator` from the route
-/// controller so consumers (e.g. WebSocket) can register auth state
-/// before accepting connections.
+/// Carries the `SecurityPolicy` from the route controller so consumers
+/// can register auth state before accepting connections. Authentication
+/// itself runs through the kernel fields (`plan` + `providers`).
 pub struct SecurityContext {
     pub policy: Arc<dyn SecurityPolicy>,
-    pub authenticator: Arc<dyn TokenAuthenticator>,
     pub credential_sources: Vec<CredentialSource>,
     /// Compiled `RouteSecurityPlan` for the route, when one has been compiled.
     ///
@@ -333,26 +332,18 @@ pub struct SecurityContext {
 }
 
 impl SecurityContext {
-    pub fn new(
-        policy: impl SecurityPolicy + 'static,
-        authenticator: Arc<dyn TokenAuthenticator>,
-    ) -> Self {
+    pub fn new(policy: impl SecurityPolicy + 'static) -> Self {
         Self {
             policy: Arc::new(policy),
-            authenticator,
             credential_sources: vec![CredentialSource::AuthorizationHeader],
             plan: None,
             providers: None,
         }
     }
 
-    pub fn from_arc(
-        policy: Arc<dyn SecurityPolicy>,
-        authenticator: Arc<dyn TokenAuthenticator>,
-    ) -> Self {
+    pub fn from_arc(policy: Arc<dyn SecurityPolicy>) -> Self {
         Self {
             policy,
-            authenticator,
             credential_sources: vec![CredentialSource::AuthorizationHeader],
             plan: None,
             providers: None,
@@ -384,7 +375,6 @@ impl Clone for SecurityContext {
     fn clone(&self) -> Self {
         Self {
             policy: Arc::clone(&self.policy),
-            authenticator: Arc::clone(&self.authenticator),
             credential_sources: self.credential_sources.clone(),
             plan: self.plan.clone(),
             providers: self.providers.as_ref().map(Arc::clone),
@@ -396,7 +386,6 @@ impl std::fmt::Debug for SecurityContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityContext")
             .field("policy", &"<SecurityPolicy>")
-            .field("authenticator", &"<TokenAuthenticator>")
             .field("credential_sources", &self.credential_sources)
             .field("plan", &self.plan)
             .field(
@@ -797,9 +786,8 @@ mod tests {
 
     #[test]
     fn test_security_context_new() {
-        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator));
+        let ctx = SecurityContext::new(StubPolicy);
         assert!(Arc::strong_count(&ctx.policy) == 1);
-        assert!(Arc::strong_count(&ctx.authenticator) == 1);
         assert_eq!(
             ctx.credential_sources,
             vec![camel_auth::CredentialSource::AuthorizationHeader]
@@ -809,10 +797,8 @@ mod tests {
     #[test]
     fn test_security_context_from_arc() {
         let policy: Arc<dyn SecurityPolicy> = Arc::new(StubPolicy);
-        let authenticator: Arc<dyn camel_auth::TokenAuthenticator> = Arc::new(StubAuthenticator);
-        let ctx = SecurityContext::from_arc(Arc::clone(&policy), Arc::clone(&authenticator));
+        let ctx = SecurityContext::from_arc(Arc::clone(&policy));
         assert!(Arc::ptr_eq(&ctx.policy, &policy));
-        assert!(Arc::ptr_eq(&ctx.authenticator, &authenticator));
         assert_eq!(
             ctx.credential_sources,
             vec![camel_auth::CredentialSource::AuthorizationHeader]
@@ -821,31 +807,28 @@ mod tests {
 
     #[test]
     fn test_security_context_clone_independent() {
-        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator));
+        let ctx = SecurityContext::new(StubPolicy);
         let cloned = ctx.clone();
         assert!(Arc::ptr_eq(&ctx.policy, &cloned.policy));
-        assert!(Arc::ptr_eq(&ctx.authenticator, &cloned.authenticator));
         assert_eq!(ctx.credential_sources, cloned.credential_sources);
     }
 
     #[test]
     fn test_security_context_debug_redacts_traits() {
-        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator));
+        let ctx = SecurityContext::new(StubPolicy);
         let debug_str = format!("{ctx:?}");
         assert!(debug_str.contains("<SecurityPolicy>"));
-        assert!(debug_str.contains("<TokenAuthenticator>"));
         assert!(debug_str.contains("credential_sources"));
     }
 
     #[test]
     fn test_security_context_with_credential_sources() {
-        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator))
-            .with_credential_sources(vec![
-                camel_auth::CredentialSource::Cookie {
-                    name: "session".into(),
-                },
-                camel_auth::CredentialSource::AuthorizationHeader,
-            ]);
+        let ctx = SecurityContext::new(StubPolicy).with_credential_sources(vec![
+            camel_auth::CredentialSource::Cookie {
+                name: "session".into(),
+            },
+            camel_auth::CredentialSource::AuthorizationHeader,
+        ]);
         assert_eq!(ctx.credential_sources.len(), 2);
         assert!(matches!(
             &ctx.credential_sources[0],
@@ -874,7 +857,7 @@ mod tests {
             },
         );
 
-        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator))
+        let ctx = SecurityContext::new(StubPolicy)
             .with_plan(plan)
             .with_providers(Arc::new(registry));
 
@@ -885,5 +868,21 @@ mod tests {
         let providers = ctx.providers.as_ref().expect("providers must be attached");
         let resolved = providers.resolve("default").expect("provider must resolve");
         assert!(resolved.audience_binding.is_none());
+    }
+
+    /// `finish-auth-flip` Task 1.3: the `SecurityContext.authenticator`
+    /// hand-off is deleted — transports authenticate through the kernel
+    /// fields (`plan` + `providers`). Registry/doc mentions of the word
+    /// `authenticator` (e.g. `ProviderEntry`) are allowed; the struct
+    /// field is not.
+    #[test]
+    fn security_context_authenticator_deleted_source_scan() {
+        let src = include_str!("consumer.rs");
+        // Assembled at runtime so this scan's own text cannot match.
+        let needle = format!("pub {}authenticator", "");
+        assert!(
+            !src.contains(&needle),
+            "SecurityContext.authenticator must stay deleted: field found in consumer.rs"
+        );
     }
 }

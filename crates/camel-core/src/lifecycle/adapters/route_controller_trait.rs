@@ -292,15 +292,21 @@ impl camel_api::RouteController for DefaultRouteController {
             .get_mut(route_id)
             .expect("invariant: route must exist after prior existence check"); // allow-unwrap
 
-        // Wire security context before spawning consumer
-        if let (Some(sp_config), Some(authenticator)) = (
+        // Wire security context before spawning consumer. The
+        // `security_authenticator` marker stays in the guard as the
+        // route's security classification; the authenticator itself no
+        // longer rides the context (kernel plan + providers do). DSL
+        // compile sets the marker only alongside the policy path, so the
+        // marker term is redundant for DSL routes — it bites programmatic
+        // ones (marker without sp_config classifies non-Public but injects
+        // no context; strict dispatch fails closed downstream).
+        if let (Some(sp_config), Some(_)) = (
             managed.compiled.security_policy.as_ref(),
             managed.compiled.security_authenticator.as_ref(),
         ) {
             use camel_component_api::SecurityContext;
-            let mut sec_ctx =
-                SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator))
-                    .with_credential_sources(sp_config.credential_sources.clone());
+            let mut sec_ctx = SecurityContext::from_arc(Arc::clone(&sp_config.policy))
+                .with_credential_sources(sp_config.credential_sources.clone());
             // Inject the route's named providers so Phase-2 transports (grpc
             // 2.1, mcp 2.6, ws 2.8, http 2.9) can resolve them from the
             // SecurityContext instead of holding their own authenticator.
@@ -695,19 +701,19 @@ impl camel_api::RouteController for DefaultRouteController {
             consumer_component_ctx.as_ref(),
         )?;
 
-        // Wire security context before spawning consumer
+        // Wire security context before spawning consumer (authenticator
+        // marker guard: see start path above).
         let managed = self
             .routes
             .get(route_id)
             .expect("invariant: route must exist after prior existence check"); // allow-unwrap
-        if let (Some(sp_config), Some(authenticator)) = (
+        if let (Some(sp_config), Some(_)) = (
             managed.compiled.security_policy.as_ref(),
             managed.compiled.security_authenticator.as_ref(),
         ) {
             use camel_component_api::SecurityContext;
-            let mut sec_ctx =
-                SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator))
-                    .with_credential_sources(sp_config.credential_sources.clone());
+            let mut sec_ctx = SecurityContext::from_arc(Arc::clone(&sp_config.policy))
+                .with_credential_sources(sp_config.credential_sources.clone());
             // Inject the route's named providers (see start path above).
             if let Some(registry) = &managed.compiled.provider_registry {
                 sec_ctx = sec_ctx.with_providers(Arc::clone(registry));

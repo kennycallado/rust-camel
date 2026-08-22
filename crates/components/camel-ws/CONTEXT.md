@@ -17,9 +17,11 @@ the last Consumer stops. Paths can register and deregister independently on one 
 Per-path registry of active WebSocket connections. Producers use it for targeted or broadcast
 delivery.
 
-**`dispatch_handler`**:
-Inbound upgrade handler. It checks path and origin before optional bearer authentication and
-policy evaluation.
+ **`dispatch_handler`**:
+Inbound upgrade handler. It checks path and origin, then runs the unified transport auth kernel
+handshake (`WsKernelAuth`) when the route carries a compiled security plan and providers; without a
+plan it passes through as Public with no credential extraction. Authorization runs in the pipeline
+security layer against the kernel carrier.
 
 ## Lifecycle and security invariants
 
@@ -37,14 +39,16 @@ policy evaluation.
   (`g:ws:bind-tls`) and the `WsConsumer::stop` error remain secondary failure
   signals for bind errors that surface after readiness. ADR-0007 requires
   such task failures to remain visible to Route supervision.
-- When a SecurityContext exists, `dispatch_handler` fails closed on missing credentials, denied
-  policy decisions, and future `AuthorizationDecision` variants. Query-token values are redacted
-  before logging.
-- A route may declare `credential_sources` (ADR-0059). The consumer resolves them in declared
-  order through the shared camel-auth extraction. The component authenticates the token itself and
-  passes the resulting principal to the policy; the removed `trust_upstream_principal` flag no
-  longer exists and exchange-property principal evidence never authorizes. URI logging redacts
-  every declared query-parameter source name, plus the `access_token` and `token` defaults.
+- When a security plan exists, the kernel handshake fails closed: missing or invalid credentials
+  reject the upgrade (401) and install no carrier, and the strict dispatch check denies a
+  non-Public route whose exchange lacks the carrier. Query-token values are redacted before
+  logging.
+- A route may declare `credential_sources` (ADR-0059). The kernel resolves them in declared order
+  through the shared camel-auth extraction and authenticates the token; the resulting principal
+  rides the kernel carrier and the pipeline policy layer evaluates it. The removed
+  `trust_upstream_principal` flag no longer exists and exchange-property principal evidence never
+  authorizes. URI logging redacts every declared query-parameter source name, plus the
+  `access_token` and `token` defaults.
 - `WsEndpointConfig::fmt` redacts TLS certificate and key paths. ADR-0051 does not classify paths
   as credential bytes, so this crate uses a stricter diagnostic policy.
 - ADR-0052 does not apply. `camel-ws` is an inbound data-plane component, not a diagnostic
@@ -58,7 +62,8 @@ Per ADR-0012, this component's `error!` sites are outside the handler contract:
   `force_unhealthy_for_route` with `g:ws:bind-tls`. The health pin is the operator signal.
 - **Class (g)** (`spawn_server`, plain-bind arm): the code first calls
   `force_unhealthy_for_route` with `g:ws:bind-plain`. The health pin is the operator signal.
-- **Class (e)** (`dispatch_handler`, policy-evaluation error arm): the code first increments
-  `e:ws:policy-eval`. The metric is the operator signal.
 
-Each site keeps `error!` for loud log visibility and carries `// log-policy: outside-contract`.
+Kernel authentication rejections in `dispatch_handler` log at `warn!` and increment
+`e:ws:authn` first; the metric is the operator signal.
+
+Each `error!` site keeps the level for loud log visibility and carries `// log-policy: outside-contract`.

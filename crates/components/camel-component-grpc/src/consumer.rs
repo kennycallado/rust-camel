@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::BytesMut;
-use camel_api::security_policy::{AuthContext, AuthPrincipal, Principal, TransportId};
+use camel_api::security_policy::AuthPrincipal;
 use camel_api::store_principal_properties;
-use camel_api::{AuthorizationDecision, Body, CamelError, Exchange, Message, Value};
+use camel_api::{Body, CamelError, Exchange, Message, Value};
 use camel_auth::{AuthenticatedPrincipal, CredentialSource, enforce_dispatch, install_carrier};
 use camel_component_api::{
     ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode, ExchangeEnvelope,
@@ -30,21 +30,6 @@ use crate::server::GrpcServerRegistry;
 
 static PROTO_CACHE: OnceLock<ProtoCache> = OnceLock::new();
 
-/// Transient `AuthPrincipal` adapter for the component-owned gRPC auth path.
-/// The component authenticates the token itself and passes the resulting
-/// principal to the policy; `provider_id` is `"legacy"` until the kernel
-/// carrier reaches this transport.
-struct GrpcPrincipal(Principal);
-
-impl AuthPrincipal for GrpcPrincipal {
-    fn principal(&self) -> &Principal {
-        &self.0
-    }
-    fn provider_id(&self) -> &str {
-        "legacy"
-    }
-}
-
 /// Per-request kernel authentication bundle: the sealed principal minted at
 /// the transport boundary plus the plan it must stay bound to
 /// (`unify-transport-auth`, Task 2.1).
@@ -59,9 +44,8 @@ impl KernelRequestAuth {
     /// — a fresh exchange is created per request, so every dispatched
     /// exchange must carry its own principal (the Task 2.9 dispatch check
     /// relies on this). The principal is also mirrored to exchange
-    /// properties so route processors can observe the subject. The legacy
-    /// path only ever stamped a scratch exchange; the kernel path stamps
-    /// the real one. `enforce_dispatch` fails closed (`Public`
+    /// properties so route processors can observe the subject.
+    /// `enforce_dispatch` fails closed (`Public`
     /// short-circuits to Ok) and denials map to the transport idiom.
     fn apply_to(&self, exchange: &mut Exchange) -> Result<(), Status> {
         store_principal_properties(exchange, self.principal.principal());
@@ -75,9 +59,9 @@ impl KernelRequestAuth {
 
 /// Bind a minted kernel principal to its route plan for one request.
 ///
-/// `None` when the route has no kernel state (legacy path) or when the
-/// request carries no minted principal (Public plans pass through without
-/// extraction).
+/// `None` when the route has no kernel state (plan-less: Public
+/// pass-through) or when the request carries no minted principal
+/// (Public plans pass through without extraction).
 fn kernel_request_auth(
     kernel: Option<&GrpcKernelAuth>,
     principal: Option<AuthenticatedPrincipal>,
@@ -92,6 +76,21 @@ fn kernel_request_auth(
 
 fn proto_cache() -> &'static ProtoCache {
     PROTO_CACHE.get_or_init(ProtoCache::new)
+}
+
+/// Map a pipeline error onto the transport denial idiom.
+///
+/// A pipeline policy denial (`CamelError::Unauthorized`, what
+/// `SecurityPolicyService` returns) is `PERMISSION_DENIED` — the status
+/// the deleted transport-side scratch evaluation used to emit, so denial
+/// semantics survive with enforcement living wholly in the pipeline
+/// layer. Every other pipeline error is system-broken, not a denial:
+/// INTERNAL, unchanged.
+fn pipeline_error_to_status(e: CamelError) -> Status {
+    match e {
+        CamelError::Unauthorized(msg) => Status::permission_denied(msg),
+        other => Status::internal(format!("pipeline error: {other}")),
+    }
 }
 
 /// Resolve the gRPC mode (unary/streaming) for a given method without creating a consumer.
@@ -179,39 +178,36 @@ pub(crate) enum GrpcReply {
 
 /// Request envelope crossing the server→consumer boundary.
 ///
-/// `principal` is the plain policy-evaluation view; `kernel_principal` is
-/// the sealed principal minted by `kernel_authenticate` at the transport
-/// boundary (`unify-transport-auth`, Task 2.1) and is installed as the
-/// exchange's typed carrier before the pipeline runs. At most one of the
-/// two is ever minted per request: the kernel path fills both views from
-/// one mint; the legacy path fills only `principal`.
+/// `kernel_principal` is the sealed principal minted by
+/// `kernel_authenticate` at the transport boundary
+/// (`unify-transport-auth`, Task 2.1) and is installed as the exchange's
+/// typed carrier before the pipeline runs. Policy evaluation is NOT done
+/// at the transport (the legacy scratch arm was deleted in
+/// `finish-auth-flip`): enforcement lives in the pipeline layer plus the
+/// strict dispatch check.
 pub(crate) enum GrpcRequestEnvelope {
     Unary {
         metadata: tonic::metadata::MetadataMap,
         body: Vec<u8>,
         reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
-        principal: Option<camel_api::security_policy::Principal>,
         kernel_principal: Option<AuthenticatedPrincipal>,
     },
     ServerStreaming {
         metadata: tonic::metadata::MetadataMap,
         body: Vec<u8>,
         reply_tx: mpsc::Sender<GrpcStreamItem>,
-        principal: Option<camel_api::security_policy::Principal>,
         kernel_principal: Option<AuthenticatedPrincipal>,
     },
     ClientStreaming {
         metadata: tonic::metadata::MetadataMap,
         body_rx: mpsc::Receiver<Vec<u8>>,
         reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
-        principal: Option<camel_api::security_policy::Principal>,
         kernel_principal: Option<AuthenticatedPrincipal>,
     },
     Bidi {
         metadata: tonic::metadata::MetadataMap,
         body_rx: mpsc::Receiver<Vec<u8>>,
         reply_tx: mpsc::Sender<GrpcStreamItem>,
-        principal: Option<camel_api::security_policy::Principal>,
         kernel_principal: Option<AuthenticatedPrincipal>,
     },
 }
@@ -480,23 +476,7 @@ impl GrpcConsumer {
                     self.path
                 )));
             }
-            let (authenticator, credential_sources) = match &self.security_ctx {
-                Some(ctx) => (
-                    Some(ctx.authenticator.clone()),
-                    ctx.credential_sources.clone(),
-                ),
-                None => (None, Vec::new()),
-            };
-            table.insert(
-                self.path.clone(),
-                (
-                    env_tx,
-                    mode,
-                    authenticator,
-                    credential_sources,
-                    kernel.clone(),
-                ),
-            );
+            table.insert(self.path.clone(), (env_tx, mode, kernel.clone()));
         }
 
         let path = self.path.clone();
@@ -537,10 +517,12 @@ impl GrpcConsumer {
                     let sender = sender.clone();
                     let correlation_id = next_observer_id();
                     let path_for_log = path.clone();
-                    let policy = self.security_ctx.as_ref().map(|ctx| ctx.policy.clone());
                     // Kernel state captured at dispatch-entry construction,
                     // cloned per request; the principal minted by the
                     // interceptor binds to this plan for the carrier install.
+                    // Per-request policy evaluation is NOT done here —
+                    // enforcement lives in the pipeline layer plus the
+                    // strict dispatch check.
                     let kernel = kernel.clone();
 
                     debug!(
@@ -552,44 +534,13 @@ impl GrpcConsumer {
                     join_set.spawn(async move {
                         let _permit = permit;
                         match envelope {
-                            GrpcRequestEnvelope::Unary { metadata, body, reply_tx, principal, kernel_principal } => {
+                            GrpcRequestEnvelope::Unary { metadata, body, reply_tx, kernel_principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
                                     size = body.len(),
                                     "grpc consumer processing unary request"
                                 );
-
-                                if let (Some(principal), Some(policy)) = (&principal, &policy) {
-                                    let mut exchange = Exchange::new(Message::new(Body::Empty));
-                                    store_principal_properties(&mut exchange, principal);
-                                    let legacy = GrpcPrincipal(Principal::clone(principal));
-                                    let auth = AuthContext {
-                                        principal: &legacy,
-                                        transport: TransportId::Grpc,
-                                    };
-                                    match policy.evaluate(&mut exchange, &auth).await {
-                                        Ok(AuthorizationDecision::Granted { .. }) => {
-                                            tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
-                                        }
-                                        Ok(AuthorizationDecision::Denied { reason, .. }) => {
-                                            tracing::warn!(path = %path_for_log, reason = %reason, "gRPC request denied");
-                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::permission_denied(reason)));
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            // log-policy: system-broken
-                                            tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
-                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::internal(format!("authorization error: {e}"))));
-                                            return;
-                                        }
-                                        // Future AuthorizationDecision variants fail closed.
-                                        _ => {
-                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::permission_denied("authorization denied")));
-                                            return;
-                                        }
-                                    }
-                                }
 
                                 let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 let result = process_unary_request(
@@ -601,7 +552,7 @@ impl GrpcConsumer {
                                 };
                                 let _ = reply_tx.send(reply);
                             }
-                            GrpcRequestEnvelope::ServerStreaming { metadata, body, reply_tx, principal, kernel_principal } => {
+                            GrpcRequestEnvelope::ServerStreaming { metadata, body, reply_tx, kernel_principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
@@ -609,122 +560,29 @@ impl GrpcConsumer {
                                     "grpc consumer processing server streaming request"
                                 );
 
-                                if let (Some(principal), Some(policy)) = (&principal, &policy) {
-                                    let mut exchange = Exchange::new(Message::new(Body::Empty));
-                                    store_principal_properties(&mut exchange, principal);
-                                    let legacy = GrpcPrincipal(Principal::clone(principal));
-                                    let auth = AuthContext {
-                                        principal: &legacy,
-                                        transport: TransportId::Grpc,
-                                    };
-                                    match policy.evaluate(&mut exchange, &auth).await {
-                                        Ok(AuthorizationDecision::Granted { .. }) => {
-                                            tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
-                                        }
-                                        Ok(AuthorizationDecision::Denied { reason, .. }) => {
-                                            tracing::warn!(path = %path_for_log, reason = %reason, "gRPC request denied");
-                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::permission_denied(reason))).await;
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            // log-policy: system-broken
-                                            tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
-                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::internal(format!("authorization error: {e}")))).await;
-                                            return;
-                                        }
-                                        // Future AuthorizationDecision variants fail closed.
-                                        _ => {
-                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::permission_denied("authorization denied"))).await;
-                                            return;
-                                        }
-                                    }
-                                }
-
                                 let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_server_streaming_request(
                                     body, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth,
                                 ).await;
                             }
-                            GrpcRequestEnvelope::ClientStreaming { metadata, body_rx, reply_tx, principal, kernel_principal } => {
+                            GrpcRequestEnvelope::ClientStreaming { metadata, body_rx, reply_tx, kernel_principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
                                     "grpc consumer processing client streaming request"
                                 );
 
-                                if let (Some(principal), Some(policy)) = (&principal, &policy) {
-                                    let mut exchange = Exchange::new(Message::new(Body::Empty));
-                                    store_principal_properties(&mut exchange, principal);
-                                    let legacy = GrpcPrincipal(Principal::clone(principal));
-                                    let auth = AuthContext {
-                                        principal: &legacy,
-                                        transport: TransportId::Grpc,
-                                    };
-                                    match policy.evaluate(&mut exchange, &auth).await {
-                                        Ok(AuthorizationDecision::Granted { .. }) => {
-                                            tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
-                                        }
-                                        Ok(AuthorizationDecision::Denied { reason, .. }) => {
-                                            tracing::warn!(path = %path_for_log, reason = %reason, "gRPC request denied");
-                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::permission_denied(reason)));
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            // log-policy: system-broken
-                                            tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
-                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::internal(format!("authorization error: {e}"))));
-                                            return;
-                                        }
-                                        // Future AuthorizationDecision variants fail closed.
-                                        _ => {
-                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::permission_denied("authorization denied")));
-                                            return;
-                                        }
-                                    }
-                                }
-
                                 let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_client_streaming_request(
                                     body_rx, metadata, req_desc, resp_desc, sender, reply_tx, kernel_auth,
                                 ).await;
                             }
-                            GrpcRequestEnvelope::Bidi { metadata, body_rx, reply_tx, principal, kernel_principal } => {
+                            GrpcRequestEnvelope::Bidi { metadata, body_rx, reply_tx, kernel_principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
                                     "grpc consumer processing bidi streaming request"
                                 );
-
-                                if let (Some(principal), Some(policy)) = (&principal, &policy) {
-                                    let mut exchange = Exchange::new(Message::new(Body::Empty));
-                                    store_principal_properties(&mut exchange, principal);
-                                    let legacy = GrpcPrincipal(Principal::clone(principal));
-                                    let auth = AuthContext {
-                                        principal: &legacy,
-                                        transport: TransportId::Grpc,
-                                    };
-                                    match policy.evaluate(&mut exchange, &auth).await {
-                                        Ok(AuthorizationDecision::Granted { .. }) => {
-                                            tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
-                                        }
-                                        Ok(AuthorizationDecision::Denied { reason, .. }) => {
-                                            tracing::warn!(path = %path_for_log, reason = %reason, "gRPC request denied");
-                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::permission_denied(reason))).await;
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            // log-policy: system-broken
-                                            tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
-                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::internal(format!("authorization error: {e}")))).await;
-                                            return;
-                                        }
-                                        // Future AuthorizationDecision variants fail closed.
-                                        _ => {
-                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::permission_denied("authorization denied"))).await;
-                                            return;
-                                        }
-                                    }
-                                }
 
                                 let kernel_auth = kernel_request_auth(kernel.as_deref(), kernel_principal);
                                 process_bidi_request(
@@ -847,7 +705,7 @@ async fn process_unary_request(
     let result = reply_rx
         .await
         .map_err(|_| Status::internal("pipeline reply dropped"))?
-        .map_err(|e| Status::internal(format!("pipeline error: {e}")))?;
+        .map_err(pipeline_error_to_status)?;
 
     let resp_json = match result.input.body {
         Body::Json(v) => v,
@@ -914,7 +772,7 @@ async fn process_server_streaming_request(
 
     let observer = GrpcStreamObserver::new(reply_tx.clone(), resp_desc);
     let observer_id = next_observer_id();
-    register_observer(observer_id.clone(), observer);
+    register_observer(observer_id.clone(), observer.clone());
     let _guard = ObserverGuard::new(observer_id.clone());
 
     let mut exchange = Exchange::new(msg);
@@ -926,9 +784,14 @@ async fn process_server_streaming_request(
     }
     exchange.set_property("CamelGrpcStreamObserverId", Value::String(observer_id));
 
+    // The envelope carries a pipeline reply channel so a pipeline error
+    // (policy denial included) reaches this processor instead of dying
+    // with `reply_tx: None` — the regression where a denial ended the
+    // stream as a silent, empty success.
+    let (pipeline_reply_tx, pipeline_reply_rx) = tokio::sync::oneshot::channel();
     let envelope = ExchangeEnvelope {
         exchange,
-        reply_tx: None,
+        reply_tx: Some(pipeline_reply_tx),
     };
 
     if sender.send(envelope).await.is_err() {
@@ -937,6 +800,17 @@ async fn process_server_streaming_request(
                 "pipeline channel closed",
             )))
             .await;
+        return;
+    }
+
+    // The pipeline verdict decides the stream's terminal frame: a
+    // pipeline error is surfaced client-visibly via the observer (the
+    // same denial idiom the deleted transport-side scratch evaluation
+    // emitted). A successful result streamed through the observer adds
+    // nothing; so does a dropped reply sender (route stand-ins that
+    // never reply) — the observer stream stays the truth either way.
+    if let Ok(Err(e)) = pipeline_reply_rx.await {
+        observer.on_error(pipeline_error_to_status(e)).await;
     }
 
     // Wait for the stream receiver to be dropped (stream complete).
@@ -1045,9 +919,7 @@ async fn process_client_streaming_request(
     let result = match reply_rx_pipe.await {
         Ok(Ok(exchange)) => exchange,
         Ok(Err(e)) => {
-            let _ = reply_tx.send(GrpcReply::Err(Status::internal(format!(
-                "pipeline error: {e}"
-            ))));
+            let _ = reply_tx.send(GrpcReply::Err(pipeline_error_to_status(e)));
             return;
         }
         Err(_) => {
@@ -1150,9 +1022,16 @@ async fn process_bidi_request(
                 Value::String(observer_id.clone()),
             );
 
+            // Each message envelope carries a pipeline reply channel so
+            // a pipeline error (policy denial included) becomes a
+            // client-visible stream error instead of dying with
+            // `reply_tx: None`. The forwarding loop stays non-blocking:
+            // a per-message watcher renders the verdict via the
+            // observer.
+            let (pipeline_reply_tx, pipeline_reply_rx) = tokio::sync::oneshot::channel();
             let envelope = ExchangeEnvelope {
                 exchange,
-                reply_tx: None,
+                reply_tx: Some(pipeline_reply_tx),
             };
 
             if sender_clone.send(envelope).await.is_err() {
@@ -1161,6 +1040,13 @@ async fn process_bidi_request(
                     .await;
                 break;
             }
+
+            let verdict_observer = observer.clone();
+            tokio::spawn(async move {
+                if let Ok(Err(e)) = pipeline_reply_rx.await {
+                    verdict_observer.on_error(pipeline_error_to_status(e)).await;
+                }
+            });
         }
 
         // Signal completion when client stream ends

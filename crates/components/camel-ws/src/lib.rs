@@ -22,10 +22,7 @@ use axum::extract::{FromRequest, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Router, serve};
-use camel_api::security_policy::{
-    AccessMode, AuthContext, AuthPrincipal, AuthorizationDecision, Principal, RouteSecurityPlan,
-    TransportId,
-};
+use camel_api::security_policy::{AccessMode, AuthPrincipal, RouteSecurityPlan};
 use camel_auth::{AuthenticatedPrincipal, ProviderRegistry};
 use camel_component_api::tls_source::ServerTlsSource;
 use camel_component_api::{
@@ -383,22 +380,6 @@ impl WsConnectionRegistry {
     }
 }
 
-/// Transient `AuthPrincipal` adapter for the component-owned WS auth path.
-///
-/// The component authenticates the token itself and passes the resulting
-/// principal to the policy. `provider_id` is `"legacy"` until the kernel
-/// carrier (Task 1.4) reaches this transport.
-struct LegacyPrincipal(Principal);
-
-impl AuthPrincipal for LegacyPrincipal {
-    fn principal(&self) -> &Principal {
-        &self.0
-    }
-    fn provider_id(&self) -> &str {
-        "legacy"
-    }
-}
-
 /// Kernel authentication state for one ws path (`unify-transport-auth`,
 /// Task 2.8).
 ///
@@ -409,8 +390,11 @@ impl AuthPrincipal for LegacyPrincipal {
 /// an upgrade with half-captured state and nothing patches the entry
 /// afterwards. `None` unless both pieces are present: a plan without
 /// providers can never mint a principal, and a registry without a plan
-/// has nothing to enforce (fail-closed to the legacy path rather than a
-/// silently unauthenticated route).
+/// has nothing to enforce. A context without both is Public pass-through
+/// (no extraction, no evaluation) — DSL routes always carry a compiled
+/// plan (mandatory at `add_route`) and programmatic routes without one
+/// fail closed at the controller's strict dispatch check
+/// (`finish-auth-flip` Task 1.1).
 struct WsKernelAuth {
     plan: RouteSecurityPlan,
     providers: Arc<ProviderRegistry>,
@@ -494,140 +478,63 @@ pub async fn dispatch_handler(
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
 
-    let mut principal_opt: Option<camel_api::security_policy::Principal> = None;
     let mut carrier_opt: Option<AuthenticatedPrincipal> = None;
-    if let Some(sec_ctx) = state.path_policies.get(&path) {
-        if let Some(kernel) = WsKernelAuth::from_security_context(&sec_ctx) {
-            // Kernel path (Task 2.8): `Public` skips credential extraction
-            // entirely (pass-through); any other mode extracts per the
-            // plan's sources and mints the sealed principal through the
-            // kernel. No local policy evaluation — authorization belongs
-            // to the pipeline's policy layer and Task 2.9's dispatch
-            // check, which read the typed carrier.
-            if matches!(kernel.plan.access_mode, AccessMode::Public) {
-                tracing::debug!(path = %path, "WS upgrade: public plan, skipping credential extraction");
-            } else {
-                match camel_auth::extract_token_multi(
-                    req.headers(),
-                    req.uri(),
-                    &kernel.plan.credential_sources,
-                ) {
-                    Some(extracted) => {
-                        debug_log_query_credential(
-                            req.uri(),
-                            &kernel.plan.credential_sources,
-                            &extracted.source,
-                        );
-                        match camel_auth::kernel_authenticate(
-                            &kernel.plan,
-                            &kernel.providers,
-                            &extracted,
-                        )
-                        .await
-                        {
-                            Ok(carrier) => {
-                                tracing::debug!(
-                                    path = %path,
-                                    subject = %carrier.principal().subject,
-                                    provider = %carrier.provider_id(),
-                                    "WS upgrade authorized via kernel"
-                                );
-                                // The plain view feeds the advisory
-                                // exchange properties; the sealed carrier
-                                // rides the connection into every message
-                                // exchange.
-                                principal_opt = Some(carrier.principal().clone());
-                                carrier_opt = Some(carrier);
-                            }
-                            Err(e) => {
-                                state
-                                    .runtime
-                                    .metrics()
-                                    .increment_errors(&state.route_id, "e:ws:authn");
-                                tracing::warn!(path = %path, error = %e, "WS upgrade kernel authentication failed");
-                                return ws_upgrade_auth_error(&e);
-                            }
-                        }
-                    }
-                    None => {
-                        state
-                            .runtime
-                            .metrics()
-                            .increment_errors(&state.route_id, "e:ws:authn");
-                        tracing::warn!(path = %path, "WS upgrade rejected: no credential found in any source");
-                        return (
-                            StatusCode::UNAUTHORIZED,
-                            [("WWW-Authenticate", "Bearer".to_string())],
-                            "Unauthorized",
-                        )
-                            .into_response();
-                    }
-                }
-            }
+    if let Some(sec_ctx) = state.path_policies.get(&path)
+        && let Some(kernel) = WsKernelAuth::from_security_context(&sec_ctx)
+    {
+        // Kernel path (Task 2.8): `Public` skips credential extraction
+        // entirely (pass-through); any other mode extracts per the
+        // plan's sources and mints the sealed principal through the
+        // kernel. No local policy evaluation — authorization belongs
+        // to the pipeline's policy layer and Task 2.9's dispatch
+        // check, which read the typed carrier.
+        if matches!(kernel.plan.access_mode, AccessMode::Public) {
+            tracing::debug!(path = %path, "WS upgrade: public plan, skipping credential extraction");
         } else {
-            // Legacy path (route without a compiled plan + providers):
-            // unchanged until the Task 2.9 migration deletes it.
-            let extracted = camel_auth::extract_token_multi(
+            match camel_auth::extract_token_multi(
                 req.headers(),
                 req.uri(),
-                &sec_ctx.credential_sources,
-            );
-
-            match extracted {
+                &kernel.plan.credential_sources,
+            ) {
                 Some(extracted) => {
                     debug_log_query_credential(
                         req.uri(),
-                        &sec_ctx.credential_sources,
+                        &kernel.plan.credential_sources,
                         &extracted.source,
                     );
-                    match sec_ctx
-                        .authenticator
-                        .authenticate_bearer(&extracted.token)
-                        .await
+                    match camel_auth::kernel_authenticate(
+                        &kernel.plan,
+                        &kernel.providers,
+                        &extracted,
+                    )
+                    .await
                     {
-                        Ok(principal) => {
-                            let mut exchange = camel_api::Exchange::new(camel_api::Message::new(
-                                camel_api::Body::Empty,
-                            ));
-                            camel_api::store_principal_properties(&mut exchange, &principal);
-                            let legacy = LegacyPrincipal(principal.clone());
-                            let auth = AuthContext {
-                                principal: &legacy,
-                                transport: TransportId::Ws,
-                            };
-                            match sec_ctx.policy.evaluate(&mut exchange, &auth).await {
-                                Ok(AuthorizationDecision::Granted { principal: _p }) => {
-                                    tracing::debug!(path = %path, subject = %principal.subject, "WS upgrade authorized");
-                                    principal_opt = Some(principal);
-                                }
-                                Ok(AuthorizationDecision::Denied { reason, .. }) => {
-                                    tracing::warn!(path = %path, reason = %reason, "WS upgrade denied");
-                                    return (StatusCode::FORBIDDEN, "Forbidden").into_response();
-                                }
-                                Err(e) => {
-                                    state
-                                        .runtime
-                                        .metrics()
-                                        .increment_errors(&state.route_id, "e:ws:policy-eval");
-                                    // log-policy: outside-contract
-                                    tracing::error!(path = %path, error = %e, "Policy evaluation error during WS upgrade");
-                                    return (
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        "Internal Server Error",
-                                    )
-                                        .into_response();
-                                }
-                                // Future AuthorizationDecision variants fail closed.
-                                _ => return (StatusCode::FORBIDDEN, "Forbidden").into_response(),
-                            }
+                        Ok(carrier) => {
+                            tracing::debug!(
+                                path = %path,
+                                subject = %carrier.principal().subject,
+                                provider = %carrier.provider_id(),
+                                "WS upgrade authorized via kernel"
+                            );
+                            // The sealed carrier rides the connection
+                            // into every message exchange.
+                            carrier_opt = Some(carrier);
                         }
                         Err(e) => {
-                            tracing::warn!(path = %path, error = %e, "WS upgrade authentication failed");
+                            state
+                                .runtime
+                                .metrics()
+                                .increment_errors(&state.route_id, "e:ws:authn");
+                            tracing::warn!(path = %path, error = %e, "WS upgrade kernel authentication failed");
                             return ws_upgrade_auth_error(&e);
                         }
                     }
                 }
                 None => {
+                    state
+                        .runtime
+                        .metrics()
+                        .increment_errors(&state.route_id, "e:ws:authn");
                     tracing::warn!(path = %path, "WS upgrade rejected: no credential found in any source");
                     return (
                         StatusCode::UNAUTHORIZED,
@@ -660,7 +567,6 @@ pub async fn dispatch_handler(
             path,
             remote_addr,
             upgrade_headers,
-            principal_opt,
             carrier_opt,
         )
     })
@@ -674,7 +580,6 @@ async fn ws_handler(
     path: String,
     remote_addr: String,
     upgrade_headers: HashMap<String, String>,
-    principal: Option<camel_api::security_policy::Principal>,
     carrier: Option<AuthenticatedPrincipal>,
 ) {
     let connection_key = uuid::Uuid::new_v4().to_string();
@@ -844,9 +749,6 @@ async fn ws_handler(
 
                 #[allow(unused_mut)]
                 let mut exchange = Exchange::new(message);
-                if let Some(ref p) = principal {
-                    camel_api::store_principal_properties(&mut exchange, p);
-                }
                 // Kernel-minted typed carrier (Task 2.8): a FRESH exchange is
                 // built per inbound message, so every one must carry the
                 // connection's authenticated principal — Task 2.9's dispatch
@@ -895,9 +797,6 @@ async fn ws_handler(
 
                 #[allow(unused_mut)]
                 let mut exchange = Exchange::new(message);
-                if let Some(ref p) = principal {
-                    camel_api::store_principal_properties(&mut exchange, p);
-                }
                 // Kernel-minted typed carrier (Task 2.8): same mandate as the
                 // text site — every binary message exchange carries it too.
                 if let Some(ref carrier) = carrier {

@@ -21,8 +21,7 @@ use tonic::{Request, Response, Status};
 use tower::Service;
 use tracing::{debug, error};
 
-use camel_api::security_policy::{AccessMode, AuthPrincipal, RouteSecurityPlan};
-use camel_auth::CredentialSource;
+use camel_api::security_policy::{AccessMode, RouteSecurityPlan};
 use camel_auth::{AuthenticatedPrincipal, ProviderRegistry};
 use camel_component_api::{RuntimeObservability, SecurityContext};
 
@@ -34,8 +33,6 @@ use crate::mode::GrpcMode;
 pub(crate) type GrpcDispatchEntry = (
     mpsc::Sender<GrpcRequestEnvelope>,
     GrpcMode,
-    Option<Arc<dyn camel_auth::TokenAuthenticator>>,
-    Vec<CredentialSource>,
     Option<Arc<GrpcKernelAuth>>,
 );
 
@@ -48,8 +45,9 @@ pub(crate) type GrpcDispatchTable = Arc<RwLock<HashMap<String, GrpcDispatchEntry
 /// arrive from the route's [`SecurityContext`] when the entry is inserted
 /// into the dispatch table — before any request reaches the per-request
 /// handlers. The interceptor is created with the plan already captured;
-/// it never reads a post-hoc setter. A context lacking either piece keeps
-/// the legacy authenticator path (which still demands credentials).
+/// it never reads a post-hoc setter. A context lacking either piece leaves
+/// the transport Public pass-through (no extraction); non-Public routes
+/// without kernel state fail closed at the controller's strict dispatch.
 pub(crate) struct GrpcKernelAuth {
     pub(crate) plan: RouteSecurityPlan,
     pub(crate) providers: Arc<ProviderRegistry>,
@@ -60,8 +58,9 @@ impl GrpcKernelAuth {
     ///
     /// `None` unless both the compiled plan and the provider registry are
     /// present: a plan without providers can never mint a principal, and a
-    /// registry without a plan has nothing to enforce (fail-closed to the
-    /// legacy path rather than a silently unauthenticated route).
+    /// registry without a plan has nothing to enforce. `None` means Public
+    /// pass-through at this transport; the controller's strict dispatch
+    /// check is what fails non-Public routes without kernel state closed.
     pub(crate) fn from_security_context(ctx: &SecurityContext) -> Option<Self> {
         Some(Self {
             plan: ctx.plan.clone()?,
@@ -461,29 +460,6 @@ impl futures::Stream for GrpcItemStream {
 
 // ── Authentication helper ──────────────────────────────────────────────────
 
-async fn extract_principal(
-    authenticator: &dyn camel_auth::TokenAuthenticator,
-    metadata: &tonic::metadata::MetadataMap,
-    sources: &[CredentialSource],
-) -> Result<camel_api::security_policy::Principal, tonic::Status> {
-    let header_map = metadata_to_header_map(metadata);
-    let uri = http::Uri::from_static("/");
-
-    let token = match camel_auth::extract_token_multi(&header_map, &uri, sources) {
-        Some(extracted) => extracted.token,
-        None => {
-            return Err(tonic::Status::unauthenticated(
-                "missing or malformed credentials",
-            ));
-        }
-    };
-
-    match authenticator.authenticate_bearer(&token).await {
-        Ok(p) => Ok(p),
-        Err(e) => Err(auth_error_to_status(e)),
-    }
-}
-
 /// Map an authentication error onto the transport denial idiom (`tonic::Status`).
 fn auth_error_to_status(e: camel_api::CamelError) -> tonic::Status {
     match e {
@@ -501,7 +477,7 @@ fn auth_error_to_status(e: camel_api::CamelError) -> tonic::Status {
     }
 }
 
-/// Per-request authentication at the gRPC boundary.
+/// Per-request authentication at the gRPC boundary (kernel-only).
 ///
 /// Kernel path (plan captured at dispatch-entry construction): an
 /// `AccessMode::Public` plan skips extraction entirely — pass-through,
@@ -509,47 +485,30 @@ fn auth_error_to_status(e: camel_api::CamelError) -> tonic::Status {
 /// `plan.credential_sources` (authorization metadata + named headers) and
 /// mints the sealed principal through the kernel. No local JWT parsing.
 ///
-/// Legacy path (route without a compiled plan): the route's configured
-/// authenticator over the configured sources, unchanged.
+/// A context without a plan is Public pass-through: no extraction, no
+/// error, no principal. Policy enforcement is not done here — it lives in
+/// the pipeline layer plus the strict dispatch check.
 ///
-/// Returns the plain principal (the policy-evaluation view) and, when the
-/// kernel minted one, the sealed carrier principal for the request's
-/// exchange.
+/// Returns the sealed principal when the kernel minted one.
 async fn authenticate_request(
-    legacy_authenticator: Option<&dyn camel_auth::TokenAuthenticator>,
-    legacy_sources: &[CredentialSource],
     kernel: Option<&GrpcKernelAuth>,
     metadata: &tonic::metadata::MetadataMap,
-) -> Result<
-    (
-        Option<camel_api::security_policy::Principal>,
-        Option<AuthenticatedPrincipal>,
-    ),
-    tonic::Status,
-> {
-    if let Some(kernel) = kernel {
-        if matches!(kernel.plan.access_mode, AccessMode::Public) {
-            return Ok((None, None));
-        }
-        let header_map = metadata_to_header_map(metadata);
-        let uri = http::Uri::from_static("/");
-        let extracted =
-            camel_auth::extract_token_multi(&header_map, &uri, &kernel.plan.credential_sources)
-                .ok_or_else(|| {
-                    tonic::Status::unauthenticated("missing or malformed credentials")
-                })?;
-        let principal =
-            camel_auth::kernel_authenticate(&kernel.plan, &kernel.providers, &extracted)
-                .await
-                .map_err(auth_error_to_status)?;
-        let view = principal.principal().clone();
-        Ok((Some(view), Some(principal)))
-    } else if let Some(authenticator) = legacy_authenticator {
-        let principal = extract_principal(authenticator, metadata, legacy_sources).await?;
-        Ok((Some(principal), None))
-    } else {
-        Ok((None, None))
+) -> Result<Option<AuthenticatedPrincipal>, tonic::Status> {
+    let Some(kernel) = kernel else {
+        return Ok(None);
+    };
+    if matches!(kernel.plan.access_mode, AccessMode::Public) {
+        return Ok(None);
     }
+    let header_map = metadata_to_header_map(metadata);
+    let uri = http::Uri::from_static("/");
+    let extracted =
+        camel_auth::extract_token_multi(&header_map, &uri, &kernel.plan.credential_sources)
+            .ok_or_else(|| tonic::Status::unauthenticated("missing or malformed credentials"))?;
+    let principal = camel_auth::kernel_authenticate(&kernel.plan, &kernel.providers, &extracted)
+        .await
+        .map_err(auth_error_to_status)?;
+    Ok(Some(principal))
 }
 
 /// Convert tonic metadata into an `http::HeaderMap` for the shared extraction
@@ -587,18 +546,12 @@ async fn handle_grpc_request(
 
     let entry = {
         let table = dispatch.read().await;
-        table.get(&path).map(|(tx, mode, auth, sources, kernel)| {
-            (
-                tx.clone(),
-                *mode,
-                auth.clone(),
-                sources.clone(),
-                kernel.clone(),
-            )
-        })
+        table
+            .get(&path)
+            .map(|(tx, mode, kernel)| (tx.clone(), *mode, kernel.clone()))
     };
 
-    let Some((sender, mode, authenticator_opt, credential_sources, kernel)) = entry else {
+    let Some((sender, mode, kernel)) = entry else {
         let handler = UnimplementedHandler;
         let mut grpc = tonic::server::Grpc::new(RawBytesCodec);
         let response = grpc.unary(handler, req).await;
@@ -609,42 +562,22 @@ async fn handle_grpc_request(
 
     match mode {
         GrpcMode::Unary => {
-            let handler = UnaryHandler {
-                sender,
-                authenticator_opt,
-                credential_sources,
-                kernel,
-            };
+            let handler = UnaryHandler { sender, kernel };
             let response = grpc.unary(handler, req).await;
             Ok(response)
         }
         GrpcMode::ServerStreaming => {
-            let handler = ServerStreamingHandler {
-                sender,
-                authenticator_opt,
-                credential_sources,
-                kernel,
-            };
+            let handler = ServerStreamingHandler { sender, kernel };
             let response = grpc.server_streaming(handler, req).await;
             Ok(response)
         }
         GrpcMode::ClientStreaming => {
-            let handler = ClientStreamingHandler {
-                sender,
-                authenticator_opt,
-                credential_sources,
-                kernel,
-            };
+            let handler = ClientStreamingHandler { sender, kernel };
             let response = grpc.client_streaming(handler, req).await;
             Ok(response)
         }
         GrpcMode::Bidi => {
-            let handler = BidiHandler {
-                sender,
-                authenticator_opt,
-                credential_sources,
-                kernel,
-            };
+            let handler = BidiHandler { sender, kernel };
             let response = grpc.streaming(handler, req).await;
             Ok(response)
         }
@@ -673,8 +606,6 @@ impl Service<Request<Vec<u8>>> for UnimplementedHandler {
 
 struct UnaryHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
-    authenticator_opt: Option<Arc<dyn camel_auth::TokenAuthenticator>>,
-    credential_sources: Vec<CredentialSource>,
     kernel: Option<Arc<GrpcKernelAuth>>,
 }
 
@@ -683,26 +614,17 @@ impl tonic::server::UnaryService<Vec<u8>> for UnaryHandler {
     type Future = Pin<Box<dyn Future<Output = Result<Response<Self::Response>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
-        let authenticator_opt = self.authenticator_opt.clone();
-        let credential_sources = self.credential_sources.clone();
         let kernel = self.kernel.clone();
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let sender = self.sender.clone();
 
         Box::pin(async move {
-            let (principal, kernel_principal) = authenticate_request(
-                authenticator_opt.as_deref(),
-                &credential_sources,
-                kernel.as_deref(),
-                req.metadata(),
-            )
-            .await?;
+            let kernel_principal = authenticate_request(kernel.as_deref(), req.metadata()).await?;
 
             let envelope = GrpcRequestEnvelope::Unary {
                 metadata: req.metadata().clone(),
                 body: req.into_inner(),
                 reply_tx,
-                principal,
                 kernel_principal,
             };
             sender
@@ -724,8 +646,6 @@ impl tonic::server::UnaryService<Vec<u8>> for UnaryHandler {
 
 struct ServerStreamingHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
-    authenticator_opt: Option<Arc<dyn camel_auth::TokenAuthenticator>>,
-    credential_sources: Vec<CredentialSource>,
     kernel: Option<Arc<GrpcKernelAuth>>,
 }
 
@@ -736,26 +656,17 @@ impl tonic::server::ServerStreamingService<Vec<u8>> for ServerStreamingHandler {
         Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
-        let authenticator_opt = self.authenticator_opt.clone();
-        let credential_sources = self.credential_sources.clone();
         let kernel = self.kernel.clone();
         let (reply_tx, reply_rx) = mpsc::channel::<GrpcStreamItem>(64);
         let sender = self.sender.clone();
 
         Box::pin(async move {
-            let (principal, kernel_principal) = authenticate_request(
-                authenticator_opt.as_deref(),
-                &credential_sources,
-                kernel.as_deref(),
-                req.metadata(),
-            )
-            .await?;
+            let kernel_principal = authenticate_request(kernel.as_deref(), req.metadata()).await?;
 
             let envelope = GrpcRequestEnvelope::ServerStreaming {
                 metadata: req.metadata().clone(),
                 body: req.into_inner(),
                 reply_tx,
-                principal,
                 kernel_principal,
             };
             sender
@@ -773,8 +684,6 @@ impl tonic::server::ServerStreamingService<Vec<u8>> for ServerStreamingHandler {
 
 struct ClientStreamingHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
-    authenticator_opt: Option<Arc<dyn camel_auth::TokenAuthenticator>>,
-    credential_sources: Vec<CredentialSource>,
     kernel: Option<Arc<GrpcKernelAuth>>,
 }
 
@@ -783,27 +692,18 @@ impl tonic::server::ClientStreamingService<Vec<u8>> for ClientStreamingHandler {
     type Future = Pin<Box<dyn Future<Output = Result<Response<Self::Response>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Streaming<Vec<u8>>>) -> Self::Future {
-        let authenticator_opt = self.authenticator_opt.clone();
-        let credential_sources = self.credential_sources.clone();
         let kernel = self.kernel.clone();
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(64);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<GrpcReply>();
         let sender = self.sender.clone();
 
         Box::pin(async move {
-            let (principal, kernel_principal) = authenticate_request(
-                authenticator_opt.as_deref(),
-                &credential_sources,
-                kernel.as_deref(),
-                req.metadata(),
-            )
-            .await?;
+            let kernel_principal = authenticate_request(kernel.as_deref(), req.metadata()).await?;
 
             let envelope = GrpcRequestEnvelope::ClientStreaming {
                 metadata: req.metadata().clone(),
                 body_rx,
                 reply_tx,
-                principal,
                 kernel_principal,
             };
 
@@ -851,8 +751,6 @@ impl tonic::server::ClientStreamingService<Vec<u8>> for ClientStreamingHandler {
 
 struct BidiHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
-    authenticator_opt: Option<Arc<dyn camel_auth::TokenAuthenticator>>,
-    credential_sources: Vec<CredentialSource>,
     kernel: Option<Arc<GrpcKernelAuth>>,
 }
 
@@ -863,8 +761,6 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
         Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Streaming<Vec<u8>>>) -> Self::Future {
-        let authenticator_opt = self.authenticator_opt.clone();
-        let credential_sources = self.credential_sources.clone();
         let kernel = self.kernel.clone();
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(64);
         let (reply_tx, reply_rx) = mpsc::channel::<GrpcStreamItem>(64);
@@ -872,19 +768,12 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
         let sender = self.sender.clone();
 
         Box::pin(async move {
-            let (principal, kernel_principal) = authenticate_request(
-                authenticator_opt.as_deref(),
-                &credential_sources,
-                kernel.as_deref(),
-                req.metadata(),
-            )
-            .await?;
+            let kernel_principal = authenticate_request(kernel.as_deref(), req.metadata()).await?;
 
             let envelope = GrpcRequestEnvelope::Bidi {
                 metadata: req.metadata().clone(),
                 body_rx,
                 reply_tx,
-                principal,
                 kernel_principal,
             };
 
@@ -926,6 +815,8 @@ mod tests {
     use std::time::Duration;
 
     use camel_api::MetricsCollector;
+    use camel_api::security_policy::AuthPrincipal;
+    use camel_auth::CredentialSource;
     use camel_component_api::HealthCheckRegistry;
     use futures::{Stream, StreamExt};
     use tokio::sync::mpsc;
@@ -1084,7 +975,7 @@ mod tests {
             let mut table = dispatch.write().await;
             table.insert(
                 "/test.Service/Method".to_string(),
-                (tx, GrpcMode::Unary, None, Vec::new(), None),
+                (tx, GrpcMode::Unary, None),
             );
         }
         assert!(dispatch.read().await.contains_key("/test.Service/Method"));
@@ -1123,13 +1014,10 @@ mod tests {
         let path = "/pkg.Service/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(
-                path.clone(),
-                (tx, GrpcMode::ServerStreaming, None, Vec::new(), None),
-            );
+            table.insert(path.clone(), (tx, GrpcMode::ServerStreaming, None));
         }
         let table = dispatch.read().await;
-        let (_, mode, _, _, _) = table.get(&path).unwrap();
+        let (_, mode, _) = table.get(&path).unwrap();
         assert_eq!(*mode, GrpcMode::ServerStreaming);
     }
 
@@ -1140,13 +1028,13 @@ mod tests {
         let path = "/pkg.Service/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(path.clone(), (tx, GrpcMode::Bidi, None, Vec::new(), None));
+            table.insert(path.clone(), (tx, GrpcMode::Bidi, None));
         }
         {
             let mut table = dispatch.write().await;
             let removed = table.remove(&path);
             assert!(removed.is_some());
-            let (_, mode, _, _, _) = removed.unwrap();
+            let (_, mode, _) = removed.unwrap();
             assert_eq!(mode, GrpcMode::Bidi);
         }
         assert!(dispatch.read().await.is_empty());
@@ -1165,13 +1053,13 @@ mod tests {
             let mut table = dispatch.write().await;
             for (i, mode) in modes.iter().enumerate() {
                 let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
-                table.insert(format!("/svc/M{i}"), (tx, *mode, None, Vec::new(), None));
+                table.insert(format!("/svc/M{i}"), (tx, *mode, None));
             }
         }
         let table = dispatch.read().await;
         assert_eq!(table.len(), 4);
         for (i, expected_mode) in modes.iter().enumerate() {
-            let (_, mode, _, _, _) = table.get(&format!("/svc/M{i}")).unwrap();
+            let (_, mode, _) = table.get(&format!("/svc/M{i}")).unwrap();
             assert_eq!(*mode, *expected_mode);
         }
     }
@@ -1201,7 +1089,6 @@ mod tests {
             body: body.clone(),
             reply_tx,
             kernel_principal: None,
-            principal: None,
         };
         match envelope {
             GrpcRequestEnvelope::Unary {
@@ -1228,7 +1115,6 @@ mod tests {
             body: vec![1],
             reply_tx,
             kernel_principal: None,
-            principal: None,
         };
         match envelope {
             GrpcRequestEnvelope::ServerStreaming { reply_tx: tx, .. } => {
@@ -1253,7 +1139,6 @@ mod tests {
             body_rx,
             reply_tx,
             kernel_principal: None,
-            principal: None,
         };
         let handle = tokio::spawn(async move {
             match envelope {
@@ -1286,7 +1171,6 @@ mod tests {
             body_rx,
             reply_tx,
             kernel_principal: None,
-            principal: None,
         };
         let handle = tokio::spawn(async move {
             match envelope {
@@ -1402,7 +1286,7 @@ mod tests {
         let path = "/test.Unregister/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(path.clone(), (tx, GrpcMode::Unary, None, Vec::new(), None));
+            table.insert(path.clone(), (tx, GrpcMode::Unary, None));
         }
         assert!(dispatch.read().await.contains_key(&path));
 
@@ -1418,9 +1302,7 @@ mod tests {
         let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
         let _handler = UnaryHandler {
             sender: _tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
     }
 
@@ -1429,9 +1311,7 @@ mod tests {
         let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
         let _handler = ServerStreamingHandler {
             sender: _tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
     }
 
@@ -1440,9 +1320,7 @@ mod tests {
         let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
         let _handler = ClientStreamingHandler {
             sender: _tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
     }
 
@@ -1451,9 +1329,7 @@ mod tests {
         let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
         let _handler = BidiHandler {
             sender: _tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
     }
 
@@ -1464,9 +1340,7 @@ mod tests {
 
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         let req = Request::new(vec![1, 2, 3]);
         let fut = handler.call(req);
@@ -1485,9 +1359,7 @@ mod tests {
 
         let mut handler = ServerStreamingHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         let req = Request::new(vec![1, 2, 3]);
         let fut = handler.call(req);
@@ -1508,9 +1380,7 @@ mod tests {
 
         let handler = ClientStreamingHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         assert!(handler.sender.is_closed());
     }
@@ -1522,9 +1392,7 @@ mod tests {
 
         let handler = BidiHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         assert!(handler.sender.is_closed());
     }
@@ -1535,9 +1403,7 @@ mod tests {
 
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         let req = Request::new(vec![1, 2, 3]);
         let fut = handler.call(req);
@@ -1564,9 +1430,7 @@ mod tests {
 
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         let req = Request::new(vec![10, 20, 30]);
         let fut = handler.call(req);
@@ -1591,9 +1455,7 @@ mod tests {
 
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         let req = Request::new(vec![1]);
         let fut = handler.call(req);
@@ -1618,9 +1480,7 @@ mod tests {
 
         let mut handler = ServerStreamingHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         let req = Request::new(vec![1, 2]);
         let fut = handler.call(req);
@@ -1651,9 +1511,7 @@ mod tests {
 
         let mut handler = ServerStreamingHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         let req = Request::new(vec![1]);
         let fut = handler.call(req);
@@ -1684,9 +1542,7 @@ mod tests {
 
         let handler = BidiHandler {
             sender: tx,
-            authenticator_opt: None,
             kernel: None,
-            credential_sources: Vec::new(),
         };
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(4);
         let envelope_for_test = GrpcRequestEnvelope::Bidi {
@@ -1694,7 +1550,6 @@ mod tests {
             body_rx,
             reply_tx,
             kernel_principal: None,
-            principal: None,
         };
 
         let send_result = handler.sender.send(envelope_for_test).await;
@@ -1768,10 +1623,6 @@ mod tests {
         // captured from the security context at construction time — the
         // plan and providers ride the dispatch entry, never a setter
         // patched on after the interceptor exists.
-        let authenticator: Arc<MockAuthenticator> = Arc::new(MockAuthenticator {
-            should_fail_unauthenticated: false,
-            should_fail_unavailable: false,
-        });
         let registry = Arc::new(ProviderRegistry::new());
         let plan = RouteSecurityPlan {
             access_mode: AccessMode::Authenticated,
@@ -1781,7 +1632,7 @@ mod tests {
             audience_binding: None,
         };
 
-        let mut ctx = SecurityContext::new(GrantAllPolicy, authenticator)
+        let mut ctx = SecurityContext::new(GrantAllPolicy)
             .with_credential_sources(plan.credential_sources.clone())
             .with_plan(plan.clone())
             .with_providers(Arc::clone(&registry));
@@ -1798,7 +1649,8 @@ mod tests {
         // SecurityContext carries, not a copy.
         assert!(Arc::ptr_eq(&kernel.providers, &registry));
 
-        // Without a plan the interceptor is not kernel-driven (legacy path).
+        // Without a plan there is no kernel state: the transport is Public
+        // pass-through.
         ctx.plan = None;
         assert!(GrpcKernelAuth::from_security_context(&ctx).is_none());
 
@@ -1830,20 +1682,51 @@ mod tests {
         }
     }
 
+    /// Kernel fixture: dispatch-entry kernel state over a single mock
+    /// provider (`mock-idp`). The deleted legacy arm threaded
+    /// `authenticator_opt` + `credential_sources` through the handler;
+    /// the kernel plan's sources and registry drive extraction and
+    /// minting now.
+    fn kernel_fixture(
+        sources: Vec<CredentialSource>,
+        authenticator: Arc<dyn camel_auth::TokenAuthenticator>,
+    ) -> Arc<GrpcKernelAuth> {
+        let registry = ProviderRegistry::new();
+        registry.register(
+            "mock-idp",
+            camel_auth::ProviderEntry {
+                authenticator,
+                audience_binding: None,
+            },
+        );
+        Arc::new(GrpcKernelAuth {
+            plan: RouteSecurityPlan {
+                access_mode: AccessMode::Authenticated,
+                provider_ref: Some("mock-idp".to_string()),
+                transport: camel_api::security_policy::TransportId::Grpc,
+                credential_sources: sources,
+                audience_binding: None,
+            },
+            providers: Arc::new(registry),
+        })
+    }
+
+    fn ok_mock() -> Arc<MockAuthenticator> {
+        Arc::new(MockAuthenticator {
+            should_fail_unauthenticated: false,
+            should_fail_unavailable: false,
+        })
+    }
+
     #[tokio::test]
     async fn test_grpc_auth_valid_token() {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
-        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
-            Some(Arc::new(MockAuthenticator {
-                should_fail_unauthenticated: false,
-                should_fail_unavailable: false,
-            }));
-
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: authenticator,
-            kernel: None,
-            credential_sources: vec![CredentialSource::AuthorizationHeader],
+            kernel: Some(kernel_fixture(
+                vec![CredentialSource::AuthorizationHeader],
+                ok_mock(),
+            )),
         };
 
         let mut request = Request::new(vec![]);
@@ -1855,14 +1738,13 @@ mod tests {
             let envelope = rx.recv().await.unwrap();
             match envelope {
                 GrpcRequestEnvelope::Unary {
-                    principal,
+                    kernel_principal,
                     reply_tx,
                     ..
                 } => {
-                    assert!(principal.is_some());
-                    let p = principal.unwrap();
-                    assert_eq!(p.subject, "test-user");
-                    assert_eq!(p.issuer, "test-issuer");
+                    let principal = kernel_principal.expect("kernel mints principal"); // allow-unwrap
+                    assert_eq!(principal.principal().subject, "test-user");
+                    assert_eq!(principal.principal().issuer, "test-issuer");
                     let _ = reply_tx.send(GrpcReply::Ok(vec![]));
                 }
                 _ => panic!("expected Unary"),
@@ -1877,19 +1759,14 @@ mod tests {
     #[tokio::test]
     async fn grpc_credential_sources_custom_header_authenticates() {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
-        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
-            Some(Arc::new(MockAuthenticator {
-                should_fail_unauthenticated: false,
-                should_fail_unavailable: false,
-            }));
-
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: authenticator,
-            kernel: None,
-            credential_sources: vec![CredentialSource::Header {
-                name: "x-api-key".to_string(),
-            }],
+            kernel: Some(kernel_fixture(
+                vec![CredentialSource::Header {
+                    name: "x-api-key".to_string(),
+                }],
+                ok_mock(),
+            )),
         };
 
         let mut request = Request::new(vec![]);
@@ -1901,13 +1778,12 @@ mod tests {
             let envelope = rx.recv().await.unwrap();
             match envelope {
                 GrpcRequestEnvelope::Unary {
-                    principal,
+                    kernel_principal,
                     reply_tx,
                     ..
                 } => {
-                    assert!(principal.is_some());
-                    let p = principal.unwrap();
-                    assert_eq!(p.subject, "test-user");
+                    let principal = kernel_principal.expect("kernel mints principal"); // allow-unwrap
+                    assert_eq!(principal.principal().subject, "test-user");
                     let _ = reply_tx.send(GrpcReply::Ok(vec![]));
                 }
                 _ => panic!("expected Unary"),
@@ -1922,17 +1798,12 @@ mod tests {
     #[tokio::test]
     async fn grpc_credential_sources_default_bearer_unchanged() {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
-        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
-            Some(Arc::new(MockAuthenticator {
-                should_fail_unauthenticated: false,
-                should_fail_unavailable: false,
-            }));
-
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: authenticator,
-            kernel: None,
-            credential_sources: vec![CredentialSource::AuthorizationHeader],
+            kernel: Some(kernel_fixture(
+                vec![CredentialSource::AuthorizationHeader],
+                ok_mock(),
+            )),
         };
 
         let mut request = Request::new(vec![]);
@@ -1944,13 +1815,12 @@ mod tests {
             let envelope = rx.recv().await.unwrap();
             match envelope {
                 GrpcRequestEnvelope::Unary {
-                    principal,
+                    kernel_principal,
                     reply_tx,
                     ..
                 } => {
-                    assert!(principal.is_some());
-                    let p = principal.unwrap();
-                    assert_eq!(p.subject, "test-user");
+                    let principal = kernel_principal.expect("kernel mints principal"); // allow-unwrap
+                    assert_eq!(principal.principal().subject, "test-user");
                     let _ = reply_tx.send(GrpcReply::Ok(vec![]));
                 }
                 _ => panic!("expected Unary"),
@@ -1965,41 +1835,33 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_auth_missing_token() {
         let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
-        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
-            Some(Arc::new(MockAuthenticator {
-                should_fail_unauthenticated: false,
-                should_fail_unavailable: false,
-            }));
-
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: authenticator,
-            kernel: None,
-            credential_sources: vec![CredentialSource::AuthorizationHeader],
+            kernel: Some(kernel_fixture(
+                vec![CredentialSource::AuthorizationHeader],
+                ok_mock(),
+            )),
         };
 
         let request = Request::new(vec![]);
 
         let result = handler.call(request).await;
-        assert!(result.is_err());
-        let status = result.unwrap_err();
+        let status = result.expect_err("missing credential must deny"); // allow-unwrap
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 
     #[tokio::test]
     async fn test_grpc_auth_invalid_token() {
         let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
-        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
-            Some(Arc::new(MockAuthenticator {
-                should_fail_unauthenticated: true,
-                should_fail_unavailable: false,
-            }));
-
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: authenticator,
-            kernel: None,
-            credential_sources: vec![CredentialSource::AuthorizationHeader],
+            kernel: Some(kernel_fixture(
+                vec![CredentialSource::AuthorizationHeader],
+                Arc::new(MockAuthenticator {
+                    should_fail_unauthenticated: true,
+                    should_fail_unavailable: false,
+                }),
+            )),
         };
 
         let mut request = Request::new(vec![]);
@@ -2008,25 +1870,22 @@ mod tests {
             .insert("authorization", "Bearer bad-token".parse().unwrap());
 
         let result = handler.call(request).await;
-        assert!(result.is_err());
-        let status = result.unwrap_err();
+        let status = result.expect_err("invalid credential must deny"); // allow-unwrap
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 
     #[tokio::test]
     async fn test_grpc_auth_provider_unavailable() {
         let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
-        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
-            Some(Arc::new(MockAuthenticator {
-                should_fail_unauthenticated: false,
-                should_fail_unavailable: true,
-            }));
-
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: authenticator,
-            kernel: None,
-            credential_sources: vec![CredentialSource::AuthorizationHeader],
+            kernel: Some(kernel_fixture(
+                vec![CredentialSource::AuthorizationHeader],
+                Arc::new(MockAuthenticator {
+                    should_fail_unauthenticated: false,
+                    should_fail_unavailable: true,
+                }),
+            )),
         };
 
         let mut request = Request::new(vec![]);
@@ -2035,21 +1894,18 @@ mod tests {
             .insert("authorization", "Bearer valid-token".parse().unwrap());
 
         let result = handler.call(request).await;
-        assert!(result.is_err());
-        let status = result.unwrap_err();
+        let status = result.expect_err("unavailable provider must surface"); // allow-unwrap
         assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 
     #[tokio::test]
     async fn test_grpc_no_auth_configured() {
+        // No kernel state (plan-less route): Public pass-through — no
+        // extraction, no error, no minted principal.
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
-        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> = None;
-
         let mut handler = UnaryHandler {
             sender: tx,
-            authenticator_opt: authenticator,
             kernel: None,
-            credential_sources: vec![CredentialSource::AuthorizationHeader],
         };
 
         let request = Request::new(vec![]);
@@ -2058,11 +1914,11 @@ mod tests {
             let envelope = rx.recv().await.unwrap();
             match envelope {
                 GrpcRequestEnvelope::Unary {
-                    principal,
+                    kernel_principal,
                     reply_tx,
                     ..
                 } => {
-                    assert!(principal.is_none());
+                    assert!(kernel_principal.is_none());
                     let _ = reply_tx.send(GrpcReply::Ok(vec![]));
                 }
                 _ => panic!("expected Unary"),

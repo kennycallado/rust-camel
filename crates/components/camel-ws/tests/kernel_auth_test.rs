@@ -23,7 +23,7 @@ use camel_api::security_policy::{
 use camel_auth::native_auth::{NativeCredential, NativeCredentialSecret, NativeCredentialStore};
 use camel_auth::{
     CredentialSource, ProviderEntry, ProviderRegistry, RolePolicy, StaticTokenAuthenticator,
-    TokenAuthenticator, read_carrier,
+    read_carrier,
 };
 use camel_component_api::test_support::NoopRuntimeObservability;
 use camel_component_api::{ExchangeEnvelope, SecurityContext};
@@ -91,24 +91,17 @@ fn public_plan() -> RouteSecurityPlan {
     }
 }
 
-/// Consumer security context carrying plan + providers (the kernel path);
-/// the legacy policy/authenticator fields stay populated so a wiring bug
-/// that falls back to the legacy path is visible in the carrier asserts,
-/// not masked by an unrelated denial.
+/// Consumer security context carrying plan + providers (the kernel path).
+///
+/// Since the `finish-auth-flip` Task 1.1 arm deletion the handshake reads
+/// ONLY the kernel fields; the policy constructor argument is an unread
+/// placeholder (the authenticator field died in Task 1.3).
 fn kernel_security_context(
     plan: RouteSecurityPlan,
     providers: Arc<ProviderRegistry>,
 ) -> SecurityContext {
-    let store = NativeCredentialStore::try_new(vec![NativeCredential {
-        secret: NativeCredentialSecret::Plaintext {
-            value: TOKEN.to_string().into(),
-        },
-        principal: native_principal(),
-    }])
-    .unwrap();
-    let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
     let policy: Arc<dyn SecurityPolicy> = Arc::new(RolePolicy::new(vec![], true));
-    SecurityContext::from_arc(policy, authenticator)
+    SecurityContext::from_arc(policy)
         .with_plan(plan)
         .with_providers(providers)
 }

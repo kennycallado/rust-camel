@@ -37,22 +37,25 @@ transport keys. These keys include `content-type`, `te`, `grpc-*`, and
 
 Security enforcement has two layers:
 
-1. The server handler authenticates the request. `extract_principal` maps the
-   inbound metadata to an HTTP header view and extracts the token through the
-   shared `camel_auth::extract_token_multi` using the route-declared
-   `credential_sources` (default `[authorization_header]`, so the historical
-   `authorization: Bearer <token>` behavior is unchanged). It then calls
-   `TokenAuthenticator::authenticate_bearer`. Missing or invalid credentials
-   return `Status::unauthenticated`. An unavailable provider returns
-   `Status::unavailable`. An unexpected authenticator failure returns
-   `Status::internal` and emits the category (h) log. `query_param` and
-   `cookie` sources are rejected at route load (`validate_credential_sources`)
-   because gRPC metadata cannot carry them.
-2. `GrpcConsumer` authorizes before pipeline dispatch, as required by
-   ADR-0010. It calls `SecurityPolicy::evaluate` in unary, server-streaming,
-   client-streaming, and bidirectional modes. `Denied` returns
-   `Status::permission_denied`. Evaluation errors return `Status::internal`.
-   Unknown future decisions fail closed as `Status::permission_denied`.
+1. The server handler authenticates through the unified transport auth kernel.
+   `GrpcKernelAuth` builds from the route's compiled plan and provider
+   registry; the kernel maps the inbound metadata to an HTTP header view and
+   extracts the token through the shared `camel_auth` extraction using the
+   route-declared `credential_sources` (default `[authorization_header]`, so
+   the historical `authorization: Bearer <token>` behavior is unchanged).
+   Missing or invalid credentials return `Status::unauthenticated`. An
+   unavailable provider returns `Status::unavailable`. An unexpected kernel
+   failure returns `Status::internal` and emits the category (h) log. A
+   plan-less route or `AccessMode::Public` skips extraction entirely.
+   `query_param` and `cookie` sources are rejected at route load
+   (`validate_credential_sources`) because gRPC metadata cannot carry them.
+2. `GrpcConsumer` relies on the pre-pipeline dispatch check plus the pipeline
+   security layer, as required by ADR-0010. A non-Public route requires the
+   kernel carrier on the Exchange or the dispatch is denied before the
+   pipeline runs. Route-level policies evaluate in the pipeline layer against
+   the carrier principal; a pipeline denial (`CamelError::Unauthorized`) maps
+   to `Status::permission_denied` at the reply sites, and any other pipeline
+   error maps to `Status::internal`.
 
 Transport setup also fails closed under ADR-0033. Every Endpoint declares
 `transport=plaintext|tls`. The component rejects `insecure_skip_verify=true`,
@@ -60,7 +63,7 @@ an incomplete mTLS identity, and a TLS/plaintext mismatch on a shared listener.
 
 ## Log-level policy
 
-Per ADR-0012. This is the complete non-test inventory of 29 `error!` and
+Per ADR-0012. This is the complete non-test inventory of 21 `error!` and
 `warn!` sites. Symbol names are authoritative because line numbers change.
 
 ### Category (e): cross-route infrastructure
@@ -83,15 +86,11 @@ Per ADR-0012. This is the complete non-test inventory of 29 `error!` and
 
 ### Category (h): pre-pipeline security faults
 
-- `GrpcConsumer::start_inner` has four policy-evaluation `error!` sites, one
-  for each RPC mode.
-- `extract_principal` has one authentication `error!` for an unexpected
-  authenticator failure.
+- `authenticate_request` has one kernel authentication `error!` for an
+  unexpected kernel failure.
 
 ### Handler-owned warnings
 
-- `GrpcConsumer::start_inner` has four authorization-denied `warn!` sites, one
-  for each RPC mode.
 - The client-stream and bidirectional-stream handlers each have one decode
   `warn!`.
 - The producer retry loop has one non-retryable-status `warn!`.
