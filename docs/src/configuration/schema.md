@@ -134,14 +134,14 @@ OTLP export configuration. The protocol and sampler accept the values listed bel
 
 The security block holds five optional sub-tables. Pick one. Most deployments choose exactly one of `oidc`, `native`, or `keycloak`. The `permissions` and `policies` sub-tables extend the chosen identity layer with authorization.
 
-Placeholders in the `[security]` block use `{{env:VAR}}` and `{{env:VAR:default}}` (single colon). The `{{env:VAR:-default}}` form is rejected at startup. Route files use a different `${env:...}` system. See [Environment variable interpolation](env-interpolation.md).
+Placeholders in `Camel.toml` use `${env:VAR}` and `${env:VAR:-default}`. The `:-` separator is native: `default` is used when `VAR` is unset. An unset variable without a default aborts load, naming the field. The legacy `{{...}}` syntax is rejected with an error pointing at the `${env:}` forms. See [Environment variable interpolation](env-interpolation.md).
 
 ```toml
 [security.keycloak]
 server_url = "https://kc.example.com"
 realm = "my-realm"
 client_id = "camel"
-client_secret = "{{env:KC_SECRET}}"
+client_secret = "${env:KC_SECRET}"
 ```
 
 | Field | Type | Default | Description |
@@ -160,20 +160,20 @@ client_secret = "{{env:KC_SECRET}}"
 | `jwks_uri` | string | (required) | JWKS endpoint. |
 | `audience` | array of strings | `[]` | Required `aud` claim values. |
 | `client_id` | string | `null` | OAuth2 client ID. |
-| `client_secret` | string | `null` | OAuth2 client secret. Resolves `{{env:VAR}}`; unset variable without default fails startup. |
+| `client_secret` | string | `null` | OAuth2 client secret. Resolves `${env:VAR}`; unset variable without default fails load. |
 | `token_endpoint` | string | `null` | Token endpoint for client credentials flows. |
 | `introspection_endpoint` | string | `null` | Token introspection endpoint. |
 
 ### [security.native]
 
-The native block is a static credential store with no external identity provider. Set at least one credential: a scalar `bearer_token` or `api_key`, or one or more `[[security.native.credentials]]` entries. A config with no credential fails startup.
+The native block is a static credential store with no external identity provider. Set at least one credential: a scalar `bearer_token` or `api_key`, or one or more `[[security.native.credentials]]` entries. A config with no credential fails load.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `subject` | string | (required) | Principal name for the scalar `bearer_token` and `api_key` identities. |
 | `issuer` | string | `"native"` | Issuer recorded on synthesized principals. `null` falls back to `"native"`. |
-| `bearer_token` | string | `null` | Pre-issued bearer token. Resolves `{{env:VAR}}`; unset variable without default fails startup. |
-| `api_key` | string | `null` | Pre-shared API key. Resolves `{{env:VAR}}`; unset variable without default fails startup. |
+| `bearer_token` | string | `null` | Pre-issued bearer token. Resolves `${env:VAR}`; unset variable without default fails load. |
+| `api_key` | string | `null` | Pre-shared API key. Resolves `${env:VAR}`; unset variable without default fails load. |
 | `roles` | array of strings | `[]` | Roles granted to the scalar identities. |
 | `scopes` | array of strings | `[]` | Scopes granted to the scalar identities. |
 | `credentials` | array of tables | `[]` | Static credentials, each with its own subject, roles, and scopes. |
@@ -197,7 +197,7 @@ Each credentials entry must set exactly one of `secret_env` or `secret`; setting
 | `server_url` | string | (required) | Keycloak base URL. |
 | `realm` | string | (required) | Realm name. |
 | `client_id` | string | (required) | Client ID. |
-| `client_secret` | string | (required) | Client secret. Resolves `{{env:VAR}}`; unset variable without default fails startup. |
+| `client_secret` | string | (required) | Client secret. Resolves `${env:VAR}`; unset variable without default fails load. |
 | `validation` | table | (defaults below) | Token validation options. |
 | `jwks` | table | (defaults below) | JWKS cache tuning. |
 | `introspection` | table | (defaults below) | Introspection cache tuning. |
@@ -444,7 +444,7 @@ Named beans are WASM plugins exposed to routes as lookup targets. Each bean is k
 plugin = "my-auth"
 
 [beans.auth.config]
-api_key = "{{env:API_KEY}}"
+api_key = "${env:API_KEY}"
 
 [beans.auth.limits]
 timeout-secs = 600

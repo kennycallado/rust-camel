@@ -5,7 +5,13 @@ use std::sync::OnceLock;
 static ENV_RE: OnceLock<Regex> = OnceLock::new();
 
 fn env_regex() -> &'static Regex {
-    ENV_RE.get_or_init(|| Regex::new(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").unwrap()) // allow-unwrap
+    // Escape alternatives exist so `$${env:X}` never falls through to plain
+    // resolution; the full escape form is listed before bare `$$` so it is
+    // consumed atomically.
+    ENV_RE.get_or_init(|| {
+        Regex::new(r"(\$\$\{env:[^}]*\})|(\$\$)|(\$\{env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})")
+            .unwrap() // allow-unwrap
+    })
 }
 
 /// Replace line/paragraph-break chars with SPACE to prevent YAML
@@ -32,6 +38,9 @@ fn sanitize_env_value(val: &str) -> String {
 
 /// Interpolates `${env:VAR_NAME}` placeholders in the source string.
 ///
+/// `$${env:VAR_NAME}` yields the literal text `${env:VAR_NAME}` (escape),
+/// and a standalone `$$` yields a single `$`.
+///
 /// Returns `Err(var_name)` if any referenced variable is not set.
 pub fn interpolate_env(src: &str) -> Result<String, String> {
     let re = env_regex();
@@ -41,8 +50,16 @@ pub fn interpolate_env(src: &str) -> Result<String, String> {
         if error.is_some() {
             return String::new();
         }
-        let var_name = &caps[1];
-        let default_value = caps.get(2).map(|m| m.as_str());
+        // `$${env:...}` escape: emit the literal placeholder text (strip one `$`).
+        if let Some(escaped) = caps.get(1) {
+            return escaped.as_str()[1..].to_string();
+        }
+        // Standalone `$$` escape: emit a single `$`.
+        if caps.get(2).is_some() {
+            return "$".to_string();
+        }
+        let var_name = &caps[4];
+        let default_value = caps.get(5).map(|m| m.as_str());
         match env::var(var_name) {
             Ok(val) => sanitize_env_value(&val),
             Err(_) => {
@@ -185,5 +202,30 @@ mod tests {
             interpolate_env("${env:TEST_DSL_MIX_A:-fallback}:${env:TEST_DSL_MIX_B}").unwrap();
         assert_eq!(result, "fallback:actual");
         unsafe { env::remove_var("TEST_DSL_MIX_B") };
+    }
+
+    #[test]
+    fn escape_full_form_yields_literal() {
+        unsafe { env::set_var("RUST_CAMEL_TEST_ESC_A", "real-val") };
+        let result = interpolate_env("$${env:RUST_CAMEL_TEST_ESC_A}").unwrap();
+        assert_eq!(result, "${env:RUST_CAMEL_TEST_ESC_A}");
+        unsafe { env::remove_var("RUST_CAMEL_TEST_ESC_A") };
+    }
+
+    #[test]
+    fn escape_standalone_dollar_yields_single() {
+        let result = interpolate_env("a$$b").unwrap();
+        assert_eq!(result, "a$b");
+        // Critical end-of-string case: standalone `$$` at end of string.
+        let result = interpolate_env("ab$$").unwrap();
+        assert_eq!(result, "ab$");
+    }
+
+    #[test]
+    fn escape_then_placeholder_both_resolve() {
+        unsafe { env::set_var("RUST_CAMEL_TEST_ESC_B", "val-b") };
+        let result = interpolate_env("$${env:LIT} and ${env:RUST_CAMEL_TEST_ESC_B}").unwrap();
+        assert_eq!(result, "${env:LIT} and val-b");
+        unsafe { env::remove_var("RUST_CAMEL_TEST_ESC_B") };
     }
 }

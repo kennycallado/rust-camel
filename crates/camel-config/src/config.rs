@@ -1,4 +1,3 @@
-use crate::PropertiesResolver;
 use camel_api::CamelError;
 use camel_api::datasource::DatasourceConfig;
 use camel_core::TracerConfig;
@@ -1488,85 +1487,6 @@ pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
 }
 
 impl CamelConfig {
-    fn resolve_placeholders(&mut self) -> Result<(), ConfigError> {
-        let resolver = PropertiesResolver::new();
-
-        for route in &mut self.routes {
-            if let Ok(resolved) = resolver.resolve(route) {
-                *route = resolved;
-            } else {
-                tracing::warn!("Failed to resolve placeholder in routes entry; keeping original");
-            }
-        }
-
-        if let Ok(resolved) = resolver.resolve(&self.log_level) {
-            self.log_level = resolved;
-        } else {
-            tracing::warn!("Failed to resolve placeholder in log_level; keeping original");
-        }
-
-        if let Some(otel) = self.observability.otel.as_mut() {
-            resolve_string_in_place(&resolver, &mut otel.endpoint, "observability.otel.endpoint");
-            resolve_string_in_place(
-                &resolver,
-                &mut otel.service_name,
-                "observability.otel.service_name",
-            );
-            for (k, v) in &mut otel.resource_attrs {
-                let field = format!("observability.otel.resource_attrs.{k}");
-                resolve_string_in_place(&resolver, v, &field);
-            }
-        }
-
-        if let Some(prom) = self.observability.prometheus.as_mut() {
-            resolve_string_in_place(&resolver, &mut prom.host, "observability.prometheus.host");
-        }
-
-        if let Some(health) = self.observability.health.as_mut() {
-            resolve_string_in_place(&resolver, &mut health.host, "observability.health.host");
-        }
-
-        if let PlatformCamelConfig::Kubernetes(k8s) = &mut self.platform {
-            if let Some(namespace) = k8s.namespace.as_mut() {
-                resolve_string_in_place(&resolver, namespace, "platform.namespace");
-            }
-            resolve_string_in_place(
-                &resolver,
-                &mut k8s.lease_name_prefix,
-                "platform.lease_name_prefix",
-            );
-        }
-
-        for (component_name, value) in &mut self.components.raw {
-            resolve_toml_value_placeholders(
-                &resolver,
-                value,
-                &format!("components.{component_name}"),
-            );
-        }
-
-        for bean in self.beans.values_mut() {
-            resolve_string_in_place(&resolver, &mut bean.plugin, "beans.*.plugin");
-            let resolved: HashMap<String, String> = bean
-                .config
-                .drain()
-                .map(|(k, v)| match resolver.resolve(&v) {
-                    Ok(resolved) => (k, resolved),
-                    Err(err) => {
-                        tracing::warn!(key = %k, error = %err, "Failed to resolve bean config placeholder; keeping original");
-                        (k, v)
-                    }
-                })
-                .collect();
-            bean.config = resolved;
-        }
-
-        resolve_security_fail_closed(&mut self.security)?;
-        resolve_datasources_fail_closed(&mut self.datasources)?;
-
-        Ok(())
-    }
-
     pub fn validate(&self) -> Result<(), CamelError> {
         if self.timeout_ms == 0 {
             return Err(CamelError::Config("timeout_ms must be > 0".to_string()));
@@ -2276,64 +2196,27 @@ fn build_from_toml_value_inner(
             builder = builder.add_source(config::File::from_str(&json, config::FileFormat::Json));
         }
     }
-    let config = builder.build()?;
+    let built = builder.build()?;
 
-    let mut config: CamelConfig = config.try_deserialize()?;
-    config.resolve_placeholders()?;
+    // Materialize the builder's MERGED state (main file + include files +
+    // `CAMEL_*` env overrides) as a raw TOML tree, then walk it. The walk must
+    // run on the POST-merge tree: placeholders can arrive via include files
+    // and env overrides, which the builder merges internally — walking the
+    // pre-builder value would miss them.
+    let mut merged_tree: toml::Value = built.try_deserialize()?;
+    resolve_tree_placeholders(&mut merged_tree)?;
+
+    // Strict deserialization: unlike the config crate's lenient coercion,
+    // `toml::Value::try_into` rejects type mismatches (e.g. a quoted numeric
+    // on a numeric field). This swap is intentional and pinned by
+    // `placeholder_e2e::quoted_numeric_root_field_is_rejected_after_materialization`.
+    let config: CamelConfig = merged_tree
+        .try_into()
+        .map_err(|e| ConfigError::Message(format!("Failed to deserialize merged config: {e}")))?;
     config
         .validate()
         .map_err(|e| ConfigError::Message(e.to_string()))?;
     Ok(config)
-}
-
-fn resolve_string_in_place(resolver: &PropertiesResolver, value: &mut String, field: &str) {
-    match resolver.resolve(value) {
-        Ok(resolved) => *value = resolved,
-        Err(_err) => {
-            tracing::warn!(
-                field = field,
-                "Failed to resolve placeholder; keeping original (error detail omitted)"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod resolve_string_in_place_tests {
-    use super::*;
-
-    #[test]
-    fn resolve_string_in_place_keeps_value_unchanged_on_failure() {
-        let resolver = PropertiesResolver::new();
-        let original = "{{env:NONEXISTENT_SECRET_TOKEN}}".to_string();
-        let mut value = original.clone();
-        resolve_string_in_place(&resolver, &mut value, "test_field");
-        assert_eq!(
-            value, original,
-            "value must be unchanged on resolution failure"
-        );
-    }
-}
-
-fn resolve_toml_value_placeholders(
-    resolver: &PropertiesResolver,
-    value: &mut toml::Value,
-    path: &str,
-) {
-    match value {
-        toml::Value::String(s) => resolve_string_in_place(resolver, s, path),
-        toml::Value::Array(arr) => {
-            for (idx, item) in arr.iter_mut().enumerate() {
-                resolve_toml_value_placeholders(resolver, item, &format!("{path}[{idx}]"));
-            }
-        }
-        toml::Value::Table(table) => {
-            for (k, v) in table.iter_mut() {
-                resolve_toml_value_placeholders(resolver, v, &format!("{path}.{k}"));
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Parses one `include` value (array of strings) for [`CamelConfig::extract_includes`].
@@ -2361,237 +2244,102 @@ fn parse_include_list(value: &toml::Value, where_: &str) -> Result<Vec<String>, 
     }
 }
 
-/// Resolve placeholders in a single string leaf, failing closed on any
-/// unresolved or ambiguous credential/datasource placeholder.
+/// Top-level Camel.toml sections whose string leaves resolve strictly
+/// (interpolation first, then residual-marker rejection). Credential-bearing
+/// surfaces: `security`, `datasources`, and the two repository sections
+/// (redis `sentinel_password` + URL userinfo).
+pub(crate) const STRICT_PREFIXES: &[&str] =
+    &["security", "datasources", "idempotent_repo", "cache_repo"];
+
+/// Recursively resolve every string leaf of a TOML tree in place.
 ///
-/// Only `{{env:VAR}}` / `{{env:VAR:default}}` are treated as fail-closed;
-/// non-`env` placeholders resolve through the resolver as before (and an
-/// unresolved key surfaces as an error rather than a silent passthrough).
-fn resolve_fail_closed(raw: &str, field: &str) -> Result<String, ConfigError> {
-    // Pre-scan `env:` placeholders for the two conditions the resolver cannot
-    // distinguish from a successful default resolution: a dash-prefixed default
-    // (ambiguous with the empty-default idiom) and an unset var with no default.
-    let mut rest = raw;
-    while let Some(open) = rest.find("{{") {
-        let after_open = &rest[open + 2..];
-        let Some(close) = after_open.find("}}") else {
-            break;
-        };
-        let inner = &after_open[..close];
-        if let Some(env_inner) = inner.strip_prefix("env:") {
-            let env_inner = env_inner.trim();
-            if !env_inner.is_empty() {
-                let (var, default) = match env_inner.find(':') {
-                    Some(colon) => (&env_inner[..colon], Some(&env_inner[colon + 1..])),
-                    None => (env_inner, None),
-                };
-                match default {
-                    Some(def) if def.starts_with('-') => {
-                        return Err(ConfigError::Message(format!(
-                            "ambiguous default starting with '-' in {field}: use single-colon \
-                             {{{{env:{var}:default}}}}"
-                        )));
-                    }
-                    None if env::var(var).is_err() => {
-                        return Err(ConfigError::Message(format!(
-                            "security placeholder unresolved: {field}: env var {var} not set"
-                        )));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        rest = &after_open[close + 2..];
-    }
-
-    let resolver = PropertiesResolver::new();
-    let resolved = resolver.resolve(raw).map_err(|e| {
-        ConfigError::Message(format!("security placeholder unresolved: {field}: {e}"))
-    })?;
-
-    if resolved.contains("{{") || resolved.contains("${") {
-        return Err(ConfigError::Message(format!(
-            "unresolved placeholder marker in {field}"
-        )));
-    }
-
-    Ok(resolved)
+/// Leaves whose top-level path segment is in [`STRICT_PREFIXES`] resolve via
+/// [`resolve_strict_leaf`]; every other leaf via [`resolve_plain_leaf`].
+/// Path segments join with `.`; array indices render as `[i]`
+/// (e.g. `security.native.credentials[1].secret`).
+pub fn resolve_tree_placeholders(root: &mut toml::Value) -> Result<(), ConfigError> {
+    resolve_tree_walk(root, "")
 }
 
-/// Resolve a single string leaf in place via [`resolve_fail_closed`].
-fn resolve_fail_closed_in_place(value: &mut String, field: &str) -> Result<(), ConfigError> {
-    *value = resolve_fail_closed(value, field)?;
-    Ok(())
-}
-
-/// Recursively resolve every string leaf under `SecurityConfig` fail-closed.
-///
-/// The walk is hand-enumerated: whenever `SecurityConfig` (or any struct it
-/// owns) gains a string field, this function MUST be extended to walk that
-/// field, or its placeholders silently survive config loading.
-fn resolve_security_fail_closed(security: &mut SecurityConfig) -> Result<(), ConfigError> {
-    if let Some(oidc) = security.oidc.as_mut() {
-        resolve_fail_closed_in_place(&mut oidc.issuer, "security.oidc.issuer")?;
-        if let Some(v) = oidc.jwks_uri.as_mut() {
-            resolve_fail_closed_in_place(v, "security.oidc.jwks_uri")?;
-        }
-        for (i, v) in oidc.audience.iter_mut().enumerate() {
-            resolve_fail_closed_in_place(v, &format!("security.oidc.audience[{i}]"))?;
-        }
-        if let Some(v) = oidc.client_id.as_mut() {
-            resolve_fail_closed_in_place(v, "security.oidc.client_id")?;
-        }
-        if let Some(v) = oidc.client_secret.as_mut() {
-            resolve_fail_closed_in_place(v, "security.oidc.client_secret")?;
-        }
-        if let Some(v) = oidc.token_endpoint.as_mut() {
-            resolve_fail_closed_in_place(v, "security.oidc.token_endpoint")?;
-        }
-        if let Some(v) = oidc.introspection_endpoint.as_mut() {
-            resolve_fail_closed_in_place(v, "security.oidc.introspection_endpoint")?;
-        }
-    }
-
-    if let Some(native) = security.native.as_mut() {
-        resolve_fail_closed_in_place(&mut native.subject, "security.native.subject")?;
-        if let Some(v) = native.issuer.as_mut() {
-            resolve_fail_closed_in_place(v, "security.native.issuer")?;
-        }
-        if let Some(v) = native.bearer_token.as_mut() {
-            resolve_fail_closed_in_place(v, "security.native.bearer_token")?;
-        }
-        if let Some(v) = native.api_key.as_mut() {
-            resolve_fail_closed_in_place(v, "security.native.api_key")?;
-        }
-        for (i, v) in native.roles.iter_mut().enumerate() {
-            resolve_fail_closed_in_place(v, &format!("security.native.roles[{i}]"))?;
-        }
-        for (i, v) in native.scopes.iter_mut().enumerate() {
-            resolve_fail_closed_in_place(v, &format!("security.native.scopes[{i}]"))?;
-        }
-        for (i, cred) in native.credentials.iter_mut().enumerate() {
-            let base = format!("security.native.credentials[{i}]");
-            resolve_fail_closed_in_place(&mut cred.subject, &format!("{base}.subject"))?;
-            if let Some(v) = cred.secret_env.as_mut() {
-                // allow-secret: env var name, not a secret value
-                resolve_fail_closed_in_place(v, &format!("{base}.secret_env"))?;
-            }
-            if let Some(v) = cred.secret.as_mut() {
-                // allow-secret: in-place resolution is safe — the boundary guard
-                // `ensure_no_placeholder_markers` re-validates at store construction.
-                resolve_fail_closed_in_place(v, &format!("{base}.secret"))?;
-            }
-            for (j, v) in cred.roles.iter_mut().enumerate() {
-                resolve_fail_closed_in_place(v, &format!("{base}.roles[{j}]"))?;
-            }
-            for (j, v) in cred.scopes.iter_mut().enumerate() {
-                resolve_fail_closed_in_place(v, &format!("{base}.scopes[{j}]"))?;
-            }
-        }
-    }
-
-    if let Some(kc) = security.keycloak.as_mut() {
-        resolve_fail_closed_in_place(&mut kc.server_url, "security.keycloak.server_url")?;
-        resolve_fail_closed_in_place(&mut kc.realm, "security.keycloak.realm")?;
-        resolve_fail_closed_in_place(&mut kc.client_id, "security.keycloak.client_id")?;
-        resolve_fail_closed_in_place(&mut kc.client_secret, "security.keycloak.client_secret")?;
-        resolve_fail_closed_in_place(
-            &mut kc.validation.method,
-            "security.keycloak.validation.method",
-        )?;
-        for (i, v) in kc.validation.audience.iter_mut().enumerate() {
-            resolve_fail_closed_in_place(
-                v,
-                &format!("security.keycloak.validation.audience[{i}]"),
-            )?;
-        }
-        // `jwks` and `introspection` carry no string leaves.
-        if let Some(uma) = kc.uma.as_mut() {
-            resolve_fail_closed_in_place(&mut uma.provider, "security.keycloak.uma.provider")?;
-        }
-    }
-
-    if let Some(permissions) = security.permissions.as_mut() {
-        for (name, provider) in permissions.iter_mut() {
-            let base = format!("security.permissions.{name}");
-            resolve_fail_closed_in_place(&mut provider.provider, &format!("{base}.provider"))?;
-            if let Some(v) = provider.path.as_mut() {
-                resolve_fail_closed_in_place(v, &format!("{base}.path"))?;
-            }
-            if let Some(config) = provider.config.as_mut() {
-                for (k, v) in config.iter_mut() {
-                    resolve_fail_closed_in_place(v, &format!("{base}.config.{k}"))?;
-                }
-            }
-            if let Some(v) = provider.limits.allow_call_schemes.as_mut() {
-                resolve_fail_closed_in_place(v, &format!("{base}.limits.allow_call_schemes"))?;
-            }
-        }
-    }
-
-    if let Some(policies) = security.policies.as_mut() {
-        for (name, policy) in policies.wasm.iter_mut() {
-            let base = format!("security.policies.wasm.{name}");
-            resolve_fail_closed_in_place(&mut policy.path, &format!("{base}.path"))?;
-            if let Some(v) = policy.limits.allow_call_schemes.as_mut() {
-                resolve_fail_closed_in_place(v, &format!("{base}.limits.allow_call_schemes"))?;
-            }
-            for (k, v) in policy.config.iter_mut() {
-                resolve_fail_closed_in_place(v, &format!("{base}.config.{k}"))?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Resolve `db_url`, `provider`, the `ssl_*` string leaves, and every string
-/// leaf inside `extra` fail-closed for each datasource.
-fn resolve_datasources_fail_closed(
-    datasources: &mut HashMap<String, DatasourceConfig>,
-) -> Result<(), ConfigError> {
-    for (name, ds) in datasources.iter_mut() {
-        let base = format!("datasources.{name}");
-        resolve_fail_closed_in_place(&mut ds.db_url, &format!("{base}.db_url"))?;
-        if let Some(v) = ds.provider.as_mut() {
-            resolve_fail_closed_in_place(v, &format!("{base}.provider"))?;
-        }
-        if let Some(v) = ds.ssl_mode.as_mut() {
-            resolve_fail_closed_in_place(v, &format!("{base}.ssl_mode"))?;
-        }
-        if let Some(v) = ds.ssl_root_cert.as_mut() {
-            resolve_fail_closed_in_place(v, &format!("{base}.ssl_root_cert"))?;
-        }
-        if let Some(v) = ds.ssl_cert.as_mut() {
-            resolve_fail_closed_in_place(v, &format!("{base}.ssl_cert"))?;
-        }
-        if let Some(v) = ds.ssl_key.as_mut() {
-            resolve_fail_closed_in_place(v, &format!("{base}.ssl_key"))?;
-        }
-        for (k, v) in ds.extra.iter_mut() {
-            resolve_toml_value_fail_closed(v, &format!("{base}.extra.{k}"))?;
-        }
-    }
-    Ok(())
-}
-
-/// Recursively resolve every string leaf of a `toml::Value` fail-closed.
-fn resolve_toml_value_fail_closed(value: &mut toml::Value, path: &str) -> Result<(), ConfigError> {
+fn resolve_tree_walk(value: &mut toml::Value, path: &str) -> Result<(), ConfigError> {
     match value {
         toml::Value::String(s) => {
-            *s = resolve_fail_closed(s, path)?;
+            let top = path.split('.').next().unwrap_or_default();
+            if STRICT_PREFIXES.contains(&top) {
+                resolve_strict_leaf(s, path)?;
+            } else {
+                resolve_plain_leaf(s, path)?;
+            }
         }
         toml::Value::Array(arr) => {
             for (i, item) in arr.iter_mut().enumerate() {
-                resolve_toml_value_fail_closed(item, &format!("{path}[{i}]"))?;
+                resolve_tree_walk(item, &format!("{path}[{i}]"))?;
             }
         }
         toml::Value::Table(table) => {
             for (k, v) in table.iter_mut() {
-                resolve_toml_value_fail_closed(v, &format!("{path}.{k}"))?;
+                let child_path = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                resolve_tree_walk(v, &child_path)?;
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Reject the legacy `{{...}}` placeholder syntax, pointing at the `${env:}`
+/// replacement forms. Runs on the raw leaf before any resolution.
+fn reject_legacy_braces(value: &str, path: &str) -> Result<(), ConfigError> {
+    if value.contains("{{") {
+        return Err(ConfigError::Message(format!(
+            "legacy '{{{{...}}}}' placeholder in {path}: Camel.toml placeholders use \
+             '${{env:NAME}}' or '${{env:NAME:-default}}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve one strict-class string leaf: interpolate `${env:}` forms, then
+/// reject any residual placeholder marker.
+///
+/// Ordering is the contract: interpolation runs first, so a consumed
+/// `${env:NAME}` leaves no `${` and passes the residual gate; malformed,
+/// truncated, or escaped forms (`$${env:NAME}` → literal residue) die there.
+fn resolve_strict_leaf(value: &mut String, path: &str) -> Result<(), ConfigError> {
+    reject_legacy_braces(value, path)?;
+    let resolved = camel_dsl::env_interpolation::interpolate_env(value).map_err(|var| {
+        ConfigError::Message(format!(
+            "placeholder unresolved: {path}: env var {var} not set"
+        ))
+    })?;
+    if resolved.contains("${") || resolved.contains("{{") {
+        return Err(ConfigError::Message(format!(
+            "unresolved placeholder marker in {path}"
+        )));
+    }
+    *value = resolved;
+    Ok(())
+}
+
+/// Resolve one non-strict string leaf: interpolate only when an `${env:` or
+/// `$$` marker is present; leaves with neither marker pass through untouched
+/// (a `${body}` without the `env:` prefix stays).
+///
+/// Fail-closed is uniform with the strict path (Q9): an unset referenced var
+/// surfaces as an error naming the field, never a warn-and-continue.
+fn resolve_plain_leaf(value: &mut String, path: &str) -> Result<(), ConfigError> {
+    reject_legacy_braces(value, path)?;
+    if value.contains("${env:") || value.contains("$$") {
+        let resolved = camel_dsl::env_interpolation::interpolate_env(value).map_err(|var| {
+            ConfigError::Message(format!(
+                "placeholder unresolved: {path}: env var {var} not set"
+            ))
+        })?;
+        *value = resolved;
     }
     Ok(())
 }
@@ -3237,16 +2985,16 @@ drain_timeout_ms = 5000
         let file = write_temp_config(
             r#"
 [default]
-routes = ["{{env:RUST_CAMEL_TEST_ROUTE:routes/default.yaml}}"]
+routes = ["${env:RUST_CAMEL_TEST_ROUTE:-routes/default.yaml}"]
 
 [default.components.http]
-base_url = "{{env:RUST_CAMEL_TEST_BASE_URL:http://localhost:8080}}"
+base_url = "${env:RUST_CAMEL_TEST_BASE_URL:-http://localhost:8080}"
 
 [default.beans.auth]
-plugin = "{{env:RUST_CAMEL_TEST_PLUGIN:test-auth}}"
+plugin = "${env:RUST_CAMEL_TEST_PLUGIN:-test-auth}"
 
 [default.beans.auth.config]
-token = "{{env:RUST_CAMEL_TEST_TOKEN:abc123}}"
+token = "${env:RUST_CAMEL_TEST_TOKEN:-abc123}"
 "#,
         );
 
@@ -3264,24 +3012,10 @@ token = "{{env:RUST_CAMEL_TEST_TOKEN:abc123}}"
         assert_eq!(bean.config.get("token").map(String::as_str), Some("abc123"));
     }
 
-    #[test]
-    fn test_from_file_unresolved_placeholder_keeps_original_string() {
-        let file = write_temp_config(
-            r#"
-[default]
-[default.components.redis]
-url = "redis://{{MISSING_PLACEHOLDER}}"
-"#,
-        );
-
-        let cfg =
-            CamelConfig::from_file(file.path().to_str().unwrap()).expect("config should load");
-        let redis = cfg.components.raw.get("redis").expect("redis config");
-        assert_eq!(
-            redis.get("url").and_then(|v| v.as_str()),
-            Some("redis://{{MISSING_PLACEHOLDER}}")
-        );
-    }
+    // The successor of `test_from_file_unresolved_placeholder_keeps_original_string`
+    // (legacy warn-and-keep passthrough, retired) lives in
+    // `tests/placeholder_e2e.rs::legacy_braces_rejected_on_load_path`: the
+    // walk-level rejection is covered by `tests/placeholder_walk.rs`.
 }
 
 #[cfg(test)]
@@ -4149,7 +3883,7 @@ mod placeholder {
             r#"
 [security.native]
 subject = "svc"
-bearer_token = "{{env:AUTH_TOKEN}}"
+bearer_token = "${env:AUTH_TOKEN}"
 "#,
         )
         .expect("config should load");
@@ -4172,7 +3906,7 @@ bearer_token = "{{env:AUTH_TOKEN}}"
             r#"
 [security.native]
 subject = "svc"
-bearer_token = "{{env:AUTH_TOKEN}}"
+bearer_token = "${env:AUTH_TOKEN}"
 "#,
         )
         .expect_err("unset credential env var must fail closed");
@@ -4188,17 +3922,17 @@ bearer_token = "{{env:AUTH_TOKEN}}"
     }
 
     #[test]
-    fn security_single_colon_default_resolves() {
+    fn security_explicit_default_resolves() {
         let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
         unset_env("AUTH_TOKEN");
         let config = load_config(
             r#"
 [security.native]
 subject = "svc"
-bearer_token = "{{env:AUTH_TOKEN:fallback-secret}}"
+bearer_token = "${env:AUTH_TOKEN:-fallback-secret}"
 "#,
         )
-        .expect("single-colon default should resolve without error");
+        .expect("explicit default should resolve without error");
         assert_eq!(
             config
                 .security
@@ -4209,49 +3943,10 @@ bearer_token = "{{env:AUTH_TOKEN:fallback-secret}}"
         );
     }
 
-    #[test]
-    fn dash_default_rejected_on_any_covered_leaf() {
-        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
-        unset_env("X");
-
-        // Credential leaf.
-        let err = load_config(
-            r#"
-[security.native]
-subject = "svc"
-bearer_token = "{{env:X:-changeme}}"
-"#,
-        )
-        .expect_err("dash default on a credential leaf must fail");
-        assert!(err.to_string().contains('-'), "message: {err}");
-
-        // Datasource leaf.
-        let err = load_config(
-            r#"
-[datasources.main]
-db_url = "{{env:X:-url}}"
-"#,
-        )
-        .expect_err("dash default on a datasource leaf must fail");
-        assert!(err.to_string().contains('-'), "message: {err}");
-    }
-
-    #[test]
-    fn dash_default_rejected_on_noncredential_leaf() {
-        let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
-        unset_env("KC_REALM");
-        let err = load_config(
-            r#"
-[security.keycloak]
-server_url = "http://localhost:8080"
-realm = "{{env:KC_REALM:-main}}"
-client_id = "client"
-client_secret = "secret"
-"#,
-        )
-        .expect_err("dash default on a non-credential security leaf must fail");
-        assert!(err.to_string().contains('-'), "message: {err}");
-    }
+    // The old dash-default rejection tests (`dash_default_rejected_*`) were
+    // deleted: `:-` is the NATIVE default separator under the `${env:}`
+    // syntax (the rc-0wvi dash trap died with the legacy single-colon
+    // default form).
 
     #[test]
     fn noncredential_security_leaf_resolves() {
@@ -4261,7 +3956,7 @@ client_secret = "secret"
             r#"
 [security.keycloak]
 server_url = "http://localhost:8080"
-realm = "{{env:KC_REALM:main}}"
+realm = "${env:KC_REALM:-main}"
 client_id = "client"
 client_secret = "secret"
 "#,
@@ -4278,10 +3973,10 @@ client_secret = "secret"
         let config = load_config(
             r#"
 [datasources.main]
-db_url = "{{env:DB_URL}}"
+db_url = "${env:DB_URL}"
 
 [datasources.main.extra]
-password = "{{env:SURREAL_PASS}}"
+password = "${env:SURREAL_PASS}"
 "#,
         )
         .expect("datasource leaves should resolve");
@@ -4306,10 +4001,10 @@ password = "{{env:SURREAL_PASS}}"
             r#"
 [datasources.main]
 db_url = "postgres://localhost/orders"
-ssl_mode = "{{env:SSL_MODE}}"
-ssl_root_cert = "{{env:SSL_ROOT_CERT}}"
-ssl_cert = "{{env:SSL_CERT}}"
-ssl_key = "{{env:SSL_KEY}}"
+ssl_mode = "${env:SSL_MODE}"
+ssl_root_cert = "${env:SSL_ROOT_CERT}"
+ssl_cert = "${env:SSL_CERT}"
+ssl_key = "${env:SSL_KEY}"
 "#,
         )
         .expect("datasource ssl_* leaves should resolve");
@@ -4327,13 +4022,14 @@ ssl_key = "{{env:SSL_KEY}}"
     #[test]
     fn datasource_ssl_leaf_unset_env_fails_closed() {
         let _guard = super::ENV_OVERRIDE_LOCK.lock().unwrap();
+        let marker = "${env:SSL_VAR}";
         for field in ["ssl_mode", "ssl_root_cert", "ssl_cert", "ssl_key"] {
             unset_env("SSL_VAR");
             let err = load_config(&format!(
                 r#"
 [datasources.main]
 db_url = "postgres://localhost/orders"
-{field} = "{{{{env:SSL_VAR}}}}"
+{field} = "{marker}"
 "#
             ))
             .expect_err("unset env var on a datasource ssl_* leaf must fail closed");
@@ -4357,7 +4053,7 @@ db_url = "postgres://localhost/orders"
             r#"
 [datasources.main]
 db_url = "postgres://localhost/orders"
-provider = "{{env:DS_PROVIDER}}"
+provider = "${env:DS_PROVIDER}"
 "#,
         )
         .expect("datasource provider leaf should resolve");
@@ -4374,7 +4070,7 @@ provider = "{{env:DS_PROVIDER}}"
             r#"
 [datasources.main]
 db_url = "postgres://localhost/orders"
-provider = "{{env:DS_PROVIDER}}"
+provider = "${env:DS_PROVIDER}"
 "#,
         )
         .expect_err("unset env var on the datasource provider leaf must fail closed");
@@ -4396,7 +4092,7 @@ provider = "{{env:DS_PROVIDER}}"
             r#"
 [security.native]
 subject = "svc"
-bearer_token = "{{env:"
+bearer_token = "${env:"
 "#,
         )
         .expect_err("surviving placeholder marker must fail closed");
@@ -4416,7 +4112,7 @@ bearer_token = "{{env:"
 path = "plugins/authz.wasm"
 
 [security.policies.wasm.corp-auth.limits]
-allow-call-schemes = "{{env:WASM_SCHEMES:file,https}}"
+allow-call-schemes = "${env:WASM_SCHEMES:-file,https}"
 "#,
         )
         .expect("wasm limits allow_call_schemes should resolve");
@@ -4431,232 +4127,26 @@ allow-call-schemes = "{{env:WASM_SCHEMES:file,https}}"
             Some("file,https")
         );
     }
-}
 
-#[cfg(test)]
-mod security_walk_exhaustiveness {
-    use super::*;
-
-    /// Exhaustiveness guard for `resolve_security_fail_closed`.
-    ///
-    /// The fixture below uses COMPLETE struct literals (the only exception is
-    /// `WasmLimitsConfig`, a general subsystem whose single walk-covered field,
-    /// `allow_call_schemes`, is set explicitly). Adding any string field to
-    /// `SecurityConfig` or a struct it owns breaks this test's compilation;
-    /// the new field must then carry a marker here, and if the walk lacks a
-    /// matching arm, the serialized scan below fails. This converts the
-    /// doc-comment discipline on the walk into a test guard.
     #[test]
-    fn every_string_leaf_is_walked() {
-        fn marker(name: &str) -> String {
-            format!("{{{{env:SECWALK_{name}:r{name}}}}}")
-        }
-
-        let mut security = SecurityConfig {
-            oidc: Some(OidcSecurityConfig {
-                issuer: marker("ISSUER"),
-                jwks_uri: Some(marker("JWKS_URI")),
-                audience: vec![marker("AUDIENCE")],
-                client_id: Some(marker("CLIENT_ID")),
-                client_secret: Some(marker("OIDC_SECRET")),
-                token_endpoint: Some(marker("TOKEN_ENDPOINT")),
-                introspection_endpoint: Some(marker("INTROSPECTION_ENDPOINT")),
-            }),
-            native: Some(NativeAuthConfig {
-                subject: marker("SUBJECT"),
-                issuer: Some(marker("NATIVE_ISSUER")),
-                bearer_token: Some(marker("BEARER")),
-                api_key: Some(marker("API_KEY")),
-                roles: vec![marker("ROLE")],
-                scopes: vec![marker("SCOPE")],
-                credentials: vec![
-                    NativeCredentialEntry {
-                        subject: marker("CRED1_SUBJECT"),
-                        secret_env: Some(marker("CRED1_ENV")),
-                        secret: None,
-                        roles: vec![marker("CRED1_ROLE")],
-                        scopes: vec![marker("CRED1_SCOPE")],
-                    },
-                    NativeCredentialEntry {
-                        subject: marker("CRED2_SUBJECT"),
-                        secret_env: None,
-                        secret: Some(marker("CRED2_SECRET")),
-                        roles: vec![],
-                        scopes: vec![],
-                    },
-                ],
-            }),
-            keycloak: Some(KeycloakSecurityConfig {
-                server_url: marker("KC_URL"),
-                realm: marker("KC_REALM"),
-                client_id: marker("KC_CLIENT_ID"),
-                client_secret: marker("KC_SECRET"),
-                validation: KeycloakValidationConfig {
-                    method: marker("KC_METHOD"),
-                    audience: vec![marker("KC_AUDIENCE")],
-                    clock_skew_secs: 30,
-                },
-                jwks: KeycloakJwksConfig {
-                    cache_ttl_secs: 3600,
-                    refresh_skew_secs: 60,
-                },
-                introspection: KeycloakIntrospectionConfig {
-                    max_entries: 1,
-                    default_ttl_secs: 1,
-                    negative_ttl_secs: 1,
-                },
-                uma: Some(KeycloakUmaConfig {
-                    provider: marker("UMA_PROVIDER"),
-                    cache: PermissionCacheConfig {
-                        positive_ttl_secs: 1,
-                        negative_ttl_secs: 1,
-                        max_entries: 1,
-                    },
-                }),
-                allow_internal: false,
-            }),
-            permissions: Some(HashMap::from([(
-                "perm".to_string(),
-                PermissionProviderConfig {
-                    provider: marker("PERM_PROVIDER"),
-                    path: Some(marker("PERM_PATH")),
-                    config: Some(HashMap::from([("k".to_string(), marker("PERM_CFG"))])),
-                    cache: PermissionCacheConfig {
-                        positive_ttl_secs: 1,
-                        negative_ttl_secs: 1,
-                        max_entries: 1,
-                    },
-                    limits: crate::wasm_limits::WasmLimitsConfig {
-                        allow_call_schemes: Some(marker("PERM_SCHEMES")),
-                        ..Default::default()
-                    },
-                },
-            )])),
-            policies: Some(WasmSecurityPoliciesConfig {
-                wasm: HashMap::from([(
-                    "pol".to_string(),
-                    WasmSecurityPolicyConfig {
-                        path: marker("WASM_PATH"),
-                        limits: crate::wasm_limits::WasmLimitsConfig {
-                            allow_call_schemes: Some(marker("WASM_SCHEMES")),
-                            ..Default::default()
-                        },
-                        config: HashMap::from([("k".to_string(), marker("WASM_CFG"))]),
-                    },
-                )]),
-            }),
-        };
-
-        resolve_security_fail_closed(&mut security)
-            .expect("default-syntax markers must resolve without env vars");
-
-        // `skip_serializing` secrets are invisible to the serialized scan
-        // below; the walk must have resolved them in place instead.
-        assert_ne!(
-            security.oidc.as_ref().unwrap().client_secret.as_deref(),
-            Some("{{env:SECWALK_OIDC_SECRET:rOIDC_SECRET}}"),
-            "oidc.client_secret marker survived the walk"
-        );
-        assert_ne!(
-            security.keycloak.as_ref().unwrap().client_secret,
-            "{{env:SECWALK_KC_SECRET:rKC_SECRET}}",
-            "keycloak.client_secret marker survived the walk"
-        );
-
-        let serialized = toml::to_string(&security).expect("SecurityConfig serializes");
-        assert!(
-            !serialized.contains("{{env:"),
-            "unwalked string leaf survived the fail-closed walk:\n{serialized}"
-        );
-        assert!(
-            !serialized.contains("${env:"),
-            "DSL-style marker survived the walk:\n{serialized}"
+    fn strict_prefixes_content_is_deliberate() {
+        // Tripwire: the strict-class set is the contract for the path-prefix
+        // dispatch in `resolve_tree_placeholders`. Changing it without updating
+        // this literal means a credential surface silently lost (or gained)
+        // strict resolution.
+        assert_eq!(
+            STRICT_PREFIXES,
+            &["security", "datasources", "idempotent_repo", "cache_repo"]
         );
     }
 }
 
-#[cfg(test)]
-mod datasource_walk_exhaustiveness {
-    use super::*;
-
-    /// Exhaustiveness guard for `resolve_datasources_fail_closed`.
-    ///
-    /// The fixture below uses a COMPLETE `DatasourceConfig` literal. The struct
-    /// carries `#[serde(deny_unknown_fields)]`, so adding any string field to
-    /// `DatasourceConfig` breaks this test's compilation; the new field must
-    /// then carry a marker here, and if the walk lacks a matching arm, the
-    /// serialized scan below fails. This converts the doc-comment discipline
-    /// on the walk into a test guard (the bug class that produced rc-xej7 and
-    /// rc-kcp2: a string leaf without a walk arm silently surviving load).
-    ///
-    /// Markers carry no default, so every referenced env var is set under
-    /// [`ENV_OVERRIDE_LOCK`] before the walk runs.
-    #[test]
-    fn every_datasource_string_leaf_is_walked() {
-        let _guard = ENV_OVERRIDE_LOCK.lock().unwrap();
-
-        fn marker(name: &str) -> String {
-            format!("{{{{env:DSWALK_{name}}}}}")
-        }
-
-        let mut datasources = HashMap::from([(
-            "orders".to_string(),
-            DatasourceConfig {
-                db_url: marker("DB_URL"),
-                provider: Some(marker("PROVIDER")),
-                max_connections: None,
-                min_connections: None,
-                idle_timeout_secs: None,
-                max_lifetime_secs: None,
-                ssl_mode: Some(marker("SSL_MODE")),
-                ssl_root_cert: Some(marker("SSL_ROOT_CERT")),
-                ssl_cert: Some(marker("SSL_CERT")),
-                ssl_key: Some(marker("SSL_KEY")),
-                extra: HashMap::from([(
-                    "namespace".to_string(),
-                    toml::Value::String(marker("EXTRA_NS")),
-                )]),
-            },
-        )]);
-
-        for name in [
-            "DB_URL",
-            "PROVIDER",
-            "SSL_MODE",
-            "SSL_ROOT_CERT",
-            "SSL_CERT",
-            "SSL_KEY",
-            "EXTRA_NS",
-        ] {
-            set_env(&format!("DSWALK_{name}"), &format!("r{name}"));
-        }
-
-        resolve_datasources_fail_closed(&mut datasources)
-            .expect("markers must resolve with env vars set");
-
-        let serialized = toml::to_string(&datasources).expect("datasources serialize");
-        assert!(
-            !serialized.contains("{{env:"),
-            "unwalked string leaf survived the fail-closed walk:\n{serialized}"
-        );
-        assert!(
-            !serialized.contains("${env:"),
-            "DSL-style marker survived the walk:\n{serialized}"
-        );
-
-        for name in [
-            "DB_URL",
-            "PROVIDER",
-            "SSL_MODE",
-            "SSL_ROOT_CERT",
-            "SSL_CERT",
-            "SSL_KEY",
-            "EXTRA_NS",
-        ] {
-            unset_env(&format!("DSWALK_{name}"));
-        }
-    }
-}
+// The hand-enumerated exhaustiveness guard mods (`security_walk_exhaustiveness`,
+// `datasource_walk_exhaustiveness`) were deleted together with the typed
+// fail-closed walks they guarded. The path-prefix dispatch in
+// `resolve_tree_placeholders` replaces them; the successor guard lives in
+// `tests/placeholder_walk.rs` (`strict_dispatch_is_exhaustive_over_security_subtree`
+// et al.) plus the `strict_prefixes_content_is_deliberate` tripwire above.
 
 #[cfg(test)]
 mod native_credentials {
@@ -4806,7 +4296,7 @@ subject = "svc"
 
 [[security.native.credentials]]
 subject = "svc-a"
-secret = "{{env:CRED_ONE}}"
+secret = "${env:CRED_ONE}"
 "#,
         )
         .expect("env-backed secret should resolve");
@@ -4826,7 +4316,7 @@ subject = "svc"
 
 [[security.native.credentials]]
 subject = "svc-a"
-secret = "{{env:CRED_ONE}}"
+secret = "${env:CRED_ONE}"
 "#,
         )
         .expect_err("unset credential secret must fail closed");

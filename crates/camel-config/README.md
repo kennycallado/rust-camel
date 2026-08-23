@@ -322,7 +322,7 @@ port = 9090
 
 The `[security]` section configures authentication and authorization for the runtime. All sub-sections are optional -- enable only the providers you need.
 
-Placeholders in the `[security]` block use `{{env:VAR}}` and `{{env:VAR:default}}` (single colon). The `{{env:VAR:-default}}` form is rejected at startup. Route files use a different `${env:...}` system; see the [DSL docs](../../docs/src/configuration/env-interpolation.md).
+Placeholders in `Camel.toml` use `${env:VAR}` and `${env:VAR:-default}`. The `:-` separator is native: `default` is used when `VAR` is unset. An unset variable without a default aborts config load, naming the field. The legacy `{{...}}` syntax is rejected with an error pointing at the `${env:}` forms. See [Environment variable interpolation](../../docs/src/configuration/env-interpolation.md).
 
 ### `[security.oidc]` -- OpenID Connect
 
@@ -334,7 +334,7 @@ issuer = "https://auth.example.com/realms/my-realm"
 jwks_uri = "https://auth.example.com/realms/my-realm/protocol/openid-connect/certs"
 audience = ["my-service"]
 client_id = "my-service"
-client_secret = "{{env:OIDC_CLIENT_SECRET}}"   # resolved from env
+client_secret = "${env:OIDC_CLIENT_SECRET}"   # resolved from env
 token_endpoint = "https://auth.example.com/realms/my-realm/protocol/openid-connect/token"
 introspection_endpoint = "https://auth.example.com/realms/my-realm/protocol/openid-connect/token/introspect"
 ```
@@ -357,7 +357,7 @@ Static credentials for development or trusted-network deployments.
 [security.native]
 subject = "system"
 issuer = "rust-camel-native"
-bearer_token = "{{env:SYSTEM_BEARER_TOKEN}}"
+bearer_token = "${env:SYSTEM_BEARER_TOKEN}"
 roles = ["admin", "operator"]
 scopes = ["read", "write"]
 
@@ -390,7 +390,7 @@ Full Keycloak integration with local JWT validation, introspection caching, and 
 server_url = "https://keycloak.example.com"
 realm = "my-realm"
 client_id = "my-service"
-client_secret = "{{env:KEYCLOAK_CLIENT_SECRET}}"    # redacted in debug output
+client_secret = "${env:KEYCLOAK_CLIENT_SECRET}"    # redacted in debug output
 
 [security.keycloak.validation]
 method = "local"               # "local" (default) or "introspection"

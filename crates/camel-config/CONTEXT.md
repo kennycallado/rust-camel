@@ -84,6 +84,26 @@ The `watch` and `watch_debounce_ms` fields are consumed by camel-cli (`run.rs`, 
 `--watch`) and implemented in camel-core (`reload_watcher::watch_and_reload`). The
 stale `TODO(CONFIG-004)` comments (finding M1) have been removed.
 
+**Unified `${env:}` placeholder interpolation (ADR: unify-config-interpolation-on-env).**
+Camel.toml string leaves interpolate through ONE engine: camel-dsl
+`interpolate_env` (`${env:NAME}` / `${env:NAME:-default}`, `$$` escapes),
+applied by `resolve_tree_placeholders` — a recursive walk over the MERGED
+raw tree (main file + includes + `CAMEL_*` env overrides), run after the
+builder merges and before strict deserialization. Dispatch is by top-level
+path prefix against `STRICT_PREFIXES` (`security`, `datasources`,
+`idempotent_repo`, `cache_repo`); every other leaf is plain. STRICT-CLASS
+CRITERION (the invariant that tells review when to extend the list): a
+section is strict iff its string leaves reach an external authenticator or
+connection secret — a residual placeholder marker in such a leaf is a
+silent credential bug, so the escaped full form `$${env:X}` is rejected
+there. Extending the class is a deliberate edit to the const + its content
+tripwire test. `components.*` / `beans.*` are intentionally PLAIN: unset
+`${env:}` still fails closed there, but malformed markers pass through; if a
+component grows a genuine credential leaf, the principle says extend
+`STRICT_PREFIXES`. Legacy `{{...}}` is a hard error on every leaf.
+`PropertiesResolver` (properties.rs) is a legacy `{{...}}` public API
+retained for compatibility; it is OFF the load path.
+
 **Route discovery delegation.**
 `discovery.rs` delegates to `camel_dsl` and wraps its error as `DiscoveryError::Dsl`. This
 crate implements no EIPs and no route steps (L7 N/A).

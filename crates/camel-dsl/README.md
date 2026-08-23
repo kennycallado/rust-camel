@@ -510,6 +510,19 @@ routes:
 
 If `POLL_MS` is not set, the default `1000` is used. The `:-` syntax follows the same convention as shell parameter expansion.
 
+You can escape the placeholder syntax. `$$` yields a single `$`, and `$${env:VAR_NAME}` yields the literal text `${env:VAR_NAME}`:
+
+```yaml
+routes:
+  - id: "env-escapes"
+    from: "timer:tick?period=1000"
+    steps:
+      - log: "Cost: $${env:PRICE}"   # literal ${env:PRICE}
+      - log: "Dollar: $$"            # literal $
+```
+
+`Camel.toml` uses the same `${env:...}` engine and escape rules. See [Environment variable interpolation](../../docs/src/configuration/env-interpolation.md) for the unified syntax, the escape table, and the credential-leaf exception.
+
 > **Note:** Direct file loaders (`load_from_file` for YAML, `json::load_json_from_file` for JSON) read and parse files without interpolating environment variables. Use [`discover_routes`] if you need env interpolation.
 
 ## Language Expressions

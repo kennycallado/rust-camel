@@ -42,6 +42,38 @@ impl camel_api::lifecycle::Lifecycle for BridgeCleanup {
     }
 }
 
+/// Load the Camel.toml at `config_path`, falling back to serde defaults
+/// ONLY when the main file does not exist.
+///
+/// The not-found decision is made on the main path alone, before loading:
+/// a missing INCLUDE also surfaces as file-not-found inside `ConfigError`
+/// (dependency-owned; `read_capped` erases the io kind into
+/// `ConfigError::Message`), and it must abort, not fall back. Every load
+/// error of an existing file — parse failure, broken include, unresolved
+/// `${env:...}` placeholder — propagates as `CamelError::Config` so
+/// `camel run` fails fast instead of booting on silent defaults.
+fn load_config_or_default(
+    config_path: &str,
+) -> Result<camel_config::config::CamelConfig, camel_api::CamelError> {
+    match std::path::Path::new(config_path).try_exists() {
+        Ok(false) => {
+            // Build an empty config so serde defaults apply.
+            config::Config::builder()
+                .build()
+                .and_then(|c| c.try_deserialize())
+                .map_err(|e| {
+                    camel_api::CamelError::Config(format!("Failed to build default config: {e}"))
+                })
+        }
+        Err(e) => Err(camel_api::CamelError::Config(format!(
+            "failed to check config path {config_path}: {e}"
+        ))),
+        Ok(true) => camel_config::config::CamelConfig::from_file(config_path).map_err(|e| {
+            camel_api::CamelError::Config(format!("failed to load {config_path}: {e}"))
+        }),
+    }
+}
+
 pub async fn run(
     routes_override: Option<String>,
     config_path: String,
@@ -52,17 +84,7 @@ pub async fn run(
     health_port: Option<u16>,
 ) -> Result<(), camel_api::CamelError> {
     // 1. Load config (fall back to empty config with serde defaults if Camel.toml not found)
-    let mut camel_config: camel_config::config::CamelConfig =
-        camel_config::config::CamelConfig::from_file(&config_path).unwrap_or_else(|_| {
-            // Build an empty config so serde defaults apply
-            config::Config::builder()
-                .build()
-                .and_then(|c| c.try_deserialize())
-                .unwrap_or_else(|e| {
-                    eprintln!("Failed to build default config: {e}");
-                    std::process::exit(1);
-                })
-        });
+    let mut camel_config: camel_config::config::CamelConfig = load_config_or_default(&config_path)?;
 
     // 1b. Apply OTel CLI overrides (--otel-endpoint and --service-name imply --otel)
     let otel_enabled = otel || otel_endpoint.is_some() || service_name.is_some();
@@ -852,6 +874,139 @@ mod tests {
             "a literal test-doc path must reach discovery unfiltered; \
              ReservedTestSuffix is discovery's job"
         );
+    }
+
+    /// Task 8 (unify-config-interpolation-on-env): the empty-config fallback
+    /// applies ONLY to a missing main file; every load error of an existing
+    /// file aborts instead of silently booting on defaults.
+    #[test]
+    fn missing_config_file_yields_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let path = dir.path().join("nope.toml");
+        let config = load_config_or_default(&path.display().to_string())
+            .expect("missing file must fall back to serde defaults"); // allow-unwrap
+        assert_eq!(config.log_level, "INFO");
+        assert_eq!(config.timeout_ms, 5000);
+    }
+
+    #[test]
+    fn malformed_config_aborts_instead_of_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let path = dir.path().join("Camel.toml");
+        std::fs::write(&path, "[observability").expect("write malformed Camel.toml"); // allow-unwrap
+        let err = load_config_or_default(&path.display().to_string())
+            .expect_err("malformed config must abort, not fall back to defaults"); // allow-unwrap
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "error must name the config path: {msg}"
+        );
+        assert!(
+            msg.contains("failed to load"),
+            "error must carry the load prefix: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to parse TOML"),
+            "error must carry the parse cause, not only the prefix: {msg}"
+        );
+    }
+
+    #[test]
+    fn broken_include_aborts_instead_of_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let path = dir.path().join("Camel.toml");
+        std::fs::write(&path, "include = [\"missing.toml\"]\n").expect("write Camel.toml"); // allow-unwrap
+        let err = load_config_or_default(&path.display().to_string())
+            .expect_err("broken include must abort, not fall back to defaults"); // allow-unwrap
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "error must name the main config path: {msg}"
+        );
+        assert!(
+            msg.contains("missing.toml"),
+            "error must name the missing include: {msg}"
+        );
+    }
+
+    /// Restores an env var to its prior value on drop, so a panicking
+    /// assertion cannot leak the test's env mutation into other tests.
+    struct EnvVarGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn unset(key: &'static str) -> Self {
+            let prior = std::env::var(key).ok();
+            // SAFETY: test-scoped; the guard restores the prior value on drop.
+            unsafe { std::env::remove_var(key) };
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(value) => {
+                    // SAFETY: test-scoped restore of the value captured at guard creation.
+                    unsafe { std::env::set_var(self.key, value) };
+                }
+                None => {
+                    // SAFETY: test-scoped; the var was unset before the test.
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unresolved_placeholder_aborts_instead_of_defaults() {
+        // Env hygiene: the referenced var must be unset for the duration of
+        // the test; the guard restores any prior value on drop.
+        let _guard = EnvVarGuard::unset("RUST_CAMEL_TEST_RUN_A");
+
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let path = dir.path().join("Camel.toml");
+        std::fs::write(
+            &path,
+            "[observability.otel]\nendpoint = \"${env:RUST_CAMEL_TEST_RUN_A}\"\n",
+        )
+        .expect("write Camel.toml"); // allow-unwrap
+
+        let err = load_config_or_default(&path.display().to_string())
+            .expect_err("unresolved ${env:} must abort, not fall back to defaults"); // allow-unwrap
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "error must name the config path: {msg}"
+        );
+        assert!(
+            msg.contains("RUST_CAMEL_TEST_RUN_A"),
+            "error must name the unresolved env var: {msg}"
+        );
+    }
+
+    #[test]
+    fn try_exists_error_aborts_instead_of_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
+        let file_path = dir.path().join("Camel.toml");
+        std::fs::write(&file_path, "").expect("write Camel.toml"); // allow-unwrap
+        let child = file_path.join("x");
+        let child_str = child.display().to_string();
+        match load_config_or_default(&child_str) {
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains(&child_str),
+                    "error must name the config path: {msg}"
+                );
+            }
+            Ok(config) => {
+                assert_eq!(config.log_level, "INFO");
+                assert_eq!(config.timeout_ms, 5000);
+            }
+        }
     }
 
     /// Task 1.5 (wasm-source-auth-kernel): `camel run` threads the

@@ -7,7 +7,7 @@
 - [Processor (EIP)](./crates/camel-processor/CONTEXT.md) — Enterprise Integration Patterns as Tower middleware: pipeline-step implementations such as Filter, Choice, Wire Tap, Load Balancer, Enrich, Aggregate, and Do Try that execute inside a Route on the data plane
 - [Builder](./crates/camel-builder/CONTEXT.md) — programmatic route authoring: the fluent Rust `RouteBuilder` API that constructs a `RouteDefinition` (and `CanonicalRouteSpec` on the canonical path) by method chaining
 - [DSL](./crates/camel-dsl/CONTEXT.md) — declarative route authoring: YAML/JSON configuration format (`RouteDslRoute` AST) that parses to the same `RouteDefinition` (ADR-0017, ADR-0026)
-- [Config](./crates/camel-config/CONTEXT.md) — platform configuration loading and resolution: `CamelConfig` deserialization, `PropertiesResolver` placeholder expansion, component discovery, and hot-reload wiring
+- [Config](./crates/camel-config/CONTEXT.md) — platform configuration loading and resolution: `CamelConfig` deserialization, unified `${env:}` placeholder interpolation (tree walk via camel-dsl `interpolate_env`), component discovery, and hot-reload wiring
 - [Components](./crates/components/CONTEXT.md) — inbound/outbound adapters (timer, HTTP, Kafka, file, etc.) that feed Exchanges into Routes and send them to external systems
   - [LLM Component](./crates/components/camel-component-llm/CONTEXT.md) — LLM chat and embedding component (OpenAI, Ollama, Mock) with streaming and materialized modes
   - [File Component](./crates/components/camel-file/CONTEXT.md) — polls directories and writes exchange bodies to disk; `atomic_write` helper powers `Override`/`TryRename` write strategies (`Fail` uses `create_new(true)` directly — already atomic)

@@ -319,11 +319,7 @@ log_level = "warn"
     #[test]
     fn load_includes_invalid_toml_is_error() {
         let dir = TempDir::new().unwrap();
-        write_toml(
-            dir.path(),
-            "broken.toml",
-            "this is {{ not valid toml at all",
-        );
+        write_toml(dir.path(), "broken.toml", "this is { not valid toml at all");
 
         let err = load_includes(dir.path(), &["broken.toml".to_string()], None).unwrap_err();
 

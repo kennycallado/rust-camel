@@ -212,7 +212,7 @@ Header, Cookie, QueryParam. QueryParam is forbidden on `ws:` and
 
 The test workspace SHALL provide a `SecurityConfigFixture` builder
 that constructs security configuration with deterministic secrets so
-tests start under fail-closed `{{env:}}` placeholder enforcement. No
+tests start under fail-closed `${env:}` placeholder enforcement. No
 environment-optional escape hatch SHALL exist.
 
 #### Scenario: tests start without real environment secrets

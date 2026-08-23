@@ -1,8 +1,14 @@
 # Environment variable interpolation
 
-Substitute environment variables into YAML route files with `${env:VAR}`
-tokens. The tokens expand before YAML parsing, so they work in endpoint
-URIs, log messages, header values, and any other string field.
+Substitute environment variables into route files and `Camel.toml` with
+`${env:VAR}` tokens. The tokens work in endpoint URIs, log messages,
+header values, and any other string field.
+
+The expansion point differs by surface. Route files expand in the raw
+route source, before YAML parsing. `Camel.toml` expands every string
+leaf of the parsed, merged tree. The tree combines the main file,
+include files, and `CAMEL_*` environment overrides. Expansion runs
+before typed deserialization.
 
 ## Syntax
 
@@ -12,19 +18,68 @@ URIs, log messages, header values, and any other string field.
 
 `${env:VAR}` reads the variable `VAR`. `${env:VAR:-default}` uses
 `default` when `VAR` is unset. An unset variable with no default fails
-route discovery. The error names the variable. Set a default or export
-the variable to avoid the failure.
+load. The error names the variable. Set a default or export the variable
+to avoid the failure.
+
+The same syntax works in `Camel.toml`:
+
+```toml
+[security.keycloak]
+client_secret = "${env:KC_SECRET}"
+
+[observability.otel]
+endpoint = "${env:OTEL_ENDPOINT:-http://localhost:4317}"
+```
+
+## Escapes
+
+| Input | Output |
+|-------|--------|
+| `${env:VAR}` | Value of `VAR`; fails closed if unset and no default |
+| `${env:VAR:-default}` | Value of `VAR`, or `default` when unset |
+| `$$` | A single `$` |
+| `$${env:VAR}` | The literal text `${env:VAR}` |
+
+The standalone `$$` escape works on every surface: route files and all
+`Camel.toml` leaves. The full-form escape `$${env:VAR}` yields the
+literal placeholder text on route files and plain `Camel.toml` leaves.
+
+**Exception — credential leaves:** `Camel.toml` sections that hold
+credentials or connection secrets reject the escaped full form. On
+`security`, `datasources`, `idempotent_repo`, and `cache_repo` leaves, a
+`$${env:VAR}` leaves a residual `${env:VAR}` marker, which fails load.
+There is no legitimate reason for a credential field to hold the literal
+text of a placeholder.
+
+## Fail-closed
+
+Both surfaces fail closed. An unset variable without a default aborts:
+
+- Route discovery fails with an error naming the variable.
+- `Camel.toml` load aborts with an error naming the field.
+
+Use `${env:VAR:-default}` for optional values.
+
+## Legacy `{{...}}` syntax
+
+`Camel.toml` rejects the legacy `{{...}}` placeholder syntax. Any `{{` in
+a string leaf fails load with an actionable message: placeholders use
+`${env:NAME}` or `${env:NAME:-default}`. Route files never supported the
+`{{...}}` form.
 
 ## How it works
 
-The DSL loader (`camel_dsl::interpolate_env`) scans route source for
-`${env:...}` patterns and replaces them before YAML parsing. Substituted
-values pass through `sanitize_env_value`, which strips control characters
-and newlines. This blocks newline injection from a hostile or malformed
+The DSL loader (`camel_dsl::interpolate_env`) scans raw route source
+before YAML parsing. `camel-config` walks the merged `Camel.toml` tree
+after the builder merges the main file, include files, and `CAMEL_*`
+environment overrides (`resolve_tree_placeholders`). The walk replaces
+`${env:...}` patterns before typed deserialization. Substituted values
+pass through `sanitize_env_value`, which strips control characters and
+newlines. This blocks newline injection from a hostile or malformed
 variable.
 
-The `PropertiesResolver` type in `camel-config` exposes the same
-resolution as a public API for config-value placeholders.
+The `PropertiesResolver` type in `camel-config` retains the legacy
+`{{...}}` API for compatibility. `Camel.toml` loading does not use it.
 
 ## Setup
 

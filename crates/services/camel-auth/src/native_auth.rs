@@ -326,6 +326,53 @@ mod tests {
         assert_eq!(found.unwrap().subject, "clean-user");
     }
 
+    #[test]
+    fn store_guard_rejects_new_syntax_marker() {
+        let result = NativeCredentialStore::try_new(vec![NativeCredential {
+            secret: NativeCredentialSecret::Plaintext {
+                value: Zeroizing::new("x${env:y}z".to_string()),
+            },
+            principal: test_principal("bad", vec![], vec![]),
+        }]);
+        let err = match result {
+            Ok(_) => panic!("marker secret must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("marker"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn store_guard_accepts_clean_secrets() {
+        // standalone escape result — lone `$` must not be treated as a marker
+        let store_a = NativeCredentialStore::try_new(vec![NativeCredential {
+            secret: NativeCredentialSecret::Plaintext {
+                value: Zeroizing::new("a$b".to_string()),
+            },
+            principal: test_principal("dollar-user", vec![], vec![]),
+        }]);
+        assert!(
+            store_a.is_ok(),
+            "store guard must accept secret with lone $: {:?}",
+            store_a.err()
+        );
+
+        // normal opaque token — no markers at all
+        let store_b = NativeCredentialStore::try_new(vec![NativeCredential {
+            secret: NativeCredentialSecret::Plaintext {
+                value: Zeroizing::new("opaque-token-xyz-123".to_string()),
+            },
+            principal: test_principal("token-user", vec![], vec![]),
+        }]);
+        assert!(
+            store_b.is_ok(),
+            "store guard must accept normal opaque token: {:?}",
+            store_b.err()
+        );
+    }
+
     #[tokio::test]
     async fn test_static_token_authenticator_valid_token() {
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
