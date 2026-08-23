@@ -15,6 +15,7 @@ use camel_component_mock::MockComponent;
 use camel_component_seda::SedaComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
+use camel_core::intercept::InterceptRules;
 use noyalib::compat::serde_yaml;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -53,8 +54,14 @@ pub struct TestDocResult {
 /// Boot a lean `CamelContext` with the mock component plus the direct, timer,
 /// log, and seda defaults (mirrors camel-test's `build_context`). Returns the
 /// context and the shared mock handle used for sampling and assertions.
-async fn boot_context() -> Result<(CamelContext, MockComponent), String> {
-    let mut ctx = CamelContext::builder()
+async fn boot_context(
+    intercepts: Option<InterceptRules>,
+) -> Result<(CamelContext, MockComponent), String> {
+    let mut builder = CamelContext::builder();
+    if let Some(rules) = intercepts {
+        builder = builder.with_intercept_rules(rules);
+    }
+    let mut ctx = builder
         .build()
         .await
         .map_err(|e| format!("failed to boot CamelContext: {e}"))?;
@@ -354,7 +361,7 @@ async fn run_phases(
 /// shared mock handle (used by callers to sample `received_count` after
 /// return, e.g. to prove the context was stopped).
 pub async fn run_test_doc(doc: &TestDocument, doc_dir: &Path) -> (TestDocResult, MockComponent) {
-    let (ctx, mock) = match boot_context().await {
+    let (ctx, mock) = match boot_context(doc.intercept_rules()).await {
         Ok((ctx, mock)) => (Arc::new(Mutex::new(ctx)), mock),
         Err(e) => {
             return (

@@ -3,7 +3,8 @@
 //! A `*.test.yaml` sidecar declares one executable test: a route source
 //! (`routeFiles` or `routeFilesFromRoot` reference OR inline `routes`,
 //! exactly one), optional `direct:` inputs, non-empty `expects` keyed by
-//! `mock:` URIs, and an optional `settle` quiet window (`0 < settle <= 5s`). Unknown fields are
+//! `mock:` URIs, an optional `settle` quiet window (`0 < settle <= 5s`),
+//! and an optional `intercepts` block (real endpoint URIs mapped to mock endpoints). Unknown fields are
 //! rejected (`deny_unknown_fields`); input bodies are restricted to string,
 //! object, and array forms — null, boolean, and number scalars are document
 //! errors.
@@ -15,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
+use camel_core::intercept::{InterceptAction, InterceptRule, InterceptRules};
 use noyalib::compat::serde_yaml;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
@@ -53,6 +55,11 @@ pub struct TestDocument {
     /// Parsed settle window, populated during validation.
     #[serde(skip)]
     pub settle_parsed: Option<Duration>,
+    /// Declarative intercept map keyed by source URI.
+    pub intercepts: Option<BTreeMap<String, InterceptActionDoc>>,
+    /// Parsed intercept rules, populated during validation.
+    #[serde(skip)]
+    intercept_rules_parsed: Option<InterceptRules>,
 }
 
 impl TestDocument {
@@ -60,6 +67,21 @@ impl TestDocument {
     pub fn settle_duration(&self) -> Option<Duration> {
         self.settle_parsed
     }
+
+    /// Parsed intercept rules, if the document declares any.
+    pub fn intercept_rules(&self) -> Option<InterceptRules> {
+        self.intercept_rules_parsed.clone()
+    }
+}
+
+/// Declarative intercept action: exactly one of `skipTo` / `divertCopyTo`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct InterceptActionDoc {
+    /// Skip the original send and redirect to the target `mock:` URI.
+    pub skip_to: Option<String>,
+    /// Copy the exchange to the target `mock:` URI while the real send continues.
+    pub divert_copy_to: Option<String>,
 }
 
 /// One input delivery to a `direct:` endpoint.
@@ -153,6 +175,16 @@ pub enum TestDocError {
     UnsupportedInputScheme { target: String },
     /// A body scalar (null/boolean/number) is not a supported body form.
     UnsupportedBodyScalar(String),
+    /// Intercept source URI is empty.
+    InterceptEmptySource,
+    /// Intercept source uses the `mock:` scheme.
+    InterceptMockSource { key: String },
+    /// Intercept action has both or neither keys (`skipTo` / `divertCopyTo`).
+    InterceptActionKeys { key: String, problem: &'static str },
+    /// Intercept target is `mock:` with an empty endpoint path.
+    InterceptEmptyTargetPath { key: String },
+    /// Intercept target failed Stage A validation (e.g. non-`mock:` target).
+    InterceptInvalid(String),
 }
 
 impl fmt::Display for TestDocError {
@@ -206,6 +238,19 @@ impl fmt::Display for TestDocError {
                 f,
                 "unsupported body scalar `{raw}`: only string, object, and array bodies are supported"
             ),
+            Self::InterceptEmptySource => write!(f, "intercept source URI must not be empty"),
+            Self::InterceptMockSource { key } => {
+                write!(f, "intercept source `{key}` must not start with `mock:`")
+            }
+            Self::InterceptActionKeys { key, problem } => write!(
+                f,
+                "intercept action for `{key}`: exactly one of `skipTo` or `divertCopyTo` is required (got {problem})"
+            ),
+            Self::InterceptEmptyTargetPath { key } => write!(
+                f,
+                "intercept target for `{key}` needs a mock endpoint name: `mock:` requires a non-empty endpoint path"
+            ),
+            Self::InterceptInvalid(msg) => write!(f, "invalid intercept: {msg}"),
         }
     }
 }
@@ -287,6 +332,55 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
             return Err(TestDocError::UnsupportedInputScheme {
                 target: input.to.clone(),
             });
+        }
+    }
+    // Intercepts: validate and build InterceptRules (BTreeMap order).
+    if let Some(intercepts) = doc.intercepts.as_ref() {
+        let mut rules: Vec<InterceptRule> = Vec::new();
+        for (source, action) in intercepts {
+            if source.is_empty() {
+                return Err(TestDocError::InterceptEmptySource);
+            }
+            if source.starts_with(MOCK_SCHEME_PREFIX) {
+                return Err(TestDocError::InterceptMockSource {
+                    key: source.clone(),
+                });
+            }
+            let (target, rule_action) = match (&action.skip_to, &action.divert_copy_to) {
+                (Some(t), None) => (t.as_str(), InterceptAction::SkipTo { uri: t.clone() }),
+                (None, Some(t)) => (t.as_str(), InterceptAction::DivertCopyTo { uri: t.clone() }),
+                (Some(_), Some(_)) => {
+                    return Err(TestDocError::InterceptActionKeys {
+                        key: source.clone(),
+                        problem: "both",
+                    });
+                }
+                (None, None) => {
+                    return Err(TestDocError::InterceptActionKeys {
+                        key: source.clone(),
+                        problem: "neither",
+                    });
+                }
+            };
+            if target == "mock:" || target.starts_with("mock:?") {
+                return Err(TestDocError::InterceptEmptyTargetPath {
+                    key: source.clone(),
+                });
+            }
+            rules.push(InterceptRule {
+                uri: source.clone(),
+                action: rule_action,
+            });
+        }
+        match InterceptRules::new(rules) {
+            Ok(parsed) => doc.intercept_rules_parsed = Some(parsed),
+            Err(e) => {
+                let msg = match e {
+                    camel_api::CamelError::Config(inner) => inner,
+                    other => other.to_string(),
+                };
+                return Err(TestDocError::InterceptInvalid(msg));
+            }
         }
     }
     Ok(doc)
@@ -735,5 +829,243 @@ expects:
 "#;
         let doc = parse_test_document(no_body).expect("input without body parses"); // allow-unwrap
         assert!(doc.inputs[0].body.is_none());
+    }
+
+    #[test]
+    fn intercepts_skip_to_parses() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  kafka:orders:
+    skipTo: mock:orders
+"#;
+        let doc = parse_test_document(yaml).expect("valid intercept doc should parse"); // allow-unwrap
+        let rules = doc.intercept_rules().expect("intercept_rules is Some"); // allow-unwrap
+        assert_eq!(
+            rules.lookup("kafka:orders"),
+            Some(&camel_core::intercept::InterceptAction::SkipTo {
+                uri: "mock:orders".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn intercepts_divert_copy_to_parses() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  seda:audit:
+    divertCopyTo: mock:audit
+"#;
+        let doc = parse_test_document(yaml).expect("valid intercept doc should parse"); // allow-unwrap
+        let rules = doc.intercept_rules().expect("intercept_rules is Some"); // allow-unwrap
+        assert_eq!(
+            rules.lookup("seda:audit"),
+            Some(&camel_core::intercept::InterceptAction::DivertCopyTo {
+                uri: "mock:audit".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn intercept_action_both_keys_rejected() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  kafka:orders:
+    skipTo: mock:orders
+    divertCopyTo: mock:audit
+"#;
+        let err = err_of(yaml);
+        assert!(
+            matches!(
+                err,
+                TestDocError::InterceptActionKeys { ref key, problem: "both" } if key == "kafka:orders"
+            ),
+            "expected InterceptActionKeys both for kafka:orders, got: {err:?}"
+        );
+        assert!(err.to_string().contains("kafka:orders"));
+    }
+
+    #[test]
+    fn intercept_action_neither_key_rejected() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  kafka:orders: {}
+"#;
+        let err = err_of(yaml);
+        assert!(
+            matches!(
+                err,
+                TestDocError::InterceptActionKeys { ref key, problem: "neither" } if key == "kafka:orders"
+            ),
+            "expected InterceptActionKeys neither for kafka:orders, got: {err:?}"
+        );
+        assert!(err.to_string().contains("kafka:orders"));
+    }
+
+    #[test]
+    fn intercept_target_non_mock_rejected() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  kafka:orders:
+    skipTo: direct:orders
+"#;
+        let err = err_of(yaml);
+        let msg = err.to_string();
+        assert!(
+            matches!(err, TestDocError::InterceptInvalid(_)),
+            "expected InterceptInvalid, got: {err:?}"
+        );
+        assert!(
+            msg.contains("must start with 'mock:'"),
+            "expected Stage A fragment, got: {msg}"
+        );
+        assert!(
+            msg.contains("direct:orders"),
+            "expected target in msg, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn intercept_source_mock_scheme_rejected() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  mock:a:
+    skipTo: mock:b
+"#;
+        let err = err_of(yaml);
+        assert!(
+            matches!(err, TestDocError::InterceptMockSource { ref key } if key == "mock:a"),
+            "expected InterceptMockSource for mock:a, got: {err:?}"
+        );
+        assert!(err.to_string().contains("mock:a"));
+    }
+
+    #[test]
+    fn intercept_source_empty_rejected() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  "":
+    skipTo: mock:orders
+"#;
+        let err = err_of(yaml);
+        assert!(
+            matches!(err, TestDocError::InterceptEmptySource),
+            "expected InterceptEmptySource, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn intercept_target_empty_path_rejected() {
+        for target in ["mock:", "mock:?x=1"] {
+            let yaml = format!(
+                r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  kafka:orders:
+    skipTo: "{target}"
+"#
+            );
+            let err = err_of(&yaml);
+            assert!(
+                matches!(err, TestDocError::InterceptEmptyTargetPath { ref key } if key == "kafka:orders"),
+                "target `{target}` should be InterceptEmptyTargetPath, got: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("kafka:orders"),
+                "display must name source key, got: {}",
+                err.to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn intercept_action_unknown_field_rejected() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+intercepts:
+  kafka:orders:
+    replaceWith: mock:x
+"#;
+        let err = err_of(yaml);
+        assert!(
+            matches!(err, TestDocError::UnknownField(ref msg) if msg.contains("replaceWith")),
+            "expected UnknownField naming replaceWith, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn intercepts_absent_keeps_behavior() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+"#;
+        let doc = parse_test_document(yaml).expect("doc without intercepts should parse"); // allow-unwrap
+        assert!(doc.intercept_rules().is_none());
+        assert!(doc.intercepts.is_none());
     }
 }

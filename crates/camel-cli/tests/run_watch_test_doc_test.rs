@@ -26,52 +26,11 @@
 mod common;
 
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use common::{KillOnDrop, drain_to_buffer, send_term, wait_for_marker};
-
-/// Build the `Command` that launches the `camel` binary against `dir`'s
-/// `Camel.toml`, with both stdout and stderr piped. No `--no-watch` flag:
-/// watching comes from `watch = true` in the fixture config (the exact
-/// former-crash configuration).
-fn spawn_camel_run_watch(dir: &Path) -> KillOnDrop {
-    let config_path = dir.join("Camel.toml");
-    let child = Command::new(env!("CARGO_BIN_EXE_camel"))
-        .arg("run")
-        .arg("--config")
-        .arg(&config_path)
-        .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("failed to spawn `camel` binary");
-    KillOnDrop(child)
-}
-
-/// Wait for the child to exit, but at most `timeout`. If it is still alive
-/// at the deadline, force-kill and reap, returning `false`.
-fn wait_exit_bounded(child: &mut Child, timeout: Duration) -> bool {
-    let start = Instant::now();
-    let step = Duration::from_millis(25);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return true,
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
-                }
-                thread::sleep(step);
-            }
-            Err(e) => panic!("try_wait failed: {e}"),
-        }
-    }
-}
+use common::{drain_to_buffer, send_term, spawn_camel_run, wait_exit_bounded, wait_for_marker};
 
 /// Write `Camel.toml` to `dir/Camel.toml`.
 fn write_camel_toml(dir: &Path, body: &str) {
@@ -122,7 +81,7 @@ watch = true
         "routeFiles:\n  - demo.yaml\ninputs: []\nexpects:\n  mock:result:\n    count: 1\n";
     write_routes_file(dir.path(), "demo.test.yaml", test_doc_body);
 
-    let mut child = spawn_camel_run_watch(dir.path());
+    let mut child = spawn_camel_run(dir.path());
     let out_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let err_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 

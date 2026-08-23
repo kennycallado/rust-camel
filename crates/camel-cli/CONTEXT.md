@@ -43,3 +43,5 @@ Metrics instrumentation for CLI commands is not yet wired; processor-crate instr
 | Assertion failure | expectation mismatch reported by `MockEndpointInner::try_assert_satisfied` | 1 |
 
 Precedence when classes mix: any parse-error class ⇒ 2, else any failed endpoint ⇒ 1, else 0. The settle timeout and assertion failure both surface as a `FAIL` line and count toward `failed`; parse-error and boot failures surface on stderr and do not count toward `passed`/`failed`.
+
+The `intercepts` block in `*.test.yaml` maps source URIs to `skipTo` or `divertCopyTo` `mock:` targets before route load; see [Declarative camel test — Intercepts](../../docs/src/testing/index.md#intercepts) and the [route-interception spec](../../openspec/specs/route-interception/spec.md).

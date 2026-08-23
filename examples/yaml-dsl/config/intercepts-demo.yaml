@@ -1,0 +1,15 @@
+# =============================================================================
+# Route for the `camel test` intercepts-demo example.
+#
+# A single `direct:` route that sends to an unregistered `kafka:` endpoint
+# and then to `mock:after` to show the pipeline continues. The paired
+# `intercepts-demo.test.yaml` document intercepts `kafka:orders` with
+# `skipTo: mock:orders`, so the test passes without a `kafka` component.
+# =============================================================================
+
+routes:
+  - id: "intercepts-demo"
+    from: "direct:start"
+    steps:
+      - to: "kafka:orders"
+      - to: "mock:after"

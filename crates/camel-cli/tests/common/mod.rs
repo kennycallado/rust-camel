@@ -1,15 +1,16 @@
 //! Shared subprocess plumbing for the `camel-cli` integration tests that
 //! spawn the real `camel` binary: pipe drainers, a kill-on-drop child guard,
-//! a bounded marker wait, and a single-SIGTERM sender. Observation and exit
-//! deadlines here are deliberately generous (30 s): under a whole-workspace
-//! `cargo test` run the OS is saturated by hundreds of peer processes and
-//! subprocess startup slows roughly 100x, while the happy path still returns
-//! the moment the marker is seen or the child exits, so the headroom never
-//! slows the fast path.
+//! a bounded marker wait, a bounded exit wait, a single-SIGTERM sender, and
+//! the standard `camel run` spawn. Observation and exit deadlines here are
+//! deliberately generous (30 s): under a whole-workspace `cargo test` run the
+//! OS is saturated by hundreds of peer processes and subprocess startup slows
+//! roughly 100x, while the happy path still returns the moment the marker is
+//! seen or the child exits, so the headroom never slows the fast path.
 
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
-use std::process::{Child, Command};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -117,4 +118,45 @@ pub fn send_term(child: &Child) {
         status.success(),
         "`kill -TERM` returned non-zero: {status:?}"
     );
+}
+
+/// Build the `Command` that launches the `camel` binary against `dir`'s
+/// `Camel.toml`, with both stdout and stderr piped. No `--no-watch` flag is
+/// passed: watching is controlled by the fixture config (`watch = true`
+/// enables it, otherwise the run is single-shot). The child is wrapped in a
+/// kill-on-drop guard so a failed assertion mid-test cannot leak the process.
+pub fn spawn_camel_run(dir: &Path) -> KillOnDrop {
+    let config_path = dir.join("Camel.toml");
+    let child = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("run")
+        .arg("--config")
+        .arg(&config_path)
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("failed to spawn `camel` binary"); // allow-unwrap
+    KillOnDrop(child)
+}
+
+/// Wait for the child to exit, but at most `timeout`. If it is still alive
+/// at the deadline, force-kill and reap, returning `false`.
+pub fn wait_exit_bounded(child: &mut Child, timeout: Duration) -> bool {
+    let start = Instant::now();
+    let step = Duration::from_millis(25);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                thread::sleep(step);
+            }
+            Err(e) => panic!("try_wait failed: {e}"),
+        }
+    }
 }
