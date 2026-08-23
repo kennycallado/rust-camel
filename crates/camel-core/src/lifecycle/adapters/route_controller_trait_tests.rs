@@ -1,10 +1,16 @@
-//! Tests for the ADR-0061 per-bind public-exposure gate (Task 1.9).
+//! Tests for the ADR-0061 per-bind public-exposure gate (Task 1.9) and
+//! the plan-only SecurityContext delivery to server-route consumers
+//! (Task 1.2).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use camel_api::CamelError;
-use camel_api::security_policy::{AccessMode, AudienceBinding, RouteSecurityPlan, TransportId};
+use camel_api::RouteController;
+use camel_api::security_policy::{
+    AccessMode, AudienceBinding, AuthContext, AuthorizationDecision, Principal, RouteSecurityPlan,
+    SecurityPolicy, SecurityPolicyConfig, TransportId,
+};
 
 use crate::lifecycle::adapters::route_controller_trait::{
     BindExposureAcks, enforce_bind_exposure_gate,
@@ -163,4 +169,239 @@ fn bind_acks_default_is_unacknowledged() {
     let acks = BindExposureAcks::new(HashMap::from([("0.0.0.0:8080".to_string(), true)]));
     assert!(acks.acknowledged("0.0.0.0:8080"));
     assert!(!acks.acknowledged("10.0.0.1:8080"));
+}
+
+// ── plan-only SecurityContext delivery (Task 1.2) ──
+
+struct AllowPolicy;
+
+#[async_trait::async_trait]
+impl SecurityPolicy for AllowPolicy {
+    async fn evaluate(
+        &self,
+        _exchange: &mut camel_api::Exchange,
+        _auth: &AuthContext<'_>,
+    ) -> Result<AuthorizationDecision, CamelError> {
+        Ok(AuthorizationDecision::Granted {
+            principal: Principal {
+                subject: "tester".into(),
+                issuer: "test".into(),
+                audience: vec![],
+                scopes: vec![],
+                roles: vec![],
+                claims: serde_json::Value::Null,
+            },
+        })
+    }
+}
+
+struct StubAuth;
+
+#[async_trait::async_trait]
+impl camel_auth::TokenAuthenticator for StubAuth {
+    async fn authenticate_bearer(&self, _token: &str) -> Result<Principal, CamelError> {
+        Ok(Principal {
+            subject: "tester".into(),
+            issuer: "test".into(),
+            audience: vec![],
+            scopes: vec![],
+            roles: vec![],
+            claims: serde_json::Value::Null,
+        })
+    }
+}
+
+/// What `set_security_context` delivered, reduced to comparable facts
+/// (`SecurityContext` holds trait objects without equality).
+#[derive(Debug)]
+struct CapturedSecurityContext {
+    policy_present: bool,
+    public_plan: bool,
+    authorized_plan: bool,
+    providers_present: bool,
+}
+
+fn capture_from(ctx: &camel_component_api::SecurityContext) -> CapturedSecurityContext {
+    CapturedSecurityContext {
+        policy_present: ctx.policy.is_some(),
+        public_plan: matches!(
+            ctx.plan.as_ref().map(|p| &p.access_mode),
+            Some(AccessMode::Public)
+        ),
+        authorized_plan: matches!(
+            ctx.plan.as_ref().map(|p| &p.access_mode),
+            Some(AccessMode::Authorized(_))
+        ),
+        providers_present: ctx.providers.is_some(),
+    }
+}
+
+struct ContextCaptureComponent {
+    captured: Arc<Mutex<Option<CapturedSecurityContext>>>,
+}
+
+#[async_trait::async_trait]
+impl camel_component_api::Component for ContextCaptureComponent {
+    fn scheme(&self) -> &str {
+        "http"
+    }
+
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn camel_component_api::Endpoint>, CamelError> {
+        Ok(Box::new(ContextCaptureEndpoint {
+            captured: Arc::clone(&self.captured),
+        }))
+    }
+}
+
+struct ContextCaptureEndpoint {
+    captured: Arc<Mutex<Option<CapturedSecurityContext>>>,
+}
+
+impl camel_component_api::Endpoint for ContextCaptureEndpoint {
+    fn uri(&self) -> &str {
+        "http"
+    }
+
+    fn create_consumer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
+        Ok(Box::new(ContextCaptureConsumer {
+            captured: Arc::clone(&self.captured),
+        }))
+    }
+
+    fn create_producer(
+        &self,
+        _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        _ctx: &camel_component_api::ProducerContext,
+    ) -> Result<camel_api::BoxProcessor, CamelError> {
+        Ok(camel_api::BoxProcessor::new(camel_api::IdentityProcessor))
+    }
+}
+
+struct ContextCaptureConsumer {
+    captured: Arc<Mutex<Option<CapturedSecurityContext>>>,
+}
+
+#[async_trait::async_trait]
+impl camel_component_api::Consumer for ContextCaptureConsumer {
+    async fn start(&mut self, ctx: camel_component_api::ConsumerContext) -> Result<(), CamelError> {
+        ctx.mark_ready();
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<(), CamelError> {
+        Ok(())
+    }
+
+    fn startup_mode(&self) -> camel_component_api::ConsumerStartupMode {
+        camel_component_api::ConsumerStartupMode::Explicit
+    }
+
+    fn set_security_context(&mut self, ctx: camel_component_api::SecurityContext) {
+        *self.captured.lock().expect("capture slot") = Some(capture_from(&ctx));
+    }
+}
+
+async fn stage_and_start(
+    uri: &str,
+    route_id: &str,
+    security: impl FnOnce(
+        crate::lifecycle::application::route_definition::RouteDefinition,
+    ) -> crate::lifecycle::application::route_definition::RouteDefinition,
+) -> CapturedSecurityContext {
+    use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+    use crate::shared::components::domain::Registry;
+
+    let captured: Arc<Mutex<Option<CapturedSecurityContext>>> = Arc::new(Mutex::new(None));
+    let component_registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    component_registry
+        .lock()
+        .expect("registry lock")
+        .register(Arc::new(ContextCaptureComponent {
+            captured: Arc::clone(&captured),
+        }));
+
+    let mut controller = DefaultRouteController::new(
+        component_registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    let def = security(
+        crate::lifecycle::application::route_definition::RouteDefinition::new(uri, vec![])
+            .with_route_id(route_id),
+    );
+    controller
+        .add_route(def)
+        .await
+        .unwrap_or_else(|e| panic!("staging {route_id} must succeed: {e}"));
+    controller
+        .start_route(route_id)
+        .await
+        .unwrap_or_else(|e| panic!("start {route_id} must succeed: {e}"));
+
+    let snapshot = captured
+        .lock()
+        .expect("capture slot")
+        .take()
+        .unwrap_or_else(|| panic!("set_security_context must have been invoked for {route_id}"));
+
+    controller
+        .stop_route(route_id)
+        .await
+        .unwrap_or_else(|e| panic!("stop {route_id} must succeed: {e}"));
+    snapshot
+}
+
+#[tokio::test]
+async fn undeclared_server_route_receives_plan_only_context() {
+    let captured =
+        stage_and_start("http://127.0.0.1:18061/api", "undeclared-route", |def| def).await;
+    assert!(
+        !captured.policy_present,
+        "plan-only context carries no policy: {captured:?}"
+    );
+    assert!(
+        captured.public_plan,
+        "plan must be the compiled Public plan: {captured:?}"
+    );
+    assert!(
+        !captured.providers_present,
+        "no providers without a registry: {captured:?}"
+    );
+}
+
+#[tokio::test]
+async fn declared_route_context_unchanged() {
+    let provider_registry = Arc::new(camel_auth::ProviderRegistry::new());
+    provider_registry.register(
+        "idp-a",
+        camel_auth::ProviderEntry {
+            authenticator: Arc::new(StubAuth),
+            audience_binding: None,
+        },
+    );
+    let captured = stage_and_start("http://127.0.0.1:18062/api", "declared-route", |def| {
+        def.with_security_policy(SecurityPolicyConfig::new(AllowPolicy))
+            .with_security_authenticator(Arc::new(StubAuth))
+            .with_provider_registry(provider_registry)
+    })
+    .await;
+    assert!(
+        captured.policy_present,
+        "declared route keeps its policy: {captured:?}"
+    );
+    assert!(
+        captured.authorized_plan,
+        "plan must carry the Authorized classification: {captured:?}"
+    );
+    assert!(
+        captured.providers_present,
+        "declared route keeps its providers: {captured:?}"
+    );
 }

@@ -52,7 +52,7 @@ static mut ECHO_MODE: EchoMode = EchoMode::Bytes;
 
 impl bindings::Guest for WebhookSource {
     fn configure(config: Vec<(String, String)>) -> Result<SourcePlan, WasmError> {
-        let mut bind = String::from("0.0.0.0:8080");
+        let mut bind = String::from("127.0.0.1:8080");
         let mut path: Option<String> = None;
 
         for (key, value) in &config {

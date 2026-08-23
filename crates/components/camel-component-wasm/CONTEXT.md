@@ -64,6 +64,40 @@ registered; they are the testable denial boundary. No world inherits host
 stdio and no `WasiCtxBuilder` call grants preopens, environment, or network.
 Guests use `camel_call` for logging output per ADR-0050.
 
+### Inbound request posture
+
+The `source` world is the fifth inbound transport (ADR-0061 amendment). The
+host authenticates each inbound HTTP request at the edge. The chain is
+`Consumer::set_security_context` → `kernel_authenticate` → `install_carrier`.
+Authorization stays pipeline-owned; the host edge does authentication only.
+
+- The route controller delivers the compiled `RouteSecurityPlan` to the
+  consumer through `Consumer::set_security_context`
+  (`SecurityContext::from_plan` for plan-only contexts).
+- The axum host-edge handler extracts credentials from headers, cookie, and
+  query and calls `kernel_authenticate` against the registered provider. On
+  failure or missing credential it returns `401 unauthenticated` and does not
+  forward the request to the guest. Denied requests never reach `accept-http`.
+- On success the handler stores the minted `AuthenticatedPrincipal` in a
+  private `HttpMeta.principal` field. `accept-http` moves it to the
+  `SourceHostState` pending slot guarded by a one-outstanding-request
+  invariant. `submit-exchange` takes the slot and calls `install_carrier` on
+  the native Exchange before the Exchange enters the pipeline. The guest never
+  observes authentication or denial. The WIT contract is unchanged
+  (ADR-0061 amendment; Gen B, like ws and grpc).
+
+Non-loopback binds that serve a `Public` route require operator acknowledgment:
+`[binds."<addr>"] allow_public_exposure = true` in `Camel.toml`.
+`WasmSourceConsumer::start()` runs `enforce_bind_exposure_gate` before
+`TcpListener::bind` and fails closed when the acknowledgment is absent.
+Loopback binds permit `Public` silently. The gate keeps the ADR-0052 rule-3
+posture: the acknowledgment is permanent and never silences the `warn!`
+emitted at every boot (ADR-0061 Rule 4; ADR-0052).
+
+The sandbox guest model is unchanged and orthogonal. Operators trust the plugin
+they install. The sandbox limits damage from guest defects. It is not a security
+boundary for intentionally malicious plugins. See Capability posture above.
+
 ## Resource and lifecycle limits
 
 - `validate_wasm_size` rejects an oversized module before compilation.

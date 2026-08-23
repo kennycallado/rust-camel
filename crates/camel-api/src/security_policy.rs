@@ -77,8 +77,9 @@ impl std::fmt::Display for AuthorizationDecision {
 
 /// Transport kinds that can host a server route.
 ///
-/// Closed set: `http:`, `ws:`, `grpc:`, and `mcp:` are the only transports
-/// that terminate requests and run authorization.
+/// Closed set: `http:`, `ws:`, `grpc:`, `mcp:`, and `wasm:` (source
+/// routes hosting an http-listener) are the only transports that
+/// terminate requests and run authorization.
 ///
 /// exhaustive-by-contract: closed transport set; a new transport is an
 /// architectural change, not additive growth.
@@ -88,6 +89,7 @@ pub enum TransportId {
     Ws,
     Grpc,
     Mcp,
+    Wasm,
 }
 
 /// Read-only view of the principal minted by the authentication path.
@@ -606,19 +608,21 @@ mod tests {
     }
 
     #[test]
-    fn transport_id_derives_all_four() {
+    fn transport_id_derives_all() {
         fn name(t: TransportId) -> &'static str {
             match t {
                 TransportId::Http => "http",
                 TransportId::Ws => "ws",
                 TransportId::Grpc => "grpc",
                 TransportId::Mcp => "mcp",
+                TransportId::Wasm => "wasm",
             }
         }
         assert_eq!(name(TransportId::Http), "http");
         assert_eq!(name(TransportId::Ws), "ws");
         assert_eq!(name(TransportId::Grpc), "grpc");
         assert_eq!(name(TransportId::Mcp), "mcp");
+        assert_eq!(name(TransportId::Wasm), "wasm");
     }
 
     #[test]

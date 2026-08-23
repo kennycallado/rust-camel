@@ -286,7 +286,8 @@ jobs:
                        examples/wasm-streaming-plugin/guest \
                        examples/security-wasm-policy/guest \
                        examples/security-wasm-policy/guest-init-check \
-                       examples/wasm-example/guest; do
+                       examples/wasm-example/guest \
+                       crates/components/camel-component-wasm/tests/fixtures/conflicting-bind-guest; do
             echo "::group::Building $guest"
             (cd "$guest" && cargo build --target wasm32-wasip2 2>&1)
             echo "::endgroup::"

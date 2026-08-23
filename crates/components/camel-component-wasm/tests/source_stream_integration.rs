@@ -82,8 +82,17 @@ fn make_consumer(guest_config: Vec<(String, String)>) -> WasmSourceConsumer {
         timeout_secs: 30,
         ..WasmConfig::default()
     };
+    // Derive the endpoint URI from the same guest-config entries so the
+    // consumer's naming key mirrors the factory-built `wasm:...?...` URI.
+    let query = guest_config
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let uri = format!("wasm:guest.wasm?{query}");
     WasmSourceConsumer::new(
         wasm_path,
+        uri,
         config,
         guest_config,
         Arc::new(camel_component_api::NoOpComponentContext),
@@ -670,6 +679,7 @@ async fn idle_source_survives_past_timeout() {
     };
     let mut consumer = WasmSourceConsumer::new(
         wasm_path,
+        format!("wasm:guest.wasm?bind=127.0.0.1:{port}&path=/webhook"),
         config,
         guest_config,
         Arc::new(camel_component_api::NoOpComponentContext),

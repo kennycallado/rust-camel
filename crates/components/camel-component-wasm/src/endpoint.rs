@@ -45,6 +45,7 @@ impl Endpoint for WasmEndpoint {
         let guest_config = crate::source_consumer::parse_guest_config(&self.uri);
         let consumer = crate::source_consumer::WasmSourceConsumer::new(
             self.module_path.clone(),
+            self.uri.clone(),
             self.config.clone(),
             guest_config,
             self.registry.clone(),

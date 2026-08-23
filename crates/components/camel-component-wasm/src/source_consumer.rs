@@ -10,7 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camel_api::CamelError;
-use camel_component_api::{ComponentContext, ConcurrencyModel, Consumer, ConsumerContext};
+use camel_api::security_policy::{AccessMode, RouteSecurityPlan, TransportId};
+use camel_component_api::{
+    ComponentContext, ConcurrencyModel, Consumer, ConsumerContext, SecurityContext,
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -22,7 +25,7 @@ use crate::source_bindings::Source;
 use crate::source_bindings::camel::plugin::source_host::CapabilityRequest;
 use crate::source_host::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, HttpListenerHandle, SourceChannels, SourceHostState,
-    add_to_linker, run_http_listener, run_pipeline_bridge,
+    WasmSourceKernelAuth, add_to_linker, run_http_listener, run_pipeline_bridge,
 };
 
 /// Epoch deadline (in ticks) granted to the guest's `configure()` call.
@@ -36,6 +39,9 @@ const CONFIGURE_EPOCH_DEADLINE: u64 = u64::MAX;
 /// Consumer backed by a WASM `source` world component.
 pub struct WasmSourceConsumer {
     module_path: PathBuf,
+    /// Full `wasm:...` endpoint URI — the naming key for bind-gate and
+    /// bind-conflict errors (the consumer has no other route identity).
+    endpoint_uri: String,
     guest_config: Vec<(String, String)>,
     config: WasmConfig,
     #[allow(dead_code)]
@@ -45,17 +51,27 @@ pub struct WasmSourceConsumer {
     run_task: Option<JoinHandle<Result<(), CamelError>>>,
     listener_task: Option<JoinHandle<()>>,
     bridge_task: Option<JoinHandle<()>>,
+    /// Kernel authentication state (plan + providers) captured from the
+    /// route's security context. `None` until `set_security_context`
+    /// delivers a context carrying both pieces.
+    kernel: Option<Arc<WasmSourceKernelAuth>>,
+    /// The whole classification plan captured from the security context —
+    /// not just the access mode. Task 1.4's bind-gate snapshot needs the
+    /// full plan even when providers are absent (plan-only contexts).
+    plan: Option<RouteSecurityPlan>,
 }
 
 impl WasmSourceConsumer {
     pub fn new(
         module_path: PathBuf,
+        uri: impl Into<String>,
         config: WasmConfig,
         guest_config: Vec<(String, String)>,
         registry: Arc<dyn ComponentContext>,
     ) -> Self {
         Self {
             module_path,
+            endpoint_uri: uri.into(),
             guest_config,
             config,
             registry,
@@ -64,7 +80,18 @@ impl WasmSourceConsumer {
             run_task: None,
             listener_task: None,
             bridge_task: None,
+            kernel: None,
+            plan: None,
         }
+    }
+
+    /// Test accessor for the captured classification mode.
+    ///
+    /// Integration tests are off-crate and cannot read the `pub(crate)`
+    /// kernel fields; this exposes only what the capture tests pin.
+    #[doc(hidden)]
+    pub fn plan_access_mode(&self) -> Option<AccessMode> {
+        self.plan.as_ref().map(|p| p.access_mode.clone())
     }
 }
 
@@ -109,6 +136,8 @@ impl Consumer for WasmSourceConsumer {
                 exchange_tx: channels.exchange_tx,
                 cancel_token: cancel.clone(),
                 max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+                pending_principal: None,
+                accept_outstanding: false,
             },
         );
 
@@ -185,6 +214,64 @@ impl Consumer for WasmSourceConsumer {
         })?;
         let path_filter = listener_spec.path.clone();
 
+        // 12b. Resolve the effective bind (Task 1.4): the operator `bind`
+        // (guest-config entry captured by `parse_guest_config` from the URI
+        // query) must agree with the guest's declared listener bind. Equal
+        // after SocketAddr parse-and-compare → operator bind (canonical
+        // form); absent → guest bind; different → refuse to start, naming
+        // the route URI, the operator bind, and the guest bind. Never bind
+        // silently on either side of a conflict.
+        let operator_bind = self
+            .guest_config
+            .iter()
+            .find(|(key, _)| key == "bind")
+            .map(|(_, value)| value.clone());
+        let bind_addr = if let Some(operator_bind) = operator_bind.as_deref() {
+            // An unparseable operator bind can never equal the (already
+            // parsed) guest bind — it falls into the same conflict refusal.
+            match operator_bind.parse::<std::net::SocketAddr>() {
+                Ok(operator_addr) if operator_addr == bind_addr => bind_addr,
+                _ => {
+                    return Err(CamelError::RouteError(format!(
+                        "wasm source '{}': operator bind '{operator_bind}' conflicts with \
+                         guest-declared bind '{}'",
+                        self.endpoint_uri, listener_spec.bind
+                    )));
+                }
+            }
+        } else {
+            bind_addr
+        };
+
+        // 12c. ADR-0061 per-bind exposure gate, immediately before the
+        // socket is bound — a refused route never spawns a listener. The
+        // gate plan is the EXACT retained classification: the kernel plan
+        // (plan + providers captured), else the plan-only classification,
+        // else the Public default `compile_route_security_plan` builds for
+        // undeclared routes (a non-Public classification without wiring
+        // yields NO Public routes, so the gate passes — the fail-closed
+        // denial happens per-request, Task 2.2).
+        let gate_plan = if let Some(kernel) = self.kernel.as_ref() {
+            kernel.plan.clone()
+        } else if let Some(plan) = self.plan.as_ref() {
+            plan.clone()
+        } else {
+            RouteSecurityPlan {
+                access_mode: AccessMode::Public,
+                provider_ref: None,
+                transport: TransportId::Wasm,
+                credential_sources: Vec::new(),
+                audience_binding: None,
+            }
+        };
+        let bind_key = bind_addr.to_string();
+        camel_auth::enforce_bind_exposure_gate(
+            &bind_key,
+            bind_addr.ip().is_loopback(),
+            &[(self.endpoint_uri.as_str(), &gate_plan)],
+            crate::WasmSourceBindAcks::global().acknowledged(&bind_key),
+        )?;
+
         // 13. Bind the TCP listener synchronously BEFORE spawning, so a bind
         // failure (port in use, permission denied) surfaces as a start()
         // error rather than a background warning. Without this the guest
@@ -198,12 +285,24 @@ impl Consumer for WasmSourceConsumer {
             })?;
         tracing::info!(%bind_addr, "source HTTP listener bound");
 
-        // 14. Spawn HTTP listener task (serve on the already-bound listener)
+        // 14. Spawn HTTP listener task (serve on the already-bound listener).
+        // Task 2.2: clone the kernel + derived classification out of the
+        // consumer before the task spawns — the listener owns the host-edge
+        // handshake (deny 401 before the request channel is touched).
+        let kernel = self.kernel.clone();
+        let plan_access = self.plan.as_ref().map(|p| p.access_mode.clone());
         let listener_cancel = cancel.clone();
         let request_tx = channels.request_tx;
         let lt = tokio::spawn(async move {
-            if let Err(e) =
-                run_http_listener(tcp_listener, path_filter, request_tx, listener_cancel).await
+            if let Err(e) = run_http_listener(
+                tcp_listener,
+                path_filter,
+                request_tx,
+                listener_cancel,
+                kernel,
+                plan_access,
+            )
+            .await
             {
                 warn!("WASM source HTTP listener exited: {e:?}");
             }
@@ -317,6 +416,20 @@ impl Consumer for WasmSourceConsumer {
         ConcurrencyModel::Sequential
     }
 
+    /// Capture the route's security classification before `start()`.
+    ///
+    /// The whole compiled plan is retained regardless of provider presence
+    /// (plan-only contexts carry classification without wiring). The kernel
+    /// state additionally requires providers: without them no principal can
+    /// be minted, so the handshake stays unwired and non-Public requests
+    /// fail closed at the host edge (Task 2.2). Credential-source capability
+    /// for `wasm:` is enforced centrally at plan compilation
+    /// (`credential_source_allowed`) — not re-validated here.
+    fn set_security_context(&mut self, ctx: SecurityContext) {
+        self.plan = ctx.plan.clone();
+        self.kernel = WasmSourceKernelAuth::from_security_context(&ctx).map(Arc::new);
+    }
+
     fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
         self.run_task.take()
     }
@@ -382,6 +495,7 @@ mod tests {
         };
         let mut consumer = WasmSourceConsumer::new(
             PathBuf::from("unused.wasm"),
+            "wasm:unused.wasm",
             config,
             Vec::new(),
             Arc::new(camel_component_api::NoOpComponentContext),
@@ -412,6 +526,7 @@ mod tests {
         };
         let mut consumer = WasmSourceConsumer::new(
             PathBuf::from("unused.wasm"),
+            "wasm:unused.wasm",
             config,
             Vec::new(),
             Arc::new(camel_component_api::NoOpComponentContext),

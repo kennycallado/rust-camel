@@ -8,6 +8,56 @@
 ADR-0060
 **Origin:** OpenSpec change `unify-transport-auth` (bd rc-fzgm)
 
+## Amendment (rc-f79u, 2026-08-23): wasm source joins the kernel
+
+The wasm source transport is the fifth kernel transport. `TransportId`
+gains the `Wasm` variant. The transport converges on the
+boundary-authentication shape (Gen B, like ws and grpc). The host
+authenticates at the axum host-edge handler, where the raw request
+exists. The guest never observes authentication. Denials never reach
+`accept-http`. Accepted requests keep the 202-immediate-ack semantics
+unchanged. The WIT contract is untouched.
+
+### Boundary authentication
+
+The host-edge handler runs `kernel_authenticate` before the guest is
+woken. A denial renders 401 (`unauthenticated`) in the transport idiom.
+A non-Public plan without kernel wiring denies with 401. Missing wiring
+never degrades to Public.
+The host edge performs authentication only. Authorization stays
+pipeline-owned. Strict dispatch and the policy layers enforce it after
+the Exchange exists.
+
+### Carrier threading
+
+The Exchange does not exist at the auth point. The minted principal
+rides the request metadata as a private `HttpMeta` field. The host
+stashes it into the `SourceHostState` pending slot. The slot holds one
+outstanding request. `install_carrier` places the principal on the
+Exchange at assembly, when the guest submits the request. The
+one-outstanding-request invariant prevents a follow-up accept from
+poisoning the slot.
+
+### Operator-authoritative bind
+
+The operator bind is authoritative. A guest bind that conflicts with
+the operator bind fails at consumer startup, before `TcpListener::bind`.
+Neither direction overrides silently. Non-loopback binds run
+`enforce_bind_exposure_gate` with `WasmSourceBindAcks`. The CLI wires
+the acks like the MCP bind acks.
+
+### Classification delivery
+
+`SecurityContext.policy` became `Option<Arc<dyn SecurityPolicy>>`.
+`SecurityContext::from_plan` builds plan-only contexts. The route
+controller delivers classification for every staged server route.
+`deliver_security_context` runs at both the start and the resume
+sites. A `wasm:` source route without a plan is `Public` pass-through,
+subject to the per-bind exposure gate.
+
+The four-transport references below (Rule 8, Consequences)
+now read five. The wasm source is the fifth.
+
 ## Context
 
 Server-component authentication lived in two wiring generations. Gen A
@@ -167,7 +217,7 @@ same kernel.
 
 **Rule 8 (mandatory MCP `security_policy`), superseded.** The
 presence-only bind gate is replaced by the kernel's per-bind exposure
-gate with uniform semantics across all four transports. The
+gate with uniform semantics across all five transports. The
 component-local MCP gate is removed when Phase 2 converges the MCP
 registry onto the kernel gate. The route-level enforcement gate
 (headers copied to the Exchange, route policy before steps) is
@@ -175,7 +225,7 @@ preserved as per-route dispatch enforcement.
 
 ## Consequences
 
-- All four server transports converge on one kernel. Duplicate Gen A /
+- All five server transports converge on one kernel. Duplicate Gen A /
   Gen B authentication is deleted after convergence (Phase 2).
 - Declared security never silently downgrades. Missing wiring fails
   classification, and a non-Public route without a principal denies.

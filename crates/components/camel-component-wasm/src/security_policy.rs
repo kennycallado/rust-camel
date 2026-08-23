@@ -52,6 +52,7 @@ impl SecurityPolicy for WasmSecurityPolicy {
             TransportId::Ws => "ws",
             TransportId::Grpc => "grpc",
             TransportId::Mcp => "mcp",
+            TransportId::Wasm => "wasm",
         };
         exchange.set_property("camel.auth.transport", transport);
 

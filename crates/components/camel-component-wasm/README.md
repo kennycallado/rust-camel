@@ -617,13 +617,13 @@ In addition to the standard processor query parameters, sources accept:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `bind` | socket address | `0.0.0.0:8080` | Address the host-granted HTTP listener binds. Surfaced as a `source-config` key to the guest. |
+| `bind` | socket address | `127.0.0.1:8080` | Address the host-granted HTTP listener binds. Surfaced as a `source-config` key to the guest. Non-loopback binds serving `Public` routes require `[binds."<addr>"] allow_public_exposure = true` (ADR-0061 Rule 4). |
 | `path` | string | (all paths) | URL path filter the listener accepts (e.g. `/webhook`). |
 
-`bind` and `path` are passed into the guest's `configure()` as `(key, value)` pairs; the guest reflects them back inside its `source-plan`. The TCP listener is bound synchronously during `start()` so a bind failure (port in use, permission denied) surfaces as a start error rather than a silent background warning.
+`bind` and `path` are passed into the guest's `configure()` as `(key, value)` pairs; the guest reflects them back inside its `source-plan`. The TCP listener is bound synchronously during `start()` so a bind failure (port in use, permission denied) surfaces as a start error rather than a silent background warning. An operator `bind` that conflicts with the guest-declared bind fails startup naming both addresses.
 
 ```
-wasm:wasm-source-webhook-guest.wasm?bind=0.0.0.0:8080&path=/webhook
+wasm:wasm-source-webhook-guest.wasm?bind=127.0.0.1:8080&path=/webhook
 wasm:plugins/my-source.wasm?bind=127.0.0.1:9090&timeout=30
 ```
 

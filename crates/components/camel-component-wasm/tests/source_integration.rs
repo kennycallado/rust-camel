@@ -106,14 +106,25 @@ fn make_consumer_context(
 }
 
 /// Create a WasmSourceConsumer with the given guest config and a short timeout.
+///
+/// The endpoint URI is derived from the same guest-config entries so the
+/// consumer's naming key mirrors the `wasm:...?bind=...&path=...` URI the
+/// factory would build from this config.
 fn make_consumer(guest_config: Vec<(String, String)>) -> WasmSourceConsumer {
     let wasm_path = require_guest_wasm();
     let config = WasmConfig {
         timeout_secs: 5,
         ..WasmConfig::default()
     };
+    let query = guest_config
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let uri = format!("wasm:guest.wasm?{query}");
     WasmSourceConsumer::new(
         wasm_path,
+        uri,
         config,
         guest_config,
         Arc::new(camel_component_api::NoOpComponentContext),

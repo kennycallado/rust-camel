@@ -312,11 +312,16 @@ impl ConsumerContext {
 
 /// Security context passed to a consumer before `start()`.
 ///
-/// Carries the `SecurityPolicy` from the route controller so consumers
-/// can register auth state before accepting connections. Authentication
-/// itself runs through the kernel fields (`plan` + `providers`).
+/// Carries the route's security classification so consumers can register
+/// auth state before accepting connections. Declared routes carry the
+/// `SecurityPolicy` from the route controller; plan-only contexts (routes
+/// without a policy declaration) carry just the compiled
+/// [`RouteSecurityPlan`] (`policy = None`). Authentication itself runs
+/// through the kernel fields (`plan` + `providers`).
 pub struct SecurityContext {
-    pub policy: Arc<dyn SecurityPolicy>,
+    /// Route policy, when the route declared one. `None` for plan-only
+    /// contexts built via [`SecurityContext::from_plan`].
+    pub policy: Option<Arc<dyn SecurityPolicy>>,
     pub credential_sources: Vec<CredentialSource>,
     /// Compiled `RouteSecurityPlan` for the route, when one has been compiled.
     ///
@@ -334,7 +339,7 @@ pub struct SecurityContext {
 impl SecurityContext {
     pub fn new(policy: impl SecurityPolicy + 'static) -> Self {
         Self {
-            policy: Arc::new(policy),
+            policy: Some(Arc::new(policy)),
             credential_sources: vec![CredentialSource::AuthorizationHeader],
             plan: None,
             providers: None,
@@ -343,9 +348,22 @@ impl SecurityContext {
 
     pub fn from_arc(policy: Arc<dyn SecurityPolicy>) -> Self {
         Self {
-            policy,
+            policy: Some(policy),
             credential_sources: vec![CredentialSource::AuthorizationHeader],
             plan: None,
+            providers: None,
+        }
+    }
+
+    /// Build a plan-only context: no policy, no providers, empty credential
+    /// sources. The controller delivers a route's compiled classification
+    /// (e.g. the `Public` default for an undeclared server route) through
+    /// this form.
+    pub fn from_plan(plan: camel_api::security_policy::RouteSecurityPlan) -> Self {
+        Self {
+            policy: None,
+            credential_sources: Vec::new(),
+            plan: Some(plan),
             providers: None,
         }
     }
@@ -374,7 +392,7 @@ impl SecurityContext {
 impl Clone for SecurityContext {
     fn clone(&self) -> Self {
         Self {
-            policy: Arc::clone(&self.policy),
+            policy: self.policy.clone(),
             credential_sources: self.credential_sources.clone(),
             plan: self.plan.clone(),
             providers: self.providers.as_ref().map(Arc::clone),
@@ -385,7 +403,7 @@ impl Clone for SecurityContext {
 impl std::fmt::Debug for SecurityContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityContext")
-            .field("policy", &"<SecurityPolicy>")
+            .field("policy", &self.policy.as_ref().map(|_| "<SecurityPolicy>"))
             .field("credential_sources", &self.credential_sources)
             .field("plan", &self.plan)
             .field(
@@ -787,7 +805,7 @@ mod tests {
     #[test]
     fn test_security_context_new() {
         let ctx = SecurityContext::new(StubPolicy);
-        assert!(Arc::strong_count(&ctx.policy) == 1);
+        assert!(Arc::strong_count(ctx.policy.as_ref().expect("new sets policy")) == 1);
         assert_eq!(
             ctx.credential_sources,
             vec![camel_auth::CredentialSource::AuthorizationHeader]
@@ -798,7 +816,10 @@ mod tests {
     fn test_security_context_from_arc() {
         let policy: Arc<dyn SecurityPolicy> = Arc::new(StubPolicy);
         let ctx = SecurityContext::from_arc(Arc::clone(&policy));
-        assert!(Arc::ptr_eq(&ctx.policy, &policy));
+        assert!(Arc::ptr_eq(
+            ctx.policy.as_ref().expect("from_arc sets policy"),
+            &policy
+        ));
         assert_eq!(
             ctx.credential_sources,
             vec![camel_auth::CredentialSource::AuthorizationHeader]
@@ -809,7 +830,10 @@ mod tests {
     fn test_security_context_clone_independent() {
         let ctx = SecurityContext::new(StubPolicy);
         let cloned = ctx.clone();
-        assert!(Arc::ptr_eq(&ctx.policy, &cloned.policy));
+        assert!(Arc::ptr_eq(
+            ctx.policy.as_ref().expect("source policy"),
+            cloned.policy.as_ref().expect("cloned policy"),
+        ));
         assert_eq!(ctx.credential_sources, cloned.credential_sources);
     }
 

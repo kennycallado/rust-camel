@@ -265,6 +265,13 @@ pub async fn run(
     // acked. Only when the mcp component is compiled in.
     #[cfg(feature = "mcp")]
     camel_component_mcp::McpServerRegistry::global().set_bind_exposure_acks(bind_acks.clone());
+    // Wasm source binds are likewise invisible to the route-level gate
+    // (the `wasm:` gate runs inside the source consumer; there is no
+    // shared listener registry), so the same ack map threads into the
+    // wasm component's per-bind gate — fail-closed without ack. Only
+    // when the wasm component is compiled in.
+    #[cfg(feature = "wasm")]
+    install_wasm_bind_acks(&bind_acks);
     ctx.set_bind_exposure_acks(camel_core::route_controller::BindExposureAcks::new(
         bind_acks,
     ))
@@ -730,6 +737,17 @@ fn resolve_route_patterns(
     resolve_route_patterns_with(&default_patterns(), routes_override, config_routes)
 }
 
+/// Install per-bind public-exposure acks into the wasm component's
+/// source-bind gate (wasm-source-auth-kernel, Task 1.5). Wasm source
+/// consumers bind outside the route-level gate, so the same ack map the
+/// route controller gets must also reach `WasmSourceBindAcks` before
+/// any route starts staging. Only exists when the wasm component is
+/// compiled in.
+#[cfg(feature = "wasm")]
+fn install_wasm_bind_acks(bind_acks: &std::collections::HashMap<String, bool>) {
+    camel_component_wasm::WasmSourceBindAcks::global().set(bind_acks.clone());
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -833,6 +851,38 @@ mod tests {
             vec![p],
             "a literal test-doc path must reach discovery unfiltered; \
              ReservedTestSuffix is discovery's job"
+        );
+    }
+
+    /// Task 1.5 (wasm-source-auth-kernel): `camel run` threads the
+    /// per-bind exposure acks from `[binds."<addr>"]` into the wasm
+    /// component's source-bind gate. The wiring helper invoked at run
+    /// startup must install the config-built ack map so
+    /// `WasmSourceBindAcks::acknowledged` reflects what the config set.
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn wasm_bind_acks_wired_from_config() {
+        const TEST_BIND: &str = "0.0.0.0:41234"; // distinctive; no other test acks it
+
+        let camel_config: camel_config::CamelConfig = toml::from_str(&format!(
+            r#"[binds."{TEST_BIND}"]
+allow_public_exposure = true
+"#
+        ))
+        .expect("parse test CamelConfig"); // allow-unwrap
+
+        // Same construction as the run command's wiring site.
+        let bind_acks: std::collections::HashMap<String, bool> = camel_config
+            .binds
+            .iter()
+            .map(|(k, v)| (k.clone(), v.allow_public_exposure))
+            .collect();
+
+        install_wasm_bind_acks(&bind_acks);
+
+        assert!(
+            camel_component_wasm::WasmSourceBindAcks::global().acknowledged(TEST_BIND),
+            "run wiring must install wasm bind acks from CamelConfig.binds"
         );
     }
 }

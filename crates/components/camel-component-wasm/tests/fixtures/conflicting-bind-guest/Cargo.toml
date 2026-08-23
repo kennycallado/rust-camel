@@ -1,0 +1,13 @@
+[package]
+name = "conflicting-bind-guest"
+description = "WASM source test fixture — declares its listener bind independent of the operator `bind` config entry (wasm-source-auth-kernel, Task 1.4)"
+version = "0.8.1"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.58"

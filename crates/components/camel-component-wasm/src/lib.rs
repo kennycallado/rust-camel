@@ -34,6 +34,7 @@ pub mod runtime;
 pub mod security_policy;
 pub mod security_policy_bindings;
 pub mod serde_bridge;
+mod source_auth_edge;
 pub mod source_bindings;
 pub mod source_consumer;
 pub mod source_host;
@@ -52,8 +53,11 @@ pub use health::WasmHealthCheck;
 pub use security_policy::{WasmSecurityPolicy, build_security_policy_registry};
 pub use state_store::StateStore;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 
 use camel_api::CamelError;
@@ -150,5 +154,52 @@ impl Component for WasmComponent {
             self.registry.clone(),
             wasm_config,
         )))
+    }
+}
+
+/// Crate-global per-bind public-exposure acknowledgements for `wasm:`
+/// source routes (ADR-0061 Rule 4). Mirrors the mcp registry's bind-ack
+/// store (`McpServerRegistry`, camel-component-mcp/src/registry.rs): the
+/// CLI installs this map from `CamelConfig.binds`
+/// (`allow_public_exposure`) so the bind gate in
+/// `WasmSourceConsumer::start()` fails closed on non-loopback binds until
+/// acknowledged. The `wasm:` gate runs inside the consumer (no shared
+/// listener registry to hang it on), so the store lives here instead.
+pub struct WasmSourceBindAcks {
+    acks: OnceLock<RwLock<HashMap<String, bool>>>,
+}
+
+impl WasmSourceBindAcks {
+    /// Returns the process-global singleton (init-once).
+    pub fn global() -> &'static Self {
+        static INSTANCE: OnceLock<WasmSourceBindAcks> = OnceLock::new();
+        INSTANCE.get_or_init(|| WasmSourceBindAcks {
+            acks: OnceLock::new(),
+        })
+    }
+
+    /// Install per-bind public-exposure acknowledgements. Replaces the
+    /// whole map (interior mutability; no reset hook — tests install a
+    /// fresh map or use distinct ephemeral ports).
+    pub fn set(&self, acks: HashMap<String, bool>) {
+        let lock = self.acks.get_or_init(|| RwLock::new(HashMap::new()));
+        *lock
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = acks;
+    }
+
+    /// Whether the operator acknowledged public exposure for `bind`
+    /// (bind address string, e.g. `"0.0.0.0:8080"`). Absent or never
+    /// installed → false (fail-closed).
+    pub fn acknowledged(&self, bind: &str) -> bool {
+        let lock = match self.acks.get() {
+            Some(lock) => lock,
+            None => return false,
+        };
+        lock.read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(bind)
+            .copied()
+            .unwrap_or(false)
     }
 }

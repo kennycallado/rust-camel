@@ -15,17 +15,55 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::{Accessor, AccessorTask, HasSelf, Linker, Resource, ResourceTable};
 
+use camel_api::security_policy::{AccessMode, RouteSecurityPlan};
 use camel_api::{Body, CamelError, Exchange, ExchangePattern, Message, StreamBody, Value};
+use camel_auth::AuthenticatedPrincipal;
+use camel_auth::ProviderRegistry;
+use camel_component_api::SecurityContext;
 use camel_component_api::consumer::ConsumerContext;
 
 use crate::return_stream::{
     DEFAULT_DRAIN_CHANNEL_BOUND, DrainCoord, DrainEvent, StreamReturnable, TerminalSlot,
     drain_guest_stream, receiver_to_body_stream,
 };
+use crate::source_auth_edge::{EdgeAuthOutcome, authenticate_edge};
 use crate::source_bindings::camel::plugin::source_host::{HttpRequest, SubmitOutcome};
 use crate::source_bindings::camel::plugin::types::{
     WasmBody, WasmExchange, WasmMessage, WasmPattern,
 };
+
+/// Kernel authentication state captured by [`WasmSourceConsumer`] when the
+/// route controller delivers the route's [`SecurityContext`] before
+/// `start()` (`wasm-source-auth-kernel`, Task 1.3).
+///
+/// Construction-order lifecycle: the compiled plan and the provider registry
+/// arrive from the route's security context through
+/// `Consumer::set_security_context` — before the listener binds and before
+/// any request reaches the guest. A context lacking either piece leaves the
+/// handshake unwired: the classification plan is still retained separately
+/// by the consumer, so a non-Public classification without kernel state
+/// fails closed per request (Task 2.2) rather than degrading to Public.
+// Fields are read by the bind-gate snapshot (Task 1.4) and the host-edge
+// handshake (Task 2.2 — plan via credential extraction + kernel mint,
+// providers via `kernel_authenticate`).
+pub(crate) struct WasmSourceKernelAuth {
+    pub(crate) plan: RouteSecurityPlan,
+    pub(crate) providers: Arc<ProviderRegistry>,
+}
+
+impl WasmSourceKernelAuth {
+    /// Capture the kernel state from a route's security context.
+    ///
+    /// `None` unless both the compiled plan and the provider registry are
+    /// present: a plan without providers can never mint a principal, and a
+    /// registry without a plan has nothing to enforce.
+    pub(crate) fn from_security_context(ctx: &SecurityContext) -> Option<Self> {
+        Some(Self {
+            plan: ctx.plan.clone()?,
+            providers: ctx.providers.clone()?,
+        })
+    }
+}
 
 /// Concrete type for the http-listener resource in the ResourceTable.
 /// Stateless — the handle is a marker that the guest holds while running.
@@ -42,6 +80,14 @@ pub struct HttpMeta {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
+    /// Principal minted at the host edge before the request entered the
+    /// channel (Task 2.1; the edge handshake that mints it lands in Task
+    /// 2.2). Private on purpose: the guest never observes it — the
+    /// `accept_http` conversion maps only the public fields into the WIT
+    /// `HttpRequest` — and `accept_http` stashes it into
+    /// [`SourceHostState::pending_principal`] for the Exchange that
+    /// `submit-exchange` assembles next.
+    principal: Option<AuthenticatedPrincipal>,
 }
 
 /// Per-request body chunk receiver. The host's axum handler streams body
@@ -139,6 +185,18 @@ pub struct SourceHostState {
     /// the stream producer terminates with an overflow error. Restores the
     /// DoS backstop that the old `to_bytes(MAX_BODY_BYTES)` path provided.
     pub max_request_body_bytes: u64,
+    /// Principal minted at the host edge for the most recently accepted,
+    /// not-yet-submitted request (Task 2.1). Stashed by `accept_http`,
+    /// consumed by `submit_exchange` when the typed carrier is installed on
+    /// the native Exchange. `None` while no request is in flight or when the
+    /// edge handshake minted no principal.
+    pub pending_principal: Option<AuthenticatedPrincipal>,
+    /// One-outstanding-request invariant marker: an `accept-http` returned
+    /// without an intervening `submit-exchange`. While set, a further
+    /// `accept-http` fails closed instead of overwriting
+    /// `pending_principal` — the WIT contract does not force accept/submit
+    /// alternation, so the host enforces it for identity integrity.
+    pub accept_outstanding: bool,
 }
 
 impl wasmtime_wasi::WasiView for SourceHostState {
@@ -147,6 +205,56 @@ impl wasmtime_wasi::WasiView for SourceHostState {
             ctx: &mut self.wasi,
             table: &mut self.table,
         }
+    }
+}
+
+// ─── Pending-principal slot (Task 2.1) ─────────────────────────────────────
+
+impl SourceHostState {
+    /// Stash the principal of a just-accepted request and mark the
+    /// accept/submit slot outstanding.
+    ///
+    /// One-outstanding-request invariant: the WIT contract does not force
+    /// accept/submit alternation, and a buggy guest may accept twice — the
+    /// host must not let a second accept overwrite the first request's
+    /// identity. Returns `Err` (fail closed) when an accept is already
+    /// outstanding; the caller surfaces it as the WIT error result for the
+    /// second accept. `Ok` replaces the slot unconditionally (the previous
+    /// request, if any, was already submitted and consumed it).
+    fn stash_pending_principal(
+        &mut self,
+        principal: Option<AuthenticatedPrincipal>,
+    ) -> Result<(), &'static str> {
+        if self.accept_outstanding {
+            return Err(
+                "accept-http rejected: a previous request is outstanding; submit-exchange it before accepting again",
+            );
+        }
+        self.accept_outstanding = true;
+        self.pending_principal = principal;
+        Ok(())
+    }
+
+    /// Take the stashed principal, install it as the submitted Exchange's
+    /// typed carrier, and clear the outstanding marker — the slot is free
+    /// for the next accept.
+    ///
+    /// Called by `submit-exchange` after the native Exchange is assembled
+    /// and before it is sent down the pipeline channel.
+    fn install_pending_carrier(&mut self, exchange: &mut Exchange) {
+        if let Some(principal) = self.pending_principal.take() {
+            camel_auth::install_carrier(exchange, &principal);
+        }
+        self.accept_outstanding = false;
+    }
+
+    /// Clear the pending-principal slot and the outstanding marker after a
+    /// failed accept (body-assembly failure): the request never reaches the
+    /// guest, so the slot must not poison a follow-up accept under the
+    /// one-outstanding-request invariant.
+    fn abort_pending_accept(&mut self) {
+        self.pending_principal = None;
+        self.accept_outstanding = false;
     }
 }
 
@@ -213,9 +321,21 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
         drop(guard);
 
         // None => channel closed (listener exited); treat as cancellation.
-        let Some((meta, mut body_rx)) = meta_and_body else {
+        let Some((mut meta, mut body_rx)) = meta_and_body else {
             return Ok(None);
         };
+
+        // One-outstanding-request invariant (Task 2.1): stash the
+        // edge-minted principal for the Exchange `submit-exchange` assembles
+        // next. A second accept while one is outstanding fails closed — the
+        // earlier request's identity is never overwritten.
+        if let Err(msg) =
+            accessor.with(|mut view| view.get().stash_pending_principal(meta.principal.take()))
+        {
+            // log-policy: handler-owned — the violation belongs to the guest.
+            tracing::warn!("source: accept-http invariant: {msg}");
+            return Err(SourceWasmError::ProcessorError(msg.to_string()));
+        }
 
         // Build a BoxStream from the per-request body channel via poll_fn.
         // NOT receiver_to_body_stream — that is DrainEvent-specific (the
@@ -241,6 +361,11 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
             Err(e) => {
                 // log-policy: system-broken
                 tracing::error!("failed to assemble stream body for accept-http: {e}");
+                // The request is dropped on this failure return; clear the
+                // stashed principal slot and the outstanding marker so a
+                // follow-up accept is not poisoned by the one-outstanding
+                // invariant.
+                accessor.with(|mut view| view.get().abort_pending_accept());
                 None
             }
         };
@@ -270,6 +395,11 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
         // The body is `Empty` for the stream case; it is overwritten with
         // `Body::Stream` after the drain is spawned.
         let mut native = source_exchange_to_native(exchange);
+
+        // Install the typed carrier from the principal stashed by
+        // accept-http (Task 2.1) BEFORE the exchange reaches the pipeline.
+        accessor.with(|mut view| view.get().install_pending_carrier(&mut native));
+
         let (reply_tx, reply_rx) = oneshot::channel();
 
         if let Some((stream_reader, terminal, stream_metadata)) = stream_parts {
@@ -496,12 +626,21 @@ pub fn add_to_linker(linker: &mut Linker<SourceHostState>) -> Result<(), wasmtim
 /// accepts the request for processing; it does not guarantee full body
 /// receipt.
 ///
+/// # Host-edge authentication (Task 2.2)
+///
+/// For non-Public classifications the handler runs the kernel handshake
+/// (see [`crate::source_auth_edge::authenticate_edge`]) BEFORE the request
+/// channel is touched: a denial renders 401 (`unauthenticated`) and returns
+/// without `tx.send` and without reading the body — the guest never wakes.
+///
 /// Shuts down gracefully when `cancel` is triggered.
-pub async fn run_http_listener(
+pub(crate) async fn run_http_listener(
     listener: tokio::net::TcpListener,
     path_filter: Option<String>,
     request_tx: mpsc::Sender<RequestChannelItem>,
     cancel: CancellationToken,
+    kernel: Option<Arc<WasmSourceKernelAuth>>,
+    plan_access: Option<AccessMode>,
 ) -> Result<(), CamelError> {
     use axum::Router;
     use axum::extract::State;
@@ -513,6 +652,8 @@ pub async fn run_http_listener(
     struct ListenerState {
         tx: mpsc::Sender<RequestChannelItem>,
         cancel: CancellationToken,
+        kernel: Option<Arc<WasmSourceKernelAuth>>,
+        plan_access: Option<AccessMode>,
     }
 
     async fn handler(
@@ -520,6 +661,29 @@ pub async fn run_http_listener(
         req: Request<axum::body::Body>,
     ) -> Response {
         let (parts, body) = req.into_parts();
+
+        // Host-edge kernel handshake (Task 2.2) BEFORE the request channel
+        // is touched. Driven by the classification (`plan_access`), never by
+        // kernel presence alone: absent/Public classifications pass through,
+        // non-Public ones must mint or deny (fail-closed without wiring).
+        // A denial returns without `tx.send` and without reading the body.
+        let principal = match authenticate_edge(
+            state.plan_access.as_ref(),
+            state.kernel.as_deref(),
+            &parts.headers,
+            &parts.uri,
+        )
+        .await
+        {
+            Ok(EdgeAuthOutcome::PassThrough) => None,
+            Ok(EdgeAuthOutcome::Authenticated(principal)) => Some(*principal),
+            Err(status) => {
+                return Response::builder()
+                    .status(status)
+                    .body(axum::body::Body::from("unauthenticated"))
+                    .unwrap(); // allow-unwrap
+            }
+        };
 
         // Per-request bounded channel for streaming the body to the guest.
         // Capacity matches the drain-channel bound used elsewhere for
@@ -536,6 +700,10 @@ pub async fn run_http_listener(
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect(),
+            // Principal minted at the host edge above (Task 2.2); `None`
+            // for pass-through classifications and unauthenticated-free
+            // flows.
+            principal,
         };
 
         if state.tx.send((http_meta, body_rx)).await.is_err() {
@@ -591,6 +759,8 @@ pub async fn run_http_listener(
     let state = Arc::new(ListenerState {
         tx: request_tx,
         cancel: cancel.clone(),
+        kernel,
+        plan_access,
     });
 
     let route_path = path_filter
@@ -654,83 +824,4 @@ pub async fn run_pipeline_bridge(
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_source_channels_new() {
-        let channels = SourceChannels::new();
-        assert!(!channels.request_tx.is_closed());
-        assert!(!channels.exchange_tx.is_closed());
-    }
-
-    #[test]
-    fn test_source_channels_default() {
-        let channels = SourceChannels::default();
-        assert!(!channels.request_tx.is_closed());
-    }
-
-    #[test]
-    fn test_request_channel_close_returns_none() {
-        let (tx, mut rx) = mpsc::channel::<RequestChannelItem>(1);
-        drop(tx);
-        let result = std::thread::spawn(move || rx.blocking_recv())
-            .join()
-            .unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_exchange_channel_close_detected() {
-        let (tx, rx) = mpsc::channel::<(Exchange, oneshot::Sender<SubmitOutcome>)>(1);
-        drop(rx);
-        assert!(tx.is_closed());
-    }
-
-    #[test]
-    fn test_cancel_token_is_cancelled() {
-        let token = CancellationToken::new();
-        assert!(!token.is_cancelled());
-        token.cancel();
-        assert!(token.is_cancelled());
-    }
-
-    #[test]
-    fn test_submit_outcome_variants() {
-        let accepted = SubmitOutcome::Accepted;
-        let stopped = SubmitOutcome::Stopped;
-        assert!(matches!(accepted, SubmitOutcome::Accepted));
-        assert!(matches!(stopped, SubmitOutcome::Stopped));
-    }
-
-    #[test]
-    fn source_exchange_to_native_maps_fields() {
-        use crate::source_bindings::camel::plugin::types as src;
-        let wasm = src::WasmExchange {
-            input: src::WasmMessage {
-                headers: vec![("key".to_string(), "val".to_string())],
-                body: src::WasmBody::Text("hello".to_string()),
-            },
-            output: None,
-            properties: vec![("p".to_string(), "v".to_string())],
-            pattern: src::WasmPattern::InOnly,
-            correlation_id: "corr-1".to_string(),
-            route_id: Some("route-1".to_string()),
-            message_id: Some("msg-1".to_string()),
-        };
-
-        let native = source_exchange_to_native(wasm);
-        assert_eq!(native.input.headers.len(), 1);
-        assert_eq!(
-            native.input.headers.get("key"),
-            Some(&camel_api::Value::String("val".to_string()))
-        );
-        assert!(matches!(native.input.body, Body::Text(_)));
-        assert_eq!(
-            native.properties.get("p"),
-            Some(&camel_api::Value::String("v".to_string()))
-        );
-        assert!(matches!(native.pattern, ExchangePattern::InOnly));
-        assert_eq!(native.correlation_id, "corr-1");
-    }
-}
+mod tests;

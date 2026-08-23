@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 
 use camel_api::security_policy::RouteSecurityPlan;
 use camel_api::{CamelError, NoOpMetrics, StepLifecycle, StepShutdownReason};
+use camel_component_api::Consumer;
 use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 
 use crate::lifecycle::adapters::consumer_management;
@@ -25,6 +26,7 @@ use crate::lifecycle::adapters::route_helpers::{
     DrainGuard, handle_is_running, inferred_lifecycle_label, ready_with_backoff,
 };
 use crate::lifecycle::adapters::route_registry::DEFAULT_SHUTDOWN_TIMEOUT;
+use crate::lifecycle::adapters::route_runtime_state::CompiledRoute;
 
 /// Operator acknowledgements for public exposure per bind address and the
 /// per-bind exposure gate (ADR-0061).
@@ -75,6 +77,49 @@ pub(super) fn bind_key_from_uri(uri: &str) -> Option<BindKey> {
         key: authority.to_string(),
         loopback,
     })
+}
+
+/// Wire the route's security context onto a freshly created consumer —
+/// the start and resume paths share this delivery.
+///
+/// Policy-backed routes (`sp_config` + authenticator marker) receive the
+/// policy with its credential sources, the named providers, and the
+/// compiled plan. Without a policy, every staged server route still
+/// carries a compiled plan (Task 1.2) — deliver it plan-only so consumers
+/// enforce the kernel classification (e.g. strict dispatch) from day one.
+/// Routes with neither get no context.
+fn deliver_security_context(consumer: &mut dyn Consumer, compiled: &CompiledRoute) {
+    use camel_component_api::SecurityContext;
+
+    if let (Some(sp_config), Some(_)) = (
+        compiled.security_policy.as_ref(),
+        compiled.security_authenticator.as_ref(),
+    ) {
+        let mut sec_ctx = SecurityContext::from_arc(Arc::clone(&sp_config.policy))
+            .with_credential_sources(sp_config.credential_sources.clone());
+        // Inject the route's named providers so Phase-2 transports (grpc
+        // 2.1, mcp 2.6, ws 2.8, http 2.9) can resolve them from the
+        // SecurityContext instead of holding their own authenticator.
+        if let Some(registry) = &compiled.provider_registry {
+            sec_ctx = sec_ctx.with_providers(Arc::clone(registry));
+        }
+        // Thread the compiled plan (Task 1.8) so transports drive
+        // per-route dispatch enforcement from it.
+        if let Some(plan) = &compiled.security_plan {
+            sec_ctx = sec_ctx.with_plan(plan.clone());
+        }
+        consumer.set_security_context(sec_ctx);
+    } else if let Some(plan) = compiled.security_plan.clone() {
+        // Plan-only delivery (Task 1.2): every staged server route
+        // carries a compiled plan even without a policy declaration —
+        // deliver it so consumers enforce the kernel classification
+        // (e.g. strict dispatch) from day one.
+        let mut sec_ctx = SecurityContext::from_plan(plan);
+        if let Some(registry) = &compiled.provider_registry {
+            sec_ctx = sec_ctx.with_providers(Arc::clone(registry));
+        }
+        consumer.set_security_context(sec_ctx);
+    }
 }
 
 /// ADR-0061 Task 2.9 strict-mode dispatch check (the flip deferred from
@@ -286,12 +331,6 @@ impl camel_api::RouteController for DefaultRouteController {
         // Resolve effective concurrency: route override > consumer default
         let effective_concurrency = concurrency.unwrap_or(consumer_concurrency);
 
-        // Get the managed route for mutation
-        let managed = self
-            .routes
-            .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
-
         // Wire security context before spawning consumer. The
         // `security_authenticator` marker stays in the guard as the
         // route's security classification; the authenticator itself no
@@ -300,26 +339,11 @@ impl camel_api::RouteController for DefaultRouteController {
         // marker term is redundant for DSL routes — it bites programmatic
         // ones (marker without sp_config classifies non-Public but injects
         // no context; strict dispatch fails closed downstream).
-        if let (Some(sp_config), Some(_)) = (
-            managed.compiled.security_policy.as_ref(),
-            managed.compiled.security_authenticator.as_ref(),
-        ) {
-            use camel_component_api::SecurityContext;
-            let mut sec_ctx = SecurityContext::from_arc(Arc::clone(&sp_config.policy))
-                .with_credential_sources(sp_config.credential_sources.clone());
-            // Inject the route's named providers so Phase-2 transports (grpc
-            // 2.1, mcp 2.6, ws 2.8, http 2.9) can resolve them from the
-            // SecurityContext instead of holding their own authenticator.
-            if let Some(registry) = &managed.compiled.provider_registry {
-                sec_ctx = sec_ctx.with_providers(Arc::clone(registry));
-            }
-            // Thread the compiled plan (Task 1.8) so transports drive
-            // per-route dispatch enforcement from it.
-            if let Some(plan) = &managed.compiled.security_plan {
-                sec_ctx = sec_ctx.with_plan(plan.clone());
-            }
-            consumer.set_security_context(sec_ctx);
-        }
+        let managed = self
+            .routes
+            .get_mut(route_id)
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+        deliver_security_context(consumer.as_mut(), &managed.compiled);
 
         // Create channel for consumer to send exchanges
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(256);
@@ -707,23 +731,7 @@ impl camel_api::RouteController for DefaultRouteController {
             .routes
             .get(route_id)
             .expect("invariant: route must exist after prior existence check"); // allow-unwrap
-        if let (Some(sp_config), Some(_)) = (
-            managed.compiled.security_policy.as_ref(),
-            managed.compiled.security_authenticator.as_ref(),
-        ) {
-            use camel_component_api::SecurityContext;
-            let mut sec_ctx = SecurityContext::from_arc(Arc::clone(&sp_config.policy))
-                .with_credential_sources(sp_config.credential_sources.clone());
-            // Inject the route's named providers (see start path above).
-            if let Some(registry) = &managed.compiled.provider_registry {
-                sec_ctx = sec_ctx.with_providers(Arc::clone(registry));
-            }
-            // Thread the compiled plan (Task 1.8; see start path above).
-            if let Some(plan) = &managed.compiled.security_plan {
-                sec_ctx = sec_ctx.with_plan(plan.clone());
-            }
-            consumer.set_security_context(sec_ctx);
-        }
+        deliver_security_context(consumer.as_mut(), &managed.compiled);
 
         // Get the managed route for mutation
         let managed = self

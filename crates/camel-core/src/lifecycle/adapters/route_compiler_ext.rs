@@ -155,10 +155,10 @@ fn build_pipeline_ctx(
 
 /// Map a route's `from` URI scheme to a [`TransportId`].
 ///
-/// Server transports (`http`, `ws`, `grpc`, `mcp`) map to their canonical
-/// transport id. Non-server schemes (e.g. `timer`, `mock`) have no transport
-/// semantics and fall back to `Http`, matching the pre-kernel hardcoded
-/// default in `SecurityPolicyLayer`.
+/// Server transports (`http`, `ws`, `grpc`, `mcp`, `wasm`) map to their
+/// canonical transport id. Non-server schemes (e.g. `timer`, `mock`) have no
+/// transport semantics and fall back to `Http`, matching the pre-kernel
+/// hardcoded default in `SecurityPolicyLayer`.
 pub(crate) fn transport_from_uri(uri: &str) -> TransportId {
     let scheme = uri
         .split([':', '?'])
@@ -170,6 +170,7 @@ pub(crate) fn transport_from_uri(uri: &str) -> TransportId {
         "ws" | "wss" => TransportId::Ws,
         "grpc" => TransportId::Grpc,
         "mcp" => TransportId::Mcp,
+        "wasm" => TransportId::Wasm,
         _ => TransportId::Http,
     }
 }
@@ -188,6 +189,7 @@ fn consumer_transport_from_uri(uri: &str) -> Option<TransportId> {
         "ws" | "wss" => Some(TransportId::Ws),
         "grpc" => Some(TransportId::Grpc),
         "mcp" => Some(TransportId::Mcp),
+        "wasm" => Some(TransportId::Wasm),
         _ => None,
     }
 }
@@ -198,6 +200,7 @@ fn transport_name(transport: TransportId) -> &'static str {
         TransportId::Ws => "ws",
         TransportId::Grpc => "grpc",
         TransportId::Mcp => "mcp",
+        TransportId::Wasm => "wasm",
     }
 }
 
@@ -206,9 +209,11 @@ fn transport_name(transport: TransportId) -> &'static str {
 /// - Http allows all four sources.
 /// - Ws/Mcp allow `AuthorizationHeader`/`Header`/`Cookie` (no `QueryParam`).
 /// - Grpc allows `AuthorizationHeader`/`Header` (no `Cookie`, no `QueryParam`).
+/// - Wasm allows all four sources: a `wasm:` source route carries a full
+///   HTTP listener, so its capability set matches Http.
 fn credential_source_allowed(transport: TransportId, source: &CredentialSource) -> bool {
     match (transport, source) {
-        (TransportId::Http, _) => true,
+        (TransportId::Http, _) | (TransportId::Wasm, _) => true,
         (TransportId::Ws, CredentialSource::QueryParam { .. })
         | (TransportId::Mcp, CredentialSource::QueryParam { .. }) => false,
         (TransportId::Ws, _) | (TransportId::Mcp, _) => true,

@@ -257,6 +257,64 @@ fn compilation_rejects_cookie_on_grpc() {
     assert!(msg.contains("grpc"), "got: {msg}");
 }
 
+// ── wasm: source-route classification (Task 1.2) ──
+
+fn wasm_def(id: &str) -> RouteDefinition {
+    RouteDefinition::new("wasm://guest-fixture.wasm?bind=127.0.0.1:0", vec![]).with_route_id(id)
+}
+
+#[test]
+fn wasm_route_with_security_classifies() {
+    let def = wasm_def("wasm-sec").with_security_policy(allow_policy_config());
+    let plan = compile_route_security_plan(&def, &providers(1, None))
+        .expect("compilation must succeed")
+        .expect("wasm consumer route must get a plan");
+    assert!(
+        matches!(plan.access_mode, AccessMode::Authorized(_)),
+        "declared security must classify Authorized, got {:?}",
+        plan.access_mode
+    );
+    assert_eq!(plan.provider_ref.as_deref(), Some("idp-a"));
+    assert_eq!(plan.transport, TransportId::Wasm);
+}
+
+#[test]
+fn wasm_route_without_security_stays_public() {
+    let def = wasm_def("wasm-public");
+    let plan = compile_route_security_plan(&def, &providers(0, None))
+        .expect("compilation must succeed")
+        .expect("wasm consumer route must get a plan");
+    assert!(matches!(plan.access_mode, AccessMode::Public));
+    assert_eq!(plan.provider_ref, None);
+    assert_eq!(plan.transport, TransportId::Wasm);
+}
+
+#[test]
+fn wasm_transport_name_and_all_sources_allowed() {
+    assert_eq!(transport_name(TransportId::Wasm), "wasm");
+    // A `wasm:` source route carries a full HTTP listener, so every
+    // CredentialSource variant is permitted (blessed spec: MODIFIED
+    // "Transport credential capability validation").
+    for source in [
+        CredentialSource::AuthorizationHeader,
+        CredentialSource::Header {
+            name: "x-api-key".into(),
+        },
+        CredentialSource::Cookie {
+            name: "session".into(),
+        },
+        CredentialSource::QueryParam {
+            param: "token".into(),
+        },
+    ] {
+        assert!(
+            credential_source_allowed(TransportId::Wasm, &source),
+            "wasm must allow {}",
+            source.variant_name()
+        );
+    }
+}
+
 // ── staging test ──
 
 struct RecordingComponent {

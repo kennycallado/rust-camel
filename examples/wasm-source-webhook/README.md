@@ -51,7 +51,7 @@ The guest implements the `source` world (`wit/camel-source.wit`). Two exports be
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `bind` | `0.0.0.0:8080` | Socket address the host-granted listener binds. |
+| `bind` | `127.0.0.1:8080` | Socket address the host-granted listener binds. Loopback by default so the example starts as `Public` without extra config. |
 | `path` | (all paths) | URL path filter accepted by the listener (e.g. `/webhook`). |
 | `crash=run` | off | Test toggle — `run()` deliberately traps on its first iteration to exercise host crash/lifecycle handling. |
 | `echo` | `bytes` | Echo body mode: `bytes` (materialize then echo), `stream` (re-emit as streaming body via `spawn_local`), `stream-fail` (emit partial stream then terminal error). |
@@ -116,11 +116,45 @@ Enable the `async-spawn` cargo feature on the guest for `wit_bindgen::spawn_loca
 wit-bindgen = { version = "0.58", features = ["async-spawn"] }
 ```
 
+## Bind exposure and authenticated webhooks
+
+The example binds loopback (`127.0.0.1:8080`) so it starts as `Public` without
+extra config. Loopback binds permit `Public` silently. Non-loopback binds that
+serve a `Public` route require operator acknowledgment in `Camel.toml`:
+
+```toml
+[binds."0.0.0.0:8080"]
+allow_public_exposure = true
+```
+
+Every boot still emits a `warn!` naming the bind and the exposed route count.
+The acknowledgment is permanent and never silences the warning (ADR-0052 rule 3;
+ADR-0061 Rule 4).
+
+To require authentication, add a `security_policy` to the route. The shape
+mirrors `examples/rest-crud/routes/secured.yaml`:
+
+```yaml
+- from: wasm:wasm-source-webhook-guest.wasm?bind=127.0.0.1:8080&path=/webhook
+  route_id: webhook-source-route
+  security_policy:
+    roles: ["user"]
+    provider: "native-demo"
+  steps:
+    - to: log:info
+```
+
+Add `credential_sources` to select the extraction source; the default is
+`authorization_header` (see `examples/credential-sources/routes.yaml` for the
+four supported forms). The host edge extracts the credential, runs
+`kernel_authenticate`, and returns `401 unauthenticated` before the request
+reaches the guest. Denied requests never reach `accept-http`.
+
 ## Expected output
 
 ```
-source HTTP listener bound addr=0.0.0.0:8080
-source HTTP listener started addr=0.0.0.0:8080
+source HTTP listener bound addr=127.0.0.1:8080
+source HTTP listener started addr=127.0.0.1:8080
 ```
 
 After the `curl` above, the guest converts the request body into an exchange (`InOnly`) and submits it; the route forwards it to `log:info`:

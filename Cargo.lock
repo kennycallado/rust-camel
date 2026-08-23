@@ -2003,9 +2003,11 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "tower 0.5.3",
  "tracing",
+ "tracing-subscriber",
  "wasmtime",
  "wasmtime-wasi",
  "wat",
+ "zeroize",
 ]
 
 [[package]]
