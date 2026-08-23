@@ -120,10 +120,10 @@ pub enum CamelError {
         response_body: Option<String>,
     },
 
-    /// Producer's `poll_ready` returned a shutdown signal — the consumer/semaphore
+    /// Producer `call()` failed on a shutdown signal — the consumer/semaphore
     /// is closing and the producer cannot acquire a permit. Distinct from Stop EIP
     /// (which is successful control flow). Used by JMS/OpenSearch producers. See ADR-0024.
-    #[error("Consumer stopping: semaphore closed during poll_ready")]
+    #[error("Consumer stopping: semaphore closed during call")]
     ConsumerStopping,
 
     #[error("Configuration error: {0}")]
