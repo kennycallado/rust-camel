@@ -329,22 +329,30 @@ pub fn topology_from_config(
     }
 }
 
+/// Build the [`redis::RedisConnectionInfo`] for the Redis nodes (not the
+/// sentinels) from the endpoint's node credentials: username, password, and
+/// database number.
+#[cfg(feature = "sentinel")]
+fn node_redis_connection_info(config: &RedisEndpointConfig) -> redis::RedisConnectionInfo {
+    let mut redis_info = redis::RedisConnectionInfo::default().set_db(config.db as i64);
+    if let Some(u) = &config.username {
+        redis_info = redis_info.set_username(u);
+    }
+    if let Some(p) = &config.password {
+        redis_info = redis_info.set_password(p);
+    }
+    redis_info
+}
+
 /// Build the [`redis::sentinel::SentinelNodeConnectionInfo`] for the Redis
 /// nodes (not the sentinels) from the endpoint's node credentials.
-///
-/// The endpoint config carries the node password and database; there is no
-/// node username field, so only password + db are propagated.
 #[cfg(feature = "sentinel")]
 fn sentinel_node_conn_info(
     config: &RedisEndpointConfig,
 ) -> Option<redis::sentinel::SentinelNodeConnectionInfo> {
-    let mut redis_info = redis::RedisConnectionInfo::default().set_db(config.db as i64);
-    if let Some(p) = &config.password {
-        redis_info = redis_info.set_password(p);
-    }
     Some(
         redis::sentinel::SentinelNodeConnectionInfo::default()
-            .set_redis_connection_info(redis_info),
+            .set_redis_connection_info(node_redis_connection_info(config)),
     )
 }
 
@@ -464,6 +472,42 @@ mod tests {
             "redis://host:26379"
         );
         assert_eq!(redact_userinfo("redis://host:26379"), "redis://host:26379");
+    }
+
+    #[cfg(feature = "sentinel")]
+    #[test]
+    fn sentinel_node_conn_info_carries_username() {
+        use crate::sentinel_config::SentinelConfig;
+
+        let config = RedisEndpointConfig {
+            host: None,
+            port: None,
+            command: crate::config::RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            username: Some("svc".to_string()),
+            password: Some("p".to_string()),
+            db: 2,
+            ssl: None,
+            reconnect: camel_component_api::NetworkRetryPolicy::default(),
+            connection_timeout_secs: 10,
+            topology_kind: crate::sentinel_config::TopologyKind::Sentinel(
+                SentinelConfig::default()
+                    .with_nodes(vec!["redis://s-a:26379".into()])
+                    .with_master_name("orders"),
+            ),
+        };
+
+        // sentinel_node_conn_info embeds the redis settings; redis 1.6.0 has no
+        // public getter on SentinelNodeConnectionInfo, so assert on the exact
+        // RedisConnectionInfo it embeds (via its getters) plus Some(..) on the
+        // wrapper itself.
+        assert!(sentinel_node_conn_info(&config).is_some());
+        let redis_info = node_redis_connection_info(&config);
+        assert_eq!(redis_info.username(), Some("svc"));
+        assert_eq!(redis_info.password(), Some("p"));
+        assert_eq!(redis_info.db(), 2);
     }
 
     #[cfg(feature = "sentinel")]

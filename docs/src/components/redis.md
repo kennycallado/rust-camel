@@ -91,7 +91,7 @@ redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&
 | `channels` | Pub/Sub | empty | Comma-separated channel names |
 | `timeout` | blocking | `1` | Blocking timeout in seconds |
 | `password` | no | none | Redis password |
-| `db` | no | `0` | Redis database number (0-255) |
+| `db` | no | `0` | Redis database number (0-16383) |
 | `ssl` | no | auto | Force TLS on or off |
 
 The `command` parameter picks the Redis command at Endpoint creation. Exchange data never becomes a command name. Dynamic values like keys, fields, values, channels, and scores cross the trust boundary as length-prefixed Redis protocol arguments. Argument contents cannot inject a second command or change the selected command (CONTEXT "Trust boundary"). Missing required headers return `CamelError`.

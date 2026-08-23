@@ -523,6 +523,7 @@ mod tests {
             channels: vec!["test".to_string()],
             key: Some("test-queue".to_string()),
             timeout: 1,
+            username: None,
             password: None,
             db: 0,
             ssl: Some(false),

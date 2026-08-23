@@ -473,8 +473,9 @@ impl ClusterConfig {
 /// - `channels` - Channels for pub/sub operations (default: empty)
 /// - `key` - Key for operations that require it (default: None)
 /// - `timeout` - Timeout in seconds for blocking operations (default: 1)
+/// - `username` - Redis ACL username for data-node authentication (default: None)
 /// - `password` - Redis password for authentication (default: None)
-/// - `db` - Redis database number (default: 0)
+/// - `db` - Redis database number, 0-16383 (default: 0)
 /// - `ssl` - Use TLS connection. `None` means not set (falls back to global config or false).
 #[derive(Clone)]
 pub struct RedisEndpointConfig {
@@ -498,11 +499,18 @@ pub struct RedisEndpointConfig {
     /// Timeout in seconds for blocking operations. Default: 1.
     pub timeout: u64,
 
+    /// Redis ACL username (Redis 6+) for authenticating to data nodes.
+    /// Default: None.
+    ///
+    /// Not populated by the URI parser; camel-config threads it onto the
+    /// endpoint for sentinel-mode data nodes. `redis_url()` never renders it.
+    pub username: Option<String>,
+
     /// Redis password for authentication. Default: None.
     pub password: Option<String>,
 
-    /// Redis database number. Default: 0.
-    pub db: u8,
+    /// Redis database number, 0-16383. Default: 0.
+    pub db: u16,
 
     /// Use TLS connection. `None` means not explicitly set in URI.
     /// Filled by `apply_defaults()` from global config TLS setting.
@@ -531,6 +539,7 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("channels", &self.channels)
             .field("key", &self.key)
             .field("timeout", &self.timeout)
+            .field("username", &redacted_opt(&self.username))
             .field("password", &redacted_opt(&self.password))
             .field("db", &self.db)
             .field("ssl", &self.ssl)
@@ -605,6 +614,7 @@ impl RedisEndpointConfig {
                 channels,
                 key,
                 timeout,
+                username: None,
                 password,
                 db,
                 ssl,
@@ -711,11 +721,21 @@ impl RedisEndpointConfig {
         // Parse password: userinfo (from redis_url) takes precedence over query param
         let password = password_from_userinfo.or_else(|| parts.params.get("password").cloned());
 
-        // Parse db (default to 0 if absent, error if present but invalid)
+        // Parse db (default to 0 if absent, error if present but invalid).
+        // Redis supports databases 0-16383 even though the field is u16.
         let db = match parts.params.get("db") {
-            Some(s) => s.parse::<u8>().map_err(|_| {
-                CamelError::InvalidUri(format!("invalid db '{}': expected integer 0-255", s))
-            })?,
+            Some(s) => {
+                let n = s.parse::<u16>().map_err(|_| {
+                    CamelError::InvalidUri(format!("invalid db '{}': expected integer 0-16383", s))
+                })?;
+                if n > 16383 {
+                    return Err(CamelError::InvalidUri(format!(
+                        "invalid db '{}': expected integer 0-16383",
+                        s
+                    )));
+                }
+                n
+            }
             None => 0,
         };
 
@@ -745,6 +765,7 @@ impl RedisEndpointConfig {
             channels,
             key,
             timeout,
+            username: None,
             password,
             db,
             ssl,
@@ -766,11 +787,13 @@ impl RedisEndpointConfig {
         if self.port.is_none() {
             self.port = Some(defaults.port);
         }
-        // Password from global config applies only when not set in the URI.
+        // Credentials from global config apply only when not set by the URI.
         // Standalone endpoints normally take the password from the `password=`
         // query parameter; sentinel endpoints (`redis-sentinel://nodes/master/db`)
-        // have no URI slot for the node password, so it comes from
-        // `[components.redis] password` here.
+        // have no URI slot for the node password, so only the password falls
+        // back to `[components.redis]` here — the username is threaded onto
+        // the endpoint by camel-config and is never set in apply_defaults.
+        // The db rides the sentinel URI path segment.
         if self.password.is_none()
             && let Some(ref pw) = defaults.password
         {
@@ -1115,6 +1138,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: Some("pass@word".to_string()),
             db: 0,
             ssl: Some(false),
@@ -1144,6 +1168,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: Some("pass:word".to_string()),
             db: 0,
             ssl: Some(false),
@@ -1168,6 +1193,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: Some("pass/word".to_string()),
             db: 0,
             ssl: Some(false),
@@ -1213,6 +1239,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: None,
             db: 0,
             ssl: Some(true),
@@ -1237,6 +1264,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: None,
             db: 0,
             ssl: Some(false),
@@ -1261,6 +1289,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: Some("secret".to_string()),
             db: 0,
             ssl: Some(true),
@@ -1286,6 +1315,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: Some("secret".to_string()),
             db: 0,
             ssl: Some(false),
@@ -1311,6 +1341,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: Some("supersecret".to_string()),
             db: 2,
             ssl: Some(false),
@@ -1342,6 +1373,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: None,
             db: 0,
             ssl: Some(true),
@@ -1358,6 +1390,7 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            username: None,
             password: None,
             db: 0,
             ssl: Some(false),
@@ -1588,7 +1621,7 @@ mod tests {
     #[cfg(feature = "sentinel")]
     #[test]
     fn global_password_propagates_to_sentinel_endpoint() {
-        // Sentinel endpoints have no URI slot for the node password; it must
+        // Sentinel endpoints have no URI slot for node credentials; they must
         // come from the global [components.redis] password and then flow into
         // sentinel_node_conn_info (topology.rs) as the node credential.
         let cfg = RedisConfig {
@@ -1884,9 +1917,15 @@ mod tests {
 
     #[test]
     fn test_out_of_range_db_returns_error() {
-        // db is u8 (0-255), 300 won't fit
-        let result = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&db=300");
+        // db accepts 0-16383 (Redis limit); 16384 must be rejected
+        let result = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&db=16384");
         assert!(result.is_err(), "out-of-range db should error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("0-16383"),
+            "error should name the 16383 limit: {}",
+            msg
+        );
     }
 
     #[test]
@@ -1963,6 +2002,7 @@ mod tests {
             channels: vec![],
             key: Some("mykey".to_string()),
             timeout: 1,
+            username: None,
             password: Some("secret123".to_string()),
             db: 0,
             ssl: None,

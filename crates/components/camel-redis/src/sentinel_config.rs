@@ -119,7 +119,7 @@ pub struct ParsedSentinelUri {
     /// The parsed topology (always `TopologyKind::Sentinel`).
     pub topology: TopologyKind,
     /// The database number from the second path segment (defaults to 0 if absent).
-    pub db: u8,
+    pub db: u16,
 }
 
 /// Parse a `redis-sentinel://` or `rediss-sentinel://` URI.
@@ -133,7 +133,7 @@ pub struct ParsedSentinelUri {
 /// with `redis://` (or `rediss://` for TLS) to produce valid redis-rs connection
 /// URLs. The master name is the first path segment. The database number is the
 /// second path segment (defaults to 0 if absent, errors if present but not an
-/// integer in 0-255).
+/// integer in 0-16383).
 ///
 /// Query parameters (command, key, etc.) are NOT parsed here — the caller handles
 /// them via the existing `from_uri` query-param parsing.
@@ -174,11 +174,21 @@ pub fn parse_sentinel_uri(uri: &str) -> Result<ParsedSentinelUri, CamelError> {
         ));
     }
 
-    // Third segment: database number (defaults to 0 if absent)
+    // Third segment: database number (defaults to 0 if absent).
+    // Redis supports databases 0-16383 even though the field is u16.
     let db = match segments.get(2) {
-        Some(s) if !s.is_empty() => s.parse::<u8>().map_err(|_| {
-            CamelError::InvalidUri(format!("invalid db '{}': expected integer 0-255", s))
-        })?,
+        Some(s) if !s.is_empty() => {
+            let n = s.parse::<u16>().map_err(|_| {
+                CamelError::InvalidUri(format!("invalid db '{}': expected integer 0-16383", s))
+            })?;
+            if n > 16383 {
+                return Err(CamelError::InvalidUri(format!(
+                    "invalid db '{}': expected integer 0-16383",
+                    s
+                )));
+            }
+            n
+        }
         _ => 0,
     };
 
@@ -326,6 +336,24 @@ mod tests {
     fn standalone_topology_validates_ok() {
         let result = validate_topology(&TopologyKind::Standalone, false);
         assert!(result.is_ok(), "Standalone should always validate");
+    }
+
+    #[test]
+    fn sentinel_db_u16_round_trip() {
+        // db 300 exceeds the old u8 range but is valid for Redis (0-16383)
+        let parsed = parse_sentinel_uri("redis-sentinel://s-a:26379/orders/300")
+            .expect("db segment 300 should parse after u16 widening");
+        assert_eq!(parsed.db, 300);
+
+        // 16384 exceeds the Redis database limit and must be rejected
+        let msg = match parse_sentinel_uri("redis-sentinel://s-a:26379/orders/16384") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("db segment 16384 must be rejected"),
+        };
+        assert!(
+            msg.contains("0-16383"),
+            "error must name the 16383 limit: {msg}"
+        );
     }
 
     #[test]

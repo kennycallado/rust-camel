@@ -14,6 +14,9 @@
 //!
 //! Sentinel section: a cache repository selected by `sentinel_nodes` +
 //! `master_name` (no `url`) connects to the master the sentinels resolve.
+//! A second, authenticated topology proves the `password` field reaches
+//! the data nodes: the master runs `requirepass`, the sentinel stays
+//! unauthenticated, and a bare client is rejected with NOAUTH.
 //!
 //! Each cache/idempotent test provisions its own Redis container so
 //! keyspaces stay isolated. The sentinel test provisions the shared
@@ -568,4 +571,200 @@ stale_retention = "30s"
         .await
         .expect("EXISTS on the master");
     assert!(present, "key must live on the sentinel-resolved master");
+}
+
+// ===========================================================================
+// Sentinel with data-node authentication: cache_repo password round-trip
+// ===========================================================================
+
+/// Ports for the authenticated sentinel topology. They differ from both
+/// the unauthenticated `SENT_*` ports above and the `redis_sentinel_test.rs`
+/// ports (16379/16380/26379), so no suite can collide on the fixed host
+/// ports or on another suite's stale containers.
+const SENT_AUTH_MASTER_PORT: u16 = 17389;
+const SENT_AUTH_REPLICA_PORT: u16 = 17390;
+const SENT_AUTH_SENTINEL_PORT: u16 = 27389;
+const SENT_AUTH_MASTER_NAME: &str = "mymaster";
+
+/// Password the authenticated topology's master requires from clients
+/// (`requirepass`) and the replica uses for replication (`masterauth`).
+/// The sentinel itself stays unauthenticated; it learns the data-node
+/// credential through `sentinel auth-pass`.
+const SENT_AUTH_PASSWORD: &str = "master-secret";
+
+/// Labels this suite's authenticated sentinel containers so a previous
+/// crashed run can be identified and removed before the fixed ports are
+/// bound again. Separate from the unauthenticated label so the two
+/// topologies' cleanups never remove each other.
+const SENT_AUTH_LABEL_KEY: &str = "org.rust-camel.redis-repositories-sentinel-auth";
+const SENT_AUTH_LABEL_VALUE: &str = "true";
+
+/// Force-removes authenticated-topology containers left by a previous
+/// crashed run of this suite (best-effort, mirroring the unauthenticated
+/// variant above).
+async fn remove_stale_sentinel_auth_containers() {
+    use std::collections::HashMap;
+
+    let docker = match bollard::Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert(
+        "label".to_string(),
+        vec![format!("{SENT_AUTH_LABEL_KEY}={SENT_AUTH_LABEL_VALUE}")],
+    );
+    let options = bollard::query_parameters::ListContainersOptionsBuilder::default()
+        .all(true)
+        .filters(&filters)
+        .build();
+    let stale = match docker.list_containers(Some(options)).await {
+        Ok(list) => list,
+        Err(_) => return,
+    };
+    let remove = bollard::query_parameters::RemoveContainerOptionsBuilder::default()
+        .force(true)
+        .build();
+    for container in stale {
+        if let Some(id) = container.id {
+            let _ = docker.remove_container(&id, Some(remove.clone())).await;
+        }
+    }
+}
+
+/// Starts the authenticated sentinel topology: the same three-role layout
+/// as `sentinel_topology` but with the data nodes requiring the password —
+/// master `requirepass`, replica `masterauth` — and the sentinel told the
+/// credential via `sentinel auth-pass` so it can keep monitoring the
+/// master. The sentinel accepts unauthenticated connections.
+async fn sentinel_auth_topology() -> ContainerAsync<GenericImage> {
+    remove_stale_sentinel_auth_containers().await;
+
+    let script = format!(
+        "set -e\n\
+         redis-server --port {SENT_AUTH_MASTER_PORT} \
+         --requirepass {SENT_AUTH_PASSWORD} --daemonize yes\n\
+         until redis-cli --no-auth-warning -a {SENT_AUTH_PASSWORD} \
+         -p {SENT_AUTH_MASTER_PORT} ping | grep -q PONG; do sleep 0.1; done\n\
+         redis-server --port {SENT_AUTH_REPLICA_PORT} --daemonize yes \
+         --slaveof 127.0.0.1 {SENT_AUTH_MASTER_PORT} \
+         --masterauth {SENT_AUTH_PASSWORD} \
+         --slave-announce-ip 127.0.0.1 \
+         --slave-announce-port {SENT_AUTH_REPLICA_PORT}\n\
+         until redis-cli -p {SENT_AUTH_REPLICA_PORT} ping | grep -q PONG; do sleep 0.1; done\n\
+         printf 'port {SENT_AUTH_SENTINEL_PORT}\\n\
+         sentinel monitor {SENT_AUTH_MASTER_NAME} 127.0.0.1 {SENT_AUTH_MASTER_PORT} 1\\n\
+         sentinel auth-pass {SENT_AUTH_MASTER_NAME} {SENT_AUTH_PASSWORD}\\n\
+         sentinel down-after-milliseconds {SENT_AUTH_MASTER_NAME} 2000\\n\
+         sentinel failover-timeout {SENT_AUTH_MASTER_NAME} 10000\\n\
+         sentinel parallel-syncs {SENT_AUTH_MASTER_NAME} 1\\n' > /tmp/sentinel.conf\n\
+         exec redis-sentinel /tmp/sentinel.conf\n"
+    );
+
+    let image = GenericImage::new("redis", REDIS_IMAGE_TAG)
+        .with_cmd(["sh", "-c", &script])
+        .with_label(SENT_AUTH_LABEL_KEY, SENT_AUTH_LABEL_VALUE)
+        .with_mapped_port(
+            SENT_AUTH_MASTER_PORT,
+            ContainerPort::Tcp(SENT_AUTH_MASTER_PORT),
+        )
+        .with_mapped_port(
+            SENT_AUTH_REPLICA_PORT,
+            ContainerPort::Tcp(SENT_AUTH_REPLICA_PORT),
+        )
+        .with_mapped_port(
+            SENT_AUTH_SENTINEL_PORT,
+            ContainerPort::Tcp(SENT_AUTH_SENTINEL_PORT),
+        )
+        .with_ready_conditions(vec![WaitFor::message_on_stdout("+monitor")]);
+
+    image
+        .start()
+        .await
+        .expect("authenticated redis sentinel topology failed to start")
+}
+
+/// Current master port as tracked by the authenticated sentinel, when it
+/// reports the expected loopback address.
+async fn sentinel_auth_master_port() -> Option<u16> {
+    let mut conn =
+        try_raw_connection(&format!("redis://127.0.0.1:{SENT_AUTH_SENTINEL_PORT}")).await?;
+    let (ip, port): (String, String) = redis::cmd("SENTINEL")
+        .arg("get-master-addr-by-name")
+        .arg(SENT_AUTH_MASTER_NAME)
+        .query_async(&mut conn)
+        .await
+        .ok()?;
+    if ip == "127.0.0.1" {
+        port.parse().ok()
+    } else {
+        None
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_sentinel_data_auth_live() {
+    let _container = sentinel_auth_topology().await;
+    support::wait::wait_until(
+        "authenticated sentinel tracks the master",
+        Duration::from_secs(30),
+        Duration::from_millis(250),
+        || async { Ok(sentinel_auth_master_port().await == Some(SENT_AUTH_MASTER_PORT)) },
+    )
+    .await
+    .expect("authenticated sentinel topology never became ready");
+
+    // Same sentinel selection as the unauthenticated test, plus the
+    // data-node credential: `password` must reach the master connection
+    // that the sentinel resolves.
+    let toml = format!(
+        r#"
+[default.cache_repo]
+backend = "redis"
+sentinel_nodes = ["127.0.0.1:{SENT_AUTH_SENTINEL_PORT}"]
+master_name = "{SENT_AUTH_MASTER_NAME}"
+password = "{SENT_AUTH_PASSWORD}"
+stale_retention = "30s"
+"#
+    );
+    install_crypto_provider();
+    let cfg = load_camel_toml(&toml);
+    let ctx = CamelConfig::configure_context(&cfg)
+        .await
+        .expect("context builds with authenticated sentinel cache_repo");
+
+    let repo = ctx
+        .cache_repository("redis")
+        .expect("redis cache repository resolves via authenticated sentinel config");
+    assert_eq!(repo.name(), "redis");
+
+    repo.set("k", cache_entry(), None)
+        .await
+        .expect("set succeeds against the authenticated master");
+    let got = repo
+        .get("k")
+        .await
+        .expect("get succeeds")
+        .expect("entry is present on the authenticated master");
+    assert_eq!(got.bytes, cache_entry().bytes);
+
+    // The master must reject a raw client WITHOUT the password — proving
+    // it truly enforces auth, so the round-trip above could only have
+    // worked by authenticating. With `requirepass`, the rejection surfaces
+    // either at the multiplexed handshake or on the first command; PING's
+    // plain bulk reply keeps a would-be success unambiguous.
+    let bare = redis::Client::open(format!("redis://127.0.0.1:{SENT_AUTH_MASTER_PORT}"))
+        .expect("bare client parses");
+    let bare_err = match bare.get_multiplexed_async_connection().await {
+        Err(err) => err.to_string(),
+        Ok(mut conn) => redis::cmd("PING")
+            .query_async::<String>(&mut conn)
+            .await
+            .expect_err("unauthenticated PING must be rejected")
+            .to_string(),
+    };
+    assert!(
+        bare_err.contains("NOAUTH") || bare_err.contains("WRONGPASS"),
+        "expected NOAUTH/WRONGPASS from the authenticated master, got: {bare_err}"
+    );
 }

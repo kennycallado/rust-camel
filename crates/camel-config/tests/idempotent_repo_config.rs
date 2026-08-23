@@ -199,6 +199,34 @@ sentinel_password = "hunter2"
     );
 }
 
+#[test]
+fn idempotent_debug_redacts_data_credentials() {
+    let cfg = make_cfg(
+        r#"
+[idempotent_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+password = "idem-secret"
+username = "idem-user"
+"#,
+    );
+
+    let rendered = format!(
+        "{:?}",
+        cfg.idempotent_repo.expect("idempotent_repo must load")
+    );
+    assert!(
+        !rendered.contains("idem-secret") && !rendered.contains("idem-user"),
+        "Debug output must not leak data-node credentials, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("password: Some(\"***\")")
+            && rendered.contains("username: Some(\"***\")"),
+        "Debug output must render the data-node credentials redacted, got: {rendered}"
+    );
+}
+
 // ── Cross-repository prefix collision ─────────────────────────────────────
 
 #[test]
@@ -269,6 +297,142 @@ key_prefix = "camel:shared"
         msg.contains("must be distinct"),
         "default-port spelling variants must collide, got: {msg}"
     );
+}
+
+#[test]
+fn collision_uses_effective_sentinel_db() {
+    // Same sentinel topology, identical effective prefixes: distinct
+    // effective databases are distinct keyspaces, so db 2 vs db 3 passes.
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+db = 2
+key_prefix = "camel:shared"
+
+[idempotent_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+db = 3
+key_prefix = "camel:shared"
+"#,
+    );
+
+    cfg.validate()
+        .expect("identical prefixes on distinct sentinel databases must pass validation");
+
+    // Same effective database (db 2 on both) → collision.
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+db = 2
+key_prefix = "camel:shared"
+
+[idempotent_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+db = 2
+key_prefix = "camel:shared"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("must be distinct"),
+        "identical prefixes on the same sentinel database must collide, got: {msg}"
+    );
+
+    // Both unset → effective db 0 on both → collision (regression: the
+    // identity must keep treating unset as 0, not as distinct).
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+key_prefix = "camel:shared"
+
+[idempotent_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+key_prefix = "camel:shared"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("must be distinct"),
+        "unset db (effective 0) on both must still collide, got: {msg}"
+    );
+}
+
+// ── Sentinel-mode data-node fields mirror the cache matrix ────────────────
+
+#[test]
+fn idempotent_data_fields_mirror_matrix() {
+    // url + db → rejected: the data-node database requires sentinel_nodes
+    let cfg = make_cfg(
+        r#"
+[idempotent_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+db = 7
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("idempotent_repo.db") && msg.contains("sentinel_nodes"),
+        "validation error must name idempotent_repo.db and sentinel_nodes, got: {msg}"
+    );
+
+    // redb + password → the data-node credential does not apply to redb
+    let cfg = make_cfg(
+        r#"
+[idempotent_repo]
+path = "x.redb"
+password = "hunter2"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("idempotent_repo.password") && msg.contains("\"redb\""),
+        "validation error must name idempotent_repo.password and \"redb\", got: {msg}"
+    );
+}
+
+#[test]
+fn idempotent_data_credentials_reach_endpoint() {
+    // Sentinel-mode data-node credentials must thread onto the endpoint.
+    let cfg = make_cfg(
+        r#"
+[idempotent_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+password = "x"
+db = 3
+"#,
+    );
+
+    let idem = cfg.idempotent_repo.expect("idempotent_repo must load");
+    let endpoint = camel_config::redis_endpoint_from_idempotent_repo(&idem)
+        .expect("sentinel idempotent_repo must build an endpoint");
+    assert_eq!(
+        endpoint.password.as_deref(),
+        Some("x"),
+        "data-node password must reach the endpoint"
+    );
+    assert_eq!(endpoint.db, 3, "data-node db must reach the endpoint");
 }
 
 // ── Redis idempotent wiring (live-lite; full live coverage in 3.5) ────────

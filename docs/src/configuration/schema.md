@@ -307,7 +307,12 @@ Persistent idempotent repository for the [Idempotent Consumer](../eip/idempotent
 | `master_name` | string | (required with `sentinel_nodes`) | Master name resolved through the sentinels. Redis only. |
 | `sentinel_username` | string | absent | Sentinel AUTH username. Redis only. |
 | `sentinel_password` | string | absent | Sentinel AUTH password. Redacted from `Debug` output. Redis only. |
+| `password` | string | absent | Data-node AUTH password. Redacted from `Debug` output. Rejected in `url` mode. Redis (sentinel mode) only. |
+| `username` | string | absent | Data-node AUTH username. Redacted from `Debug` output. Rejected in `url` mode. Redis (sentinel mode) only. |
+| `db` | integer | absent | Data-node database index. Valid range `0` to `16383`. Defaults to `0` when absent. Rejected in `url` mode. Redis (sentinel mode) only. |
 | `key_prefix` | string | `"camel:idem"` | Redis key prefix for this repository's keyspace. Allowed charset `[A-Za-z0-9:_-]`. Redis only. |
+
+In `url` mode the URI carries the password and the database. The password rides the userinfo and the database rides the `?db=N` query parameter, as in `redis://:pass@host:port?db=N`. A username in the URI is not supported.
 
 A runnable redis configuration lives in `examples/redis-repositories`:
 
@@ -333,7 +338,12 @@ Optional cache repository configuration. When unset, only the default `"memory"`
 | `master_name` | string | (required with `sentinel_nodes`) | Master name resolved through the sentinels. Redis only. |
 | `sentinel_username` | string | absent | Sentinel AUTH username. Redis only. |
 | `sentinel_password` | string | absent | Sentinel AUTH password. Redacted from `Debug` output. Redis only. |
+| `password` | string | absent | Data-node AUTH password. Redacted from `Debug` output. Rejected in `url` mode. Redis (sentinel mode) only. |
+| `username` | string | absent | Data-node AUTH username. Redacted from `Debug` output. Rejected in `url` mode. Redis (sentinel mode) only. |
+| `db` | integer | absent | Data-node database index. Valid range `0` to `16383`. Defaults to `0` when absent. Rejected in `url` mode. Redis (sentinel mode) only. |
 | `key_prefix` | string | `"camel:cache"` | Redis key prefix for this repository's keyspace. Allowed charset `[A-Za-z0-9:_-]`. Redis only. |
+
+In `url` mode the URI carries the password and the database. The password rides the userinfo and the database rides the `?db=N` query parameter, as in `redis://:pass@host:port?db=N`. A username in the URI is not supported.
 
 Fields that do not apply to the configured `backend` are rejected at validation (fail-closed), and a malformed `cache_size`, `sweep_interval`, or `stale_retention` fails validation with an error naming the field.
 

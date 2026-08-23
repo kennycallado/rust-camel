@@ -189,6 +189,9 @@ pub fn redis_endpoint_from_cache_repo(
         cfg.master_name.as_deref(),
         cfg.sentinel_username.as_deref(),
         cfg.sentinel_password.as_deref(),
+        cfg.password.as_deref(),
+        cfg.username.as_deref(),
+        cfg.db,
     )
 }
 
@@ -205,6 +208,9 @@ pub fn redis_endpoint_from_idempotent_repo(
         cfg.master_name.as_deref(),
         cfg.sentinel_username.as_deref(),
         cfg.sentinel_password.as_deref(),
+        cfg.password.as_deref(),
+        cfg.username.as_deref(),
+        cfg.db,
     )
 }
 
@@ -212,6 +218,7 @@ pub fn redis_endpoint_from_idempotent_repo(
 /// path prefix ("cache_repo" / "idempotent_repo") so rejections name the
 /// offending repository; both repo variants map through this core so their
 /// endpoints cannot drift.
+#[allow(clippy::too_many_arguments)] // flat field list mirrors the config surface
 fn redis_endpoint_from_fields(
     field: &str,
     url: Option<&str>,
@@ -219,6 +226,9 @@ fn redis_endpoint_from_fields(
     master_name: Option<&str>,
     sentinel_username: Option<&str>,
     sentinel_password: Option<&str>,
+    password: Option<&str>,
+    username: Option<&str>,
+    db: Option<u16>,
 ) -> Result<RedisEndpointConfig, CamelError> {
     if let Some(url) = url {
         if sentinel_nodes.is_some() {
@@ -248,6 +258,12 @@ fn redis_endpoint_from_fields(
     if let TopologyKind::Sentinel(ref mut sentinel) = endpoint.topology_kind {
         sentinel.username = sentinel_username.map(str::to_string);
         sentinel.password = sentinel_password.map(str::to_string);
+        // Data-node credentials ride the endpoint (not the sentinel
+        // monitor config); validation already rejected them in url mode,
+        // whose branch returns above.
+        endpoint.password = password.map(str::to_string);
+        endpoint.username = username.map(str::to_string);
+        endpoint.db = db.unwrap_or(0);
     }
     Ok(endpoint)
 }
@@ -1780,6 +1796,9 @@ mod tests {
             master_name: None,
             sentinel_username: None,
             sentinel_password: None,
+            password: None,
+            username: None,
+            db: None,
             key_prefix: None,
         }
     }
@@ -1924,6 +1943,9 @@ mod tests {
             master_name: None,
             sentinel_username: None,
             sentinel_password: None,
+            password: None,
+            username: None,
+            db: None,
             key_prefix: None,
         };
 

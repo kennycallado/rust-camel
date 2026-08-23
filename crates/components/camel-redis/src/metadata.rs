@@ -31,7 +31,7 @@ pub(super) struct RedisMetadataDescriptor {
     pub _password: String,
 
     #[uri_param(name = "db", default = "0")]
-    pub _db: u8,
+    pub _db: u16,
 
     #[uri_param(name = "ssl")]
     pub _ssl: Option<bool>,

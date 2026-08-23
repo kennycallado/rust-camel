@@ -856,6 +856,205 @@ url = "redis://127.0.0.1:6379"
         msg.contains("cache_repo.url"),
         "validation error must name cache_repo.url, got: {msg}"
     );
+
+    // The redb arm rejects the data-node fields with the same "does not
+    // apply" posture as the other redis-only fields.
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+password = "hunter2"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.password") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.password and \"redb\", got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+username = "svc"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.username") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.username and \"redb\", got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+db = 2
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.db") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.db and \"redb\", got: {msg}"
+    );
+}
+
+// ── Sentinel-mode data-node fields (password / username / db) ──────────────
+
+#[test]
+fn cache_data_fields_rejected_in_url_mode() {
+    // url + password → the data-node credential requires sentinel_nodes
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+password = "hunter2"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.password") && msg.contains("sentinel_nodes"),
+        "validation error must name cache_repo.password and sentinel_nodes, got: {msg}"
+    );
+
+    // url + db → the data-node database requires sentinel_nodes
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+db = 2
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.db") && msg.contains("sentinel_nodes"),
+        "validation error must name cache_repo.db and sentinel_nodes, got: {msg}"
+    );
+
+    // url + username → the data-node credential requires sentinel_nodes
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+username = "svc"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.username") && msg.contains("sentinel_nodes"),
+        "validation error must name cache_repo.username and sentinel_nodes, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_data_db_out_of_range_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+db = 20000
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.db") && msg.contains("16383"),
+        "validation error must name cache_repo.db and the 16383 limit, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_memory_rejects_data_fields() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+username = "svc"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.username") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.username and \"memory\", got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+password = "hunter2"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.password") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.password and \"memory\", got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+db = 2
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.db") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.db and \"memory\", got: {msg}"
+    );
+}
+
+#[test]
+fn cache_data_credentials_reach_endpoint() {
+    // Sentinel-mode data-node credentials must thread onto the endpoint:
+    // password/username for ACL auth, db for database selection.
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+password = "master-secret"
+username = "svc"
+db = 2
+"#,
+    );
+
+    let cache = cfg.cache_repo.expect("cache_repo must load");
+    let endpoint = camel_config::redis_endpoint_from_cache_repo(&cache)
+        .expect("sentinel cache_repo must build an endpoint");
+    assert_eq!(
+        endpoint.password.as_deref(),
+        Some("master-secret"),
+        "data-node password must reach the endpoint"
+    );
+    assert_eq!(
+        endpoint.username.as_deref(),
+        Some("svc"),
+        "data-node username must reach the endpoint"
+    );
+    assert_eq!(endpoint.db, 2, "data-node db must reach the endpoint");
 }
 
 // ── Test 8b: exhaustive redis-only field rejection on memory/redb ─────────
@@ -1105,6 +1304,9 @@ sentinel_nodes = ["s-a:26379"]
 master_name = "mymaster"
 sentinel_username = "admin"
 sentinel_password = "hunter2"
+password = "master-secret"
+username = "svc"
+db = 2
 key_prefix = "camel:cache"
 "#,
     );
@@ -1153,6 +1355,31 @@ sentinel_password = "hunter2"
     assert!(
         rendered.contains("redis://***@h:6379"),
         "Debug output must redact URL userinfo as ***, got: {rendered}"
+    );
+}
+
+#[test]
+fn cache_debug_redacts_data_credentials() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+password = "master-secret"
+username = "svc-user"
+"#,
+    );
+
+    let rendered = format!("{:?}", cfg.cache_repo.expect("cache_repo must load"));
+    assert!(
+        !rendered.contains("master-secret") && !rendered.contains("svc-user"),
+        "Debug output must not leak data-node credentials, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("password: Some(\"***\")")
+            && rendered.contains("username: Some(\"***\")"),
+        "Debug output must render the data-node credentials redacted, got: {rendered}"
     );
 }
 

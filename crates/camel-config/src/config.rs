@@ -571,6 +571,26 @@ pub struct IdempotentRepoConfig {
     #[serde(default)]
     pub sentinel_password: Option<String>,
 
+    /// Password for data-node (master/replica) authentication in sentinel
+    /// mode. Only valid when `sentinel_nodes` is set; rejected in `url`
+    /// mode, where the credential rides the URL userinfo. Redacted from
+    /// `Debug` output.
+    #[serde(default)]
+    pub password: Option<String>,
+
+    /// Username for data-node (master/replica) authentication in sentinel
+    /// mode. Only valid when `sentinel_nodes` is set; rejected in `url`
+    /// mode, where the credential rides the URL userinfo.
+    #[serde(default)]
+    pub username: Option<String>,
+
+    /// Redis database index (0..=16383) for the data nodes in sentinel
+    /// mode. Only valid when `sentinel_nodes` is set; rejected in `url`
+    /// mode, where the database rides the `?db=N` query parameter.
+    /// Defaults to 0.
+    #[serde(default)]
+    pub db: Option<u16>,
+
     /// Redis key prefix for this repository's keyspace. Default:
     /// `"camel:idem"` (applied at the registration site, not by serde, so
     /// it stays consistent with the cache repository's `"camel:cache"`).
@@ -604,6 +624,9 @@ impl std::fmt::Debug for IdempotentRepoConfig {
                 "sentinel_password",
                 &self.sentinel_password.as_deref().map(|_| "***"),
             )
+            .field("password", &self.password.as_deref().map(|_| "***"))
+            .field("username", &self.username.as_deref().map(|_| "***"))
+            .field("db", &self.db)
             .field("key_prefix", &self.key_prefix)
             .finish()
     }
@@ -700,6 +723,26 @@ pub struct CacheRepoConfig {
     #[serde(default)]
     pub sentinel_password: Option<String>,
 
+    /// Password for data-node (master/replica) authentication in sentinel
+    /// mode. Only valid when `sentinel_nodes` is set; rejected in `url`
+    /// mode, where the credential rides the URL userinfo. Redacted from
+    /// `Debug` output.
+    #[serde(default)]
+    pub password: Option<String>,
+
+    /// Username for data-node (master/replica) authentication in sentinel
+    /// mode. Only valid when `sentinel_nodes` is set; rejected in `url`
+    /// mode, where the credential rides the URL userinfo.
+    #[serde(default)]
+    pub username: Option<String>,
+
+    /// Redis database index (0..=16383) for the data nodes in sentinel
+    /// mode. Only valid when `sentinel_nodes` is set; rejected in `url`
+    /// mode, where the database rides the `?db=N` query parameter.
+    /// Defaults to 0.
+    #[serde(default)]
+    pub db: Option<u16>,
+
     /// Redis key prefix for this repository's keyspace. Default: `"camel:cache"`.
     /// Only `[A-Za-z0-9:_-]` are allowed (glob metacharacters are forbidden).
     #[serde(default)]
@@ -760,6 +803,7 @@ pub(crate) fn parse_byte_size(s: &str) -> Result<usize, String> {
 /// `idempotent_repo` (task 2.5 rules). `field` is the config path prefix
 /// ("cache_repo" / "idempotent_repo") so error messages name the offending
 /// repository and the two validation branches cannot drift.
+#[allow(clippy::too_many_arguments)] // flat field list mirrors the config surface
 pub(crate) fn validate_redis_topology_fields(
     field: &str,
     url: Option<&str>,
@@ -767,6 +811,9 @@ pub(crate) fn validate_redis_topology_fields(
     master_name: Option<&str>,
     sentinel_username: Option<&str>,
     sentinel_password: Option<&str>,
+    password: Option<&str>,
+    username: Option<&str>,
+    db: Option<u16>,
     key_prefix: Option<&str>,
 ) -> Result<(), CamelError> {
     let has_url = url.is_some();
@@ -796,6 +843,13 @@ pub(crate) fn validate_redis_topology_fields(
                 "{field}.master_name must be set when sentinel_nodes is set"
             )));
         }
+        if let Some(d) = db
+            && d > 16383
+        {
+            return Err(CamelError::Config(format!(
+                "{field}.db: sentinel data-node db must be at most 16383, got {d}"
+            )));
+        }
     } else {
         if master_name.is_some() {
             return Err(CamelError::Config(format!(
@@ -810,6 +864,22 @@ pub(crate) fn validate_redis_topology_fields(
         if sentinel_password.is_some() {
             return Err(CamelError::Config(format!(
                 "{field}.sentinel_password: only applies when sentinel_nodes is set"
+            )));
+        }
+        if password.is_some() {
+            return Err(CamelError::Config(format!(
+                // Literal field path in the message, not a secret value.
+                "{field}.password: only applies when sentinel_nodes is set" // allow-secret
+            )));
+        }
+        if username.is_some() {
+            return Err(CamelError::Config(format!(
+                "{field}.username: only applies when sentinel_nodes is set"
+            )));
+        }
+        if db.is_some() {
+            return Err(CamelError::Config(format!(
+                "{field}.db: only applies when sentinel_nodes is set"
             )));
         }
     }
@@ -846,6 +916,7 @@ fn redis_database_key(
     url: Option<&str>,
     sentinel_nodes: Option<&[String]>,
     master_name: Option<&str>,
+    db: Option<u16>,
 ) -> Option<String> {
     if let Some(url) = url {
         let endpoint = camel_redis_repo::RedisEndpointConfig::from_uri(url).ok()?;
@@ -864,8 +935,13 @@ fn redis_database_key(
         .collect();
     normalized.sort();
     let master = master_name?.trim();
-    // Sentinel topology has no db slot in the config surface; db defaults to 0.
-    Some(format!("sentinel|{}|{master}|0", normalized.join(",")))
+    // Sentinel topologies select the data-node database via `db` (default 0):
+    // same nodes + master but different databases are distinct keyspaces.
+    Some(format!(
+        "sentinel|{}|{master}|{}",
+        normalized.join(","),
+        db.unwrap_or(0)
+    ))
 }
 
 #[cfg(test)]
@@ -932,6 +1008,9 @@ impl Default for CacheRepoConfig {
             master_name: None,
             sentinel_username: None,
             sentinel_password: None,
+            password: None,
+            username: None,
+            db: None,
             key_prefix: None,
         }
     }
@@ -975,6 +1054,9 @@ impl std::fmt::Debug for CacheRepoConfig {
                 "sentinel_password",
                 &self.sentinel_password.as_deref().map(|_| "***"),
             )
+            .field("password", &self.password.as_deref().map(|_| "***"))
+            .field("username", &self.username.as_deref().map(|_| "***"))
+            .field("db", &self.db)
             .field("key_prefix", &self.key_prefix)
             .finish()
     }
@@ -1552,6 +1634,23 @@ impl CamelConfig {
                             .to_string(),
                     ));
                 }
+                if repo.password.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.password does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if repo.username.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.username does not apply to the \"redb\" backend"
+                            .to_string(),
+                    ));
+                }
+                if repo.db.is_some() {
+                    return Err(CamelError::Config(
+                        "idempotent_repo.db does not apply to the \"redb\" backend".to_string(),
+                    ));
+                }
                 if repo.key_prefix.is_some() {
                     return Err(CamelError::Config(
                         "idempotent_repo.key_prefix does not apply to the \"redb\" backend"
@@ -1595,6 +1694,9 @@ impl CamelConfig {
                     repo.master_name.as_deref(),
                     repo.sentinel_username.as_deref(),
                     repo.sentinel_password.as_deref(),
+                    repo.password.as_deref(),
+                    repo.username.as_deref(),
+                    repo.db,
                     repo.key_prefix.as_deref(),
                 )?;
             }
@@ -1667,6 +1769,21 @@ impl CamelConfig {
                             .to_string(),
                     ));
                 }
+                if cache.password.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.password does not apply to the \"memory\" backend".to_string(),
+                    ));
+                }
+                if cache.username.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.username does not apply to the \"memory\" backend".to_string(),
+                    ));
+                }
+                if cache.db.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.db does not apply to the \"memory\" backend".to_string(),
+                    ));
+                }
                 if cache.key_prefix.is_some() {
                     return Err(CamelError::Config(
                         "cache_repo.key_prefix does not apply to the \"memory\" backend"
@@ -1719,6 +1836,21 @@ impl CamelConfig {
                     return Err(CamelError::Config(
                         "cache_repo.sentinel_password does not apply to the \"redb\" backend"
                             .to_string(),
+                    ));
+                }
+                if cache.password.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.password does not apply to the \"redb\" backend".to_string(),
+                    ));
+                }
+                if cache.username.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.username does not apply to the \"redb\" backend".to_string(),
+                    ));
+                }
+                if cache.db.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.db does not apply to the \"redb\" backend".to_string(),
                     ));
                 }
                 if cache.key_prefix.is_some() {
@@ -1792,6 +1924,9 @@ impl CamelConfig {
                     cache.master_name.as_deref(),
                     cache.sentinel_username.as_deref(),
                     cache.sentinel_password.as_deref(),
+                    cache.password.as_deref(),
+                    cache.username.as_deref(),
+                    cache.db,
                     cache.key_prefix.as_deref(),
                 )?;
             }
@@ -1808,10 +1943,12 @@ impl CamelConfig {
                 cache.url.as_deref(),
                 cache.sentinel_nodes.as_deref(),
                 cache.master_name.as_deref(),
+                cache.db,
             ) == redis_database_key(
                 idem.url.as_deref(),
                 idem.sentinel_nodes.as_deref(),
                 idem.master_name.as_deref(),
+                idem.db,
             )
         {
             let cache_prefix = cache.key_prefix.as_deref().unwrap_or("camel:cache");
@@ -3264,6 +3401,9 @@ mod config_validation_tests {
                 master_name: None,
                 sentinel_username: None,
                 sentinel_password: None,
+                password: None,
+                username: None,
+                db: None,
                 key_prefix: None,
             }),
             ..CamelConfig::default()

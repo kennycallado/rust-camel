@@ -4,7 +4,7 @@ fn cfg_with(
     host: &str,
     port: u16,
     password: Option<&str>,
-    db: u8,
+    db: u16,
     ssl: bool,
 ) -> RedisEndpointConfig {
     use camel_component_api::NetworkRetryPolicy;
@@ -16,6 +16,7 @@ fn cfg_with(
         channels: vec![],
         key: None,
         timeout: 1,
+        username: None,
         password: password.map(|s| s.to_string()),
         db,
         ssl: Some(ssl),
@@ -149,4 +150,48 @@ fn roundtrip_bare_username_no_password() {
     let parsed = RedisEndpointConfig::from_uri("redis://alice@localhost:6379").unwrap();
     assert_eq!(parsed.password, None);
     assert_eq!(parsed.host, Some("localhost".to_string()));
+}
+
+#[test]
+fn db_u16_round_trip() {
+    // db=16383 (the Redis limit) parses and re-renders identically
+    let mut cfg = RedisEndpointConfig::from_uri("redis://localhost:6379?db=16383").unwrap();
+    assert_eq!(cfg.db, 16383);
+    cfg.resolve_defaults();
+    let url = cfg.redis_url();
+    assert_eq!(url, "redis://localhost:6379?db=16383");
+    let reparsed = RedisEndpointConfig::from_uri(&url).unwrap();
+    assert_eq!(reparsed.db, 16383);
+
+    // db=256 parses (was u8 overflow before the u16 widening)
+    let cfg256 = RedisEndpointConfig::from_uri("redis://localhost:6379?db=256").unwrap();
+    assert_eq!(cfg256.db, 256);
+
+    // db=16384 exceeds the Redis limit and fails naming the 16383 limit
+    let err = RedisEndpointConfig::from_uri("redis://localhost:6379?db=16384")
+        .expect_err("db=16384 must be rejected");
+    assert!(
+        err.to_string().contains("0-16383"),
+        "error must name the 16383 limit: {}",
+        err
+    );
+}
+
+#[test]
+fn endpoint_debug_redacts_username() {
+    let mut endpoint = cfg_with("localhost", 6379, Some("hunter2"), 0, false);
+    endpoint.username = Some("svc".to_string());
+    let debug = format!("{:?}", endpoint);
+    assert!(
+        !debug.contains("svc"),
+        "username must be redacted in Debug: {debug}"
+    );
+    assert!(
+        !debug.contains("hunter2"),
+        "password must be redacted in Debug: {debug}"
+    );
+    assert!(
+        debug.contains("***"),
+        "redacted marker should appear: {debug}"
+    );
 }
