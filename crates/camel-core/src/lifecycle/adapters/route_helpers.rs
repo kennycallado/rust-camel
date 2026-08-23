@@ -65,7 +65,7 @@ pub struct CrashNotification {
 }
 
 #[cfg(test)]
-type StartRouteEventHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
+type StartRouteEventHook = Arc<dyn Fn(&'static str, &str) + Send + Sync + 'static>;
 
 #[cfg(test)]
 static START_ROUTE_EVENT_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<StartRouteEventHook>>> =
@@ -79,13 +79,16 @@ pub(super) fn set_start_route_event_hook(hook: Option<StartRouteEventHook>) {
 }
 
 #[cfg(test)]
-pub(super) fn emit_start_route_event(event: &'static str) {
+/// `route_id` scopes the event: hook-installing tests filter to their own
+/// route so parallel tests starting routes cannot contaminate the recorder
+/// (the hook is a single process-wide slot).
+pub(super) fn emit_start_route_event(event: &'static str, route_id: &str) {
     if let Some(hook) = START_ROUTE_EVENT_HOOK
         .lock()
         .expect("start route event hook lock")
         .as_ref()
     {
-        hook(event);
+        hook(event, route_id);
     }
 }
 

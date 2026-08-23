@@ -477,6 +477,47 @@ async fn start_stop_route_happy_path_with_timer_and_mock() {
     controller.remove_route("rt-1").await.unwrap();
 }
 
+/// rc-082j regression: the global start-route event hook is route-scoped —
+/// a parallel test starting its own routes must not land events in another
+/// test's recorder (the hook is a single process-wide slot).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn start_route_hook_ignores_foreign_routes() {
+    let _hook_guard = START_ROUTE_HOOK_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let events: Arc<std::sync::Mutex<Vec<&'static str>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    set_start_route_event_hook(Some({
+        let events = Arc::clone(&events);
+        Arc::new(move |event, route_id| {
+            if route_id == "hook-owner" {
+                events.lock().expect("events").push(event);
+            }
+        })
+    }));
+
+    // Foreign route start — simulates ANY parallel test starting a route
+    // while the hook is installed. None of it may reach the recorder.
+    let mut controller = build_controller_with_components();
+    let route = RouteDefinition::new(
+        "timer:tick?period=10&repeatCount=1",
+        vec![BuilderStep::To("mock:out".into())],
+    )
+    .with_route_id("foreign-rt");
+    controller.add_route(route).await.unwrap();
+    controller.start_route("foreign-rt").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    controller.stop_route("foreign-rt").await.unwrap();
+
+    set_start_route_event_hook(None);
+    let events = events.lock().expect("events").clone();
+    assert!(
+        events.is_empty(),
+        "foreign route events leaked into hook-owner recorder: {events:?}"
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn start_route_spawns_pipeline_before_consumer_for_eager_consumers() {
@@ -486,8 +527,10 @@ async fn start_route_spawns_pipeline_before_consumer_for_eager_consumers() {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     set_start_route_event_hook(Some({
         let events = Arc::clone(&events);
-        Arc::new(move |event| {
-            events.lock().expect("events lock").push(event);
+        Arc::new(move |event, route_id| {
+            if route_id == "startup-order" {
+                events.lock().expect("events lock").push(event);
+            }
         })
     }));
 
@@ -2590,8 +2633,10 @@ async fn start_route_awaits_start_in_order() {
     // events land on one timeline.
     set_start_route_event_hook(Some({
         let log = Arc::clone(&log);
-        Arc::new(move |event| {
-            log.lock().expect("log").push(event);
+        Arc::new(move |event, route_id| {
+            if route_id == "start-order" {
+                log.lock().expect("log").push(event);
+            }
         })
     }));
 
@@ -2660,8 +2705,10 @@ async fn start_route_rolls_back_on_failure() {
         Arc::new(std::sync::Mutex::new(Vec::new()));
     set_start_route_event_hook(Some({
         let events = Arc::clone(&events);
-        Arc::new(move |event| {
-            events.lock().expect("events").push(event);
+        Arc::new(move |event, route_id| {
+            if route_id == "rollback" {
+                events.lock().expect("events").push(event);
+            }
         })
     }));
 
@@ -2728,8 +2775,10 @@ async fn start_route_default_start_noop_unaffected() {
         Arc::new(std::sync::Mutex::new(Vec::new()));
     set_start_route_event_hook(Some({
         let events = Arc::clone(&events);
-        Arc::new(move |event| {
-            events.lock().expect("events").push(event);
+        Arc::new(move |event, route_id| {
+            if route_id == "default-start" {
+                events.lock().expect("events").push(event);
+            }
         })
     }));
 
@@ -2783,8 +2832,10 @@ async fn start_route_rolls_back_on_consumer_creation_failure() {
         Arc::new(std::sync::Mutex::new(Vec::new()));
     set_start_route_event_hook(Some({
         let events = Arc::clone(&events);
-        Arc::new(move |event| {
-            events.lock().expect("events").push(event);
+        Arc::new(move |event, route_id| {
+            if route_id == "post-start-rollback" {
+                events.lock().expect("events").push(event);
+            }
         })
     }));
 

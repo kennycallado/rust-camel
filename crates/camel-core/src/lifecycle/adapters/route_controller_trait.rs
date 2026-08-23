@@ -541,7 +541,7 @@ impl camel_api::RouteController for DefaultRouteController {
             }
         };
         #[cfg(test)]
-        emit_start_route_event("pipeline_spawned");
+        emit_start_route_event("pipeline_spawned", route_id);
 
         // Start consumer after pipeline task is spawned to minimize the chance of
         // fire-and-forget events being produced before the pipeline loop is active.
@@ -554,7 +554,7 @@ impl camel_api::RouteController for DefaultRouteController {
             false,
         );
         #[cfg(test)]
-        emit_start_route_event("consumer_spawned");
+        emit_start_route_event("consumer_spawned", route_id);
 
         // rc-w1u9: await consumer startup handshake before returning. For
         // Immediate consumers this is a no-op (pre-resolved receiver); for

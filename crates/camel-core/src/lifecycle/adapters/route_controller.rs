@@ -1046,7 +1046,7 @@ impl DefaultRouteController {
             }
         });
         #[cfg(test)]
-        emit_start_route_event("pipeline_spawned");
+        emit_start_route_event("pipeline_spawned", route_id);
 
         // Start consumer after pipeline loop is spawned to avoid startup races
         // where consumers emit exchanges before the route pipeline begins polling.
@@ -1087,7 +1087,7 @@ impl DefaultRouteController {
             }
         });
         #[cfg(test)]
-        emit_start_route_event("consumer_spawned");
+        emit_start_route_event("consumer_spawned", route_id);
 
         {
             let managed = self
