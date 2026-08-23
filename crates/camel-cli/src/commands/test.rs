@@ -1,4 +1,4 @@
-//! `camel test <file>...` — run declarative mock tests from `*.test.yaml`
+//! `camel test <FILE|DIR>...` — run declarative mock tests from `*.test.yaml`
 //! documents.
 //!
 //! Each document boots a lean `CamelContext` in-process, loads its routes,
@@ -14,9 +14,11 @@
 pub mod document;
 pub mod runner;
 
+use std::collections::HashSet;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use camel_dsl::discovery::is_test_document;
 use clap::Args;
 
 use document::parse_test_document;
@@ -25,8 +27,8 @@ use runner::run_test_doc;
 /// CLI args for `camel test`.
 #[derive(Args, Debug)]
 pub struct TestArgs {
-    /// Paths to `*.test.yaml` documents to run, in order.
-    #[arg(value_name = "FILE", required = true)]
+    /// Paths to `*.test.yaml` documents or directories to expand, in order.
+    #[arg(value_name = "FILE|DIR", required = true)]
     pub files: Vec<PathBuf>,
 }
 
@@ -38,6 +40,99 @@ pub struct TestRunSummary {
     pub passed: usize,
     /// Number of endpoints that failed.
     pub failed: usize,
+}
+
+/// Directory names skipped during expansion, at any depth.
+const EXCLUDED_DIR_NAMES: [&str; 3] = ["target", ".git", "node_modules"];
+
+/// Expand CLI path arguments into test documents and error strings.
+///
+/// File arguments pass through verbatim. Directory arguments expand to the
+/// test documents found recursively, skipping `target`, `.git`, and
+/// `node_modules` at any depth. Within one directory argument the documents
+/// are byte-sorted; across arguments, CLI order is preserved. Duplicates
+/// collapse to the first occurrence via `canonicalize` (raw-path fallback
+/// when canonicalization fails). A directory with no test documents yields
+/// an error naming it. Symlinked directories are not followed during the walk
+/// (cycle safety); non-directory entries whose name matches the test suffix are
+/// collected regardless of file type.
+fn expand_test_paths(args: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
+    let mut documents = Vec::new();
+    let mut errors = Vec::new();
+    let mut seen = HashSet::new();
+
+    for arg in args {
+        if arg.is_dir() {
+            let mut found = Vec::new();
+            collect_test_documents(arg, &mut found, &mut errors);
+            found.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+            if found.is_empty() {
+                errors.push(format!("{}: no test documents found", arg.display()));
+            }
+            for path in found {
+                push_unique(path, &mut documents, &mut seen);
+            }
+        } else {
+            push_unique(arg.clone(), &mut documents, &mut seen);
+        }
+    }
+    (documents, errors)
+}
+
+/// Recursively collect test documents under `dir` into `found`.
+///
+/// Directory entries named `target`, `.git`, or `node_modules` are skipped.
+/// Symlinked directories are not followed (cycle safety); non-directory entries
+/// whose name matches the test suffix are collected regardless of file type.
+/// Unreadable entries push an error string naming the path.
+fn collect_test_documents(dir: &Path, found: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            errors.push(format!("{}: {e}", dir.display()));
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                errors.push(format!("{}: {e}", dir.display()));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(e) => {
+                errors.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            if !EXCLUDED_DIR_NAMES.iter().any(|excluded| name == *excluded) {
+                collect_test_documents(&path, found, errors);
+            }
+        } else if is_test_document(&path) {
+            found.push(path);
+        }
+    }
+}
+
+/// Push `path` unless a canonicalized duplicate was seen before.
+///
+/// `canonicalize` failure (e.g. a nonexistent file argument) falls back to
+/// the raw path for dedup; it is not an error here — the runner's read step
+/// owns nonexistent-file errors.
+fn push_unique(path: PathBuf, documents: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+    let key = match std::fs::canonicalize(&path) {
+        Ok(canonical) => canonical,
+        Err(_) => path.clone(),
+    };
+    if seen.insert(key) {
+        documents.push(path);
+    }
 }
 
 /// Run every test document in CLI argument order, sequentially.
@@ -55,7 +150,13 @@ pub async fn run_tests(
     let mut failed = 0usize;
     let mut had_parse_error = false;
 
-    for path in files {
+    let (documents, expansion_errors) = expand_test_paths(files);
+    for message in &expansion_errors {
+        had_parse_error = true;
+        let _ = writeln!(err, "{message}");
+    }
+
+    for path in &documents {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => {
@@ -278,5 +379,116 @@ expects:
         assert_eq!(summary.exit_code, 2);
         let err = String::from_utf8(err).unwrap();
         assert!(err.contains("nope.test.yaml"), "err: {err}");
+    }
+
+    #[test]
+    fn dir_expansion_recursive_sorted() {
+        let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
+        let root = dir.path();
+        fs::write(root.join("b.test.yaml"), "").expect("write b"); // allow-unwrap
+        fs::write(root.join("a.test.yaml"), "").expect("write a"); // allow-unwrap
+        fs::create_dir_all(root.join("sub")).expect("create sub"); // allow-unwrap
+        fs::write(root.join("sub/c.test.yml"), "").expect("write c"); // allow-unwrap
+        let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        let expected = [
+            root.join("a.test.yaml"),
+            root.join("b.test.yaml"),
+            root.join("sub/c.test.yml"),
+        ];
+        assert_eq!(
+            docs, expected,
+            "documents must be byte-sorted within the directory"
+        );
+    }
+
+    #[test]
+    fn dir_expansion_skips_excluded_dirs() {
+        let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
+        let root = dir.path();
+        fs::write(root.join("ok.test.yaml"), "").expect("write ok"); // allow-unwrap
+        fs::create_dir_all(root.join("target")).expect("create target"); // allow-unwrap
+        fs::write(root.join("target/gen.test.yaml"), "").expect("write gen"); // allow-unwrap
+        let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert_eq!(
+            docs,
+            vec![root.join("ok.test.yaml")],
+            "target must be skipped"
+        );
+    }
+
+    #[test]
+    fn dir_expansion_empty_dir_is_error() {
+        let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
+        let root = dir.path();
+        fs::write(root.join(".keep"), "").expect("write keep"); // allow-unwrap
+        let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
+        assert!(docs.is_empty(), "docs: {docs:?}");
+        assert_eq!(errors.len(), 1, "errors: {errors:?}");
+        assert!(
+            errors[0].contains(&root.display().to_string()),
+            "error must name the directory: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn dir_expansion_dedupes_first_occurrence() {
+        let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
+        let root = dir.path();
+        let a = root.join("a.test.yaml");
+        fs::write(&a, "").expect("write a"); // allow-unwrap
+        let (docs, errors) = expand_test_paths(&[root.to_path_buf(), a.clone()]);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert_eq!(
+            docs,
+            vec![a],
+            "duplicate must collapse to the first occurrence"
+        );
+    }
+
+    #[test]
+    fn dir_expansion_file_args_verbatim() {
+        let args = vec![PathBuf::from("foo.yaml")];
+        let (docs, errors) = expand_test_paths(&args);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert_eq!(docs, args, "file args pass through unchanged");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mixed_args_dir_file_empty_order_and_exit_two() {
+        let dir_a = tempfile::tempdir().expect("create dir_a"); // allow-unwrap
+        let empty_dir = tempfile::tempdir().expect("create empty_dir"); // allow-unwrap
+        let file_x_dir = tempfile::tempdir().expect("create file_x dir"); // allow-unwrap
+        // dir_a contains one passing document
+        write_passing(dir_a.path(), "a.test.yaml");
+        // file_x is a standalone passing document
+        let file_x = write_passing(file_x_dir.path(), "standalone.test.yaml");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let summary = run_tests(
+            &[
+                dir_a.path().to_path_buf(),
+                file_x.clone(),
+                empty_dir.path().to_path_buf(),
+            ],
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(summary.exit_code, 2, "empty dir must force exit 2");
+        let out = String::from_utf8(out).unwrap(); // allow-unwrap
+        assert!(
+            out.contains("standalone.test.yaml#out"),
+            "file_x must still run despite expansion error: {out}"
+        );
+        let ia = out.find("a.test.yaml#out").expect("dir_a PASS line"); // allow-unwrap
+        let ib = out
+            .find("standalone.test.yaml#out")
+            .expect("file_x PASS line"); // allow-unwrap
+        assert!(
+            ia < ib,
+            "dir_a must precede file_x across mixed args: {out}"
+        );
     }
 }

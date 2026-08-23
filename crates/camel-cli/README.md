@@ -203,7 +203,7 @@ lean `CamelContext` in-process, loads its routes, delivers `direct:` inputs,
 settles traffic, and asserts expectations against the real mock component.
 
 ```bash
-camel test <FILE>...   # one or more *.test.yaml documents, in order
+camel test <FILE|DIR>...   # test documents, or directories expanded recursively
 ```
 
 ### Test document format
