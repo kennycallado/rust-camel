@@ -445,6 +445,7 @@ mod tests {
             idempotent_repositories,
             claim_check_repositories,
             cache_repositories,
+            intercept: crate::intercept::InterceptRules::default(),
         }
     }
 

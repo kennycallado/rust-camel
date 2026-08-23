@@ -188,6 +188,27 @@ impl StepLifecycle for WireTapLifecycle {
         "wiretap"
     }
 
+    /// Reopen admission after a shutdown (route restart, ADR-0022).
+    ///
+    /// A start-after-shutdown installs a fresh cancellation token and task
+    /// tracker, so taps admitted after the restart are not born cancelled,
+    /// and clears the shutdown idempotency flag, so the next `shutdown`
+    /// again closes admission and drains in-flight copies.
+    async fn start(&self) -> Result<(), CamelError> {
+        {
+            let mut guard = self
+                .shared
+                .inner
+                .lock()
+                .expect("WireTapShared mutex poisoned"); // allow-unwrap
+            guard.open = true;
+            guard.cancel = CancellationToken::new();
+            guard.tracker = TaskTracker::new();
+        }
+        self.shutdown_called.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
     async fn shutdown(&self, _reason: StepShutdownReason) -> Result<(), CamelError> {
         // Idempotency gate.
         if self.shutdown_called.swap(true, Ordering::SeqCst) {

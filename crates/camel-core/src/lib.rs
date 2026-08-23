@@ -77,6 +77,7 @@ pub(crate) use registry::{
     CacheRegistry, ClaimCheckRegistry, IdempotentRegistry, SharedCacheRegistry,
     SharedClaimCheckRegistry, SharedIdempotentRegistry,
 };
+pub mod intercept;
 pub(crate) mod shared;
 pub mod startup_validation;
 pub mod step;

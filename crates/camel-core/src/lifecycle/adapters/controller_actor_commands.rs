@@ -11,6 +11,7 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{BoxProcessor, CamelError, FunctionInvoker, RuntimeHandle, StepLifecycle};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::intercept::InterceptRules;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::domain::CompiledPipeline;
 use crate::lifecycle::domain::route_compilation::PreparedRoute;
@@ -159,6 +160,15 @@ pub(crate) enum RouteControllerCommand {
     },
     SetRuntimeHandle {
         runtime: Arc<dyn RuntimeHandle>,
+    },
+    SetInterceptRules {
+        rules: InterceptRules,
+        reply: oneshot::Sender<Result<(), CamelError>>,
+    },
+    /// Trip the intercept-rules freeze; sent by `CamelContext::start` so the
+    /// freeze applies even with zero routes.
+    MarkStarted {
+        reply: oneshot::Sender<Result<(), CamelError>>,
     },
     SetFunctionInvoker {
         invoker: Arc<dyn FunctionInvoker>,
@@ -720,6 +730,34 @@ impl RouteControllerHandle {
             .send(RouteControllerCommand::SetFunctionInvoker { invoker })
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))
+    }
+
+    /// Install route interception rules; the actor replies with the
+    /// controller's freeze-checked result.
+    pub async fn set_intercept_rules(&self, rules: InterceptRules) -> Result<(), CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::SetInterceptRules {
+                rules,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    /// Trip the intercept-rules freeze (context start marker).
+    pub async fn mark_started(&self) -> Result<(), CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::MarkStarted { reply: reply_tx })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
     }
 
     pub fn try_set_function_invoker(

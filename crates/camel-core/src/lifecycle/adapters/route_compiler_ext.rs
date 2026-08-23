@@ -34,6 +34,7 @@ use camel_processor::security_policy_layer::SecurityPolicyLayer;
 use tower::Layer;
 
 use crate::health_registry::HealthCheckRegistry;
+use crate::intercept::InterceptRules;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 use crate::lifecycle::adapters::route_compiler::{
@@ -486,6 +487,8 @@ pub(crate) struct RouteCompilerExt<'a> {
     pub(crate) idempotent_repositories: crate::SharedIdempotentRegistry,
     pub(crate) claim_check_repositories: crate::SharedClaimCheckRegistry,
     pub(crate) cache_repositories: crate::SharedCacheRegistry,
+    /// Route send-point interception rules captured at compile time.
+    pub(crate) intercept: &'a InterceptRules,
 }
 
 impl RouteCompilerExt<'_> {
@@ -539,6 +542,7 @@ impl RouteCompilerExt<'_> {
             self.idempotent_repositories.as_ref(),
             self.claim_check_repositories.as_ref(),
             self.cache_repositories.as_ref(),
+            self.intercept.clone(),
         )
     }
 

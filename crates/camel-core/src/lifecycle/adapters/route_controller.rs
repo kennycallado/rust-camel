@@ -28,6 +28,7 @@ use camel_processor::aggregator::AggregatorService;
 pub use camel_processor::aggregator::SharedLanguageRegistry;
 
 use crate::health_registry::HealthCheckRegistry;
+use crate::intercept::InterceptRules;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::route_compiler_ext::{
     RouteCompilerExt, build_eh_config_pipeline, transport_from_uri,
@@ -96,6 +97,12 @@ pub struct DefaultRouteController {
     /// Operator acknowledgements for per-bind public exposure (ADR-0061).
     /// Empty by default → the gate fails closed on non-loopback binds.
     pub(super) bind_acks: super::route_controller_trait::BindExposureAcks,
+    /// Route send-point interception rules captured by step compilation.
+    pub(super) intercept: InterceptRules,
+    /// Intercept-rules freeze. Trips on `add_route` success and on the
+    /// `MarkStarted` actor command; never reset (stop/restart included),
+    /// because compiled pipelines capture the rules at compile time.
+    pub(super) frozen: bool,
 }
 
 impl DefaultRouteController {
@@ -155,6 +162,8 @@ impl DefaultRouteController {
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
             bind_acks: Default::default(),
+            intercept: InterceptRules::default(),
+            frozen: false,
         }
     }
 
@@ -184,6 +193,8 @@ impl DefaultRouteController {
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
             bind_acks: Default::default(),
+            intercept: InterceptRules::default(),
+            frozen: false,
         }
     }
 
@@ -213,6 +224,8 @@ impl DefaultRouteController {
             prepared_staging: HashMap::new(),
             endpoint_index: super::endpoint_index::EndpointIndex::new(),
             bind_acks: Default::default(),
+            intercept: InterceptRules::default(),
+            frozen: false,
         }
     }
 
@@ -265,6 +278,37 @@ impl DefaultRouteController {
     /// (ADR-0061). Built by the CLI from `CamelConfig.binds`.
     pub fn set_bind_exposure_acks(&mut self, acks: BindExposureAcks) {
         self.bind_acks = acks;
+    }
+
+    /// Install route send-point interception rules (pre-first-use only).
+    ///
+    /// Fails with `CamelError::Config` once the freeze has tripped: compiled
+    /// pipelines capture the rules at compile time, so the rule set must not
+    /// change after a route is added or the context is started.
+    pub fn set_intercept_rules(&mut self, rules: InterceptRules) -> Result<(), CamelError> {
+        if self.frozen {
+            return Err(CamelError::Config(
+                "intercept rules are frozen: a route was added or the context was started; \
+                 rules cannot be changed after first use"
+                    .into(),
+            ));
+        }
+        self.intercept = rules;
+        Ok(())
+    }
+
+    /// Builder-style build-time configuration on a fresh controller (which
+    /// is never frozen); mirrors `with_function_invoker`.
+    pub fn with_intercept_rules(mut self, rules: InterceptRules) -> Self {
+        self.intercept = rules;
+        self
+    }
+
+    /// Trip the intercept-rules freeze. Dispatched by the `MarkStarted`
+    /// actor command so the freeze applies even with zero routes. Never
+    /// unset.
+    pub fn mark_started(&mut self) {
+        self.frozen = true;
     }
 
     /// All compiled security plans whose routes bind the same listener
@@ -376,6 +420,7 @@ impl DefaultRouteController {
             idempotent_repositories: Arc::clone(&self.idempotent_repositories),
             claim_check_repositories: Arc::clone(&self.claim_check_repositories),
             cache_repositories: Arc::clone(&self.cache_repositories),
+            intercept: &self.intercept,
         }
     }
 
@@ -416,6 +461,7 @@ impl DefaultRouteController {
             &self.idempotent_repositories,
             &self.claim_check_repositories,
             &self.cache_repositories,
+            self.intercept.clone(),
         )
     }
 
@@ -474,6 +520,9 @@ impl DefaultRouteController {
             .insert(managed.definition.route_id().to_string(), managed);
 
         self.endpoint_index.insert(&from_uri, &route_id);
+        // First successful route registration freezes the intercept rules:
+        // this route's pipeline compiled against the current rule set.
+        self.frozen = true;
         Ok(())
     }
 

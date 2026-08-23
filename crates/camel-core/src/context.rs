@@ -17,6 +17,7 @@ use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
 
 use crate::health_registry::HealthCheckRegistry;
+use crate::intercept::InterceptRules;
 use crate::language_registry::LanguageRegistryError;
 use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
@@ -528,6 +529,16 @@ impl CamelContext {
         self.register_component_dyn(Arc::new(component));
     }
 
+    /// Install route send-point interception rules (pre-first-use only).
+    ///
+    /// Returns `CamelError::Config` once frozen: after the first route is
+    /// registered or the context is started, compiled pipelines have
+    /// captured the rule set and it cannot change. Builder-time rules via
+    /// [`CamelContextBuilder::with_intercept_rules`] bypass this gate.
+    pub async fn set_intercept_rules(&self, rules: InterceptRules) -> Result<(), CamelError> {
+        self.route_controller.set_intercept_rules(rules).await
+    }
+
     /// Register a startup `ConfigCheck` to be evaluated at the head of
     /// [`start()`](Self::start). Established by ADR-0033.
     ///
@@ -682,7 +693,11 @@ impl CamelContext {
             &self.route_controller,
             &mut self.cancel_token,
         )
-        .await
+        .await?;
+        // Trip the intercept-rules freeze so it applies even with zero
+        // routes. A failed `start_context` above returns early — a failed
+        // start does not freeze.
+        self.route_controller.mark_started().await
     }
 
     /// Graceful shutdown with default 30-second timeout.

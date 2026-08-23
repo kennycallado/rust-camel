@@ -13,6 +13,7 @@ use crate::cache::memory::MemoryCacheRepository;
 use crate::claim_check::memory_repository::MemoryClaimCheckRepository;
 use crate::health_registry::HealthCheckRegistry;
 use crate::idempotent::memory_repository::MemoryIdempotentRepository;
+use crate::intercept::InterceptRules;
 use crate::lifecycle::adapters::RuntimeExecutionAdapter;
 use crate::lifecycle::adapters::controller_actor::{
     RouteControllerHandle, spawn_controller_actor, spawn_supervision_task,
@@ -45,6 +46,7 @@ pub struct CamelContextBuilder {
     execution_factory: Option<ExecutionFactory>,
     health_registry: Option<Arc<HealthCheckRegistry>>,
     template_registry: Option<Arc<TemplateRegistry>>,
+    intercept_rules: Option<InterceptRules>,
 }
 
 impl CamelContextBuilder {
@@ -63,6 +65,7 @@ impl CamelContextBuilder {
             execution_factory: None,
             health_registry: None,
             template_registry: None,
+            intercept_rules: None,
         }
     }
 
@@ -145,6 +148,15 @@ impl CamelContextBuilder {
     /// If not provided, a default empty registry is created during `build()`.
     pub fn template_registry(mut self, registry: Arc<TemplateRegistry>) -> Self {
         self.template_registry = Some(registry);
+        self
+    }
+
+    /// Set route send-point interception rules at build time.
+    ///
+    /// The rules are installed on a fresh controller, where the
+    /// first-use freeze cannot have tripped yet.
+    pub fn with_intercept_rules(mut self, rules: InterceptRules) -> Self {
+        self.intercept_rules = Some(rules);
         self
     }
 
@@ -258,6 +270,9 @@ impl CamelContextBuilder {
                 if let Some(invoker) = self.function_invoker.clone() {
                     controller_impl = controller_impl.with_function_invoker(invoker);
                 }
+                if let Some(rules) = self.intercept_rules.clone() {
+                    controller_impl = controller_impl.with_intercept_rules(rules);
+                }
                 controller_impl.set_idempotent_repositories(Arc::clone(&idempotent_repositories));
                 controller_impl.set_claim_check_repositories(Arc::clone(&claim_check_repositories));
                 controller_impl.set_cache_repositories(Arc::clone(&cache_repositories));
@@ -288,6 +303,9 @@ impl CamelContextBuilder {
                 };
                 if let Some(invoker) = self.function_invoker.clone() {
                     controller_impl = controller_impl.with_function_invoker(invoker);
+                }
+                if let Some(rules) = self.intercept_rules.clone() {
+                    controller_impl = controller_impl.with_intercept_rules(rules);
                 }
                 controller_impl.set_idempotent_repositories(Arc::clone(&idempotent_repositories));
                 controller_impl.set_claim_check_repositories(Arc::clone(&claim_check_repositories));

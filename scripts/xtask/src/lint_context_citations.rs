@@ -259,6 +259,28 @@ fn method_in_trait_def(items: &[syn::Item], type_name: &str, method: &str) -> bo
     })
 }
 
+/// True when `type_name` is a struct in `items` and `field` is one of its
+/// named fields. Used so `` `<Type>::<field>` `` citations for struct fields
+/// (e.g. `DefaultRouteController::frozen`) resolve without requiring an impl
+/// method of the same name.
+fn field_in_struct(items: &[syn::Item], type_name: &str, field: &str) -> bool {
+    items.iter().any(|item| {
+        let syn::Item::Struct(s) = item else {
+            return false;
+        };
+        if s.ident != type_name {
+            return false;
+        }
+        match &s.fields {
+            syn::Fields::Named(named) => named
+                .named
+                .iter()
+                .any(|f| f.ident.as_ref().is_some_and(|id| id == field)),
+            syn::Fields::Unnamed(_) | syn::Fields::Unit => false,
+        }
+    })
+}
+
 /// Rule B: validate every backtick-quoted Rust definition token in
 /// `masked_content` against the symbol table. For `fn`/`struct`/`enum`/
 /// `trait` the definition must exist in `own_items`, falling back to
@@ -367,6 +389,8 @@ pub fn check_symbols_src(
                     || enum_variant_exists(workspace_items, type_name, method);
                 let is_trait_method = method_in_trait_def(own_items, type_name, method)
                     || method_in_trait_def(workspace_items, type_name, method);
+                let is_field = field_in_struct(own_items, type_name, method)
+                    || field_in_struct(workspace_items, type_name, method);
                 let method_items: &[syn::Item] = if is_context_map {
                     workspace_items
                 } else {
@@ -374,6 +398,7 @@ pub fn check_symbols_src(
                 };
                 if !is_variant
                     && !is_trait_method
+                    && !is_field
                     && !method_in_impl_for_type(method_items, type_name, method)
                 {
                     push_violation(&mut violations);

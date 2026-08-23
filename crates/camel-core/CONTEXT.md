@@ -89,6 +89,18 @@ _Avoid_: OnException (use OnException in DSL context; ExceptionPolicy in runtime
 
 **CacheRepository backends**:
 `MemoryCacheRepository` (moka-based, size-eviction only via `eviction_listener` filtered to `RemovalCause::Size`) and `RedbCacheRepository` (persistent, async `new()`, sweep loop bound to `CamelContext::shutdown_token()`). Both implement `CacheRepository` from camel-api (async `stats`). The memory backend is registered as `"memory"` by default with `max_capacity = 10_000`. The redb backend is registered as `"persistent"` when `[default.cache_repo] backend = "redb"` is configured. Redb overrides `invalidate_prefix` with range deletion (memory keeps the fail-closed default). Both backends count `peek_stale_served` and `invalidations` per operation; redb reports `bytes: Some(sum)` (scan inside `spawn_blocking`, bd rc-22wj), degrading to `bytes: None` when the scan fails (unreadable table or a non-deserializable entry) while memory reports `bytes: None`. `RedbCacheRepository::new` requires an explicit `cache_size` (a page-cache byte budget routed through `redb::Builder::set_cache_size`) and warns at open when it exceeds the container's cgroup memory limit. Established by ADR-0056. The redis backend lives outside camel-core, in the `camel-redis-repo` repository service crate (`RedisCacheRepository`, `RedisIdempotentRepository`; ADR-0063): `camel-config` registers it by name when `[default.cache_repo]` or `[default.idempotent_repo]` sets `backend = "redis"`.
+**InterceptRules / InterceptAction**:
+Ordered interception map for route send points. `struct InterceptRules` and `enum InterceptAction` in `src/intercept.rs` hold exact-URI `InterceptRule` entries (`uri` plus `SkipTo { uri }` or `DivertCopyTo { uri }`). Targets must be `mock:` URIs; `InterceptRules::new` rejects other targets at build time. Lookup is first-match-wins on exact equality. Established by ADR-0064 (see `struct InterceptRules` and `enum InterceptAction`).
+_Avoid_: advice, intercept config (use InterceptRules for the set, InterceptAction for the variant)
+
+**Intercept freeze**:
+Rules freeze at first successful route registration or at context start, and never unfreeze. `CamelContextBuilder::with_intercept_rules` sets rules at build time before freeze. `CamelContext::set_intercept_rules` installs rules only before freeze and returns `CamelError::Config` after freeze. Freeze lives in `src/lifecycle/adapters/route_controller.rs` (`DefaultRouteController::frozen`, `fn set_intercept_rules`, `fn with_intercept_rules`, `fn mark_started`). Established by ADR-0064.
+_Avoid_: late intercept, dynamic intercept
+
+**CompilationContext.intercept**:
+The compiler threads the frozen rules into `CompilationContext.intercept` at step resolution. `src/lifecycle/adapters/route_compiler_ext.rs` copies the controller's `InterceptRules` into the context so each `RouteDefinition` compiles against the frozen set; `SkipTo` rewrites the producer URI before endpoint resolution and `DivertCopyTo` composes the copy stage. Established by ADR-0064.
+_Avoid_: runtime intercept lookup (use compile-time threading)
+
 **RuntimeComponentMetadataCatalog**:
 Thin wrapper around `Arc<Mutex<Registry>>` implementing `ComponentMetadataCatalog`. Created
 on-demand via `CamelContext::metadata_catalog()`. Defined in `component_metadata_catalog.rs`.

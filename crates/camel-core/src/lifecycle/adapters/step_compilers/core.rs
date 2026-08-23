@@ -697,6 +697,7 @@ mod tests {
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
             cache_repositories: &cache_repositories,
+            intercept: crate::intercept::InterceptRules::default(),
         };
 
         // ── IdempotentConsumer step ──
@@ -809,6 +810,7 @@ mod tests {
             idempotent_repositories: idempotent,
             claim_check_repositories: claim_check,
             cache_repositories: cache,
+            intercept: crate::intercept::InterceptRules::default(),
         };
 
         let mut reg = StepCompilerRegistry::new();
@@ -999,6 +1001,7 @@ mod tests {
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
             cache_repositories: &cache_repositories,
+            intercept: crate::intercept::InterceptRules::default(),
         };
 
         reg.compile_step(step, 0, &ctx)
@@ -1159,6 +1162,7 @@ mod tests {
             idempotent_repositories: idempotent,
             claim_check_repositories: claim_check,
             cache_repositories: cache,
+            intercept: crate::intercept::InterceptRules::default(),
         }
     }
 }

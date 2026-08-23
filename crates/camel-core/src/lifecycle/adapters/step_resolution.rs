@@ -202,6 +202,7 @@ pub(crate) fn resolve_steps(
     idempotent_repositories: &IdempotentRegistry,
     claim_check_repositories: &ClaimCheckRegistry,
     cache_repositories: &CacheRegistry,
+    intercept: crate::intercept::InterceptRules,
 ) -> Result<Vec<CompiledStep>, CamelError> {
     use crate::lifecycle::adapters::step_compilers::{CompilationContext, build_registry};
 
@@ -218,6 +219,7 @@ pub(crate) fn resolve_steps(
         idempotent_repositories,
         claim_check_repositories,
         cache_repositories,
+        intercept,
     };
     compiler_registry.compile_steps(steps, &ctx)
 }
@@ -423,6 +425,7 @@ mod tests {
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
             &crate::CacheRegistry::new(),
+            crate::intercept::InterceptRules::default(),
         )
         .unwrap_err();
         assert!(
@@ -454,6 +457,7 @@ mod tests {
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
             &crate::CacheRegistry::new(),
+            crate::intercept::InterceptRules::default(),
         )
         .unwrap_err();
         assert!(
@@ -491,6 +495,7 @@ mod tests {
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
             &crate::CacheRegistry::new(),
+            crate::intercept::InterceptRules::default(),
         )
         .unwrap_err();
 
@@ -692,6 +697,7 @@ mod tests {
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
             &crate::CacheRegistry::new(),
+            crate::intercept::InterceptRules::default(),
         )
         .unwrap();
 
@@ -725,6 +731,7 @@ mod tests {
             &crate::IdempotentRegistry::new(),
             &crate::ClaimCheckRegistry::new(),
             &crate::CacheRegistry::new(),
+            crate::intercept::InterceptRules::default(),
         )
         .unwrap_err();
 

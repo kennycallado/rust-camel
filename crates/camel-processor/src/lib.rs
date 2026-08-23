@@ -17,6 +17,7 @@ pub mod enrichment_strategy;
 pub mod error_handler;
 pub mod filter;
 pub mod idempotent_consumer;
+pub mod intercept_compose;
 pub mod json_schema_validate;
 pub mod load_balancer;
 pub mod log;
@@ -81,6 +82,7 @@ pub use error_handler::{
 };
 pub use filter::{FilterSegment, FilterService};
 pub use idempotent_consumer::{IdempotentConsumerSegment, MessageIdExpression};
+pub use intercept_compose::compose_divert;
 pub use json_schema_validate::JsonSchemaValidateService;
 pub use load_balancer::{LoadBalanceSegment, LoadBalancerService};
 pub use log::{LogLevel, LogProcessor};

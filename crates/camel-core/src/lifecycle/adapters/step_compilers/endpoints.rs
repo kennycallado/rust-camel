@@ -6,16 +6,94 @@ use std::sync::Arc;
 
 use camel_api::{BoxProcessor, CamelError, StepLifecycle};
 
-use camel_endpoint::parse_uri;
-
 use super::{
     CompilationContext, CompileOutcome, CompiledStep, StepCompiler, StepCompilerRegistry,
-    resolve_producer_with_lifecycle,
+    resolve_producer_with_lifecycle, resolve_send,
 };
+use crate::intercept::InterceptAction;
 use crate::lifecycle::adapters::CompositeStepLifecycle;
 use crate::lifecycle::application::route_definition::BuilderStep;
 
 pub(crate) struct EndpointsCompiler;
+
+/// Enrich a failed intercept-target resolution (Tasks 4+5): the
+/// `ComponentNotFound` variant is preserved (operators match on it to
+/// distinguish "component not registered" from configuration errors); other
+/// variants are rewrapped as `Config`.
+fn enrich_intercept_error(err: CamelError, target: &str) -> CamelError {
+    match err {
+        CamelError::ComponentNotFound(s) => {
+            CamelError::ComponentNotFound(format!("{s} (intercept target: {target})"))
+        }
+        other => CamelError::Config(format!("{other} (intercept target: {target})")),
+    }
+}
+
+/// Compile an un-diverted (optionally substituted) `To` send.
+fn compile_to(
+    ctx: &CompilationContext,
+    uri: &str,
+    intercept_target: Option<&str>,
+) -> Result<CompileOutcome, CamelError> {
+    match (resolve_send(ctx, uri), intercept_target) {
+        (Err(e), Some(target)) => Err(enrich_intercept_error(e, target)),
+        (Err(e), None) => Err(e),
+        (Ok(resolved), _) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+            processor: resolved.producer,
+            body_contract: resolved.body_contract,
+            lifecycle: resolved.lifecycle,
+        })),
+    }
+}
+
+/// Compile a diverted send (Task 5): a wiretap copy stage in front of the
+/// real producer.
+///
+/// The copy stage is infallible at the pipeline level — copy readiness and
+/// call failures are logged and suppressed inside the wiretap — so the real
+/// producer's `Result` is returned verbatim to the caller. The body contract
+/// comes from the REAL endpoint: the copy never replaces the main exchange.
+///
+/// Lifecycle: children in compile order `[copy endpoint?, tap, real
+/// endpoint?]`. `CompositeStepLifecycle::shutdown` iterates in REVERSE — the
+/// real endpoint tears down first, the tap then drains in-flight copies, and
+/// the copy endpoint closes last (copies drain before their target endpoint
+/// tears down). The child list is built ONCE per compile because
+/// `shutdown_called` is a per-handle flag: every start/shutdown of this step
+/// must flow through the same composite chain.
+fn compile_divert(
+    ctx: &CompilationContext,
+    real_uri: &str,
+    copy_uri: &str,
+) -> Result<CompileOutcome, CamelError> {
+    // Real side: the un-intercepted resolution path, verbatim.
+    let real = resolve_send(ctx, real_uri)?;
+    // Copy side: producer (+ endpoint lifecycle) from the copy target.
+    let (copy_producer, copy_lifecycle) = resolve_producer_with_lifecycle(ctx, copy_uri)
+        .map_err(|e| enrich_intercept_error(e, copy_uri))?;
+
+    // The tap clone moved into the composition shares the admission gate and
+    // task tracker with the lifecycle handle, so route shutdown drains the
+    // same tracker the processor admits into.
+    let tap = camel_processor::WireTapService::new(copy_producer);
+    let processor = camel_processor::compose_divert(tap.clone(), real.producer);
+
+    let mut children: Vec<Arc<dyn StepLifecycle>> = Vec::with_capacity(3);
+    if let Some(lc) = copy_lifecycle {
+        children.push(lc);
+    }
+    children.push(tap.lifecycle());
+    if let Some(lc) = real.lifecycle {
+        children.push(lc);
+    }
+    let lifecycle = Some(Arc::new(CompositeStepLifecycle::new(children)) as Arc<dyn StepLifecycle>);
+
+    Ok(CompileOutcome::Matched(CompiledStep::Process {
+        processor,
+        body_contract: real.body_contract,
+        lifecycle,
+    }))
+}
 
 impl StepCompiler for EndpointsCompiler {
     fn compile(
@@ -28,24 +106,20 @@ impl StepCompiler for EndpointsCompiler {
         match step {
             // ── To ──
             BuilderStep::To(uri) => {
-                let parsed = parse_uri(&uri)?;
-                let component = ctx
-                    .component_ctx
-                    .resolve_component(&parsed.scheme)
-                    .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
-                let endpoint = component.create_endpoint(&uri, ctx.component_ctx.as_ref())?;
-                let contract = endpoint.body_contract();
-                let producer = endpoint.create_producer(Arc::clone(&ctx.rt), ctx.producer_ctx)?;
-                // Capture the endpoint's lifecycle handle so the route
-                // controller can start/shut it down in route order (ADR-0022).
-                // Default is `None` for stateless endpoints — see
-                // `Endpoint::lifecycle` in camel-component-api.
-                let lifecycle: Option<Arc<dyn StepLifecycle>> = endpoint.lifecycle();
-                Ok(CompileOutcome::Matched(CompiledStep::Process {
-                    processor: producer,
-                    body_contract: contract,
-                    lifecycle,
-                }))
+                // Route send-point interception: a `SkipTo` rule (Task 4)
+                // substitutes the send URI before any parsing or component
+                // resolution, so the original URI's scheme is never resolved.
+                // A `DivertCopyTo` rule (Task 5) composes a copy stage in
+                // front of the real producer.
+                match ctx.intercept.lookup(&uri) {
+                    None => compile_to(ctx, &uri, None),
+                    Some(InterceptAction::SkipTo { uri: target }) => {
+                        compile_to(ctx, target, Some(target.as_str()))
+                    }
+                    Some(InterceptAction::DivertCopyTo { uri: copy_uri }) => {
+                        compile_divert(ctx, &uri, copy_uri)
+                    }
+                }
             }
 
             // ── WireTap ──
@@ -232,6 +306,59 @@ mod tests {
         }
     }
 
+    /// Lifecycle fake that records its id on `shutdown` (Task 5: divert
+    /// child ordering).
+    #[derive(Debug)]
+    struct RecordingShutdown {
+        id: &'static str,
+        order: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl RecordingShutdown {
+        fn new(id: &'static str, order: Arc<Mutex<Vec<&'static str>>>) -> Self {
+            Self { id, order }
+        }
+    }
+
+    #[async_trait]
+    impl StepLifecycle for RecordingShutdown {
+        fn name(&self) -> &'static str {
+            self.id
+        }
+        async fn shutdown(&self, _reason: StepShutdownReason) -> Result<(), CamelError> {
+            self.order.lock().expect("order mutex").push(self.id);
+            Ok(())
+        }
+    }
+
+    /// Divert composition order (Task 5): children in compile order
+    /// `[copy, tap, real]`; shutdown iterates in REVERSE — the real endpoint
+    /// tears down first, the tap then drains in-flight copies, and the copy
+    /// endpoint closes last (`composite_step_lifecycle.rs:66-67`).
+    #[tokio::test]
+    async fn divert_children_shut_down_in_reverse_order() {
+        let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let copy: Arc<dyn StepLifecycle> =
+            Arc::new(RecordingShutdown::new("copy", Arc::clone(&order)));
+        let tap: Arc<dyn StepLifecycle> =
+            Arc::new(RecordingShutdown::new("tap", Arc::clone(&order)));
+        let real: Arc<dyn StepLifecycle> =
+            Arc::new(RecordingShutdown::new("real", Arc::clone(&order)));
+
+        let composite = CompositeStepLifecycle::new(vec![copy, tap, real]);
+        composite
+            .shutdown(StepShutdownReason::RouteStop)
+            .await
+            .expect("shutdown should succeed");
+
+        let recorded = order.lock().expect("order mutex").clone();
+        assert_eq!(
+            recorded,
+            vec!["real", "tap", "copy"],
+            "shutdown must run children in reverse: real, tap drain, copy close"
+        );
+    }
+
     /// Endpoint that returns `None` from `lifecycle()` — stateless.
     struct StatelessEndpoint {
         uri: String,
@@ -336,6 +463,7 @@ mod tests {
             idempotent_repositories,
             claim_check_repositories,
             cache_repositories,
+            intercept: crate::intercept::InterceptRules::default(),
         }
     }
 

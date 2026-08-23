@@ -13,6 +13,7 @@ use camel_api::{
 use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_endpoint::parse_uri;
 
+use crate::intercept::InterceptRules;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
 use crate::lifecycle::application::route_definition::BuilderStep;
@@ -113,6 +114,9 @@ pub(crate) struct CompilationContext<'a> {
     /// `CachePeekStale` compiler arms to resolve repository names into
     /// `Arc<dyn CacheRepository>`.
     pub cache_repositories: &'a CacheRegistry,
+    /// Route send-point interception rules captured at compile time.
+    /// Consulted by send-step compilation (Task 4/5).
+    pub intercept: InterceptRules,
 }
 
 impl<'a> CompilationContext<'a> {
@@ -251,35 +255,63 @@ impl StepCompilerRegistry {
     }
 }
 
-/// Parse a URI and create a producer, reusing `component_ctx`, `rt`, and `producer_ctx`
-/// from the compilation context.
-///
-/// Thin wrapper over [`resolve_producer_with_lifecycle`] that discards the
-/// endpoint's [`StepLifecycle`] handle. Use [`resolve_producer_with_lifecycle`]
-/// directly when the lifecycle is needed (e.g. `WireTap` propagation).
-pub(crate) fn resolve_producer(
-    ctx: &CompilationContext,
-    uri: &str,
-) -> Result<BoxProcessor, CamelError> {
-    Ok(resolve_producer_with_lifecycle(ctx, uri)?.0)
+/// A resolved send target: the pieces the un-intercepted `To` path produces
+/// for one URI.
+pub(super) struct ResolvedSend {
+    pub producer: BoxProcessor,
+    pub body_contract: Option<BodyType>,
+    pub lifecycle: Option<Arc<dyn StepLifecycle>>,
 }
 
-/// Parse a URI and create a producer, also returning the endpoint's
-/// [`StepLifecycle`] handle (if any). Canonical resolution path used by all
-/// step compilers; [`resolve_producer`] is a thin wrapper over this.
-pub(crate) fn resolve_producer_with_lifecycle(
+/// Resolve a send URI into producer/body-contract/lifecycle, exactly as the
+/// un-intercepted `To` path does. Canonical resolution path for send steps;
+/// [`resolve_producer_with_lifecycle`] and [`resolve_producer`] are thin
+/// wrappers over this.
+pub(super) fn resolve_send(
     ctx: &CompilationContext,
     uri: &str,
-) -> Result<(BoxProcessor, Option<Arc<dyn StepLifecycle>>), CamelError> {
+) -> Result<ResolvedSend, CamelError> {
     let parsed = parse_uri(uri)?;
     let component = ctx
         .component_ctx
         .resolve_component(&parsed.scheme)
         .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
     let endpoint = component.create_endpoint(uri, ctx.component_ctx.as_ref())?;
+    let body_contract = endpoint.body_contract();
     let producer = endpoint.create_producer(Arc::clone(&ctx.rt), ctx.producer_ctx)?;
-    let lifecycle = endpoint.lifecycle();
-    Ok((producer, lifecycle))
+    // Capture the endpoint's lifecycle handle so the route controller can
+    // start/shut it down in route order (ADR-0022). Default is `None` for
+    // stateless endpoints — see `Endpoint::lifecycle` in camel-component-api.
+    let lifecycle: Option<Arc<dyn StepLifecycle>> = endpoint.lifecycle();
+    Ok(ResolvedSend {
+        producer,
+        body_contract,
+        lifecycle,
+    })
+}
+
+/// Parse a URI and create a producer, also returning the endpoint's
+/// [`StepLifecycle`] handle (if any). Thin wrapper over [`resolve_send`] that
+/// discards the body contract. Use directly when the lifecycle is needed
+/// (e.g. `WireTap` propagation).
+pub(crate) fn resolve_producer_with_lifecycle(
+    ctx: &CompilationContext,
+    uri: &str,
+) -> Result<(BoxProcessor, Option<Arc<dyn StepLifecycle>>), CamelError> {
+    let resolved = resolve_send(ctx, uri)?;
+    Ok((resolved.producer, resolved.lifecycle))
+}
+
+/// Parse a URI and create a producer, reusing `component_ctx`, `rt`, and `producer_ctx`
+/// from the compilation context.
+///
+/// Thin wrapper over [`resolve_producer_with_lifecycle`] that discards the
+/// endpoint's [`StepLifecycle`] handle.
+pub(crate) fn resolve_producer(
+    ctx: &CompilationContext,
+    uri: &str,
+) -> Result<BoxProcessor, CamelError> {
+    Ok(resolve_producer_with_lifecycle(ctx, uri)?.0)
 }
 
 /// Pack a lifecycle Vec into `None` when empty, `Some` when non-empty.
@@ -488,6 +520,7 @@ mod segment_tests {
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
             cache_repositories: &cache_repositories,
+            intercept: InterceptRules::default(),
         };
 
         // Compile a Filter with a child Processor step.
@@ -581,6 +614,7 @@ mod segment_tests {
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
             cache_repositories: &cache_repositories,
+            intercept: InterceptRules::default(),
         };
 
         // Filter with TWO child Processors → both get the same lifecycle handle.
@@ -664,6 +698,7 @@ mod segment_tests {
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
             cache_repositories: &cache_repositories,
+            intercept: InterceptRules::default(),
         };
 
         // Choice with 2 when branches, each containing 1 stateful child.
@@ -753,6 +788,7 @@ mod segment_tests {
             idempotent_repositories: &idempotent_repositories,
             claim_check_repositories: &claim_check_repositories,
             cache_repositories: &cache_repositories,
+            intercept: InterceptRules::default(),
         };
 
         // Outer Filter containing an inner Filter that has a stateful Processor.
@@ -884,6 +920,7 @@ mod dispatch_tests {
             idempotent_repositories,
             claim_check_repositories,
             cache_repositories,
+            intercept: InterceptRules::default(),
         }
     }
 

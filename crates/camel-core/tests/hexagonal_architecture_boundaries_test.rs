@@ -898,3 +898,28 @@ fn camel_lsp_has_no_runtime_dep() {
          use re-exports from camel-lint"
     );
 }
+
+// ── Interception modules: no query-plane dependency ──
+
+/// The interception modules (rule model, `To`-arm step compiler, divert
+/// composition) are data-plane code: they must never reference the CQRS
+/// query plane (`RuntimeBus`, `RuntimeQuery`, `RuntimeQueryBus`). The
+/// `endpoints.rs` check is whole-file — no query-plane token belongs there
+/// at all, including outside the `To` arm.
+#[test]
+fn intercept_modules_have_no_query_plane_dependency() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let processor = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("camel-processor")
+        .join("src")
+        .join("intercept_compose.rs");
+    let files = [
+        root.join("intercept.rs"),
+        root.join("lifecycle/adapters/step_compilers/endpoints.rs"),
+        processor,
+    ];
+    for file in files {
+        assert_file_not_contains(&file, &["RuntimeBus", "RuntimeQuery", "RuntimeQueryBus"]);
+    }
+}

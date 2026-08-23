@@ -95,6 +95,7 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `ErrorHandlerLayer`, `ErrorHandlerService` | stable | `pub use error_handler::{...}`; `struct ErrorHandlerLayer`, `struct ErrorHandlerService` | Legacy Tower layer/service for in-pipeline error handling; prefer `RouteChannelService` + `DefaultRouteErrorHandler` per ADR-0019 for new code. |
 | `FilterSegment`, `FilterService` | stable | `pub use filter::{...}` | Filter EIP. |
 | `IdempotentConsumerSegment`, `MessageIdExpression` | stable | `pub use idempotent_consumer::{...}` | Repository-backed idempotent consumer. |
+| `compose_divert` | stable | `pub use intercept_compose::compose_divert` | Divert composition — copy stage in front of a real producer (ADR-0064). |
 | `JsonSchemaValidateService` | stable | `pub use json_schema_validate::JsonSchemaValidateService` | JSON Schema validation. |
 | `LoadBalanceSegment`, `LoadBalancerService` | stable | `pub use load_balancer::{...}` | Load balancer EIP; service poll_ready migration pending. |
 | `LogLevel`, `LogProcessor` | stable | `pub use log::{...}` | Log EIP. |
@@ -189,6 +190,14 @@ YAML example (streaming NDJSON split):
     steps:
       - to: "log:fragment"
 ```
+
+**compose_divert**:
+Composes a divert copy stage with a real producer. `fn compose_divert` in `src/intercept_compose.rs` takes a `WireTapService` copy stage and a `BoxProcessor` real stage and returns a `BoxProcessor` that runs the copy first (detached or inline under saturation, failures suppressed) then drives `real.ready()` and `real.call()` and returns the real outcome verbatim. It follows Tower `Service` semantics and the WireTap outcome isolation. Used in production by the camel-core `To` compiler (`compile_divert` in `crates/camel-core/src/lifecycle/adapters/step_compilers/endpoints.rs`) for `DivertCopyTo` interception, and by the unit tests in `src/intercept_compose.rs`. Source: `src/intercept_compose.rs` (`fn compose_divert`, `struct DivertService`). Established by ADR-0064.
+_Avoid_: divert layer, copy-then-send (use compose_divert for the function)
+
+**WireTap restart-reopen**:
+Route restart reopens WireTap admission. `WireTapLifecycle::start` in `src/wire_tap.rs` resets `open`, replaces `cancel` with a fresh token, replaces `tracker` with a fresh `TaskTracker`, and clears `shutdown_called`. `WireTapLifecycle::shutdown` uses a per-handle `shutdown_called` latch so one handle cannot block a later handle; use one handle per route (single-handle discipline). Without the reset, copies after restart would be born cancelled. Source: `src/wire_tap.rs` (`struct WireTapService`, `struct WireTapLifecycle`, `fn start`, `fn shutdown`). Established by ADR-0064 via the composed divert.
+_Avoid_: global reopen, shared latch (use per-handle latch, single-handle discipline)
 
 ## Aggregation contract (divergence from Apache Camel)
 

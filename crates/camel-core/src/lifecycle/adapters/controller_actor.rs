@@ -354,6 +354,13 @@ pub fn spawn_controller_actor(
                 RouteControllerCommand::SetRuntimeHandle { runtime } => {
                     controller.set_runtime_handle(runtime);
                 }
+                RouteControllerCommand::SetInterceptRules { rules, reply } => {
+                    let _ = reply.send(controller.set_intercept_rules(rules));
+                }
+                RouteControllerCommand::MarkStarted { reply } => {
+                    controller.mark_started();
+                    let _ = reply.send(Ok(()));
+                }
                 RouteControllerCommand::SetFunctionInvoker { invoker } => {
                     controller.set_function_invoker(invoker);
                 }
