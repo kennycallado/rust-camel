@@ -92,7 +92,7 @@ The system SHALL register a redb-backed idempotent repository under the name `"r
 
 ### Requirement: Redis idempotent repository backend
 
-The system SHALL provide a `RedisIdempotentRepository` in the `camel-redis-repo` repository service crate that implements `camel_api::IdempotentRepository` over a multiplexed Redis connection owned by the repository. `add` SHALL issue `SET key 1 NX` atomically and SHALL return `Ok(true)` when the key was set, `Ok(false)` when it already existed. The repository SHALL NOT re-issue `SET NX` after a transport error; the unknown outcome SHALL surface as `Err(CamelError::Io(..))` and the connection MAY be refreshed for subsequent calls. `contains` SHALL issue `EXISTS`. `remove` SHALL issue `UNLINK`. `clear` SHALL delete only keys under the repository prefix via `SCAN` + `UNLINK` batching and SHALL never issue `FLUSHDB` or `FLUSHALL`. Keys SHALL be namespaced under `{key_prefix}:{repo-name}:` with default prefix `camel:idem`. The repository name SHALL be validated at construction with the same rule as `key_prefix`: non-empty, charset `[A-Za-z0-9:_-]`, no glob metacharacters — the name is part of every SCAN pattern and an unsafe name would break `clear` scoping. Any backend or transport failure SHALL surface as `Err(CamelError::Io(..))`, never as `Ok(false)` and never as a silent absence (Contract C1). During a sentinel failover, a `SET NX` whose outcome is unknown SHALL return `Err`. No TTL SHALL be applied to idempotent keys (out of scope, parity with ADR-0023 and the redb backend). The repository SHALL register under the name `"redis"` only when `[default.idempotent_repo] backend = "redis"` is configured, reusing the same connection lifecycle and validation rules as the cache backend (`url` XOR `sentinel_nodes` + `master_name`; cluster fields rejected), not the same connection — each repository owns its own connection.
+The system SHALL provide a `RedisIdempotentRepository` in the `camel-redis-repo` repository service crate that implements `camel_api::IdempotentRepository` over a multiplexed Redis connection owned by the repository. `add` SHALL issue `SET key 1 NX` atomically and SHALL return `Ok(true)` when the key was set, `Ok(false)` when it already existed. The repository SHALL NOT re-issue `SET NX` after a transport error; the unknown outcome SHALL surface as `Err(CamelError::Io(..))` and the connection MAY be refreshed for subsequent calls. `contains` SHALL issue `EXISTS`. `remove` SHALL issue `UNLINK`. `clear` SHALL delete only keys under the repository prefix via `SCAN` + `UNLINK` batching and SHALL never issue `FLUSHDB` or `FLUSHALL`. Keys SHALL be namespaced under `{key_prefix}:{repo-name}:` with default prefix `camel:idem`. The repository name SHALL be validated at construction with the same rule as `key_prefix`: non-empty, charset `[A-Za-z0-9:_-]`, no glob metacharacters — the name is part of every SCAN pattern and an unsafe name would break `clear` scoping. Any backend or transport failure SHALL surface as `Err(CamelError::Io(..))`, never as `Ok(false)` and never as a silent absence (Contract C1). During a sentinel failover, a `SET NX` whose outcome is unknown SHALL return `Err`. No TTL SHALL be applied to idempotent keys (out of scope, parity with ADR-0023 and the redb backend). The repository SHALL register under the name `"redis"` only when `[default.idempotent_repo] backend = "redis"` is configured, reusing the same connection lifecycle and validation rules as the cache backend (`url` XOR `sentinel_nodes` + `master_name`; cluster fields rejected), not the same connection — each repository owns its own connection. The idempotent redis configuration SHALL carry the same data-node fields as the cache backend: optional `password` and `username` (authenticate the master/replicas in sentinel mode; rejected in `url` mode — where password and db ride the URI and username-in-URI is out of scope — and on the `redb` backend) and optional `db` of type `Option<u16>` (validated 0..=16383, default 0, rejected in `url` mode and on the `redb` backend), validated with the same fail-closed matrix as `cache_repo` under the `idempotent_repo.<field>` names, with the `Debug` output redacting the data-node `password` and `username`, and with the sentinel-mode `db` participating in the effective-endpoint identity of the cross-repo prefix-collision rule.
 
 #### Scenario: add is atomic insert-if-absent
 
@@ -159,4 +159,33 @@ The system SHALL provide a `RedisIdempotentRepository` in the `camel-redis-repo`
   `url = "redis://user:secret@host:6379"` and `sentinel_password = "hunter2"`
 - **WHEN** the struct is formatted with `{:?}`
 - **THEN** the output contains neither `secret` nor `hunter2`
+
+#### Scenario: idempotent data credentials reach the endpoint in sentinel mode
+
+- **GIVEN** a `CamelConfig` whose `idempotent_repo` has `backend = "redis"`,
+  `sentinel_nodes`, `master_name`, `password = "idem-secret"`, and `db = 3`
+- **WHEN** the redis endpoint is constructed from that config
+- **THEN** the endpoint carries the data-node password and database 3 for the
+  master/replica connection
+
+#### Scenario: idempotent data credentials rejected on redb backend
+
+- **GIVEN** a `CamelConfig` whose `idempotent_repo` has `backend = "redb"`,
+  a `path`, and `password = "x"`
+- **WHEN** the config is validated
+- **THEN** validation returns an error naming `idempotent_repo.password`
+
+#### Scenario: idempotent data credentials rejected in url mode
+
+- **GIVEN** a `CamelConfig` whose `idempotent_repo` has `backend = "redis"`,
+  `url = "redis://h:6379"`, and `db = 1`
+- **WHEN** the config is validated
+- **THEN** validation returns an error naming `idempotent_repo.db`
+
+#### Scenario: idempotent data credentials redacted from Debug output
+
+- **GIVEN** an `IdempotentRepoConfig` in sentinel mode with
+  `password = "idem-secret"` and `username = "idem-user"`
+- **WHEN** the struct is formatted with `{:?}`
+- **THEN** the output contains neither `idem-secret` nor `idem-user`
 

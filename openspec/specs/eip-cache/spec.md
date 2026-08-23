@@ -268,26 +268,39 @@ The EFFIS anchor case configures persistence with:
 The redis backend SHALL carry `url` (standalone endpoint), OR the pair
 `sentinel_nodes` + `master_name` (sentinel topology), an optional `key_prefix`
 (default `"camel:cache"`, restricted to the charset `[A-Za-z0-9:_-]`), and the same
-`stale_retention` field as redb. Validation SHALL reject, with an error naming the
+`stale_retention` field as redb. In sentinel mode the redis backend SHALL
+additionally carry data-node credentials `password` and `username` (both
+optional `Option<String>`; they authenticate the client against the
+master/replicas, NOT against the sentinels — sentinel credentials remain
+`sentinel_username`/`sentinel_password`) and an optional `db` of type `Option<u16>`
+(validated 0..=16383, default 0) selecting the logical database on the
+data connection. Validation SHALL reject, with an error naming the
 dotted field (`cache_repo.<field>`) and the violated rule: `backend = "redis"` with
 both `url` and `sentinel_nodes`; with neither `url` nor `sentinel_nodes`; with an
 empty `sentinel_nodes` list or any empty node entry; with `sentinel_nodes` and an
 empty `master_name`; with `master_name`, `sentinel_username`, or `sentinel_password`
-set but no `sentinel_nodes`; with a `url` scheme other than `redis://` or
+set but no `sentinel_nodes`; with `password`, `username`, or `db` set but no
+`sentinel_nodes` (in `url` mode the password and database selection ride
+the URI — userinfo password and `?db=N`; username in the URI is out of
+scope); with a `db` outside 0..=16383; with a `url` scheme other than `redis://` or
 `rediss://`; with any cluster topology fields (cluster mode is not supported for
 repository backends); with a `key_prefix` that is empty or contains characters
 outside `[A-Za-z0-9:_-]` (glob metacharacters would break prefix-scoped `clear`);
 with a `stale_retention` that fails duration parsing; and, when the idempotent repo
 is also `backend = "redis"` on the same effective endpoint and database, with an
-effective prefix identical to the idempotent repository's. Fields that do not
+effective prefix identical to the idempotent repository's (the effective
+endpoint identity SHALL include the sentinel-mode `db`, so db 2 vs db 3 on
+the same sentinel topology and prefix do not collide). Fields that do not
 apply to the configured `backend` SHALL be rejected at validation with an
 error naming `cache_repo.<field>` (fail-closed): `backend = "redis"` rejects
 `path`, `cache_size`, `sweep_interval`, `max_entries`, and `max_capacity`;
 `backend = "memory"` and `"redb"` reject `url`, `sentinel_nodes`,
-`master_name`, `sentinel_username`, `sentinel_password`, and `key_prefix`.
+`master_name`, `sentinel_username`, `sentinel_password`, `key_prefix`,
+`password`, `username`, and `db`.
 Foreign fields SHALL NOT be required. The `CacheRepoConfig`
-`Debug` output SHALL redact credentials: URL userinfo and sentinel
-username/password SHALL NOT appear in formatted output.
+`Debug` output SHALL redact credentials: URL userinfo, sentinel
+username/password, and the data-node `password` and `username` SHALL NOT
+appear in formatted output.
 
 #### Scenario: redb registered when backend = redb
 
@@ -473,6 +486,47 @@ username/password SHALL NOT appear in formatted output.
   `sentinel_password = "hunter2"`
 - **WHEN** the struct is formatted with `{:?}`
 - **THEN** the output contains neither `secret` nor `hunter2`
+
+#### Scenario: data credentials reach the endpoint in sentinel mode
+
+- **GIVEN** a `CamelConfig` whose `cache_repo` has `backend = "redis"`,
+  `sentinel_nodes`, `master_name`, `password = "master-secret"`,
+  `username = "svc"`, and `db = 2`
+- **WHEN** the redis endpoint is constructed from that config
+- **THEN** the endpoint carries the data-node username and password and
+  database 2 for the master/replica connection, distinct from any sentinel
+  credentials
+
+#### Scenario: data credentials rejected in url mode
+
+- **GIVEN** a `CamelConfig` whose `cache_repo` has `backend = "redis"`,
+  `url = "redis://h:6379"`, and `password = "x"`
+- **WHEN** the config is validated
+- **THEN** validation returns an error naming `cache_repo.password` (credentials
+  ride the URI — userinfo password and `?db=N`; username in the URI is
+  out of scope)
+
+#### Scenario: db out of range rejected
+
+- **GIVEN** a `CamelConfig` whose `cache_repo` has `backend = "redis"`,
+  `sentinel_nodes`, `master_name`, and `db = 20000`
+- **WHEN** the config is validated
+- **THEN** validation returns an error naming `cache_repo.db`
+
+#### Scenario: sentinel db participates in the prefix-collision identity
+
+- **GIVEN** two redis repo configs on the same sentinel topology and master
+  with identical effective prefixes but `db = 2` and `db = 3`
+- **WHEN** the config is validated
+- **THEN** validation succeeds (different logical databases do not collide);
+  the same config with both `db = 2` fails with the prefix-collision error
+
+#### Scenario: data credentials redacted from Debug output
+
+- **GIVEN** a `CacheRepoConfig` in sentinel mode with
+  `password = "master-secret"` and `username = "svc-user"`
+- **WHEN** the struct is formatted with `{:?}`
+- **THEN** the output contains neither `master-secret` nor `svc-user`
 
 ### Requirement: Cache EIP face — cache, cache_invalidate, cache_peek_stale steps
 
