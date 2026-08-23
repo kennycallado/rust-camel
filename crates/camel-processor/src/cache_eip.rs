@@ -1760,7 +1760,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn cache_peek_stale_on_absence_stops_branch() {
+        let _lock = PEEK_STALE_LOG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = Arc::new(MockCacheRepository::new("mock"));
         let mut svc =
             CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop, noop_rt());
@@ -1774,7 +1778,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn cache_peek_stale_none_key_stops() {
+        let _lock = PEEK_STALE_LOG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = Arc::new(MockCacheRepository::new("mock"));
         let mut svc =
             CachePeekStaleService::new(repo, none_key(), PeekStaleMissPolicy::Stop, noop_rt());
@@ -1788,7 +1796,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn peek_stale_miss_stop_sets_properties_and_stops() {
+        let _lock = PEEK_STALE_LOG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = Arc::new(MockCacheRepository::new("mock"));
         let mut svc =
             CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop, noop_rt());
@@ -1903,6 +1915,21 @@ mod tests {
         records: Arc<Mutex<Vec<String>>>,
     }
 
+    /// Serializes tests that emit at the shared `cache_peek_stale` debug
+    /// callsites (the miss-stop arm and the none-key arm).
+    ///
+    /// Why: tracing-core caches each callsite's interest process-wide. When a
+    /// non-recorder thread first-registers one of these callsites while
+    /// exactly one recorder is installed, `Rebuilder::JustOne` consults the
+    /// *current thread's* default dispatcher (the no-op one) instead of the
+    /// registered subscribers, caching `Interest::never()`. The recorder
+    /// test's later emission at the same callsite is then silently filtered
+    /// before it reaches the layer, yielding zero captured records. Holding
+    /// this lock for the whole test body keeps recorder and non-recorder
+    /// tests from overlapping on the same callsite, so the recorder test
+    /// always first-registers the callsite with its own subscriber active.
+    static PEEK_STALE_LOG_LOCK: Mutex<()> = Mutex::new(());
+
     impl EventRecorder {
         /// Installs the recorder as this thread's default subscriber and
         /// returns the shared record list plus the dispatcher guard.
@@ -1948,7 +1975,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn peek_stale_miss_stop_emits_debug_log() {
+        let _lock = PEEK_STALE_LOG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = Arc::new(MockCacheRepository::new("mock"));
         let mut svc =
             CachePeekStaleService::new(repo, fixed_key(), PeekStaleMissPolicy::Stop, noop_rt());
@@ -1984,7 +2015,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn peek_stale_key_none_stops_with_debug_log() {
+        let _lock = PEEK_STALE_LOG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = Arc::new(MockCacheRepository::new("mock"));
         let mut svc =
             CachePeekStaleService::new(repo, none_key(), PeekStaleMissPolicy::Stop, noop_rt());
@@ -2396,8 +2431,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn peek_stale_miss_emits_no_peek_served_counter() {
         // Absent key -> MISS path must NOT emit camel.cache.peek_stale_served.
+        let _lock = PEEK_STALE_LOG_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let repo = Arc::new(MockCacheRepository::new("mock"));
         let collector = RecordingMetricsCollector::new();
         let counters = collector.counters.clone();
