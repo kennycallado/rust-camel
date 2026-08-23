@@ -94,7 +94,7 @@ The Consumer removes its registry entry on `stop()` or when the cancellation tok
 
 ## Producer
 
-`to: "direct:name"` builds a DirectProducer. The Producer holds one in-flight call at a time through a bounded semaphore. `poll_ready` checks the registry and acquires a permit. `call` hands the Exchange to the Consumer's channel and awaits the reply.
+`to: "direct:name"` builds a DirectProducer. The Producer holds one in-flight call at a time through a bounded semaphore. `poll_ready` checks only the registry. It fails fast when no Consumer is registered and `failIfNoConsumers` is not `false`. `call` acquires the permit before the dispatch timeout starts. It then hands the Exchange to the Consumer's channel and awaits the reply.
 
 `failIfNoConsumers=true` (default) rejects the call when no Consumer is registered. Set it to `false` to let the Producer race against late registration. The Producer still waits for the Consumer to receive the Exchange, so `false` does not give a fire-and-forget guarantee. Use SEDA for that.
 

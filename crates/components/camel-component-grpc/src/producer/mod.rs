@@ -9,7 +9,7 @@ use camel_api::{Body, CamelError, Exchange};
 use futures::StreamExt;
 use http::uri::PathAndQuery;
 use prost_reflect::MessageDescriptor;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tonic::Request;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
@@ -35,8 +35,6 @@ pub(crate) use convert::proto_cache;
 use convert::{json_to_protobuf, protobuf_to_json};
 
 type ProducerFuture = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
-type AcquireFut =
-    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>>;
 
 /// Default max concurrent gRPC calls per producer instance.
 const DEFAULT_CONCURRENCY: usize = 128;
@@ -52,8 +50,6 @@ pub struct GrpcProducer {
     connect_timeout_ms: u64,
     retry: camel_component_api::NetworkRetryPolicy,
     semaphore: Arc<Semaphore>,
-    pending_permit: Option<OwnedSemaphorePermit>,
-    acquire_fut: AcquireFut,
     auth: AuthConfig,
     config_metadata: Option<String>,
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
@@ -79,9 +75,6 @@ impl Clone for GrpcProducer {
             connect_timeout_ms: self.connect_timeout_ms,
             retry: self.retry.clone(),
             semaphore: Arc::clone(&self.semaphore),
-            // Each clone starts with a fresh permit state.
-            pending_permit: None,
-            acquire_fut: None,
             auth: self.auth.clone(),
             config_metadata: self.config_metadata.clone(),
             runtime: Arc::clone(&self.runtime),
@@ -301,8 +294,6 @@ impl GrpcProducer {
             connect_timeout_ms: config.connect_timeout_ms,
             retry: config.retry.clone(),
             semaphore: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY)),
-            pending_permit: None,
-            acquire_fut: None,
             auth: config.auth.clone(),
             config_metadata: config.metadata.clone(),
             runtime,
@@ -632,35 +623,16 @@ impl Service<Exchange> for GrpcProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.pending_permit.is_some() {
-            return Poll::Ready(Ok(()));
-        }
-        let fut = self
-            .acquire_fut
-            .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
-        match fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(permit)) => {
-                self.acquire_fut = None;
-                self.pending_permit = Some(permit);
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ChannelClosed)),
-            Poll::Pending => Poll::Pending,
-        }
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Permits are NOT acquired here: a permit reserved in poll_ready is
+        // held across the poll_ready/call boundary, wedging the semaphore
+        // when a wrapping Service re-readies a clone (tower contract:
+        // call() may only reserve resources for its own future).
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, exchange: Exchange) -> ProducerFuture {
-        let permit = match self.pending_permit.take() {
-            Some(p) => p,
-            None => {
-                return Box::pin(async {
-                    Err(CamelError::ProcessorError(
-                        "call() invoked without poll_ready()".into(),
-                    ))
-                });
-            }
-        };
+        let semaphore = Arc::clone(&self.semaphore);
         let inner = match self.mode {
             GrpcMode::Unary => self.call_unary(exchange),
             GrpcMode::ServerStreaming => self.call_server_streaming(exchange),
@@ -668,7 +640,14 @@ impl Service<Exchange> for GrpcProducer {
             GrpcMode::Bidi => self.call_bidi(exchange),
         };
         Box::pin(async move {
-            let _permit = permit; // hold semaphore slot for call duration
+            // Acquire the concurrency permit inside call()'s future: the
+            // permit is held only while this one exchange is in flight,
+            // and permit contention must not consume readiness for other
+            // callers. A closed semaphore maps to ChannelClosed.
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| CamelError::ChannelClosed)?;
             inner.await
         })
     }
@@ -964,7 +943,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_producer_poll_ready_always_ready() {
+    async fn poll_ready_returns_ok_unconditionally() {
         let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
         let mut producer = GrpcProducer::new(
             "http://localhost:50051".to_string(),
@@ -982,6 +961,93 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         assert!(matches!(producer.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            128,
+            "poll_ready must not consume a call permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_closed_semaphore_returns_error() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let mut producer = GrpcProducer::new(
+            "http://localhost:50051".to_string(),
+            proto_path,
+            "helloworld.Greeter".to_string(),
+            "SayHello".to_string(),
+            GrpcMode::Unary,
+            None,
+            &default_config(),
+            rt(),
+            "grpc-producer-test-route",
+        )
+        .unwrap();
+
+        producer.semaphore.close();
+
+        let exchange = Exchange::new(Message::new(Body::Json(
+            serde_json::json!({"name": "test"}),
+        )));
+        let mut fut = producer.call(exchange);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            matches!(
+                fut.as_mut().poll(&mut cx),
+                Poll::Ready(Err(CamelError::ChannelClosed))
+            ),
+            "call must surface a closed semaphore as ChannelClosed"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_blocks_on_semaphore_until_release() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let mut producer = GrpcProducer::new(
+            "http://localhost:50051".to_string(),
+            proto_path,
+            "helloworld.Greeter".to_string(),
+            "SayHello".to_string(),
+            GrpcMode::Unary,
+            None,
+            &default_config(),
+            rt(),
+            "grpc-producer-test-route",
+        )
+        .unwrap();
+
+        // Drain every permit the producer sized: the call future must not be
+        // able to acquire one until they are released.
+        let limit = producer.semaphore.available_permits();
+        let mut held = Vec::new();
+        while let Ok(permit) = Arc::clone(&producer.semaphore).try_acquire_owned() {
+            held.push(permit);
+        }
+        assert_eq!(held.len(), limit, "all permits must be drained");
+
+        let exchange = Exchange::new(Message::new(Body::Json(
+            serde_json::json!({"name": "test"}),
+        )));
+        let mut fut = producer.call(exchange);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "call must pend while all permits are held elsewhere"
+        );
+
+        drop(held);
+        // The next poll completes acquisition and proceeds into request
+        // building and the lazy channel connect (which pends on the absent
+        // server). The permit count dropping by one proves the future got
+        // past acquisition; the delivery result itself is not under test.
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            limit - 1,
+            "call future must now hold a permit (past acquisition)"
+        );
     }
 
     #[tokio::test]

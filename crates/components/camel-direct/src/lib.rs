@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
@@ -33,8 +33,6 @@ use tracing::{debug, error, info, warn};
 
 type DirectSender = mpsc::Sender<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>;
 type DirectRegistry = Arc<Mutex<HashMap<String, DirectSender>>>;
-type AcquirePermitFut =
-    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>;
 
 // ---------------------------------------------------------------------------
 // Validation helpers
@@ -244,8 +242,6 @@ impl Endpoint for DirectEndpoint {
             registry: Arc::clone(&self.registry),
             config: self.config.clone(),
             semaphore: Arc::new(Semaphore::new(1)),
-            pending_permit: None,
-            acquire_fut: None,
             fail_if_no_consumers: self.config.fail_if_no_consumers,
         }))
     }
@@ -390,8 +386,6 @@ struct DirectProducer {
     registry: DirectRegistry,
     config: DirectConfig,
     semaphore: Arc<Semaphore>,
-    pending_permit: Option<OwnedSemaphorePermit>,
-    acquire_fut: Option<AcquirePermitFut>,
     fail_if_no_consumers: Option<bool>,
 }
 
@@ -402,8 +396,6 @@ impl Clone for DirectProducer {
             registry: self.registry.clone(),
             config: self.config.clone(),
             semaphore: self.semaphore.clone(),
-            pending_permit: None,
-            acquire_fut: None,
             fail_if_no_consumers: self.fail_if_no_consumers,
         }
     }
@@ -414,63 +406,37 @@ impl Service<Exchange> for DirectProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // If we already hold a permit we are ready.
-        if self.pending_permit.is_some() {
-            return Poll::Ready(Ok(()));
-        }
-
-        // Check that the endpoint is registered.
-        {
-            let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            match reg.get(&self.name) {
-                None => {
-                    if self.fail_if_no_consumers != Some(false) {
-                        return Poll::Ready(Err(CamelError::EndpointCreationFailed(format!(
-                            "direct endpoint '{}' not registered",
-                            self.name
-                        ))));
-                    }
-                }
-                Some(sender) if sender.is_closed() => {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Check that the endpoint is registered. Permits are NOT acquired
+        // here: a permit reserved in poll_ready is held across the
+        // poll_ready/call boundary, wedging the semaphore when a wrapping
+        // Service re-readies a clone (tower contract: call() may only
+        // reserve resources for its own future).
+        let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        match reg.get(&self.name) {
+            None => {
+                if self.fail_if_no_consumers != Some(false) {
                     return Poll::Ready(Err(CamelError::EndpointCreationFailed(format!(
-                        "direct endpoint '{}' channel closed",
+                        "direct endpoint '{}' not registered",
                         self.name
                     ))));
                 }
-                Some(_) => {}
-            }
-        }
-
-        // Acquire a semaphore permit (bounded concurrency).
-        let fut = self
-            .acquire_fut
-            .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
-        match fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(permit)) => {
-                self.acquire_fut = None;
-                self.pending_permit = Some(permit);
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ChannelClosed)),
-            Poll::Pending => Poll::Pending,
+            Some(sender) if sender.is_closed() => {
+                Poll::Ready(Err(CamelError::EndpointCreationFailed(format!(
+                    "direct endpoint '{}' channel closed",
+                    self.name
+                ))))
+            }
+            Some(_) => Poll::Ready(Ok(())),
         }
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let _permit = match self.pending_permit.take() {
-            Some(p) => p,
-            None => {
-                return Box::pin(async {
-                    Err(CamelError::ProcessorError(
-                        "call() invoked without poll_ready()".into(),
-                    ))
-                });
-            }
-        };
-
         let name = self.name.clone();
         let registry = Arc::clone(&self.registry);
+        let semaphore = Arc::clone(&self.semaphore);
         let timeout = Duration::from_millis(self.config.timeout_ms.unwrap_or(30_000));
         let exchange_id = exchange.correlation_id.clone();
 
@@ -481,6 +447,15 @@ impl Service<Exchange> for DirectProducer {
         );
 
         Box::pin(async move {
+            // Acquire the sole concurrency permit inside call()'s future and
+            // OUTSIDE the timeout: the permit is held only while this one
+            // exchange is in flight, and permit contention must not eat the
+            // dispatch timeout budget.
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| CamelError::ChannelClosed)?;
+
             tokio::time::timeout(timeout, async {
                 let sender = {
                     let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -965,25 +940,31 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_poll_ready_endpoint_not_registered() {
-        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
-        let producer = DirectProducer {
-            name: "missing".to_string(),
+    fn direct_producer(
+        name: &str,
+        registry: DirectRegistry,
+        fail_if_no_consumers: Option<bool>,
+        timeout_ms: Option<u64>,
+    ) -> DirectProducer {
+        DirectProducer {
+            name: name.to_string(),
             registry,
             config: DirectConfig {
-                name: "missing".to_string(),
-                timeout_ms: None,
-                fail_if_no_consumers: None,
+                name: name.to_string(),
+                timeout_ms,
+                fail_if_no_consumers,
             },
             semaphore: Arc::new(Semaphore::new(1)),
-            pending_permit: None,
-            acquire_fut: None,
-            fail_if_no_consumers: None,
-        };
+            fail_if_no_consumers,
+        }
+    }
+
+    #[test]
+    fn poll_ready_absent_consumer_fails_fast() {
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let mut producer = direct_producer("missing", registry, None, None);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut producer = producer;
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(
             result,
@@ -992,83 +973,156 @@ mod tests {
     }
 
     #[test]
-    fn test_poll_ready_endpoint_registered() {
+    fn poll_ready_live_consumer_ok_without_permit() {
         let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
         let (tx, _rx) =
             mpsc::channel::<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>(1);
         registry.lock().unwrap().insert("active".to_string(), tx);
-        let producer = DirectProducer {
-            name: "active".to_string(),
-            registry,
-            config: DirectConfig {
-                name: "active".to_string(),
-                timeout_ms: None,
-                fail_if_no_consumers: None,
-            },
-            semaphore: Arc::new(Semaphore::new(1)),
-            pending_permit: None,
-            acquire_fut: None,
-            fail_if_no_consumers: None,
-        };
+        let mut producer = direct_producer("active", registry, None, None);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut producer = producer;
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            1,
+            "poll_ready must not consume the call permit"
+        );
     }
 
     #[test]
     fn test_poll_ready_allows_missing_consumer_when_fail_if_no_consumers_false() {
         let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
-        let producer = DirectProducer {
-            name: "missing-ok".to_string(),
-            registry,
-            config: DirectConfig {
-                name: "missing-ok".to_string(),
-                timeout_ms: None,
-                fail_if_no_consumers: Some(false),
-            },
-            semaphore: Arc::new(Semaphore::new(1)),
-            pending_permit: None,
-            acquire_fut: None,
-            fail_if_no_consumers: Some(false),
-        };
+        let mut producer = direct_producer("missing-ok", registry, Some(false), None);
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut producer = producer;
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
     }
 
     #[test]
-    fn test_poll_ready_channel_closed() {
+    fn poll_ready_closed_channel_fails_fast() {
         let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) =
             mpsc::channel::<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>(1);
         drop(rx);
         registry.lock().unwrap().insert("closed".to_string(), tx);
-        let producer = DirectProducer {
-            name: "closed".to_string(),
-            registry,
-            config: DirectConfig {
-                name: "closed".to_string(),
-                timeout_ms: None,
-                fail_if_no_consumers: None,
-            },
-            semaphore: Arc::new(Semaphore::new(1)),
-            pending_permit: None,
-            acquire_fut: None,
-            fail_if_no_consumers: None,
-        };
+        let mut producer = direct_producer("closed", registry, None, None);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut producer = producer;
-        let result = producer.poll_ready(&mut cx);
-        assert!(matches!(
-            result,
-            Poll::Ready(Err(CamelError::EndpointCreationFailed(_)))
-        ));
+        match producer.poll_ready(&mut cx) {
+            Poll::Ready(Err(CamelError::EndpointCreationFailed(msg))) => {
+                assert!(
+                    msg.contains("channel closed"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected channel-closed error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn call_blocks_on_semaphore_until_release() {
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) =
+            mpsc::channel::<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>(4);
+        registry.lock().unwrap().insert("park".to_string(), tx);
+
+        let mut producer = direct_producer("park", registry, None, None);
+        let semaphore = Arc::clone(&producer.semaphore);
+
+        // Consumer stub: parks the FIRST exchange's reply on the
+        // test-controlled release signal; later exchanges reply immediately.
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let (parked_tx, parked_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let mut parked_tx = Some(parked_tx);
+            let mut release_rx = Some(release_rx);
+            let mut first = true;
+            while let Some((exchange, reply_tx)) = rx.recv().await {
+                if first {
+                    first = false;
+                    if let Some(signal) = parked_tx.take() {
+                        let _ = signal.send(());
+                    }
+                    if let Some(release) = release_rx.take() {
+                        let _ = release.await;
+                    }
+                }
+                let _ = reply_tx.send(Ok(exchange));
+            }
+        });
+
+        let fut_a = producer.call(Exchange::new(Message::new("a")));
+        let fut_b = producer.call(Exchange::new(Message::new("b")));
+        let a = tokio::spawn(fut_a);
+        let b = tokio::spawn(fut_b);
+
+        tokio::time::timeout(Duration::from_secs(5), parked_rx)
+            .await
+            .expect("consumer stub must receive call A's exchange within 5s")
+            .expect("parked signal must be sent");
+        // Let B run into the semaphore acquisition and park there.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            semaphore.available_permits(),
+            0,
+            "call A must hold the sole permit while awaiting its reply"
+        );
+        assert!(
+            !b.is_finished(),
+            "call B must be blocked on the semaphore while call A is in flight"
+        );
+
+        release_tx
+            .send(())
+            .expect("release signal must be received");
+
+        let reply_a = a
+            .await
+            .expect("call A task must not panic")
+            .expect("call A must complete Ok once its reply arrives");
+        assert_eq!(reply_a.input.body.as_text(), Some("a"));
+        let reply_b = b
+            .await
+            .expect("call B task must not panic")
+            .expect("call B must complete Ok after the permit is released");
+        assert_eq!(reply_b.input.body.as_text(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn call_pending_when_all_permits_held() {
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) =
+            mpsc::channel::<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>(1);
+        registry.lock().unwrap().insert("held".to_string(), tx);
+
+        let mut producer = direct_producer("held", registry, None, None);
+        let permit = Arc::clone(&producer.semaphore)
+            .try_acquire_owned()
+            .expect("sole permit must be free before call");
+
+        let mut fut = producer.call(Exchange::new(Message::new("x")));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "call must pend while the sole permit is held elsewhere"
+        );
+
+        drop(permit);
+        // Next poll completes acquisition and proceeds into the send/reply
+        // round-trip (which pends: nobody replies). Holding the permit proves
+        // the future got past acquisition.
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            0,
+            "call future must now hold the permit (past acquisition)"
+        );
     }
 
     #[tokio::test]
@@ -1155,19 +1209,12 @@ mod tests {
         let _producer_endpoint = component
             .create_endpoint("direct:timeout-test", &NoOpComponentContext)
             .unwrap();
-        let producer = DirectProducer {
-            name: "timeout-test".to_string(),
-            registry: Arc::clone(&component.registry),
-            config: DirectConfig {
-                name: "timeout-test".to_string(),
-                timeout_ms: Some(100), // 100ms timeout
-                fail_if_no_consumers: None,
-            },
-            semaphore: Arc::new(Semaphore::new(1)),
-            pending_permit: None,
-            acquire_fut: None,
-            fail_if_no_consumers: None,
-        };
+        let producer = direct_producer(
+            "timeout-test",
+            Arc::clone(&component.registry),
+            None,
+            Some(100), // 100ms timeout
+        );
 
         let exchange = Exchange::new(Message::new("test"));
         let mut svc = producer;

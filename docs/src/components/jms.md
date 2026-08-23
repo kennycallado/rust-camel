@@ -118,7 +118,7 @@ The `concurrentConsumers` parameter spawns N parallel consumer tasks on the same
 
 `activemq:queue:orders` sends the Exchange body to a destination. The content type is inferred from the body. `Body::Text` sends `text/plain`. `Body::Json` sends `application/json`. `Body::Xml` sends `text/xml`. An explicit `Content-Type` header wins over inference.
 
-The Producer uses a semaphore for backpressure. The default concurrency limit is 128 in-flight sends. When the limit is reached, `poll_ready` returns `Pending`. ADR-0024 classifies a closed semaphore as `ConsumerStopping`.
+The Producer uses a semaphore for backpressure. The default concurrency limit is 128 in-flight sends. When the limit is reached, `poll_ready` still returns ready. The `call` future waits on the semaphore. ADR-0024 classifies a closed semaphore as `ConsumerStopping`.
 
 A successful send returns the Exchange unchanged. The `JMSMessageID` header carries the broker-assigned message ID. A send failure on a gRPC transport error refreshes the channel. The original send is not retried. A retry on a non-idempotent write would cause duplicates. The caller decides whether to retry.
 

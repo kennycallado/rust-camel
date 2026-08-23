@@ -10,15 +10,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tower::Service;
 use tracing::{debug, warn};
 
 use crate::broker_config::apply_rdkafka_config;
 use crate::config::{ResolvedKafkaEndpointConfig, apply_security_config};
 
-type AcquireFut =
-    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>>;
 pub struct KafkaProducer {
     config: ResolvedKafkaEndpointConfig,
     producer: Arc<FutureProducer>,
@@ -26,8 +24,6 @@ pub struct KafkaProducer {
     /// Used by `poll_ready` to reject calls when the producer is unusable.
     stopped: Arc<AtomicBool>,
     semaphore: Arc<Semaphore>,
-    pending_permit: Option<OwnedSemaphorePermit>,
-    acquire_fut: AcquireFut,
 }
 
 impl Clone for KafkaProducer {
@@ -37,8 +33,6 @@ impl Clone for KafkaProducer {
             producer: self.producer.clone(),
             stopped: self.stopped.clone(),
             semaphore: self.semaphore.clone(),
-            pending_permit: None,
-            acquire_fut: None,
         }
     }
 }
@@ -63,8 +57,6 @@ impl KafkaProducer {
             config,
             producer: Arc::new(producer),
             stopped: Arc::new(AtomicBool::new(false)),
-            pending_permit: None,
-            acquire_fut: None,
         })
     }
 
@@ -175,40 +167,33 @@ impl Service<Exchange> for KafkaProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Permits are NOT acquired here: a permit reserved in poll_ready is
+        // held across the poll_ready/call boundary, wedging the semaphore
+        // when a wrapping Service re-readies a clone (tower contract:
+        // call() may only reserve resources for its own future).
         if self.stopped.load(Ordering::SeqCst) {
             return Poll::Ready(Err(CamelError::ProcessorError(
                 "Kafka producer is stopped".into(),
             )));
         }
-
-        if self.pending_permit.is_some() {
-            return Poll::Ready(Ok(()));
-        }
-
-        let fut = self
-            .acquire_fut
-            .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
-        match fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(permit)) => {
-                self.acquire_fut = None;
-                self.pending_permit = Some(permit);
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ChannelClosed)),
-            Poll::Pending => Poll::Pending,
-        }
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
         let producer = self.producer.clone();
-        let permit = self.pending_permit.take();
+        let semaphore = Arc::clone(&self.semaphore);
 
         Box::pin(async move {
-            let _permit = permit.ok_or_else(|| {
-                CamelError::ProcessorError("Kafka producer call without readiness permit".into())
-            })?;
+            // Acquire the concurrency permit inside call()'s future: the
+            // permit is held only while this one exchange is in flight,
+            // and permit contention must not consume readiness for other
+            // callers. A closed semaphore maps to ChannelClosed.
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| CamelError::ChannelClosed)?;
 
             let topic = Self::resolve_topic(&exchange, &config)?.to_string();
             let payload = Self::body_to_bytes(&exchange.input.body)?;
@@ -490,7 +475,7 @@ mod tests {
     // --- KAFKA-007: poll_ready returns error when producer is stopped ---
 
     #[test]
-    fn test_poll_ready_returns_error_when_stopped() {
+    fn poll_ready_stopped_returns_error() {
         let config = make_resolved_config();
         let producer = KafkaProducer::new(config).expect("producer should build");
 
@@ -503,8 +488,8 @@ mod tests {
         producer.stop();
         let result = producer.poll_ready(&mut cx);
         assert!(
-            matches!(result, Poll::Ready(Err(_))),
-            "poll_ready must return error when stopped"
+            matches!(result, Poll::Ready(Err(CamelError::ProcessorError(_)))),
+            "poll_ready must return ProcessorError when stopped"
         );
         if let Poll::Ready(Err(err)) = result {
             assert!(
@@ -513,6 +498,58 @@ mod tests {
                 err
             );
         }
+    }
+
+    #[test]
+    fn poll_ready_running_returns_ok_without_permit() {
+        let config = make_resolved_config();
+        let expected_permits = config.max_poll_records as usize;
+        let mut producer = KafkaProducer::new(config).expect("producer should build");
+
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(
+            matches!(producer.poll_ready(&mut cx), Poll::Ready(Ok(()))),
+            "running producer must be ready"
+        );
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            expected_permits,
+            "poll_ready must not consume a call permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_blocks_on_semaphore_until_release() {
+        let config = make_resolved_config();
+        let mut producer = KafkaProducer::new(config).expect("producer should build");
+
+        // Drain every permit the config sized: the call future must not be
+        // able to acquire one until they are released.
+        let limit = producer.semaphore.available_permits();
+        let mut held = Vec::new();
+        while let Ok(permit) = Arc::clone(&producer.semaphore).try_acquire_owned() {
+            held.push(permit);
+        }
+        assert_eq!(held.len(), limit, "all permits must be drained");
+
+        let mut fut = producer.call(Exchange::new(Message::new(Body::Text("x".to_string()))));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "call must pend while all permits are held elsewhere"
+        );
+
+        drop(held);
+        // The next poll completes acquisition and proceeds into topic
+        // resolution and delivery (which pends on the absent broker). The
+        // permit count dropping by one proves the future got past
+        // acquisition; the delivery result itself is not under test.
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            limit - 1,
+            "call future must now hold a permit (past acquisition)"
+        );
     }
 
     #[test]

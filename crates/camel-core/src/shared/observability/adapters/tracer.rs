@@ -7,7 +7,6 @@ use std::time::Instant;
 use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
 use opentelemetry::{Context as OtelContext, KeyValue, global};
 use tower::Service;
-use tower::ServiceExt;
 use tracing::Instrument;
 
 use crate::shared::observability::domain::DetailLevel;
@@ -174,7 +173,13 @@ impl Service<Exchange> for TracingProcessor {
             }
         }
 
-        let mut inner = self.inner.clone();
+        // Consume the ORIGINAL inner that `poll_ready` readied: its
+        // reservations (e.g. DirectProducer's pending semaphore permit)
+        // belong to that instance, so re-readying a clone would drop them.
+        // The fresh clone stays in `self.inner` as the unreadied placeholder
+        // for the next ready/call cycle.
+        let fresh = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, fresh);
         let detail_level = self.detail_level.clone();
         let metrics = self.metrics.clone();
         let route_id = self.route_id.clone();
@@ -188,7 +193,7 @@ impl Service<Exchange> for TracingProcessor {
                 // Create guard to ensure span is ended even on panic
                 let _guard = SpanEndGuard(cx.clone());
 
-                let result = inner.ready().await?.call(exchange).await;
+                let result = inner.call(exchange).await;
 
                 let duration = start.elapsed();
                 let duration_ms = duration.as_millis() as u64;
@@ -286,6 +291,8 @@ mod tests {
     use super::*;
     use camel_api::{BoxProcessorExt, IdentityProcessor, Message, Value};
     use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
+    use std::time::Duration;
+    use tokio::sync::{OwnedSemaphorePermit, Semaphore};
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -528,5 +535,109 @@ mod tests {
             "<oversized:correlation_id>"
         );
         assert_eq!(capped_correlation_id("abc-123"), "abc-123");
+    }
+
+    /// Mock inner mirroring `DirectProducer`'s stateful readiness: `poll_ready`
+    /// acquires the sole permit of a shared semaphore into `pending_permit`,
+    /// and `Clone` shares the semaphore but drops the permit. Calling `call`
+    /// without a reserved permit fails, so any readiness state loss is
+    /// detected instead of silently proceeding.
+    struct PermitGateInner {
+        semaphore: Arc<Semaphore>,
+        pending_permit: Option<OwnedSemaphorePermit>,
+    }
+
+    impl PermitGateInner {
+        fn new() -> Self {
+            Self {
+                semaphore: Arc::new(Semaphore::new(1)),
+                pending_permit: None,
+            }
+        }
+    }
+
+    impl Clone for PermitGateInner {
+        fn clone(&self) -> Self {
+            Self {
+                semaphore: Arc::clone(&self.semaphore),
+                pending_permit: None,
+            }
+        }
+    }
+
+    impl Service<Exchange> for PermitGateInner {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            // Already holding the permit: ready.
+            if self.pending_permit.is_some() {
+                return Poll::Ready(Ok(()));
+            }
+            let mut fut = std::pin::pin!(Arc::clone(&self.semaphore).acquire_owned());
+            match fut.as_mut().poll(cx) {
+                Poll::Ready(Ok(permit)) => {
+                    self.pending_permit = Some(permit);
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Pending => Poll::Pending,
+                // Unreachable in practice: the semaphore is never closed.
+                Poll::Ready(Err(err)) => {
+                    Poll::Ready(Err(CamelError::ProcessorError(err.to_string())))
+                }
+            }
+        }
+
+        fn call(&mut self, exchange: Exchange) -> Self::Future {
+            let permit = self.pending_permit.take();
+            Box::pin(async move {
+                match permit {
+                    Some(_permit) => Ok(exchange),
+                    None => Err(CamelError::ProcessorError(
+                        "call() invoked without a reserved permit".into(),
+                    )),
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn tracing_processor_does_not_re_ready_clone() {
+        let mock_inner = BoxProcessor::new(PermitGateInner::new());
+        let mut tracing_proc =
+            TracingProcessor::new(mock_inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+
+        let exchange = Exchange::new(Message::default());
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            tracing_proc.ready().await.unwrap().call(exchange).await
+        })
+        .await
+        .expect("deadlock: TracingProcessor re-readied a clone whose permit was dropped");
+
+        assert!(outcome.is_ok());
+    }
+
+    #[tokio::test]
+    async fn tracing_processor_reusable_across_sequential_cycles() {
+        let mock_inner = BoxProcessor::new(PermitGateInner::new());
+        let mut tracing_proc =
+            TracingProcessor::new(mock_inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+
+        let ex_a = Exchange::new(Message::default());
+        let outcome_a = tokio::time::timeout(Duration::from_secs(5), async {
+            tracing_proc.ready().await.unwrap().call(ex_a).await
+        })
+        .await
+        .expect("first cycle timed out");
+        assert!(outcome_a.is_ok());
+
+        let ex_b = Exchange::new(Message::default());
+        let outcome_b = tokio::time::timeout(Duration::from_secs(5), async {
+            tracing_proc.ready().await.unwrap().call(ex_b).await
+        })
+        .await
+        .expect("second cycle timed out");
+        assert!(outcome_b.is_ok());
     }
 }

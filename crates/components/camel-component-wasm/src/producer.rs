@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{debug, warn};
@@ -35,8 +35,8 @@ pub(crate) fn is_streaming(body: &Body) -> bool {
 pub(crate) const DEFAULT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Standalone runtime init — takes owned Arcs so the resulting future is `Send`
-/// without borrowing the producer. `WasmProducer: Sync` is now required: the
-/// acquire box carries `+ Sync`, and the producer is boxed as `BoxCloneSyncService`.
+/// without borrowing the producer. `WasmProducer: Sync` is required: the
+/// producer is boxed as `BoxCloneSyncService` by the endpoint layer.
 async fn ensure_runtime_fn(
     module_path: PathBuf,
     config: crate::config::WasmConfig,
@@ -70,9 +70,6 @@ async fn ensure_runtime_fn(
 use crate::runtime::WasmRuntime;
 use crate::serde_bridge::wasm_to_exchange;
 
-type AcquireFut =
-    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>>;
-
 pub struct WasmProducer {
     module_path: PathBuf,
     registry: Arc<dyn ComponentContext>,
@@ -81,8 +78,6 @@ pub struct WasmProducer {
     state_store: crate::state_store::StateStore,
     init_failed: Arc<AtomicBool>,
     sem: Arc<Semaphore>,
-    pending_permit: Option<OwnedSemaphorePermit>,
-    acquire_fut: AcquireFut,
     /// `Arc<dyn RuntimeObservability>` for Phase B metric/health calls.
     /// Named `observability` (not `runtime`) to avoid collision with the
     /// existing `runtime: Arc<Mutex<Option<Arc<WasmRuntime>>>>` field above
@@ -111,8 +106,6 @@ impl Clone for WasmProducer {
             state_store: self.state_store.clone(),
             init_failed: Arc::clone(&self.init_failed),
             sem: Arc::clone(&self.sem),
-            pending_permit: None,
-            acquire_fut: None,
             observability: Arc::clone(&self.observability),
             cancel: self.cancel.clone(),
             max_bytes: self.max_bytes,
@@ -143,8 +136,6 @@ impl WasmProducer {
             state_store,
             init_failed: Arc::new(AtomicBool::new(false)),
             sem: Arc::new(Semaphore::new(max_concurrent_calls)),
-            pending_permit: None,
-            acquire_fut: None,
             observability,
             cancel: CancellationToken::new(),
             max_bytes: max_stream_bytes,
@@ -162,36 +153,21 @@ impl Service<Exchange> for WasmProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Permits are NOT acquired here: a permit reserved in poll_ready is
+        // held across the poll_ready/call boundary, wedging the semaphore
+        // when a wrapping Service re-readies a clone (tower contract:
+        // call() may only reserve resources for its own future).
         if self.init_failed.load(Ordering::Relaxed) {
             return Poll::Ready(Err(CamelError::ProcessorError(
                 "wasm runtime initialization failed".to_string(),
             )));
         }
 
-        if self.pending_permit.is_some() {
-            return Poll::Ready(Ok(()));
-        }
-
-        let fut = self
-            .acquire_fut
-            .get_or_insert_with(|| Box::pin(Arc::clone(&self.sem).acquire_owned()));
-
-        match fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(permit)) => {
-                self.acquire_fut = None;
-                self.pending_permit = Some(permit);
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ProcessorError(
-                "wasm producer semaphore closed".to_string(),
-            ))),
-            Poll::Pending => Poll::Pending,
-        }
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let permit = self.pending_permit.take();
         // Extract owned fields before entering the async block: the boxed
         // future is 'static, so it must not borrow `&self` across an await.
         let module_path = self.module_path.clone();
@@ -202,6 +178,7 @@ impl Service<Exchange> for WasmProducer {
         let state_store = self.state_store.clone();
         let state_store2 = self.state_store.clone();
         let init_failed = Arc::clone(&self.init_failed);
+        let sem = Arc::clone(&self.sem);
         // Streaming knobs: clone the root token (cheap) and derive a child
         // per call inside the future; the byte cap and watchdog window are
         // Copy types.
@@ -210,6 +187,15 @@ impl Service<Exchange> for WasmProducer {
         let no_progress_timeout = self.no_progress_timeout;
         Box::pin(async move {
             tracing::debug!(component = "wasm", "wasm call started");
+            // Acquire the concurrency permit inside call()'s future: the
+            // permit is held only while this one exchange is in flight,
+            // and permit contention must not consume readiness for other
+            // callers. A closed semaphore maps to ProcessorError.
+            let permit = sem
+                .acquire_owned()
+                .await
+                .map_err(|_| CamelError::ProcessorError("wasm producer semaphore closed".into()))?;
+
             let runtime = match ensure_runtime_fn(
                 module_path.clone(),
                 config,
@@ -234,8 +220,6 @@ impl Service<Exchange> for WasmProducer {
                 }
             };
 
-            let pending_permit = permit.expect("poll_ready gates Some"); // allow-unwrap
-
             // All plugin calls go through `process_streaming_exchange`, which
             // handles both stream and non-stream inputs (its `make_drive`
             // closure extracts the stream if present, otherwise uses the
@@ -252,7 +236,7 @@ impl Service<Exchange> for WasmProducer {
                     exchange.properties.clone(),
                     state_store2,
                     exchange,
-                    pending_permit,
+                    permit,
                     cancel,
                     max_bytes,
                     no_progress_timeout,
@@ -368,10 +352,25 @@ mod tests {
     }
 
     #[test]
-    fn test_poll_ready_pending_when_no_permits_available() {
+    fn poll_ready_init_failed_returns_error() {
+        let config = WasmConfig::default();
+        let mut producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(camel_component_api::NoOpComponentContext),
+            config,
+            test_rt(),
+        );
+        producer.init_failed.store(true, Ordering::Relaxed);
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(
+            matches!(result, Poll::Ready(Err(CamelError::ProcessorError(msg))) if msg.contains("initialization failed"))
+        );
+    }
+
+    #[test]
+    fn poll_ready_healthy_ok_without_permit() {
         let config = WasmConfig {
-            timeout_secs: 5,
-            max_memory_bytes: 1024,
             max_concurrent_calls: 1,
             ..WasmConfig::default()
         };
@@ -381,18 +380,52 @@ mod tests {
             config,
             test_rt(),
         );
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        // poll_ready must not reserve a permit: readiness no longer
+        // consumes concurrency budget.
+        assert_eq!(producer.sem.available_permits(), 1);
+    }
 
-        let permit = Arc::clone(&producer.sem)
+    #[test]
+    fn call_blocks_on_semaphore_until_release() {
+        let config = WasmConfig {
+            max_concurrent_calls: 1,
+            ..WasmConfig::default()
+        };
+        let mut producer = WasmProducer::new(
+            PathBuf::from("missing-module.wasm"),
+            Arc::new(camel_component_api::NoOpComponentContext),
+            config,
+            test_rt(),
+        );
+
+        // Hold the sole permit externally: the call future must not be
+        // able to acquire one until it is released.
+        let held = Arc::clone(&producer.sem)
             .try_acquire_owned()
             .expect("test should consume sole permit");
 
+        let exchange = Exchange::new(camel_api::Message::new(Body::Text("x".into())));
+        let mut fut = producer.call(exchange);
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let first = producer.poll_ready(&mut cx);
-        assert!(matches!(first, Poll::Pending));
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "call must pend on the semaphore while the permit is held elsewhere"
+        );
 
-        drop(permit);
-        let second = producer.poll_ready(&mut cx);
-        assert!(matches!(second, Poll::Ready(Ok(()))));
+        drop(held);
+        // The next poll completes acquisition and proceeds into runtime
+        // init. With no module on disk, init fails fast, so the future
+        // resolves (with a module-load error) instead of pending on the
+        // module invoke as a real guest would; readiness proves the
+        // future got past the semaphore gate.
+        let after = fut.as_mut().poll(&mut cx);
+        assert!(
+            matches!(&after, Poll::Ready(Err(CamelError::ComponentNotFound(_)))),
+            "post-release poll must proceed past acquisition into module init, got: {after:?}"
+        );
     }
 
     #[test]

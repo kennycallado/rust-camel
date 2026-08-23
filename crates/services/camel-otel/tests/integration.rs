@@ -15,7 +15,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use camel_api::exchange::Exchange;
 use camel_api::message::Message;
-use camel_api::{BoxProcessor, IdentityProcessor};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, IdentityProcessor};
 use camel_core::DetailLevel;
 use camel_core::TracingProcessor;
 use camel_otel::propagation::{
@@ -24,7 +24,8 @@ use camel_otel::propagation::{
 use opentelemetry::Context;
 use opentelemetry::global;
 use opentelemetry::trace::{
-    SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, Tracer, TracerProvider,
+    SpanContext, SpanId, Status, TraceContextExt, TraceFlags, TraceId, TraceState, Tracer,
+    TracerProvider,
 };
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
 use tower::{Service, ServiceExt};
@@ -479,6 +480,73 @@ async fn test_tracing_processor_chain_preserves_trace_id() {
             "All spans should have the same trace ID"
         );
     }
+
+    // Lock is released when _lock goes out of scope
+}
+
+// ---------------------------------------------------------------------------
+// Test: span status (Ok and Error) exported by TracingProcessor
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // intentional: serializes global tracer access across tests
+async fn span_status_success_and_error_exported() {
+    // Lock to serialize access to global tracer provider
+    let _lock = lock_global_tracer();
+
+    let (provider, exporter) = setup_test_tracer();
+    global::set_tracer_provider(provider.clone());
+
+    // --- Success cycle: Ok-returning inner exports a span with Status::Ok ---
+    let inner = BoxProcessor::new(IdentityProcessor);
+    let mut ok_processor =
+        TracingProcessor::new(inner, "ok-route".to_string(), 0, DetailLevel::Minimal, None);
+
+    let exchange = Exchange::new(Message::new("ok"));
+    let result: Result<Exchange, _> = ok_processor.ready().await.unwrap().call(exchange).await;
+    assert!(result.is_ok(), "Ok cycle should succeed");
+
+    provider.force_flush().expect("Should flush");
+    let spans = exporter.get_finished_spans().expect("Should get spans");
+    assert_eq!(
+        spans.len(),
+        1,
+        "Exactly one span should be exported for the Ok cycle"
+    );
+    assert_eq!(spans[0].name, "ok-route:step-0");
+    assert!(
+        matches!(spans[0].status, Status::Ok),
+        "Ok cycle span should have Status::Ok"
+    );
+
+    // --- Error cycle: Err-returning inner exports a span with error status ---
+    let failing_inner = BoxProcessor::from_fn(|_ex: Exchange| async move {
+        Err(CamelError::ProcessorError("intentional test error".into()))
+    });
+    let mut err_processor = TracingProcessor::new(
+        failing_inner,
+        "err-route".to_string(),
+        0,
+        DetailLevel::Minimal,
+        None,
+    );
+
+    let exchange = Exchange::new(Message::new("err"));
+    let result: Result<Exchange, _> = err_processor.ready().await.unwrap().call(exchange).await;
+    assert!(result.is_err(), "Error cycle should fail");
+
+    provider.force_flush().expect("Should flush");
+    let spans = exporter.get_finished_spans().expect("Should get spans");
+    assert_eq!(spans.len(), 2, "Both cycles should have exported spans");
+
+    let err_span = spans
+        .iter()
+        .find(|s| s.name == "err-route:step-0")
+        .expect("Should find span created by the error-cycle TracingProcessor");
+    assert!(
+        matches!(err_span.status, Status::Error { .. }),
+        "Error cycle span should have error status"
+    );
 
     // Lock is released when _lock goes out of scope
 }

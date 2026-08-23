@@ -13,7 +13,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::sync::{AcquireError, Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 use tower::Service;
 use tracing::{debug, error, warn};
 
@@ -49,16 +49,10 @@ pub struct OpenSearchProducer {
     client: Arc<Mutex<Option<OpenSearch>>>,
     /// Semaphore bounding concurrent in-flight requests.
     semaphore: Arc<Semaphore>,
-    /// Permit acquired in poll_ready and held until call completes.
-    pending_permit: Option<OwnedSemaphorePermit>,
-    /// Pinned permit acquisition future.
-    acquire_fut: Option<AcquirePermitFut>,
     runtime: Arc<dyn RuntimeObservability>,
 }
 
 const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
-type AcquirePermitFut =
-    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>;
 
 impl Clone for OpenSearchProducer {
     fn clone(&self) -> Self {
@@ -66,8 +60,6 @@ impl Clone for OpenSearchProducer {
             config: self.config.clone(),
             client: Arc::clone(&self.client),
             semaphore: Arc::clone(&self.semaphore),
-            pending_permit: None,
-            acquire_fut: None,
             runtime: Arc::clone(&self.runtime),
         }
     }
@@ -82,8 +74,6 @@ impl OpenSearchProducer {
             config,
             client: Arc::new(Mutex::new(None)),
             semaphore: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY_LIMIT)),
-            pending_permit: None,
-            acquire_fut: None,
             runtime,
         }
     }
@@ -577,24 +567,12 @@ impl Service<Exchange> for OpenSearchProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.pending_permit.is_some() {
-            return Poll::Ready(Ok(()));
-        }
-
-        let fut = self
-            .acquire_fut
-            .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
-
-        match fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(permit)) => {
-                self.acquire_fut = None;
-                self.pending_permit = Some(permit);
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ConsumerStopping)),
-            Poll::Pending => Poll::Pending,
-        }
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Permits are NOT acquired here: a permit reserved in poll_ready is
+        // held across the poll_ready/call boundary, wedging the semaphore
+        // when a wrapping Service re-readies a clone (tower contract:
+        // call() may only reserve resources for its own future).
+        Poll::Ready(Ok(()))
     }
 
     /// Delivery semantics: at-least-once with internal retry for transient errors.
@@ -607,12 +585,14 @@ impl Service<Exchange> for OpenSearchProducer {
     fn call(&mut self, req: Exchange) -> Self::Future {
         let client = self.client.clone();
         let config = self.config.clone();
-        let _permit = self
-            .pending_permit
-            .take()
-            .expect("call() after poll_ready()"); // allow-unwrap
+        let semaphore = Arc::clone(&self.semaphore);
 
         Box::pin(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| CamelError::ConsumerStopping)?;
+
             let os_client = {
                 let mut guard = client.lock().await;
                 if guard.is_none() {
@@ -713,16 +693,72 @@ mod tests {
     }
 
     #[test]
-    fn poll_ready_returns_consumer_stopping_when_semaphore_closed() {
+    fn poll_ready_returns_ok_unconditionally() {
+        let config =
+            OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
+        let mut producer = OpenSearchProducer::new(config, test_rt());
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(
+            matches!(producer.poll_ready(&mut cx), Poll::Ready(Ok(()))),
+            "fresh producer with an open semaphore must be ready"
+        );
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            DEFAULT_CONCURRENCY_LIMIT,
+            "poll_ready must not consume a call permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_closed_semaphore_returns_error() {
         let config =
             OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
         let mut producer = OpenSearchProducer::new(config, test_rt());
         producer.semaphore.close();
+
+        let result = producer.call(Exchange::new(Message::default())).await;
+        assert!(
+            matches!(result, Err(CamelError::ConsumerStopping)),
+            "closed semaphore must surface ConsumerStopping from call"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_blocks_on_semaphore_until_release() {
+        let config =
+            OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
+        let mut producer = OpenSearchProducer::new(config, test_rt());
+
+        // Drain all 128 permits externally: the call future must pend on
+        // acquisition until they are released.
+        let mut held: Vec<tokio::sync::OwnedSemaphorePermit> = Vec::new();
+        while let Ok(permit) = Arc::clone(&producer.semaphore).try_acquire_owned() {
+            held.push(permit);
+        }
+        assert_eq!(
+            held.len(),
+            DEFAULT_CONCURRENCY_LIMIT,
+            "all permits must be drained"
+        );
+
+        let mut fut = producer.call(Exchange::new(Message::default()));
         let mut cx = Context::from_waker(noop_waker_ref());
-        assert!(matches!(
-            producer.poll_ready(&mut cx),
-            Poll::Ready(Err(CamelError::ConsumerStopping))
-        ));
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "call must pend while all permits are held elsewhere"
+        );
+
+        drop(held);
+        // The next poll completes acquisition and proceeds into client setup
+        // and the request send (which pends on the absent server). The
+        // permit count one below the limit proves the future got past
+        // acquisition; the send result itself is not under test.
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            DEFAULT_CONCURRENCY_LIMIT - 1,
+            "call future must now hold a permit (past acquisition)"
+        );
     }
 
     #[test]

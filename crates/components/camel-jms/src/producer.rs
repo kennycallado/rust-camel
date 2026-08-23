@@ -6,7 +6,7 @@ use std::{
 };
 
 use camel_component_api::{Body, CamelError, Exchange, Value};
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tonic::transport::Channel;
 use tower::Service;
 use tracing::debug;
@@ -19,26 +19,17 @@ use crate::proto::{SendRequest, bridge_service_client::BridgeServiceClient};
 /// Default concurrency limit for JMS producer backpressure.
 const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
 
-/// Pinned future for acquiring an owned semaphore permit.
-type AcquirePermitFut =
-    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>;
-
 // JMS-004 [resource-leak]: Exchange is NOT cloned. It is passed by value (moved)
 // through LazyJmsProducer::call → JmsProducer::call → async block → returned.
 // No clone site exists in this crate.
 
-// JmsProducer cannot derive Clone because `acquire_fut` holds a `dyn Future`.
-// We implement Clone manually, cloning the shared semaphore and resetting
-// transient poll-ready state (which is correct: a clone starts fresh).
+// Clone shares the semaphore Arc so every clone observes one backpressure
+// budget; remaining fields clone by value.
 pub struct JmsProducer {
     channel: Channel,
     endpoint_config: JmsEndpointConfig,
     /// Semaphore bounding concurrent in-flight sends.
     semaphore: Arc<Semaphore>,
-    /// Held permit from a successful `poll_ready` acquisition.
-    pending_permit: Option<OwnedSemaphorePermit>,
-    /// Pinned acquire future, set when `poll_ready` is waiting.
-    acquire_fut: Option<AcquirePermitFut>,
 }
 
 impl Clone for JmsProducer {
@@ -47,8 +38,6 @@ impl Clone for JmsProducer {
             channel: self.channel.clone(),
             endpoint_config: self.endpoint_config.clone(),
             semaphore: Arc::clone(&self.semaphore),
-            pending_permit: None,
-            acquire_fut: None,
         }
     }
 }
@@ -68,8 +57,6 @@ impl JmsProducer {
             channel,
             endpoint_config,
             semaphore: Arc::new(Semaphore::new(concurrency_limit)),
-            pending_permit: None,
-            acquire_fut: None,
         }
     }
 
@@ -125,31 +112,18 @@ impl Service<Exchange> for JmsProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // If we already hold a permit, we're ready.
-        if self.pending_permit.is_some() {
-            return Poll::Ready(Ok(()));
-        }
-        // Lazily initialise the acquire future.
-        let fut = self
-            .acquire_fut
-            .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
-        match fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(permit)) => {
-                self.acquire_fut = None;
-                self.pending_permit = Some(permit);
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ConsumerStopping)),
-            Poll::Pending => Poll::Pending,
-        }
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Permits are NOT acquired here: a permit reserved in poll_ready is
+        // held across the poll_ready/call boundary, wedging the semaphore
+        // when a wrapping Service re-readies a clone (tower contract:
+        // call() may only reserve resources for its own future).
+        Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let channel = self.channel.clone();
         let destination = Self::destination(&self.endpoint_config);
-        // Consume the permit so the semaphore slot is held for the duration of the call.
-        let _permit = self.pending_permit.take();
+        let semaphore = Arc::clone(&self.semaphore);
 
         // JMS-018: gate header extraction behind config flag
         let map_headers = self.endpoint_config.map_jms_headers;
@@ -160,6 +134,14 @@ impl Service<Exchange> for JmsProducer {
         let persistent_delivery = self.endpoint_config.persistent_delivery;
 
         Box::pin(async move {
+            // Acquire the send permit inside call()'s future and hold it for
+            // the duration of the send. A closed semaphore surfaces
+            // ConsumerStopping here rather than in poll_ready.
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| CamelError::ConsumerStopping)?;
+
             let body = Self::body_to_bytes(&exchange.input.body)?;
             let headers = if map_headers {
                 extract_send_headers(&exchange)
@@ -308,19 +290,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_ready_returns_consumer_stopping_when_semaphore_closed() {
+    async fn poll_ready_returns_ok_unconditionally() {
         use futures::task::noop_waker_ref;
         use std::task::{Context, Poll};
 
         let config = JmsEndpointConfig::from_uri("jms:queue:orders").unwrap();
         let channel: tonic::transport::Channel =
             tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-        let mut producer = JmsProducer::new(channel, config);
-        producer.semaphore.close();
+        let mut producer = JmsProducer::with_concurrency(channel, config, 1);
+
         let mut cx = Context::from_waker(noop_waker_ref());
-        assert!(matches!(
-            producer.poll_ready(&mut cx),
-            Poll::Ready(Err(CamelError::ConsumerStopping))
-        ));
+        assert!(
+            matches!(producer.poll_ready(&mut cx), Poll::Ready(Ok(()))),
+            "fresh producer with an open semaphore must be ready"
+        );
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            1,
+            "poll_ready must not consume a call permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_closed_semaphore_returns_error() {
+        let config = JmsEndpointConfig::from_uri("jms:queue:orders").unwrap();
+        let channel: tonic::transport::Channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut producer = JmsProducer::with_concurrency(channel, config, 1);
+        producer.semaphore.close();
+
+        let result = producer.call(Exchange::default()).await;
+        assert!(
+            matches!(result, Err(CamelError::ConsumerStopping)),
+            "closed semaphore must surface ConsumerStopping from call"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_blocks_on_semaphore_until_release() {
+        use futures::task::noop_waker_ref;
+        use std::task::Context;
+
+        let config = JmsEndpointConfig::from_uri("jms:queue:orders").unwrap();
+        let channel: tonic::transport::Channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut producer = JmsProducer::with_concurrency(channel, config, 1);
+
+        // Hold the sole permit externally: the call future must pend on
+        // acquisition until it is released.
+        let held = Arc::clone(&producer.semaphore)
+            .try_acquire_owned()
+            .expect("sole permit must be free initially");
+
+        let mut fut = producer.call(Exchange::default());
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "call must pend while the sole permit is held elsewhere"
+        );
+
+        drop(held);
+        // The next poll completes acquisition and proceeds into header
+        // setup and the bridge send (which pends on the absent broker).
+        // The permit count dropping back to zero proves the future got
+        // past acquisition; the send result itself is not under test.
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            0,
+            "call future must now hold the permit (past acquisition)"
+        );
     }
 }

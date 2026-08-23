@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-util"))]
@@ -7,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
 use camel_component_api::{Body, CamelError, Exchange, Value};
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tower::Service;
 use tracing::debug;
 
@@ -30,9 +29,6 @@ fn is_transport_error(status: &tonic::Status) -> bool {
     }
 }
 
-type AcquireFuture =
-    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync>>;
-
 pub struct CxfProducer {
     pool: Arc<CxfBridgePool>,
     profile_name: String,
@@ -45,8 +41,6 @@ pub struct CxfProducer {
     mtom_enabled: bool,
     attachment_content_type: Option<String>,
     semaphore: Arc<Semaphore>,
-    pending_permit: Option<OwnedSemaphorePermit>,
-    acquire_fut: Option<AcquireFuture>,
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
 
@@ -64,8 +58,6 @@ impl Clone for CxfProducer {
             mtom_enabled: self.mtom_enabled,
             attachment_content_type: self.attachment_content_type.clone(),
             semaphore: Arc::clone(&self.semaphore),
-            pending_permit: None,
-            acquire_fut: None,
             runtime: Arc::clone(&self.runtime),
         }
     }
@@ -98,8 +90,6 @@ impl CxfProducer {
             mtom_enabled,
             attachment_content_type,
             semaphore: Arc::new(Semaphore::new(1)),
-            pending_permit: None,
-            acquire_fut: None,
             runtime,
         }
     }
@@ -181,8 +171,6 @@ impl CxfProducer {
             mtom_enabled: false,
             attachment_content_type: None,
             semaphore: Arc::new(Semaphore::new(1)),
-            pending_permit: None,
-            acquire_fut: None,
             runtime,
         }
     }
@@ -194,27 +182,11 @@ impl Service<Exchange> for CxfProducer {
     type Future = Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Phase 1: backpressure via semaphore (Pattern B).
-        if self.pending_permit.is_none() {
-            let fut = self
-                .acquire_fut
-                .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
-            match fut.as_mut().poll(cx) {
-                Poll::Ready(Ok(permit)) => {
-                    self.acquire_fut = None;
-                    self.pending_permit = Some(permit);
-                }
-                Poll::Ready(Err(_)) => {
-                    self.acquire_fut = None;
-                    return Poll::Ready(Err(CamelError::ProcessorError(
-                        "cxf producer semaphore closed".to_string(),
-                    )));
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
-        // Phase 2: bridge state check.
+        // Permits are NOT acquired here: a permit reserved in poll_ready is
+        // held across the poll_ready/call boundary, wedging the semaphore
+        // when a wrapping Service re-readies a clone (tower contract:
+        // call() may only reserve resources for its own future).
+        // Bridge state check.
         if let Some(slot) = self.pool.slots.get(&CxfBridgePool::slot_key()) {
             match &*slot.state_rx.borrow() {
                 BridgeState::Ready { .. } => return Poll::Ready(Ok(())),
@@ -251,10 +223,7 @@ impl Service<Exchange> for CxfProducer {
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
-        let _permit = self
-            .pending_permit
-            .take()
-            .expect("call() without poll_ready()"); // allow-unwrap
+        let semaphore = Arc::clone(&self.semaphore);
         let pool = Arc::clone(&self.pool);
         let profile_name = self.profile_name.clone();
         let wsdl_path = self.wsdl_path.clone();
@@ -269,14 +238,19 @@ impl Service<Exchange> for CxfProducer {
         let correlation_id = exchange.correlation_id().to_string();
 
         Box::pin(async move {
+            // Acquire the call permit inside the future so readiness never
+            // reserves one (see poll_ready); held for the whole call to
+            // enforce backpressure.
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| CamelError::ProcessorError("cxf producer semaphore closed".into()))?;
             debug!(
                 address = %address.as_deref().unwrap_or(""),
                 operation = %configured_operation,
                 correlation_id = %correlation_id,
                 "CXF producer call started"
             );
-            // Hold permit for the duration of the call to enforce backpressure.
-            let _ = &_permit;
             let channel = pool
                 .get_channel()
                 .await
@@ -390,6 +364,7 @@ impl Service<Exchange> for CxfProducer {
 mod tests {
     use super::*;
     use crate::pool::{BridgeSlot, CxfBridgePool};
+    use camel_component_api::Message;
     use camel_component_api::StreamBody;
     use camel_component_api::test_support::PanicRuntimeObservability;
     use futures::stream;
@@ -456,142 +431,113 @@ mod tests {
         assert!(matches!(poll, Poll::Ready(Ok(()))));
     }
 
-    #[tokio::test]
-    async fn test_poll_ready_bridge_ready() {
+    fn producer_with_bridge_state(state: BridgeState) -> CxfProducer {
         let pool = test_pool();
+        let (state_tx, state_rx) = watch::channel(state);
+        let slot = BridgeSlot {
+            key: CxfBridgePool::slot_key(),
+            configured_profiles: vec![],
+            bind_address: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+
+        CxfProducer::new(
+            pool,
+            "test".to_string(),
+            "/wsdl/hello.wsdl".to_string(),
+            "Svc".to_string(),
+            "Port".to_string(),
+            None,
+            "op".to_string(),
+            None,
+            false,
+            None,
+            test_rt(),
+        )
+    }
+
+    #[tokio::test]
+    async fn poll_ready_ready_state_ok_without_permit() {
         let channel =
             tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let slot = BridgeSlot::new_ready_for_test(channel);
-        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+        let mut producer = producer_with_bridge_state(BridgeState::Ready { channel });
 
-        let mut producer = CxfProducer::new(
-            pool,
-            "test".to_string(),
-            "/wsdl/hello.wsdl".to_string(),
-            "Svc".to_string(),
-            "Port".to_string(),
-            None,
-            "op".to_string(),
-            None,
-            false,
-            None,
-            test_rt(),
-        );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let poll = producer.poll_ready(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert!(matches!(producer.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        // poll_ready must not consume the sole call permit.
+        assert_eq!(producer.semaphore.available_permits(), 1);
     }
 
     #[tokio::test]
-    async fn test_poll_ready_bridge_starting() {
-        let pool = test_pool();
-        let _channel =
-            tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
-        let slot = BridgeSlot {
-            key: CxfBridgePool::slot_key(),
-            configured_profiles: vec![],
-            bind_address: None,
-            state_rx,
-            state_tx,
-            process: Arc::new(tokio::sync::Mutex::new(None)),
-            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
-        };
-        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+    async fn poll_ready_starting_returns_pending() {
+        for state in [
+            BridgeState::Starting,
+            BridgeState::Restarting {
+                attempt: 1,
+                next_at: std::time::Instant::now(),
+            },
+        ] {
+            let mut producer = producer_with_bridge_state(state.clone());
 
-        let mut producer = CxfProducer::new(
-            pool,
-            "test".to_string(),
-            "/wsdl/hello.wsdl".to_string(),
-            "Svc".to_string(),
-            "Port".to_string(),
-            None,
-            "op".to_string(),
-            None,
-            false,
-            None,
-            test_rt(),
-        );
-        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let poll = producer.poll_ready(&mut cx);
-        assert!(matches!(poll, Poll::Pending));
+            let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+            let poll = producer.poll_ready(&mut cx);
+            assert!(
+                matches!(poll, Poll::Pending),
+                "expected Pending for {state:?}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn test_poll_ready_bridge_degraded() {
-        let pool = test_pool();
-        let _channel =
-            tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let (state_tx, state_rx) =
-            watch::channel(BridgeState::Degraded("connection lost".to_string()));
-        let slot = BridgeSlot {
-            key: CxfBridgePool::slot_key(),
-            configured_profiles: vec![],
-            bind_address: None,
-            state_rx,
-            state_tx,
-            process: Arc::new(tokio::sync::Mutex::new(None)),
-            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
-        };
-        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
-
-        let mut producer = CxfProducer::new(
-            pool,
-            "test".to_string(),
-            "/wsdl/hello.wsdl".to_string(),
-            "Svc".to_string(),
-            "Port".to_string(),
-            None,
-            "op".to_string(),
-            None,
-            false,
-            None,
-            test_rt(),
-        );
+    async fn poll_ready_degraded_and_stopped_error() {
+        let mut producer = producer_with_bridge_state(BridgeState::Degraded("x".to_string()));
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let poll = producer.poll_ready(&mut cx);
-        match poll {
+        match producer.poll_ready(&mut cx) {
             Poll::Ready(Err(e)) => assert!(e.to_string().contains("degraded")),
             other => panic!("expected Ready(Err), got: {other:?}"),
         }
-    }
 
-    #[tokio::test]
-    async fn test_poll_ready_bridge_stopped() {
-        let pool = test_pool();
-        let _channel =
-            tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-        let (state_tx, state_rx) = watch::channel(BridgeState::Stopped);
-        let slot = BridgeSlot {
-            key: CxfBridgePool::slot_key(),
-            configured_profiles: vec![],
-            bind_address: None,
-            state_rx,
-            state_tx,
-            process: Arc::new(tokio::sync::Mutex::new(None)),
-            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
-        };
-        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
-
-        let mut producer = CxfProducer::new(
-            pool,
-            "test".to_string(),
-            "/wsdl/hello.wsdl".to_string(),
-            "Svc".to_string(),
-            "Port".to_string(),
-            None,
-            "op".to_string(),
-            None,
-            false,
-            None,
-            test_rt(),
-        );
-        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        let poll = producer.poll_ready(&mut cx);
-        match poll {
+        let mut producer = producer_with_bridge_state(BridgeState::Stopped);
+        match producer.poll_ready(&mut cx) {
             Poll::Ready(Err(e)) => assert!(e.to_string().contains("stopped")),
             other => panic!("expected Ready(Err), got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn call_blocks_on_semaphore_until_release() {
+        let channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let mut producer = producer_with_bridge_state(BridgeState::Ready { channel });
+
+        // Hold the sole permit externally: the call future must not be able
+        // to acquire it until it is released.
+        let permit = Arc::clone(&producer.semaphore)
+            .try_acquire_owned()
+            .expect("sole permit must be free for the blocking test");
+
+        let mut fut = producer.call(Exchange::new(Message::new(Body::Text("x".to_string()))));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "call must pend while the sole permit is held elsewhere"
+        );
+
+        drop(permit);
+        // The next poll completes acquisition and proceeds into channel
+        // resolution and invoke (which pends on the absent bridge). A permit
+        // count of zero proves the future got past acquisition; the invoke
+        // result itself is not under test.
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            producer.semaphore.available_permits(),
+            0,
+            "call future must now hold the permit (past acquisition)"
+        );
     }
 
     #[test]

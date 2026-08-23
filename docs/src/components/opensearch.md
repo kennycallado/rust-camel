@@ -196,7 +196,7 @@ The `OpenSearchConfig::Debug` implementation redacts the password to `<redacted>
 
 ## Concurrency and retry
 
-The Producer holds a `Semaphore` that caps in-flight calls at 128. `poll_ready()` reserves a permit before the call. A closed semaphore maps to `CamelError::ConsumerStopping` (ADR-0019, ADR-0024). The shared client initializes lazily on the first call. `Arc<Mutex<Option<OpenSearch>>>` serializes initialization, then each call clones and reuses the client.
+The Producer holds a `Semaphore` that caps in-flight calls at 128. `poll_ready()` returns ready unconditionally. The `call` future waits on the semaphore. A closed semaphore maps to `CamelError::ConsumerStopping` (ADR-0019, ADR-0024). The shared client initializes lazily on the first call. `Arc<Mutex<Option<OpenSearch>>>` serializes initialization, then each call clones and reuses the client.
 
 Retry uses `NetworkRetryPolicy`. The retry loop classifies failures as transient or permanent:
 

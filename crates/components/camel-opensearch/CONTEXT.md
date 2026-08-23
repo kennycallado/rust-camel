@@ -46,9 +46,10 @@ The crate uses its Rule 3 framework case by case.
   `Arc<Mutex<Option<OpenSearch>>>` serializes initialization, then each call
   clones and reuses the client. The mutex guard is dropped before any network
   await.
-- A semaphore caps in-flight calls at 128. `poll_ready()` reserves a permit and
-  maps a closed semaphore to `CamelError::ConsumerStopping` as required by
-  ADR-0019 and ADR-0024.
+- A semaphore caps in-flight calls at 128. `poll_ready()` returns
+  `Ready(Ok(()))` unconditionally. The `call()` future acquires the semaphore
+  permit. A closed semaphore surfaces `CamelError::ConsumerStopping` from
+  `call()`, as required by ADR-0019 and ADR-0024.
 - `retry_async` uses `NetworkRetryPolicy`. Only network failures, timeouts, and
   HTTP 5xx responses are transient. Input errors and HTTP 4xx responses fail
   without retry.
