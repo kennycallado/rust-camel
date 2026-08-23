@@ -238,7 +238,7 @@ sxd-document = "0.3"
 syn = "2.0"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 ariadne = "0.4"
-ron = "0.8"
+ron = "0.12"
 noyalib = { version = "0.0.18", features = ["compat-serde-yaml"] }
 toml = "1"
 percent-encoding = "2.3"

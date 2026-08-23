@@ -18,18 +18,30 @@ use crate::protocol_b::{
 use crate::rss::{aggregate_samples, sample_once, ProcessTreeSample};
 use crate::warmup::WarmupConfig;
 
-/// Parse `--key=value` style args from a slice into a key→value lookup.
+/// Parse `--key=value` and `--key value` style args into a key→value lookup.
+///
+/// Supports both `--key=value` and `--key value` (space-separated) forms.
+/// A bare `--flag` with no `=` and no following non-flag value is stored as
+/// `flag -> ""` (boolean presence). Unknown flags are stored silently; the
+/// hard requirement is that empty/missing `--url` is a hard error, not a
+/// livelock, and that the natural `--url http://…` invocation works.
 fn parse_flags(args: &[String]) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    for a in args {
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
         if let Some(rest) = a.strip_prefix("--") {
             if let Some(eq) = rest.find('=') {
                 let (k, v) = rest.split_at(eq);
                 map.insert(k.to_string(), v[1..].to_string());
+            } else if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                map.insert(rest.to_string(), args[i + 1].clone());
+                i += 1;
             } else {
                 map.insert(rest.to_string(), String::new());
             }
         }
+        i += 1;
     }
     map
 }
@@ -54,8 +66,8 @@ pub fn devnull_main(args: &[String]) -> ExitCode {
 pub fn calibrate_main(args: &[String]) -> ExitCode {
     let flags = parse_flags(args);
     let url = match flags.get("url") {
-        Some(u) => u.clone(),
-        None => {
+        Some(u) if !u.trim().is_empty() => u.clone(),
+        _ => {
             eprintln!("calibrate: --url is required");
             return ExitCode::from(2);
         }
@@ -82,8 +94,8 @@ pub fn calibrate_main(args: &[String]) -> ExitCode {
 pub fn measure_a_main(args: &[String]) -> ExitCode {
     let flags = parse_flags(args);
     let url = match flags.get("url") {
-        Some(u) => u.clone(),
-        None => {
+        Some(u) if !u.trim().is_empty() => u.clone(),
+        _ => {
             eprintln!("measure-a: --url is required");
             return ExitCode::from(2);
         }
@@ -154,8 +166,8 @@ pub fn measure_a_main(args: &[String]) -> ExitCode {
 pub fn measure_throughput_main(args: &[String]) -> ExitCode {
     let flags = parse_flags(args);
     let url = match flags.get("url") {
-        Some(u) => u.clone(),
-        None => {
+        Some(u) if !u.trim().is_empty() => u.clone(),
+        _ => {
             eprintln!("measure-throughput: --url is required");
             return ExitCode::from(2);
         }

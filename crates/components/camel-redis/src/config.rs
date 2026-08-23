@@ -624,15 +624,35 @@ impl RedisEndpointConfig {
 
         // Parse host and port from path (format: //host:port or //host or empty)
         // Use Option to distinguish "not set in URI" from "set in URI"
-        let (host, port) = if parts.path.starts_with("//") {
+        // Also extract optional userinfo password (e.g. redis://:secret@host:port)
+        // so that `RedisEndpointConfig::from_uri(cfg.redis_url())` round-trips.
+        let (host, port, password_from_userinfo) = if parts.path.starts_with("//") {
             let path = &parts.path[2..]; // Remove leading //
             if path.is_empty() {
                 // redis://?command=GET → no host, no port
-                (None, None)
+                (None, None, None)
             } else {
-                let (host_part, port_part) = match path.split_once(':') {
-                    Some((h, p)) => (h, Some(p)),
+                // Split userinfo if present (last '@' separates creds from host:port)
+                let (host_port, pw_opt) = match path.rsplit_once('@') {
+                    Some((userinfo, hp)) => {
+                        let decoded = if let Some((_, p)) = userinfo.split_once(':') {
+                            // Password in userinfo is percent-encoded by redis_url(); decode it
+                            let d = percent_encoding::percent_decode_str(p)
+                                .decode_utf8()
+                                .map(|s| s.into_owned())
+                                .unwrap_or_else(|_| p.to_string());
+                            if d.is_empty() { None } else { Some(d) }
+                        } else {
+                            // Bare username without ':' — no password modeled
+                            None
+                        };
+                        (hp, decoded)
+                    }
                     None => (path, None),
+                };
+                let (host_part, port_part) = match host_port.split_once(':') {
+                    Some((h, p)) => (h, Some(p)),
+                    None => (host_port, None),
                 };
                 let host = Some(host_part.to_string());
                 let port = port_part
@@ -652,11 +672,11 @@ impl RedisEndpointConfig {
                         Ok(n)
                     })
                     .transpose()?;
-                (host, port)
+                (host, port, pw_opt)
             }
         } else {
             // No // prefix means no host/port in URI
-            (None, None)
+            (None, None, None)
         };
 
         // Parse command (default to SET)
@@ -688,8 +708,8 @@ impl RedisEndpointConfig {
             None => 1,
         };
 
-        // Parse password
-        let password = parts.params.get("password").cloned();
+        // Parse password: userinfo (from redis_url) takes precedence over query param
+        let password = password_from_userinfo.or_else(|| parts.params.get("password").cloned());
 
         // Parse db (default to 0 if absent, error if present but invalid)
         let db = match parts.params.get("db") {
@@ -843,6 +863,9 @@ impl RedisEndpointConfig {
     /// After `resolve_defaults()`, host and port are guaranteed `Some`.
     /// Passwords are URL-encoded to handle special characters (`@`, `:`, `/`).
     /// Uses `rediss://` scheme when `ssl` is true.
+    /// Database is rendered as `?db=N` only when `db != 0` so that
+    /// `RedisEndpointConfig::from_uri(cfg.redis_url())` round-trips
+    /// (absent `db` defaults to 0 in `from_uri`).
     pub fn redis_url(&self) -> String {
         let host = self.host.as_deref().unwrap_or("localhost");
         let port = self.port.unwrap_or(6379);
@@ -852,11 +875,16 @@ impl RedisEndpointConfig {
             "redis"
         };
 
-        if let Some(password) = &self.password {
+        let base = if let Some(password) = &self.password {
             let encoded = utf8_percent_encode(password, NON_ALPHANUMERIC).to_string();
-            format!("{}://:{}@{}:{}/{}", scheme, encoded, host, port, self.db) // allow-secret
+            format!("{}://:{}@{}:{}", scheme, encoded, host, port) // allow-secret
         } else {
-            format!("{}://{}:{}/{}", scheme, host, port, self.db) // allow-secret
+            format!("{}://{}:{}", scheme, host, port) // allow-secret
+        };
+        if self.db != 0 {
+            format!("{}?db={}", base, self.db)
+        } else {
+            base
         }
     }
 
@@ -873,15 +901,21 @@ impl RedisEndpointConfig {
             "redis"
         };
 
-        match &self.password {
-            Some(_) => format!("{}://:***@{}:{}/{}", scheme, host, port, self.db), // allow-secret
-            None => self.redis_url(),
+        let base = match &self.password {
+            Some(_) => format!("{}://:***@{}:{}", scheme, host, port), // allow-secret
+            None => return self.redis_url(),
+        };
+        if self.db != 0 {
+            format!("{}?db={}", base, self.db)
+        } else {
+            base
         }
     }
 
     /// Return a concise, secret-safe endpoint identifier for tracing.
     ///
-    /// Format: `rediss://host:port/db` or `redis://host:port/db` — never contains credentials.
+    /// Format: `rediss://host:port` or `rediss://host:port?db=N`
+    /// (and the same for `redis://`) — never contains credentials.
     pub fn safe_endpoint(&self) -> String {
         let host = self.host.as_deref().unwrap_or("localhost");
         let port = self.port.unwrap_or(6379);
@@ -890,7 +924,12 @@ impl RedisEndpointConfig {
         } else {
             "redis"
         };
-        format!("{}://{}:{}/{}", scheme, host, port, self.db)
+        let base = format!("{}://{}:{}", scheme, host, port);
+        if self.db != 0 {
+            format!("{}?db={}", base, self.db)
+        } else {
+            base
+        }
     }
 }
 
@@ -1054,15 +1093,15 @@ mod tests {
         let mut c =
             RedisEndpointConfig::from_uri("redis://localhost:6379?password=secret&db=2").unwrap();
         c.resolve_defaults();
-        // Password without special chars is unchanged
-        assert_eq!(c.redis_url(), "redis://:secret@localhost:6379/2");
+        // Password without special chars is unchanged, db rendered as ?db=N
+        assert_eq!(c.redis_url(), "redis://:secret@localhost:6379?db=2");
     }
 
     #[test]
     fn test_redis_url_no_auth() {
         let mut c = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
         c.resolve_defaults();
-        assert_eq!(c.redis_url(), "redis://localhost:6379/0");
+        assert_eq!(c.redis_url(), "redis://localhost:6379");
     }
 
     // REDIS-015: Password with special characters is URL-encoded

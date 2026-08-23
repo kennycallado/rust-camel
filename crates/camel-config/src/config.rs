@@ -839,9 +839,9 @@ pub(crate) fn validate_redis_topology_fields(
 /// Canonical redis database identity for the cross-repository
 /// prefix-collision rule: standalone endpoints compare by host/port/db,
 /// sentinel topologies by (sorted, trimmed, scheme-normalized) node set +
-/// master + db. `None` means the endpoint could not be normalized — no
-/// collision is claimed on doubt; registration reports the underlying
-/// parse error later.
+/// master + db. Returns `None` when normalization fails; the caller
+/// compares `Option`s directly so `None == None` claims collision, but
+/// `validate()` makes this unreachable — a validated endpoint always yields `Some`.
 fn redis_database_key(
     url: Option<&str>,
     sentinel_nodes: Option<&[String]>,

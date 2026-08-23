@@ -60,8 +60,8 @@ fn loadgen_bin() -> PathBuf {
 
 /// Run bench-loadgen with the given args, returning (exit_status, stdout, stderr).
 ///
-/// Args use the `--key=value` form (the parser does not support
-/// `--key value` space-separated form).
+/// Args support both `--key=value` and `--key value` forms; values starting
+/// with `-` are not consumed as space-form values.
 fn run_loadgen(args: &[&str]) -> (std::process::Output, String, String) {
     let bin = loadgen_bin();
     let output = Command::new(&bin)
@@ -575,5 +575,108 @@ fn connections_drive_inflight_concurrency() {
     assert!(
         max >= 7,
         "expected max concurrent in-flight >= 7 with --connections=8, got {max}"
+    );
+}
+
+// ----- bench-loadgen space-separated flags + empty url hard error (rc-bujs) -----
+
+#[test]
+fn measure_throughput_space_form_url_accepted() {
+    let url = spawn_canned_http_server();
+    let out = write_tmp("loadgen-space-form-url.json", "{}");
+    let out_str = out.to_str().unwrap().to_string();
+    let url_arg = url.clone();
+    // Only --url is space-form; other flags use --key=value so old parser's
+    // default-duration livelock (60s) doesn't mask the url-handling check.
+    let duration_arg = kv("--duration-secs", "1");
+    let warmup_arg = kv("--warmup-secs", "0");
+    let workers_arg = kv("--workers", "2");
+    let connections_arg = kv("--connections", "2");
+    let out_arg = kv("--out", &out_str);
+    let (output, _stdout, stderr) = run_loadgen(&[
+        "measure-throughput",
+        "--url",
+        &url_arg,
+        &duration_arg,
+        &warmup_arg,
+        &workers_arg,
+        &connections_arg,
+        &out_arg,
+    ]);
+    assert!(
+        output.status.success(),
+        "measure-throughput with space-form --url should succeed (status {:?}): {stderr}",
+        output.status
+    );
+    assert!(
+        !stderr.contains("--url is required"),
+        "space-form url must not produce '--url is required' error: {stderr}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&out).expect("read out json"))
+            .expect("parse out json");
+    let total_2xx = json.get("total_2xx").and_then(|v| v.as_u64()).unwrap_or(0);
+    assert!(
+        total_2xx > 0,
+        "expected total_2xx > 0 with space-form url accepted, got {total_2xx}: {json}"
+    );
+    let _ = fs::remove_file(out);
+}
+
+#[test]
+fn measure_throughput_empty_url_hard_error() {
+    let start = std::time::Instant::now();
+    let duration_arg = kv("--duration-secs", "1");
+    let warmup_arg = kv("--warmup-secs", "0");
+    let workers_arg = kv("--workers", "2");
+    let (output, _stdout, stderr) = run_loadgen(&[
+        "measure-throughput",
+        "--url=",
+        &duration_arg,
+        &warmup_arg,
+        &workers_arg,
+    ]);
+    let elapsed = start.elapsed();
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "empty --url= must exit nonzero"
+    );
+    let combined = stderr.to_ascii_lowercase();
+    assert!(
+        combined.contains("url") && (combined.contains("required") || combined.contains("empty")),
+        "expected stderr to mention url required/empty for empty url: {stderr}"
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "empty url must fail fast (no livelock), elapsed {elapsed:?}"
+    );
+}
+
+#[test]
+fn measure_throughput_missing_url_hard_error() {
+    let start = std::time::Instant::now();
+    let duration_arg = kv("--duration-secs", "1");
+    let warmup_arg = kv("--warmup-secs", "0");
+    let workers_arg = kv("--workers", "2");
+    let (output, _stdout, stderr) = run_loadgen(&[
+        "measure-throughput",
+        &duration_arg,
+        &warmup_arg,
+        &workers_arg,
+    ]);
+    let elapsed = start.elapsed();
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "missing --url must exit nonzero"
+    );
+    assert!(
+        stderr.contains("--url is required"),
+        "expected --url is required error for missing url: {stderr}"
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "missing url must fail fast, elapsed {elapsed:?}"
     );
 }

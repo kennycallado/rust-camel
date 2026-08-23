@@ -858,6 +858,260 @@ url = "redis://127.0.0.1:6379"
     );
 }
 
+// ── Test 8b: exhaustive redis-only field rejection on memory/redb ─────────
+// Mirrors the idempotent_repo redb-vs-memory rejection matrix: every
+// redis-only field must be rejected on the non-redis backends.
+
+#[test]
+fn url_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+url = "redis://127.0.0.1:6379"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.url") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.url and \"memory\", got: {msg}"
+    );
+}
+
+#[test]
+fn sentinel_nodes_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_nodes") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.sentinel_nodes and \"memory\", got: {msg}"
+    );
+}
+
+#[test]
+fn master_name_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+master_name = "mymaster"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.master_name") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.master_name and \"memory\", got: {msg}"
+    );
+}
+
+#[test]
+fn sentinel_username_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+sentinel_username = "admin"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_username") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.sentinel_username and \"memory\", got: {msg}"
+    );
+}
+
+#[test]
+fn sentinel_password_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+sentinel_password = "hunter2"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_password") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.sentinel_password and \"memory\", got: {msg}"
+    );
+}
+
+#[test]
+fn key_prefix_on_memory_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+key_prefix = "camel:cache"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.key_prefix") && msg.contains("\"memory\""),
+        "validation error must name cache_repo.key_prefix and \"memory\", got: {msg}"
+    );
+}
+
+#[test]
+fn url_on_redb_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+url = "redis://127.0.0.1:6379"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.url") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.url and \"redb\", got: {msg}"
+    );
+}
+
+#[test]
+fn sentinel_nodes_on_redb_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_nodes") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.sentinel_nodes and \"redb\", got: {msg}"
+    );
+}
+
+#[test]
+fn master_name_on_redb_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+master_name = "mymaster"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.master_name") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.master_name and \"redb\", got: {msg}"
+    );
+}
+
+#[test]
+fn sentinel_username_on_redb_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+sentinel_username = "admin"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_username") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.sentinel_username and \"redb\", got: {msg}"
+    );
+}
+
+#[test]
+fn sentinel_password_on_redb_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+sentinel_password = "hunter2"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.sentinel_password") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.sentinel_password and \"redb\", got: {msg}"
+    );
+}
+
+#[test]
+fn key_prefix_on_redb_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "cache.redb"
+cache_size = "256MiB"
+key_prefix = "camel:cache"
+"#,
+    );
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.key_prefix") && msg.contains("\"redb\""),
+        "validation error must name cache_repo.key_prefix and \"redb\", got: {msg}"
+    );
+}
+
+#[test]
+fn redis_with_url_accepted() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+"#,
+    );
+    cfg.validate()
+        .expect("redis backend with url must pass validation");
+}
+
+#[test]
+fn redis_with_key_prefix_accepted() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+key_prefix = "camel:cache"
+"#,
+    );
+    cfg.validate()
+        .expect("redis backend with key_prefix must pass validation");
+}
+
+#[test]
+fn redis_with_sentinel_fields_accepted() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+sentinel_nodes = ["s-a:26379"]
+master_name = "mymaster"
+sentinel_username = "admin"
+sentinel_password = "hunter2"
+key_prefix = "camel:cache"
+"#,
+    );
+    cfg.validate()
+        .expect("redis backend with sentinel fields must pass validation");
+}
+
 #[test]
 fn cache_redis_malformed_stale_retention_rejected() {
     let cfg = make_cfg(

@@ -674,12 +674,6 @@ checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
 name = "base64"
-version = "0.21.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
-
-[[package]]
-name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -1399,7 +1393,7 @@ dependencies = [
  "mimalloc",
  "noyalib",
  "percent-encoding",
- "ron 0.8.1",
+ "ron",
  "rustls",
  "serde",
  "serde_json",
@@ -3002,7 +2996,7 @@ dependencies = [
  "convert_case",
  "json5",
  "pathdiff",
- "ron 0.12.2",
+ "ron",
  "rust-ini",
  "serde-untagged",
  "serde_core",
@@ -9321,18 +9315,6 @@ name = "robust"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
-
-[[package]]
-name = "ron"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b91f7eff05f748767f183df4320a63d6936e9c6107d97c9e6bdd9784f4289c94"
-dependencies = [
- "base64 0.21.7",
- "bitflags 2.13.1",
- "serde",
- "serde_derive",
-]
 
 [[package]]
 name = "ron"
