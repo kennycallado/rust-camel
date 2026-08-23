@@ -26,6 +26,12 @@ type CodeSev = (String, String);
 /// file-relative-path -> set of (code, severity).
 type EmittedMap = BTreeMap<String, BTreeSet<CodeSev>>;
 
+/// Whether a discovered path sits under a cargo `target/` directory (a
+/// build-artifact tree, never a route file). See `discover_corpus` doc.
+fn is_build_artifact(p: &Path) -> bool {
+    p.components().any(|c| c.as_os_str() == "target")
+}
+
 /// Workspace root, resolved from this crate's manifest dir.
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -65,6 +71,13 @@ fn collect(pattern: &str, out: &mut BTreeSet<PathBuf>) {
 /// errors the same way. The exclusion uses
 /// `camel_dsl::discovery::is_test_document`, the same predicate `camel lint`
 /// and route discovery apply, so the gate cannot drift from the runtime skip.
+///
+/// Paths under any `target/` directory are excluded: nested guest crates
+/// (`examples/*/guest`, `crates/**/tests/fixtures/*-guest`) are built with
+/// `cargo build --target wasm32-wasip2`, which leaves gitignored `target/`
+/// dirs whose fingerprint `*.json` files match the corpus globs but are
+/// build artifacts, not route files (rc-l4tc). Route files never live under
+/// a cargo `target/` directory, so the component test cannot over-match.
 fn discover_corpus() -> Vec<(String, PathBuf)> {
     let root = workspace_root();
     let mut found = BTreeSet::new();
@@ -95,6 +108,7 @@ fn discover_corpus() -> Vec<(String, PathBuf)> {
         .into_iter()
         .filter(|p| !p.starts_with(&excluded))
         .filter(|p| !camel_dsl::discovery::is_test_document(p))
+        .filter(|p| !is_build_artifact(p))
         .map(|p| {
             let rel = p
                 .strip_prefix(&root)
@@ -234,5 +248,40 @@ async fn corpus_gate_detects_false_positive() {
         named,
         "gate failure must name the file + code; got:\n  - {}",
         failures.join("\n  - ")
+    );
+}
+
+#[test]
+fn build_artifact_paths_are_excluded() {
+    use std::path::Path;
+
+    // Guest-crate build trees (rc-l4tc): fingerprint JSON under a nested
+    // cargo `target/` dir must not enter the corpus.
+    assert!(is_build_artifact(Path::new(
+        "/ws/examples/wasm-source-webhook/guest/target/wasm32-wasip2/release/deps/foo.json"
+    )));
+    assert!(is_build_artifact(Path::new(
+        "/ws/crates/components/camel-component-wasm/tests/fixtures/conflicting-bind-guest/target/debug/.fingerprint/x.json"
+    )));
+    // Real corpus files (no `target` path component) stay in.
+    assert!(!is_build_artifact(Path::new(
+        "/ws/examples/wasm-source-webhook/routes/webhook.yaml"
+    )));
+    assert!(!is_build_artifact(Path::new(
+        "/ws/crates/camel-cli/tests/fixtures/lint-corpus-baseline.ron"
+    )));
+}
+
+#[tokio::test]
+async fn corpus_contains_no_build_artifacts() {
+    let corpus = discover_corpus();
+    let leaked: Vec<_> = corpus
+        .iter()
+        .filter(|(_, p)| is_build_artifact(p))
+        .map(|(rel, _)| rel.clone())
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "corpus must not contain target/ build artifacts; leaked: {leaked:?}"
     );
 }
