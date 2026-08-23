@@ -10,6 +10,7 @@
 ## Structural checks (deterministic, run these)
 
 - `nix shell nixpkgs#mdbook -c mdbook build docs` — verifies every include directive, link, and page resolves. Must exit 0.
+- `nix shell nixpkgs#mdbook -c mdbook test docs` — compiles every Rust block. Must exit 0. mdbook treats an untagged fence as Rust, so tag non-Rust blocks with a language (`text`, `yaml`, `output`). This check runs in CI (`docs.yml`, "Build and test guide") and fails the build on an untagged non-Rust fence.
 
 ADR citation validity (`docs/src` → `docs/adr/`) and glossary consistency with CONTEXT-MAP Key Terms have no xtask lint. They are enforced by review under the two-source rule.
 
@@ -49,4 +50,5 @@ Section hub pages (index.md) group pages by family with one-line descriptions an
 Before committing documentation changes:
 ```bash
 nix shell nixpkgs#mdbook -c mdbook build docs    # must exit 0
+nix shell nixpkgs#mdbook -c mdbook test docs     # must exit 0
 ```

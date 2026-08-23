@@ -61,7 +61,7 @@ ADR follows from it.
 
 The unit-tier lean boot registers exactly this set:
 
-```
+```text
 { direct, log, mock, seda, timer }
 ```
 
