@@ -23,19 +23,19 @@ yields `ConfigError`; an escaped `$${env:...}` on a strict-gate leaf yields `Con
 (the `:-` separator is NATIVE syntax under `${env:}` and resolves normally). The authenticator boundary guard (`NativeCredentialStore` construction
 via `ensure_no_placeholder_markers`) SHALL carry forward unchanged as defense-in-depth.
 
-#### Scenario: bearer token resolves from env under new syntax
+#### Scenario: Placeholder resolves to real secret
 
 - **Given** Camel.toml with `[security.native] bearer_token = "${env:APP_TOKEN}"` and env `APP_TOKEN=real-secret`
 - **When** the config loads
 - **Then** the native credential store accepts `real-secret` as the static token and rejects the literal `${env:APP_TOKEN}`
 
-#### Scenario: literal new-syntax placeholder never authenticates
+#### Scenario: Unset env var on a covered leaf fails closed
 
 - **Given** `[security.native] bearer_token = "${env:APP_TOKEN}"` with `APP_TOKEN` unset
 - **When** the config loads
 - **Then** `load_config` returns `Err` (`ConfigError`) naming the field — the literal placeholder string is never installed as a live credential
 
-#### Scenario: explicit default honored
+#### Scenario: Single-colon default resolves normally
 
 - **Given** `[security.native] bearer_token = "${env:APP_TOKEN:-fallback-tok}"` with `APP_TOKEN` unset
 - **When** the config loads
@@ -53,7 +53,7 @@ via `ensure_no_placeholder_markers`) SHALL carry forward unchanged as defense-in
 - **When** the config loads
 - **Then** `load_config` returns `Err` with an actionable message naming the field and the `${env:}` replacement — regardless of whether `APP_TOKEN` is set
 
-#### Scenario: legacy dash default rejected only under legacy syntax
+#### Scenario: Dash-prefixed default fails closed on any covered leaf
 
 - **Given** `[security.native] bearer_token = "{{env:X:-changeme}}"` (legacy braces with shell separator)
 - **When** the config loads
@@ -89,19 +89,19 @@ via `ensure_no_placeholder_markers`) SHALL carry forward unchanged as defense-in
 - **When** the config loads
 - **Then** the resolved secret equals the env value
 
-#### Scenario: non-credential security leaf resolves
+#### Scenario: Non-credential security leaf resolves
 
 - **Given** `[security.keycloak] realm = "${env:KC_REALM:-main}"` with `KC_REALM` unset
 - **When** the config loads
 - **Then** the realm resolves to `main` and load succeeds (non-credential leaf, declared default)
 
-#### Scenario: datasource leaves resolve
+#### Scenario: Datasource leaves resolve
 
 - **Given** `[datasources.main] db_url = "${env:DB_URL}"` with `DB_URL=postgres://u:p@h/db`, `[datasources.main.extra] password = "${env:SUR_PASS}"` with `SUR_PASS=sur-secret`, `provider = "surrealdb"`, and TLS fields unset
 - **When** the config loads
 - **Then** `db_url` resolves to `postgres://u:p@h/db`, `extra.password` to `sur-secret`, and the provider/TLS leaves resolve through the same strict gate when placeholders are present
 
-#### Scenario: authenticator boundary guard carries forward
+#### Scenario: Authenticator boundary guard rejects marker secrets
 
 - **Given** a `NativeCredentialStore::try_new` call whose plaintext secret contains `{{` or an unconsumed `${env:` marker
 - **When** the store constructs
