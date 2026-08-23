@@ -6,6 +6,78 @@
 //! variant produces for the same condition.
 
 use crate::MockEndpointInner;
+use camel_component_api::Exchange;
+
+/// Diagnostic cap for received-value and header-key lists.
+const DIAGNOSTIC_LIST_CAP: usize = 8;
+
+/// Received-state snapshot for a failed header expectation.
+///
+/// `actual_values` holds the `{:?}`-formatted values of the expected key
+/// across received exchanges that carry it, and `last_headers` holds the
+/// sorted key list of the last received exchange. Both cap at
+/// [`DIAGNOSTIC_LIST_CAP`] entries; overflow appends a `+N more` entry.
+/// `last_headers` is `None` when no exchange was received.
+struct HeaderDiagnostics {
+    received_count: usize,
+    actual_values: Vec<String>,
+    last_headers: Option<String>,
+}
+
+/// Collect the received-state diagnostics for the expected `key`.
+fn header_diagnostics(received: &[Exchange], key: &str) -> HeaderDiagnostics {
+    let mut actual_values: Vec<String> = received
+        .iter()
+        .filter_map(|ex| ex.input.headers.get(key))
+        .map(|v| format!("{v:?}"))
+        .collect();
+    let overflow = actual_values.len().saturating_sub(DIAGNOSTIC_LIST_CAP);
+    actual_values.truncate(DIAGNOSTIC_LIST_CAP);
+    if overflow > 0 {
+        actual_values.push(format!("+{overflow} more"));
+    }
+    let last_headers = received.last().map(|ex| {
+        let mut keys: Vec<&str> = ex.input.headers.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let keys_overflow = keys.len().saturating_sub(DIAGNOSTIC_LIST_CAP);
+        keys.truncate(DIAGNOSTIC_LIST_CAP);
+        let mut rendered = keys.join(", ");
+        if keys_overflow > 0 {
+            rendered.push_str(&format!(", +{keys_overflow} more"));
+        }
+        rendered
+    });
+    HeaderDiagnostics {
+        received_count: received.len(),
+        actual_values,
+        last_headers,
+    }
+}
+
+/// Append the received-state clause shared by the header mismatch variants.
+fn write_header_received_clause(
+    f: &mut std::fmt::Formatter<'_>,
+    received_count: usize,
+    actual_values: &[String],
+    last_headers: &Option<String>,
+    key: &str,
+) -> std::fmt::Result {
+    if received_count == 0 {
+        return write!(f, " (received 0 exchanges)");
+    }
+    if !actual_values.is_empty() {
+        return write!(
+            f,
+            " (received {received_count} exchanges; '{key}' present with values: [{}])",
+            actual_values.join(", ")
+        );
+    }
+    write!(
+        f,
+        " (received {received_count} exchanges; '{key}' absent from all received exchanges; last exchange headers: [{}])",
+        last_headers.as_deref().unwrap_or("")
+    )
+}
 
 /// Error returned by [`MockEndpointInner::try_assert_satisfied`] when a
 /// recorded expectation is not satisfied (or is malformed).
@@ -61,6 +133,8 @@ pub enum MockAssertionError {
         endpoint: String,
         /// `{:?}`-formatted expected body.
         expected: String,
+        /// Number of received exchanges at evaluation.
+        received_count: usize,
     },
     /// Expected header key/value pair not found in any received exchange.
     HeaderNotFound {
@@ -70,6 +144,16 @@ pub enum MockAssertionError {
         key: String,
         /// Expected header value.
         value: serde_json::Value,
+        /// Number of received exchanges at evaluation.
+        received_count: usize,
+        /// `{:?}`-formatted values of `key` across received exchanges that
+        /// carry it: up to [`DIAGNOSTIC_LIST_CAP`] values plus a final
+        /// `+N more` entry on overflow.
+        actual_values: Vec<String>,
+        /// Sorted key list of the last received exchange: up to
+        /// [`DIAGNOSTIC_LIST_CAP`] keys plus a `+N more` suffix on
+        /// overflow; `None` when no exchange was received.
+        last_headers: Option<String>,
     },
     /// No received exchange has the named header matching the regex pattern.
     HeaderRegexNotMatched {
@@ -79,6 +163,16 @@ pub enum MockAssertionError {
         key: String,
         /// Regex pattern.
         pattern: String,
+        /// Number of received exchanges at evaluation.
+        received_count: usize,
+        /// `{:?}`-formatted values of `key` across received exchanges that
+        /// carry it: up to [`DIAGNOSTIC_LIST_CAP`] values plus a final
+        /// `+N more` entry on overflow.
+        actual_values: Vec<String>,
+        /// Sorted key list of the last received exchange: up to
+        /// [`DIAGNOSTIC_LIST_CAP`] keys plus a `+N more` suffix on
+        /// overflow; `None` when no exchange was received.
+        last_headers: Option<String>,
     },
     /// Header regex pattern failed to compile.
     ///
@@ -132,26 +226,42 @@ impl std::fmt::Display for MockAssertionError {
                 f,
                 "MockEndpoint '{endpoint}': body[{index}] expected {expected}, got {actual}"
             ),
-            MockAssertionError::BodyNotFound { endpoint, expected } => write!(
+            MockAssertionError::BodyNotFound {
+                endpoint,
+                expected,
+                received_count,
+            } => write!(
                 f,
-                "MockEndpoint '{endpoint}': expected body {expected} not found in received exchanges (anyOrder mode)"
+                "MockEndpoint '{endpoint}': expected body {expected} not found in received exchanges (anyOrder mode) (received {received_count} exchanges)"
             ),
             MockAssertionError::HeaderNotFound {
                 endpoint,
                 key,
                 value,
-            } => write!(
-                f,
-                "MockEndpoint '{endpoint}': expected header '{key}' = {value} not found in any received exchange"
-            ),
+                received_count,
+                actual_values,
+                last_headers,
+            } => {
+                write!(
+                    f,
+                    "MockEndpoint '{endpoint}': expected header '{key}' = {value} not found in any received exchange"
+                )?;
+                write_header_received_clause(f, *received_count, actual_values, last_headers, key)
+            }
             MockAssertionError::HeaderRegexNotMatched {
                 endpoint,
                 key,
                 pattern,
-            } => write!(
-                f,
-                "MockEndpoint '{endpoint}': no received exchange has header '{key}' matching regex {pattern:?}"
-            ),
+                received_count,
+                actual_values,
+                last_headers,
+            } => {
+                write!(
+                    f,
+                    "MockEndpoint '{endpoint}': no received exchange has header '{key}' matching regex {pattern:?}"
+                )?;
+                write_header_received_clause(f, *received_count, actual_values, last_headers, key)
+            }
             MockAssertionError::InvalidHeaderPattern {
                 endpoint,
                 pattern,
@@ -188,6 +298,10 @@ impl MockEndpointInner {
     /// `fail_fast` is enabled), then the error is returned. A malformed
     /// expectation ([`MockAssertionError::InvalidHeaderPattern`]) is returned
     /// without touching the latch.
+    /// Diagnostic payloads keep `MockAssertionError` above the
+    /// `result_large_err` size threshold (clippy allow mirrors
+    /// `do_try_segment.rs`).
+    #[allow(clippy::result_large_err)]
     pub(crate) async fn evaluate_expectations(&self) -> Result<(), MockAssertionError> {
         let received = self.get_received_exchanges().await;
 
@@ -245,6 +359,7 @@ impl MockEndpointInner {
                             return self.latch_err(MockAssertionError::BodyNotFound {
                                 endpoint: self.name.clone(),
                                 expected: format!("{expected:?}"),
+                                received_count: received.len(),
                             });
                         }
                     }
@@ -269,10 +384,14 @@ impl MockEndpointInner {
                 .iter()
                 .any(|ex| ex.input.headers.get(key).is_some_and(|v| v == value));
             if !found {
+                let diag = header_diagnostics(&received, key);
                 return self.latch_err(MockAssertionError::HeaderNotFound {
                     endpoint: self.name.clone(),
                     key: key.clone(),
                     value: value.clone(),
+                    received_count: diag.received_count,
+                    actual_values: diag.actual_values,
+                    last_headers: diag.last_headers,
                 });
             }
         }
@@ -302,10 +421,14 @@ impl MockEndpointInner {
                 })
             });
             if !found {
+                let diag = header_diagnostics(&received, key);
                 return self.latch_err(MockAssertionError::HeaderRegexNotMatched {
                     endpoint: self.name.clone(),
                     key: key.clone(),
                     pattern: pattern.clone(),
+                    received_count: diag.received_count,
+                    actual_values: diag.actual_values,
+                    last_headers: diag.last_headers,
                 });
             }
         }
@@ -317,6 +440,7 @@ impl MockEndpointInner {
     ///
     /// Single latch call site for every expectation-mismatch branch;
     /// [`MockAssertionError::InvalidHeaderPattern`] deliberately bypasses it.
+    #[allow(clippy::result_large_err)]
     fn latch_err(&self, err: MockAssertionError) -> Result<(), MockAssertionError> {
         self.set_fail_fast_on_mismatch();
         Err(err)

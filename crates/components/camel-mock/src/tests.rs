@@ -2399,3 +2399,198 @@ fn set_fail_fast_on_mismatch_panics_on_poisoned_lock() {
     }));
     inner.set_fail_fast_on_mismatch();
 }
+
+// -----------------------------------------------------------------------
+// Received-state diagnostics in MockAssertionError (mock-assert-diagnostics)
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn header_not_found_zero_exchanges_message_contains_received_0() {
+    let component = MockComponent::new();
+    let _endpoint = component
+        .create_endpoint("mock:diag-zero", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("diag-zero").unwrap();
+
+    inner.expect_header("k", serde_json::json!("v"));
+    // Send 0 exchanges — no producer needed.
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("unmet expect_header must Err")
+        .to_string();
+    assert!(
+        msg.contains("received 0 exchanges"),
+        "message should report zero received exchanges, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn header_not_found_wrong_values_message_contains_actual_values() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:diag-values", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("diag-values").unwrap();
+    inner.expect_header("k", serde_json::json!("expected"));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    for v in ["actual-1", "actual-2"] {
+        let mut msg = Message::new("body");
+        msg.headers.insert("k".to_string(), serde_json::json!(v));
+        producer.call(Exchange::new(msg)).await.unwrap();
+    }
+    inner
+        .await_exchanges(2, std::time::Duration::from_millis(500))
+        .await;
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("wrong header values must Err")
+        .to_string();
+    assert!(
+        msg.contains("received 2 exchanges"),
+        "message should report two received exchanges, got: {msg}"
+    );
+    assert!(
+        msg.contains("actual-1") && msg.contains("actual-2"),
+        "message should list both actual values, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn header_not_found_absent_key_message_contains_last_exchange_headers() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:diag-absent", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("diag-absent").unwrap();
+    inner.expect_header("k", serde_json::json!("v"));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("body");
+    msg.headers.insert("a".to_string(), serde_json::json!(1));
+    msg.headers.insert("b".to_string(), serde_json::json!(2));
+    producer.call(Exchange::new(msg)).await.unwrap();
+    inner
+        .await_exchanges(1, std::time::Duration::from_millis(500))
+        .await;
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("absent header key must Err")
+        .to_string();
+    assert!(
+        msg.contains("absent from all received exchanges"),
+        "message should report the key absent, got: {msg}"
+    );
+    assert!(
+        msg.contains("last exchange headers: [a, b]"),
+        "message should list the last exchange header keys, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn body_not_found_message_contains_received_count() {
+    let config = MockConfig {
+        any_order: true,
+        ..Default::default()
+    };
+    let component = MockComponent::with_config(config);
+    let endpoint = component
+        .create_endpoint("mock:diag-body", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("diag-body").unwrap();
+    inner.expect_body(camel_component_api::Body::Text("x".into()));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    producer
+        .call(Exchange::new(Message::new("other")))
+        .await
+        .unwrap();
+    inner
+        .await_exchanges(1, std::time::Duration::from_millis(500))
+        .await;
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("unmatched expected body must Err")
+        .to_string();
+    assert!(
+        msg.contains("received 1") && msg.contains("\"x\""),
+        "message should report the received count and expected body, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn header_regex_not_matched_message_contains_actual_values() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:diag-re", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("diag-re").unwrap();
+    inner.expect_header_regex("k", "^pre");
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("body");
+    msg.headers
+        .insert("k".to_string(), serde_json::json!("other"));
+    producer.call(Exchange::new(msg)).await.unwrap();
+    inner
+        .await_exchanges(1, std::time::Duration::from_millis(500))
+        .await;
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("unmatched header regex must Err")
+        .to_string();
+    assert!(
+        msg.contains("other"),
+        "message should list the actual value of 'k', got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn diagnostic_lists_cap_at_eight_entries() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:diag-cap", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("diag-cap").unwrap();
+    inner.expect_header("k", serde_json::json!("never"));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    for i in 1..=10 {
+        let mut msg = Message::new("body");
+        msg.headers
+            .insert("k".to_string(), serde_json::json!(format!("v{i}")));
+        producer.call(Exchange::new(msg)).await.unwrap();
+    }
+    inner
+        .await_exchanges(10, std::time::Duration::from_millis(500))
+        .await;
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("cap test must Err")
+        .to_string();
+    assert!(
+        msg.contains("+2 more"),
+        "message should note two truncated values, got: {msg}"
+    );
+    assert!(
+        !msg.contains("\"v10\""),
+        "message should not list the 9th and 10th values, got: {msg}"
+    );
+}

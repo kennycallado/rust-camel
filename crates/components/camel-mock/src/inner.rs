@@ -252,7 +252,10 @@ impl MockEndpointInner {
     ///
     /// Returns `Err(MockAssertionError)` when any expectation is not met or
     /// an expectation is malformed (e.g. a header regex pattern that fails
-    /// to compile).
+    /// to compile). Diagnostic payloads keep the error above the
+    /// `result_large_err` size threshold (clippy allow mirrors
+    /// `do_try_segment.rs`).
+    #[allow(clippy::result_large_err)]
     pub async fn try_assert_satisfied(&self) -> Result<(), MockAssertionError> {
         self.evaluate_expectations().await
     }
