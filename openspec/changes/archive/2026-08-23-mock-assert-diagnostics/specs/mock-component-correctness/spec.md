@@ -72,6 +72,12 @@ implementation panics.
 - **WHEN** `try_assert_satisfied().await` completes
 - **THEN** the result is `Err` in the invalid-pattern class (no panic), and `fail_fast_error()` returns `None` (a malformed expectation is a caller programming error, not an expectation mismatch — it does not trip the latch)
 
+#### Scenario: Display matches panicking variant message
+
+- **GIVEN** the same unmet expectation evaluated two ways on two identically-configured endpoints
+- **WHEN** one endpoint's `assert_satisfied().await` panic message is captured and the other's `try_assert_satisfied().await` `Err` `Display` output is captured
+- **THEN** both strings are equal
+
 #### Scenario: HeaderNotFound with zero received exchanges reports arrival state
 
 - **GIVEN** a `MockEndpointInner` with `expect_header("k", "v")` set and no exchanges sent

@@ -157,17 +157,32 @@ malformed expectation. `MockAssertionError` SHALL be a
 `MinimumCountNotMet { endpoint, minimum, actual }`,
 `BodyCountMismatch { endpoint, expected, actual }`,
 `BodyMismatch { endpoint, index, expected, actual }`,
-`BodyNotFound { endpoint, expected }`,
-`HeaderNotFound { endpoint, key, value }`,
-`HeaderRegexNotMatched { endpoint, key, pattern }`, and
-`InvalidHeaderPattern { endpoint, key, pattern, source }`.
+`BodyNotFound { endpoint, expected, received_count }`,
+`HeaderNotFound { endpoint, key, value, received_count, actual_values, last_headers }`,
+`HeaderRegexNotMatched { endpoint, key, pattern, received_count, actual_values, last_headers }`,
+and `InvalidHeaderPattern { endpoint, key, pattern, source }`.
 Every assertion branch maps to exactly one variant: exact count →
 `CountMismatch`; minimum count → `MinimumCountNotMet`;
 expected-bodies-count differs from received-count →
 `BodyCountMismatch`; ordered body index mismatch → `BodyMismatch`;
 any-order body not found → `BodyNotFound`; header value not found →
 `HeaderNotFound`; header regex not matched → `HeaderRegexNotMatched`;
-invalid header regex pattern → `InvalidHeaderPattern`. Its `Display`
+invalid header regex pattern → `InvalidHeaderPattern`.
+
+The diagnostic fields SHALL carry the received state at evaluation:
+`received_count` is the number of received exchanges; `actual_values`
+holds the `{:?}`-formatted values of the expected key across received
+exchanges that carry it, capped at 8 entries with a `+N more` suffix on
+overflow; `last_headers` holds the pre-formatted key list of the last
+received exchange, capped at 8 entries with a `+N more` suffix on
+overflow, and is `None` when no exchange was received.
+
+`Display` for `BodyNotFound`, `HeaderNotFound`, and
+`HeaderRegexNotMatched` SHALL append a received-state clause to the
+existing message: `(received 0 exchanges)` when no exchange was
+received; the key's actual values when the key is present under other
+values; the last exchange's header keys when the key is absent
+everywhere but at least one exchange was received. Its `Display`
 output SHALL equal the panic message the panicking variant produces
 for the same condition. An invalid header regex pattern SHALL be
 reported as `Err` by `try_assert_satisfied` where the current
@@ -202,6 +217,36 @@ implementation panics.
 - **GIVEN** the same unmet expectation evaluated two ways on two identically-configured endpoints
 - **WHEN** one endpoint's `assert_satisfied().await` panic message is captured and the other's `try_assert_satisfied().await` `Err` `Display` output is captured
 - **THEN** both strings are equal
+
+#### Scenario: HeaderNotFound with zero received exchanges reports arrival state
+
+- **GIVEN** a `MockEndpointInner` with `expect_header("k", "v")` set and no exchanges sent
+- **WHEN** `try_assert_satisfied().await` completes
+- **THEN** the `Err` `Display` output contains "received 0 exchanges"
+
+#### Scenario: HeaderNotFound with the key under other values reports actual values
+
+- **GIVEN** a `MockEndpointInner` with `expect_header("k", "expected")` set
+- **WHEN** 2 exchanges are sent, each carrying header `k` with value "actual-1" / "actual-2", and `try_assert_satisfied().await` completes
+- **THEN** the `Err` `Display` output contains "received 2 exchanges" and both actual values
+
+#### Scenario: HeaderNotFound with the key absent reports last exchange headers
+
+- **GIVEN** a `MockEndpointInner` with `expect_header("k", "v")` set
+- **WHEN** 1 exchange carrying headers `a` and `b` (but not `k`) is sent and `try_assert_satisfied().await` completes
+- **THEN** the `Err` `Display` output reports the key absent and contains the header keys `a` and `b`
+
+#### Scenario: BodyNotFound reports received count
+
+- **GIVEN** a `MockEndpointInner` with `expect_body("x")` under any-order evaluation
+- **WHEN** 1 exchange with a different body is sent and `try_assert_satisfied().await` completes
+- **THEN** the `Err` `Display` output contains "received 1" and the expected body
+
+#### Scenario: diagnostic lists cap at 8 entries
+
+- **GIVEN** a `MockEndpointInner` with `expect_header("k", "v")` set
+- **WHEN** 10 exchanges carrying header `k` under 10 distinct values are sent and `try_assert_satisfied().await` completes
+- **THEN** the `Err` `Display` output lists at most 8 values and contains "+2 more"
 
 ### Requirement: URI parameter surface
 
