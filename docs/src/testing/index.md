@@ -101,4 +101,4 @@ Matching uses the full URI verbatim. Query parameters are part of the key. `kafk
 
 Failure handling stays unchanged. Parse errors in the `intercepts` map and route-load errors from interception (for example, a `divertCopyTo` whose source has no registered component) are document errors. `camel test` reports them on stderr and exits with code 2. No endpoint result counts toward `passed` or `failed` in that case.
 
-The contract lives in [ADR-0064](../adr/0064-two-tier-testing-contract.md) and the [route-interception spec](../../../openspec/specs/route-interception/spec.md).
+The contract lives in [ADR-0064](../adr/0064-two-tier-testing-contract.md) and the route-interception spec (`openspec/specs/route-interception/spec.md` in the repository — outside the rendered book).
