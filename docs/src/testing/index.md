@@ -103,6 +103,8 @@ Failure handling stays unchanged. Parse errors in the `intercepts` map and route
 
 The contract lives in [ADR-0064](../adr/0064-two-tier-testing-contract.md) and the route-interception spec (`openspec/specs/route-interception/spec.md` in the repository — outside the rendered book).
 
+`camel lint` warns `R-MOCK-IN-PRODUCTION` on inline `to: mock:` and `endpoints: mock:` sends in route files. The warning is exempt for `tests/fixtures/` paths and `*.test.yaml` documents. Migrate the send to an `intercepts:` block in a `*.test.yaml` document, as described above.
+
 ### Bean stubs
 
 A `beans:` block declares stub beans for the `bean:` steps in the routes. A stub bean is an in-process processor registered in the bean registry before the context boots. The `bean:` step resolves against it, so the test runs without a real bean implementation. The block maps a bean name to a declaration.

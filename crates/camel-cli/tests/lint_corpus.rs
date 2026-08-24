@@ -19,7 +19,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use camel_cli::commands::lint::production_engine;
+use camel_cli::commands::lint::{is_stagec_exempt_path, production_engine};
+use camel_lint::DiagnosticCode;
 
 /// (DiagnosticCode Display string, Severity Display string) per file.
 type CodeSev = (String, String);
@@ -135,7 +136,14 @@ async fn run_corpus() -> EmittedMap {
     for (rel, full) in &corpus {
         let source = std::fs::read_to_string(full)
             .unwrap_or_else(|e| panic!("read corpus file {full:?}: {e}"));
+        // Mirror the CLI's Stage C fixture-path exemption: component test
+        // fixtures under a `tests/fixtures/` pair have their R-MOCK
+        // diagnostics suppressed (they legitimately send to `mock:`).
+        let exempt = is_stagec_exempt_path(full);
         for diag in engine.lint(&source) {
+            if exempt && diag.code == DiagnosticCode::RMock {
+                continue;
+            }
             emitted
                 .entry(rel.clone())
                 .or_default()

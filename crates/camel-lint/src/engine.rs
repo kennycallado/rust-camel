@@ -50,6 +50,7 @@ impl LintEngine {
             .with_rule(Box::new(crate::rules::ruriknown::RUriKnownRule))
             .with_rule(Box::new(crate::rules::rsecret::RSecretRule))
             .with_rule(Box::new(crate::rules::rdeprecated::RDeprecatedRule))
+            .with_rule(Box::new(crate::rules::rmock::RMockRule))
     }
 
     /// Run all rules over `source` and return the concatenated diagnostics.
@@ -418,17 +419,21 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn all_five_rules_registered() {
+    fn all_six_rules_registered() {
         let catalog = Arc::new(StubCatalog::empty());
         let engine = LintEngine::new(catalog).with_default_rules();
-        assert_eq!(engine.rule_count(), 5);
+        assert_eq!(engine.rule_count(), 6);
     }
 
     #[test]
-    fn all_five_rules_silent_on_valid_doc() {
+    fn all_six_rules_silent_on_valid_doc() {
         // Stub catalog with timer/log/direct metadata; clean fixture using
-        // only valid options. With all five rules registered, lint must
+        // only valid options. With all six rules registered, lint must
         // return zero diagnostics.
+        //
+        // OWNERSHIP: this mock-free fixture is the owner of the MODIFIED
+        // "Valid document yields no diagnostics" scenario — it must stay
+        // free of `mock:` sends so R-MOCK-IN-PRODUCTION stays silent here.
         let catalog = StubCatalog::empty()
             .with("direct", ComponentMetadata::minimal("direct"))
             .with("log", ComponentMetadata::minimal("log"))

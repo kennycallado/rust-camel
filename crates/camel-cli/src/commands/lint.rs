@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use camel_api::component_metadata::ComponentMetadataCatalog;
-use camel_lint::{Diagnostic, LintEngine, Severity};
+use camel_lint::{Diagnostic, DiagnosticCode, LintEngine, Severity};
 use clap::Args;
 
 /// CLI args for `camel lint`.
@@ -54,6 +54,22 @@ pub async fn production_engine() -> Result<LintEngine, String> {
     crate::register_builtin_components_for_lint(&mut ctx);
     let catalog: Arc<dyn ComponentMetadataCatalog> = Arc::new(ctx.metadata_catalog());
     Ok(LintEngine::new(catalog).with_default_rules())
+}
+
+/// Whether a path is exempt from the Stage C `R-MOCK-IN-PRODUCTION` warning.
+///
+/// True when any component pair in the path is `tests` immediately followed
+/// by `fixtures`. Such paths are component test fixtures (e.g.
+/// `crates/components/camel-xslt/tests/fixtures/xslt-param-namespace.yaml`),
+/// which legitimately send to `mock:` endpoints to assert on recorded
+/// exchanges — not production routes. The exemption is scoped to the mock
+/// rule only (see [`run_lint`]); other diagnostic codes are unaffected.
+/// Evaluates the user-supplied path as given (not canonicalized): a bare relative filename from inside a fixtures dir will not match; repo-relative and absolute paths do (deliberate syntactic proxy per design.md).
+pub fn is_stagec_exempt_path(path: &Path) -> bool {
+    let comps: Vec<_> = path.components().collect();
+    comps
+        .windows(2)
+        .any(|w| w[0].as_os_str() == "tests" && w[1].as_os_str() == "fixtures")
 }
 
 /// Run the lint engine over `path` with the production component catalog.
@@ -105,6 +121,19 @@ pub async fn run_lint(path: &Path) -> LintOutcome {
         }
     };
     let diagnostics = engine.lint(&source);
+
+    // Stage C fixture-path exemption: component test fixtures under a
+    // `tests/fixtures/` pair legitimately send to `mock:` endpoints. Drop
+    // only the R-MOCK-IN-PRODUCTION diagnostics for such files; all other
+    // codes pass through unchanged.
+    let diagnostics = if is_stagec_exempt_path(path) {
+        diagnostics
+            .into_iter()
+            .filter(|d| d.code != DiagnosticCode::RMock)
+            .collect()
+    } else {
+        diagnostics
+    };
 
     let has_error = diagnostics.iter().any(|d| d.severity == Severity::Error);
     let exit_code = if has_error { 1 } else { 0 };

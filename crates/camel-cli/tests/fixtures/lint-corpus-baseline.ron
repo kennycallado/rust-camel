@@ -91,7 +91,27 @@
     // env-interpolation/wasm-webhook precedents.
     (
         "examples/yaml-dsl/config/intercepts-demo.yaml",
-        [("R-URI-known:unverified-scheme", "info")],
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            // R-MOCK-IN-PRODUCTION: ADR-0064 Stage C warn-phase lint.
+            ("R-MOCK-IN-PRODUCTION", "warning"),
+        ],
+    ),
+
+    // R-MOCK-IN-PRODUCTION — inline `mock:` send in a camel-run demo route;
+    // teaching fixture pending migration to test-doc intercepts (ADR-0064
+    // Stage C warn phase).
+    (
+        "examples/yaml-dsl/config/mock-demo.yaml",
+        [("R-MOCK-IN-PRODUCTION", "warning")],
+    ),
+    (
+        "examples/yaml-dsl/config/routes-eip-advanced.yaml",
+        [("R-MOCK-IN-PRODUCTION", "warning")],
+    ),
+    (
+        "examples/json-dsl/config/routes-eip-advanced.json",
+        [("R-MOCK-IN-PRODUCTION", "warning")],
     ),
 
     // parameters.json (added by add-endpoint-parameters Task 2.3). The

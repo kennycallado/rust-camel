@@ -130,8 +130,15 @@ impl LintOption {
 }
 
 /// An endpoint: a URI leaf (`to`/`from`/`uri`) with its options.
+///
+/// `key` names the origin field that produced this endpoint (e.g. `to`,
+/// `from`, `uri`, `wire_tap`, `enrich`, `poll_enrich`, `endpoints`,
+/// `dead_letter_channel`). It lets rules distinguish send positions from
+/// non-send origins without re-deriving the source path. Its span mirrors the
+/// endpoint URI's span.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
+    pub key: Spanned<String>,
     pub uri: Spanned<String>,
     pub options: Vec<LintOption>,
 }
@@ -173,6 +180,10 @@ impl LintRoute {
             let mut options = LintOption::parse_from_query(&f.value, f.span.clone());
             options.extend(self.from_parameters.iter().cloned());
             out.push(Endpoint {
+                key: Spanned {
+                    value: "from".to_string(),
+                    span: f.span.clone(),
+                },
                 uri: Spanned {
                     value: f.value.clone(),
                     span: f.span.clone(),

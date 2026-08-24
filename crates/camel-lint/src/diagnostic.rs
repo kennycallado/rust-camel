@@ -62,13 +62,15 @@ pub enum DiagnosticCode {
     RUriKnown(UriKnownSubCode),
     RSecret,
     RDeprecated,
+    RMock,
 }
 
 impl std::fmt::Display for DiagnosticCode {
     /// Canonical stable string for a diagnostic code.
     ///
     /// This is the baseline's stable contract: `R-SYN`, `R-SCHEMA`,
-    /// `R-SECRET`, `R-DEPRECATED`, and `R-URI-known:<sub>` where `<sub>` is
+    /// `R-SECRET`, `R-DEPRECATED`, `R-MOCK-IN-PRODUCTION`, and
+    /// `R-URI-known:<sub>` where `<sub>` is
     /// `unverified-scheme` / `unknown-option` / `kind-mismatch` /
     /// `missing-required-option` / `duplicate-key`. Never rely on the
     /// `Debug` repr — it is not a stability boundary.
@@ -78,6 +80,7 @@ impl std::fmt::Display for DiagnosticCode {
             DiagnosticCode::RSchema => f.write_str("R-SCHEMA"),
             DiagnosticCode::RSecret => f.write_str("R-SECRET"),
             DiagnosticCode::RDeprecated => f.write_str("R-DEPRECATED"),
+            DiagnosticCode::RMock => f.write_str("R-MOCK-IN-PRODUCTION"),
             DiagnosticCode::RUriKnown(sub) => {
                 let s = match sub {
                     UriKnownSubCode::UnverifiedScheme => "unverified-scheme",

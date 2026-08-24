@@ -213,6 +213,12 @@ and does not specify their solutions:
 - **rc-24e5:** no explicit dataformat registration in the lean boot
   (investigation).
 
+> Amendment (2026-08-24): the rc-07qh (bean registry) gap was closed by
+> bean-test-registry, and the rc-66c5 (reply capture) gap was closed by
+> reply-capture. Stage C's warn-phase lint (rc-car5) completes the §5 warn phase:
+> `camel lint` now warns `R-MOCK-IN-PRODUCTION` on inline `mock:` sends in
+> route files, with fixture-path and test-document exemptions.
+
 ## Alternatives considered
 
 - **`http:` in the lean boot (rc-5s8c):** rejected by the creep rule.

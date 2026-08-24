@@ -552,6 +552,10 @@ fn endpoint_for(
     options.extend(params.iter().cloned());
     Some(Spanned {
         value: LintNode::Endpoint(Endpoint {
+            key: Spanned {
+                value: endpoint_key(path),
+                span: span.clone(),
+            },
             uri: Spanned {
                 value: uri.to_string(),
                 span: span.clone(),
@@ -560,6 +564,20 @@ fn endpoint_for(
         }),
         span,
     })
+}
+
+/// Derive the endpoint's origin key from its noyalib query `path`.
+///
+/// Takes the FINAL dot-delimited segment of the path, then strips a terminal
+/// `[i]` array index if present — so `routes[0]...steps.to` → `to`,
+/// `...endpoints[1]` → `endpoints`, and object-form `enrich.uri` → `uri`.
+fn endpoint_key(path: &str) -> String {
+    let last = path.rsplit('.').next().unwrap_or(path);
+    let key = match last.rfind('[') {
+        Some(idx) if last.ends_with(']') => &last[..idx],
+        _ => last,
+    };
+    key.to_string()
 }
 
 /// Join a parent path and a mapping key into a noyalib query path.
