@@ -706,7 +706,11 @@ async fn sweep_unlinks_dead_and_keeps_live_blobs() {
 
     let swept = sweep_payload_dir(dir.path(), now, Duration::from_secs(3600)).await;
 
-    assert_eq!(swept, (1, 0), "one dead blob unlinked, nothing else");
+    assert_eq!(
+        (swept.blobs_unlinked, swept.tmps_unlinked),
+        (1, 0),
+        "one dead blob unlinked, nothing else"
+    );
     assert!(!dead.exists(), "dead blob must be reclaimed");
     assert!(live.exists(), "live blob must survive the sweep");
 }
@@ -743,7 +747,11 @@ async fn sweep_gcs_stale_tmp_by_age() {
 
     let swept = sweep_payload_dir(dir.path(), SystemTime::now(), Duration::from_secs(3600)).await;
 
-    assert_eq!(swept, (0, 1), "one stale tmp unlinked, nothing else");
+    assert_eq!(
+        (swept.blobs_unlinked, swept.tmps_unlinked),
+        (0, 1),
+        "one stale tmp unlinked, nothing else"
+    );
     assert!(!stale.exists(), "tmp older than one sweep interval must go");
     assert!(fresh.exists(), "fresh tmp must survive the sweep");
 }
@@ -814,7 +822,7 @@ async fn blob_reclaimed_after_death() {
         Duration::from_secs(3600),
     )
     .await;
-    assert_eq!(swept, (1, 0));
+    assert_eq!((swept.blobs_unlinked, swept.tmps_unlinked), (1, 0));
     assert!(
         dir_names(dir.path()).is_empty(),
         "blob must be reclaimed after its death epoch"

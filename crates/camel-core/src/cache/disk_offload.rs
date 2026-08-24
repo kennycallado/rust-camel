@@ -38,7 +38,7 @@ use camel_api::cache::ContentType;
 use parking_lot::Mutex;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Injectable wall clock for death-epoch math and deterministic tests.
 ///
@@ -558,21 +558,34 @@ async fn unlink_payload_file(
 /// counts as success; other per-file errors WARN and the scan
 /// continues. A missing dir is not an error — nothing was ever
 /// offloaded. Returns `(blobs_unlinked, tmps_unlinked)`.
-async fn sweep_payload_dir(dir: &Path, now: SystemTime, sweep_interval: Duration) -> (u64, u64) {
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+struct SweepStats {
+    /// Dead blobs unlinked this pass.
+    blobs_unlinked: u64,
+    /// Bytes reclaimed with those dead blobs.
+    blob_bytes_reclaimed: u64,
+    /// Stale tmp files unlinked this pass.
+    tmps_unlinked: u64,
+    /// Blobs still on disk after the pass (live or orphan pre-epoch).
+    live_blobs: u64,
+    /// Total bytes of those surviving blobs.
+    live_blob_bytes: u64,
+}
+
+async fn sweep_payload_dir(dir: &Path, now: SystemTime, sweep_interval: Duration) -> SweepStats {
     let mut read_dir = match tokio::fs::read_dir(dir).await {
         Ok(read_dir) => read_dir,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (0, 0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SweepStats::default(),
         Err(e) => {
             warn!(
                 dir = %dir.display(),
                 error = %e,
                 "cache payload dir read failed during sweep (skipped)"
             );
-            return (0, 0);
+            return SweepStats::default();
         }
     };
-    let mut blobs = 0u64;
-    let mut tmps = 0u64;
+    let mut stats = SweepStats::default();
     loop {
         let entry = match read_dir.next_entry().await {
             Ok(Some(entry)) => entry,
@@ -587,19 +600,26 @@ async fn sweep_payload_dir(dir: &Path, now: SystemTime, sweep_interval: Duration
             }
         };
         let path = entry.path();
+        let is_tmp = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".tmp"));
+        let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
         match unlink_payload_file(&path, now, sweep_interval).await {
             Ok(true) => {
-                if path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".tmp"))
-                {
-                    tmps += 1;
+                if is_tmp {
+                    stats.tmps_unlinked += 1;
                 } else {
-                    blobs += 1;
+                    stats.blobs_unlinked += 1;
+                    stats.blob_bytes_reclaimed += size;
                 }
             }
-            Ok(false) => {}
+            Ok(false) => {
+                if !is_tmp {
+                    stats.live_blobs += 1;
+                    stats.live_blob_bytes += size;
+                }
+            }
             Err(e) => warn!(
                 dir = %dir.display(),
                 file = %path.display(),
@@ -608,7 +628,7 @@ async fn sweep_payload_dir(dir: &Path, now: SystemTime, sweep_interval: Duration
             ),
         }
     }
-    (blobs, tmps)
+    stats
 }
 
 /// Spawn the background payload sweeper for `dir`.
@@ -627,7 +647,20 @@ fn spawn_sweeper(
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    sweep_payload_dir(&dir, SystemTime::now(), sweep_interval).await;
+                    let s = sweep_payload_dir(&dir, SystemTime::now(), sweep_interval).await;
+                    // Per-pass volume observability (bd rc-h3dp): live
+                    // bytes are the high-water baseline operators compare
+                    // against the eager-reclaim trigger; reclaimed bytes
+                    // show the pass's cleanup.
+                    info!(
+                        dir = %dir.display(),
+                        live_blobs = s.live_blobs,
+                        live_blob_bytes = s.live_blob_bytes,
+                        blobs_unlinked = s.blobs_unlinked,
+                        blob_bytes_reclaimed = s.blob_bytes_reclaimed,
+                        tmps_unlinked = s.tmps_unlinked,
+                        "cache payload sweep pass"
+                    );
                 }
                 _ = shutdown_token.cancelled() => break,
             }
