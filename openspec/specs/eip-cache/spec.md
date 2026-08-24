@@ -8,8 +8,12 @@ TBD - created by archiving change add-cache-repository. Update Purpose after arc
 The system SHALL provide an object-safe `CacheRepository` trait in `camel-api`,
 implemented with `#[async_trait]`, whose implementations are `Send + Sync` and whose
 fallible operations return `Result`, and stores
-`CacheEntry { bytes: Vec<u8>, content_type: ContentType,
-expires_at: Option<SystemTime> }`. The trait SHALL expose `get`, `set`, `peek_stale`,
+`CacheEntry { bytes: Vec<u8>,
+payload_path: Option<String>, content_type: ContentType,
+expires_at: Option<SystemTime> }`, where `payload_path` is a
+`#[serde(default)]` additive field (absent in legacy stored entries deserializes
+as `None` — the bytes live inline in `bytes`; offload re-injection semantics are
+specified in the *Disk payload offload decorator* requirement). The trait SHALL expose `get`, `set`, `peek_stale`,
 `invalidate`, `clear`, and a default async `stats` method. `get` SHALL return `Ok(None)` when the
 key is absent OR when the entry's in-band `expires_at` has elapsed (NEVER silently swallow a
 backend read failure as a miss — Contract C1 inherited from ADR-0023). `peek_stale` SHALL
@@ -297,6 +301,7 @@ error naming `cache_repo.<field>` (fail-closed): `backend = "redis"` rejects
 `backend = "memory"` and `"redb"` reject `url`, `sentinel_nodes`,
 `master_name`, `sentinel_username`, `sentinel_password`, `key_prefix`,
 `password`, `username`, and `db`.
+The cache_repo section SHALL additionally carry payload offload fields: `payload` (an `"inline"` | `"disk"` discriminator, default `"inline"` — today's behavior), and when `payload = "disk"`: `payload_dir` (a **required** path string with no default — the operator consciously chooses a shared or node-local location; `${env:}` strict interpolation applies), plus optional `payload_sweep_interval` (humantime, default `"1h"`, values of zero rejected) and `payload_max_ttl` (humantime, default `"720h"`, values of zero rejected). Malformed values SHALL fail validation with an error naming the offending field. `payload = "disk"` SHALL be valid only over `backend = "redis"` or `backend = "redb"`: `backend = "memory"` rejects `payload = "disk"` (a volatile index cannot own persistent blobs), and both `backend = "memory"` and `payload = "inline"` reject `payload_dir`, `payload_sweep_interval`, and `payload_max_ttl` (fail-closed, naming `cache_repo.<field>`). When `payload = "disk"` the context builder SHALL wrap the backend repository in the disk-offload decorator before registration (see the *Disk payload offload decorator* requirement) and emit a startup WARN naming `payload_dir` (offloaded entries are unreadable by consumers that do not share the directory).
 Foreign fields SHALL NOT be required. The `CacheRepoConfig`
 `Debug` output SHALL redact credentials: URL userinfo, sentinel
 username/password, and the data-node `password` and `username` SHALL NOT
@@ -527,6 +532,105 @@ appear in formatted output.
   `password = "master-secret"` and `username = "svc-user"`
 - **WHEN** the struct is formatted with `{:?}`
 - **THEN** the output contains neither `master-secret` nor `svc-user`
+
+#### Scenario: disk payload over redis registers the offload-wrapped repository
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.backend = "redis"` (url mode),
+  `payload = "disk"`, and `payload_dir` set to a temp dir
+- **WHEN** the context is built and a `set`/`get` round-trip runs against the
+  `"redis"` cache repository
+- **THEN** the blob file materializes in `payload_dir`, `get` returns the
+  original bytes, and the startup logs a portability WARN naming `payload_dir`
+
+#### Scenario: disk payload over redb registers the offload-wrapped repository
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.backend = "redb"`, `path`,
+  `cache_size` set, `payload = "disk"`, and `payload_dir` set to a temp dir
+- **WHEN** the context is built and a `set`/`get` round-trip runs against the
+  `"persistent"` cache repository
+- **THEN** the blob file materializes in `payload_dir` and `get` returns the
+  original bytes
+
+#### Scenario: disk payload without payload_dir rejected at validation
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.backend = "redis"` and
+  `payload = "disk"` with `payload_dir` unset
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming `cache_repo.payload_dir`
+
+#### Scenario: memory backend rejects disk payload
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.backend = "memory"` and
+  `payload = "disk"`
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming `cache_repo.payload`
+
+#### Scenario: payload offload fields rejected under inline payload
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.payload` is unset (or
+  `"inline"`) and any of `payload_dir`, `payload_sweep_interval`,
+  `payload_max_ttl` is set
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming the offending
+  `cache_repo.<field>`
+
+#### Scenario: payload offload fields rejected under memory backend
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.backend = "memory"` and any of
+  `payload_dir`, `payload_sweep_interval`, `payload_max_ttl` is set
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming the offending
+  `cache_repo.<field>`
+
+#### Scenario: malformed payload value rejected at validation
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.payload = "spool"`
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming `cache_repo.payload`
+
+#### Scenario: malformed payload_sweep_interval rejected at validation
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.payload = "disk"` and
+  `payload_sweep_interval = "thirty"` (unparseable)
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming
+  `cache_repo.payload_sweep_interval`
+
+#### Scenario: zero payload_sweep_interval rejected at validation
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.payload = "disk"` and
+  `payload_sweep_interval = "0s"`
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming
+  `cache_repo.payload_sweep_interval`
+
+#### Scenario: malformed payload_max_ttl rejected at validation
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.payload = "disk"` and
+  `payload_max_ttl = "forever"` (unparseable)
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming `cache_repo.payload_max_ttl`
+
+#### Scenario: zero payload_max_ttl rejected at validation
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.payload = "disk"` and
+  `payload_max_ttl = "0s"`
+- **WHEN** the config is validated
+- **THEN** validation fails with an error naming `cache_repo.payload_max_ttl`
+
+#### Scenario: payload defaults reach the decorator when unset
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.payload = "disk"` with
+  `payload_sweep_interval` and `payload_max_ttl` unset
+- **WHEN** the context is built
+- **THEN** the offload decorator runs with sweep interval 1h and max ttl 720h
+
+#### Scenario: payload_dir resolves env placeholders
+
+- **GIVEN** a `CamelConfig` whose `cache_repo.payload_dir = "${env:CACHE_PAYLOAD_DIR}"`
+  and the `CACHE_PAYLOAD_DIR` environment variable set to a temp dir
+- **WHEN** the config is interpolated and validated
+- **THEN** the decorator uses the resolved path and validation passes
 
 ### Requirement: Cache EIP face — cache, cache_invalidate, cache_peek_stale steps
 
@@ -1132,4 +1236,204 @@ error.
 - **WHEN** `get("k")` then `get("x")` are awaited, then `stats()` is awaited
 - **THEN** the snapshot reports `hits = 1`, `misses = 1`, `entries = 0`, and
   `evictions = 0`
+
+### Requirement: Disk payload offload decorator
+
+The system SHALL provide a `DiskOffloadRepository` in `camel-core` that decorates
+a registered `CacheRepository` (memory excluded — see the cache_repo
+configuration matrix) and stores entry payloads as blob files under the
+configured `payload_dir`, while the decorated backend holds a tiny index entry.
+Offload SHALL be transparent to the EIP faces: expiry and stale-while-revalidate
+semantics stay owned by the decorated backend (the decorator SHALL NOT
+re-evaluate expiry; the single in-band check remains the backend's).
+
+`set` SHALL: (1) derive the effective expiry from the supplied `ttl`
+(`now + ttl`; when `ttl` is `None` it SHALL fabricate
+`expires_at = now + payload_max_ttl` on the stored entry — no-TTL entries behave
+as payload_max_ttl-TTL entries under disk offload); (2) write the blob file
+FIRST within `payload_dir` to a UNIQUE temporary name per write attempt
+(opened with create-new semantics — never a shared destination-derived
+tmp name; on a name collision, retry with a fresh nonce), fsync, then rename
+onto the destination filename
+`<blake3-128-hex(key)>.<death_epoch_secs>.<blake3-128-hex(payload ∥
+content_type)>.blob` where
+`death_epoch = effective_expires_at + stale_retention + payload_sweep_interval`
+(the grace keeps the blob alive at least as long as any backend sweeper or EXAT
+keeps the index row; the trailing fingerprint domain-separates the content:
+`blake3-128(payload || u8-discriminant(content_type))` — the one-byte enum
+discriminant makes the encoding unambiguous) (3) then store the index entry with `bytes` emptied and
+`payload_path` set. When the blob write fails (e.g. ENOSPC, EIO), `set` SHALL
+degrade to inline storage — store the unstripped entry, log a WARN, and return
+`Ok(())`: cache writes SHALL NOT introduce a new route-failure mode. Errors from
+the decorated backend (including the `"cache: max_entries"` capacity contract)
+SHALL propagate unchanged; only the decorator's own file-write errors are
+contained. Concurrent same-key `set` calls (multi-replica) are safe without locks:
+two writers produce the SAME filename only when key, death epoch, payload
+bytes, and content_type all hash alike — identical content, in which case the
+files are identical and any surviving index row is coherent. Any differing
+component yields a distinct filename (up to a negligible 128-bit collision, a
+manifestation of which is a complete-but-stale entry or a clean MISS — never
+torn bytes), so the surviving index row references its OWN complete blob and
+the unreferenced blob is an orphan reclaimed at its own epoch (last index
+write wins). Reads observe a complete, coherent entry or a clean MISS — never
+cross-writer pairing of one replica's bytes with another's metadata, never torn
+bytes.
+
+`get`/`peek_stale` SHALL re-inject: entries carrying `payload_path` SHALL have
+the blob loaded and the bytes restored before returning. `payload_path` values
+SHALL be sanitized on read — only a direct child of `payload_dir` is acceptable
+(separators, `..`, and absolute paths are corrupt rows). A missing blob file
+(early sweep, NFS lag, clock skew, foreign reader) or a corrupt index row
+(sanitization failure) SHALL return `Ok(None)` with a WARN — NEVER `Err`
+(stale-serve resilience takes precedence). An I/O failure on a blob that
+EXISTS (EIO, EACCES, EPERM) SHALL surface as `Err` per Contract C1 — a failing
+disk is a storage failure, not a miss. Backend failures still surface as
+Contract C1 Err as always. Entries without `payload_path` SHALL pass through unchanged,
+including entries stored by older inline versions (serde `default` compatibility).
+
+`invalidate` and `invalidate_prefix` SHALL delegate to the decorated backend
+only; the returned count SHALL be index-scoped (blobs are reclaimed
+asynchronously at their filename-encoded death epoch — after invalidation or
+backend-side eviction the blob is an orphan awaiting its epoch). `clear` SHALL
+best-effort unlink the `payload_dir` contents (unlink failures SHALL NOT turn
+`clear` into `Err`) and then delegate. `stats` and `name` SHALL delegate
+unchanged (`CacheStats.bytes` reports the decorated backend's value unchanged;
+offloaded entries store an emptied `bytes` field, and redb's accounting sums
+entry `bytes` lengths — so each offloaded entry contributes 0, and redis
+reports `None`; blob bytes never appear in stats).
+
+#### Scenario: set stores the blob on disk and a bytes-empty index entry
+
+- **GIVEN** a repository decorated with `payload_dir` D holding a 50 KiB entry
+  for key `"k"` (ttl 1h, stale_retention 168h, payload_sweep_interval 1h)
+- **WHEN** `set("k", entry, Some(1h))` completes and `get("k")` runs
+- **THEN** D contains a file named
+  `<blake3-128-hex("k")>.<death_epoch>.<blake3-128-hex(payload ∥
+  content_type)>.blob`
+  with the entry bytes, the decorated backend's index row for `"k"` has empty
+  `bytes` and `payload_path` set to that filename, and `get("k")` returns the
+  original bytes and content type
+
+#### Scenario: concurrent same-key writers never cross-pair content
+
+- **GIVEN** two `set` calls for the same key with DIFFERENT payloads (or
+  content types) completing within the same death-epoch second
+- **WHEN** both writes settle and `get("k")` runs
+- **THEN** the returned entry's bytes and content type both come from the SAME
+  write (the index row references its own fingerprinted blob), the other blob
+  remains as an orphan, and it is reclaimed at its own death epoch
+
+#### Scenario: blob write failure degrades to inline storage
+
+- **GIVEN** a decorated repository whose `payload_dir` cannot be written
+  (read-only filesystem)
+- **WHEN** `set("k", entry, Some(1h))` runs
+- **THEN** `set` returns `Ok(())`, the index row stores the FULL entry bytes
+  with `payload_path = None`, a WARN is logged, and `get("k")` returns the bytes
+
+#### Scenario: index-alive file-dead read is a MISS with WARN, never Err
+
+- **GIVEN** a set entry whose blob file is removed underneath the index
+  (simulating early sweep or NFS lag)
+- **WHEN** `get("k")` and `peek_stale("k")` run
+- **THEN** both return `Ok(None)` and a WARN is logged — neither returns `Err`
+
+#### Scenario: blob read failure on an existing file surfaces as Err
+
+- **GIVEN** a set entry whose blob file exists but its permissions deny read
+- **WHEN** `get("k")` runs
+- **THEN** the call returns `Err` (Contract C1: a storage read failure is
+  never swallowed as a miss)
+#### Scenario: peek_stale re-injects bytes past expiry
+
+- **GIVEN** a set entry with ttl 10ms and 10ms elapsed
+- **WHEN** `peek_stale("k")` runs
+- **THEN** the post-expiry entry returns with the original bytes re-injected
+  from the blob file
+
+#### Scenario: no-TTL entry is capped at payload_max_ttl
+
+- **GIVEN** `payload_max_ttl = 24h` and `set("k", entry, None)`
+- **WHEN** the index row and blob filename are inspected
+- **THEN** the stored entry carries `expires_at = now + 24h` and the blob's
+  death epoch equals that time plus `stale_retention` plus
+  `payload_sweep_interval`
+
+#### Scenario: payload_path traversal is rejected without file access
+
+- **GIVEN** an index row (corrupt or foreign) whose `payload_path` is
+  `"../../etc/passwd"` or an absolute path
+- **WHEN** `get("k")` runs
+- **THEN** the call returns `Ok(None)` with a WARN and no file outside
+  `payload_dir` is opened
+
+#### Scenario: legacy inline entries pass through
+
+- **GIVEN** an index row stored before this change (JSON without
+  `payload_path`, `bytes` populated)
+- **WHEN** `get("k")` runs
+- **THEN** the entry returns with its stored bytes unchanged
+
+#### Scenario: invalidate delegates and the blob dies at its epoch
+
+- **GIVEN** a set entry under disk offload
+- **WHEN** `invalidate("k")` runs, then `get("k")`, then time passes the
+  blob's death epoch and the sweeper runs
+- **THEN** `get("k")` returns `Ok(None)` immediately, the blob file remains
+  until its epoch, and the sweeper unlinks it afterwards
+
+#### Scenario: clear unlinks the payload dir then delegates
+
+- **GIVEN** two set entries under disk offload on a writable local `payload_dir`
+- **WHEN** `clear()` runs and the unlinks succeed
+- **THEN** the backend's `stats().entries` is 0 and `payload_dir` contains no
+  blob files (an unlink failure is swallowed with a WARN — `clear` still
+  returns `Ok(())`)
+
+#### Scenario: stats and name delegate to the inner backend
+
+- **GIVEN** a decorated redb-backed repository
+- **WHEN** `stats()` and `name()` run
+- **THEN** both return the inner backend's values (`name()` = `"persistent"`;
+  `CacheStats.bytes` reports the inner backend's value)
+
+### Requirement: Payload sweeper for offloaded blobs
+
+The system SHALL run a standalone sweeper task per offload-decorated repository,
+spawned at wiring time on the context's shutdown token (mirroring the redb
+sweep loop): it wakes every `payload_sweep_interval`, scans `payload_dir`, and
+unlinks (a) blob files whose filename-encoded death epoch has elapsed and
+(b) `*.tmp` files older than `payload_sweep_interval` (crash leftovers between
+tmp-write and rename). Unlink `ENOENT` SHALL be treated as success
+(multi-replica races on shared volumes). The sweeper SHALL stop when the
+context shuts down; dropping the repository SHALL abort its handle. No sweeper
+SHALL be spawned under inline mode.
+
+#### Scenario: sweeper unlinks dead blobs and tolerates ENOENT
+
+- **GIVEN** a `payload_dir` containing one blob whose death epoch has elapsed
+  and one live blob
+- **WHEN** the sweeper runs (and a concurrent unlink already removed the dead
+  blob)
+- **THEN** the dead blob is gone, the live blob remains, and the ENOENT from
+  the racing unlink is treated as success (no error surfaced)
+
+#### Scenario: tmp crash leftovers are GC'd by age
+
+- **GIVEN** a `*.tmp` file in `payload_dir` older than
+  `payload_sweep_interval`, and one younger
+- **WHEN** the sweeper runs
+- **THEN** the stale tmp file is unlinked and the young one remains
+
+#### Scenario: sweeper stops on context shutdown
+
+- **GIVEN** a running payload sweeper
+- **WHEN** the context shutdown token fires
+- **THEN** the sweeper task exits
+
+#### Scenario: no sweeper under inline mode
+
+- **GIVEN** a context built with `payload = "inline"` (or unset)
+- **WHEN** the context is built
+- **THEN** no payload sweeper task is spawned
 
