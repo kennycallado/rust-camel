@@ -156,3 +156,25 @@ Each asserted input produces one result row labeled `reply[i] <input.to>`. A mis
 A document may omit `expects` when at least one input declares `expectReply`. The reply assertions then drive the outcome. A document with neither endpoint expectations nor any `expectReply` still fails to parse.
 
 The example pair lives in [`examples/yaml-dsl/config/reply-demo.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/reply-demo.yaml) and [`reply-demo.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/reply-demo.test.yaml).
+
+### Repository stubs
+
+A `repositories:` block declares in-memory stubs for the named repositories that `cache:`, `idempotent:`, and `claimCheck:` steps resolve against. The block maps a registry kind to a map of repository name to stub target. The only valid target in v1 is the literal `memory`.
+
+```yaml
+repositories:
+  cache:
+    persistent: memory
+  idempotent:
+    dedupe: memory
+  claimCheck:
+    store: memory
+```
+
+Three registry kinds exist: `cache`, `idempotent`, and `claimCheck`. Each maps repository names to the stub target. The runner registers a fresh memory backend under each declared name before the routes load. The steps then resolve at compile time. Only the `memory` target is supported. Any other target is a document error.
+
+The built-in name `memory` is not stubbable. Registering it would collide with the built-in repository, so the runner rejects it. Blank repository names are rejected too. An undeclared name still fails route load. A stub resolves only its explicitly declared name. A typo hits the same compile-time `ComponentNotFound` gate as production. An unknown registry kind is a document error that lists the three supported kinds.
+
+Stubs are lossy. The `R-REPOSITORY-STUB` warning on stderr names each stubbed registry and repository and lists the semantics the memory backend does not exercise: for `cache`, prefix purge, TTL/stale timing, disk offload, and stats; for `idempotent` and `claimCheck`, persistence; for all, backend failure. Cover these in the integration tier.
+
+The example pair lives in [`examples/yaml-dsl/config/repositories-demo.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/repositories-demo.yaml) and [`repositories-demo.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/repositories-demo.test.yaml).

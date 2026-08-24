@@ -1,0 +1,31 @@
+# =============================================================================
+# `camel test` document for the repositories-demo route.
+#
+# References the route file above, delivers two `direct:` inputs with the
+# same cache key, and declares `persistent` as an in-memory cache stub. The
+# first input misses the cache and diverts to `mock:miss`; the second input
+# hits the populated cache and skips straight to `mock:out`. The `expects`
+# block proves the miss-then-hit sequence: `mock:miss` receives exactly one
+# exchange while `mock:out` receives both. On the hit the cache returns the
+# stored body, so `mock:out` sees `order-1` twice.
+# =============================================================================
+
+routeFiles: [repositories-demo.yaml]
+
+repositories:
+  cache:
+    persistent: memory
+
+inputs:
+  - to: "direct:orders"
+    body: "order-1"
+  - to: "direct:orders"
+    body: "order-2"
+
+expects:
+  mock:miss:
+    count: 1
+    bodies: ["order-1"]
+  mock:out:
+    count: 2
+    bodies: ["order-1", "order-1"]

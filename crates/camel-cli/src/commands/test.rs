@@ -179,6 +179,31 @@ pub async fn run_tests(
                 continue;
             }
         };
+        if let Some(stubs) = doc.repository_stubs() {
+            let mut pairs: Vec<String> = Vec::new();
+            if let Some(cache) = &stubs.cache {
+                for name in cache.keys() {
+                    pairs.push(format!("cache={name}"));
+                }
+            }
+            if let Some(idempotent) = &stubs.idempotent {
+                for name in idempotent.keys() {
+                    pairs.push(format!("idempotent={name}"));
+                }
+            }
+            if let Some(claim_check) = &stubs.claim_check {
+                for name in claim_check.keys() {
+                    pairs.push(format!("claimCheck={name}"));
+                }
+            }
+            if !pairs.is_empty() {
+                let _ = writeln!(
+                    err,
+                    "R-REPOSITORY-STUB: {} stubbed as memory; backend semantics not exercised (cache: prefix purge, TTL/stale timing, disk offload, stats; idempotent/claim-check: persistence; all: backend failure) — cover them in the integration tier",
+                    pairs.join(" ")
+                );
+            }
+        }
         let parent_dir = path
             .parent()
             .map(|p| p.to_path_buf())

@@ -1,0 +1,22 @@
+# =============================================================================
+# Route for the `camel test` repositories-demo example.
+#
+# A single `direct:` route that reads a `cache:` step backed by the named
+# repository `persistent`. On a cache miss the exchange diverts to
+# `mock:miss`; on a hit it skips straight to `mock:out`. The paired
+# `repositories-demo.test.yaml` document declares `persistent` as an
+# in-memory stub, so the test passes without a real cache backend. This
+# production file contains routes only; the test double lives in the test
+# document.
+# =============================================================================
+
+routes:
+  - id: "repositories-demo"
+    from: "direct:orders"
+    steps:
+      - cache:
+          repository: persistent
+          key: k
+          on_miss:
+            - to: "mock:miss"
+      - to: "mock:out"

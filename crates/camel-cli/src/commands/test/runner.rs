@@ -16,13 +16,18 @@ use camel_component_mock::MockComponent;
 use camel_component_seda::SedaComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
+use camel_core::cache::MemoryCacheRepository;
+use camel_core::claim_check::MemoryClaimCheckRepository;
+use camel_core::idempotent::MemoryIdempotentRepository;
 use camel_core::intercept::InterceptRules;
 use noyalib::compat::serde_yaml;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 use super::beans::{collect_bean_calls, stub_from_decl};
-use super::document::{ExpectReply, ExpectSet, InputBody, TestDocError, TestDocument, TestInput};
+use super::document::{
+    ExpectReply, ExpectSet, InputBody, RepositoriesDoc, TestDocError, TestDocument, TestInput,
+};
 
 /// Instability budget: traffic must quiesce within this window after the
 /// quiet window elapses, anchored at route-execution begin.
@@ -57,10 +62,13 @@ pub struct TestDocResult {
 /// log, and seda defaults (mirrors camel-test's `build_context`). Returns the
 /// context and the shared mock handle used for sampling and assertions.
 /// `beans`, when present, threads a stub-bean registry into the builder so
-/// `bean:` steps resolve at route-add time.
+/// `bean:` steps resolve at route-add time. `repo_stubs`, when present,
+/// registers the declared repository stubs (cache, idempotent, claim check)
+/// after boot so `cache:` steps resolve at route-add time.
 async fn boot_context(
     intercepts: Option<InterceptRules>,
     beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
+    repo_stubs: Option<&RepositoriesDoc>,
 ) -> Result<(CamelContext, MockComponent), String> {
     let mut builder = CamelContext::builder();
     if let Some(rules) = intercepts {
@@ -79,6 +87,35 @@ async fn boot_context(
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(SedaComponent::new());
+    if let Some(stubs) = repo_stubs {
+        if let Some(cache) = &stubs.cache {
+            for name in cache.keys() {
+                ctx.register_cache_repository(
+                    name.clone(),
+                    Arc::new(MemoryCacheRepository::new(name.clone(), 10_000)),
+                )
+                .expect("repository stub registration must succeed"); // allow-unwrap
+            }
+        }
+        if let Some(idempotent) = &stubs.idempotent {
+            for name in idempotent.keys() {
+                ctx.register_idempotent_repository(
+                    name.clone(),
+                    Arc::new(MemoryIdempotentRepository::new(name.clone())),
+                )
+                .expect("repository stub registration must succeed"); // allow-unwrap
+            }
+        }
+        if let Some(claim_check) = &stubs.claim_check {
+            for name in claim_check.keys() {
+                ctx.register_claim_check_repository(
+                    name.clone(),
+                    Arc::new(MemoryClaimCheckRepository::new(name.clone())),
+                )
+                .expect("repository stub registration must succeed"); // allow-unwrap
+            }
+        }
+    }
     Ok((ctx, mock))
 }
 
@@ -510,7 +547,8 @@ pub async fn run_test_doc(doc: &TestDocument, doc_dir: &Path) -> (TestDocResult,
         }
     };
 
-    let (ctx, mock) = match boot_context(doc.intercept_rules(), beans).await {
+    let (ctx, mock) = match boot_context(doc.intercept_rules(), beans, doc.repository_stubs()).await
+    {
         Ok((ctx, mock)) => (Arc::new(Mutex::new(ctx)), mock),
         Err(e) => {
             return (

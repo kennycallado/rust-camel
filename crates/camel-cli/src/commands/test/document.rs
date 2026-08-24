@@ -35,6 +35,8 @@ const DIRECT_SCHEME_PREFIX: &str = "direct:";
 const BODY_SCALAR_SENTINEL: &str = "unsupported body scalar: ";
 /// Upper bound for the `settle` quiet window.
 const SETTLE_MAX: Duration = Duration::from_secs(5);
+/// Registry kinds `repositories:` accepts; displayed order in error messages.
+const SUPPORTED_REGISTRY_KINDS: [&str; 3] = ["cache", "idempotent", "claimCheck"];
 
 /// Parsed `*.test.yaml` document. `expects` keys are normalized to bare mock
 /// endpoint names during [`parse_test_document`] validation.
@@ -66,6 +68,8 @@ pub struct TestDocument {
     intercept_rules_parsed: Option<InterceptRules>,
     /// Declarative stub beans keyed by bean name.
     pub beans: Option<BTreeMap<String, BeanDeclDoc>>,
+    /// Declarative repository stubs keyed by registry kind.
+    pub repositories: Option<RepositoriesDoc>,
 }
 
 impl TestDocument {
@@ -83,6 +87,12 @@ impl TestDocument {
     /// eagerly in [`parse_test_document`], so the accessor is infallible.
     pub fn bean_decls(&self) -> Option<&BTreeMap<String, BeanDeclDoc>> {
         self.beans.as_ref()
+    }
+
+    /// Declared repository stubs, if the document declares any. Validation
+    /// ran eagerly in [`parse_test_document`], so the accessor is infallible.
+    pub fn repository_stubs(&self) -> Option<&RepositoriesDoc> {
+        self.repositories.as_ref()
     }
 }
 
@@ -111,6 +121,31 @@ pub enum BeanKindDoc {
     SetBody,
     /// Fail with the configured `message` (or `fail bean <name>`).
     Fail,
+}
+
+/// Declarative repository stubs: three optional maps — `cache`,
+/// `idempotent`, `claimCheck` — each mapping a repository name to the stub
+/// target. The only valid target in v1 is the literal `memory`; anything
+/// else is a document error (validated in [`parse_test_document`]).
+///
+/// Unknown registry kinds are collected into `extra` via
+/// `#[serde(flatten)]` instead of being rejected by `deny_unknown_fields`:
+/// the noyalib serde_yaml shim's `unknown_field` error discards serde's
+/// `_expected` list, so a `deny_unknown_fields` message cannot name the
+/// supported kinds. Validation rejects a non-empty `extra` with a message
+/// that lists them.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoriesDoc {
+    /// Cache repository stubs keyed by repository name.
+    pub cache: Option<BTreeMap<String, String>>,
+    /// Idempotent repository stubs keyed by repository name.
+    pub idempotent: Option<BTreeMap<String, String>>,
+    /// Claim-check repository stubs keyed by repository name.
+    pub claim_check: Option<BTreeMap<String, String>>,
+    /// Unknown registry kinds, captured rather than rejected by serde.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 /// Declarative intercept action: exactly one of `skipTo` / `divertCopyTo`.
@@ -244,6 +279,9 @@ pub enum TestDocError {
     /// A `beans:` declaration failed validation; the message carries the
     /// precise reason verbatim.
     InvalidBeans(String),
+    /// A `repositories:` declaration failed validation; the message carries
+    /// the precise reason verbatim.
+    InvalidRepositories(String),
     /// An `expectReply` block failed validation; the message carries the
     /// precise reason verbatim.
     InvalidReply(String),
@@ -317,6 +355,7 @@ impl fmt::Display for TestDocError {
             ),
             Self::InterceptInvalid(msg) => write!(f, "invalid intercept: {msg}"),
             Self::InvalidBeans(msg) => write!(f, "{msg}"),
+            Self::InvalidRepositories(msg) => write!(f, "{msg}"),
             Self::InvalidReply(msg) => write!(f, "{msg}"),
         }
     }
@@ -346,7 +385,9 @@ fn classify_yaml_error(raw: &str) -> TestDocError {
 /// `mock:` scheme (then the map is rebuilt with bare endpoint names);
 /// (d) `count`/`minCount` exclusivity; (e) `settle` range; (f) every
 /// input targets `direct:`; (g) intercepts validate and build rules;
-/// (h) `beans:` declarations validate (names, methods, per-kind config).
+/// (h) `beans:` declarations validate (names, methods, per-kind config);
+/// (i) `repositories:` declarations validate (registry kinds, stub targets,
+/// blank names, built-in `memory` name).
 pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     let mut doc = serde_yaml::from_str::<TestDocument>(text)
         .map_err(|e| classify_yaml_error(&e.to_string()))?;
@@ -523,5 +564,63 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
             }
         }
     }
+    // Repositories: validate stub declarations (BTreeMap order).
+    validate_repositories(&doc)?;
     Ok(doc)
+}
+
+/// Validates the `repositories:` stub declarations. For each declared
+/// registry map and each (`name`, `target`) pair: the target must be the
+/// literal `memory`; the name must be non-blank after trimming; and the
+/// name must not be the built-in `memory` (registration would collide with
+/// the built-in repository). Unknown registry kinds land in `extra` and are
+/// rejected first with a message listing the supported kinds.
+fn validate_repositories(doc: &TestDocument) -> Result<(), TestDocError> {
+    let Some(repos) = doc.repositories.as_ref() else {
+        return Ok(());
+    };
+    // Unknown registry kinds arrive in `extra` (see `RepositoriesDoc`). The
+    // noyalib serde_yaml shim cannot produce the supported-kinds list from a
+    // `deny_unknown_fields` error (it discards serde's `_expected`), so the
+    // rejection is a validation error with an explicit message.
+    if !repos.extra.is_empty() {
+        let kinds = repos
+            .extra
+            .keys()
+            .map(|kind| format!("`{kind}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(TestDocError::InvalidRepositories(format!(
+            "unknown registry kind {kinds}; supported kinds: {}",
+            SUPPORTED_REGISTRY_KINDS.join(", ")
+        )));
+    }
+    for (registry, map) in [
+        (SUPPORTED_REGISTRY_KINDS[0], &repos.cache),
+        (SUPPORTED_REGISTRY_KINDS[1], &repos.idempotent),
+        (SUPPORTED_REGISTRY_KINDS[2], &repos.claim_check),
+    ] {
+        let Some(map) = map.as_ref() else {
+            continue;
+        };
+        for (name, target) in map {
+            if name.trim().is_empty() {
+                return Err(TestDocError::InvalidRepositories(
+                    "repository names must be non-blank".to_string(),
+                ));
+            }
+            if name == "memory" {
+                return Err(TestDocError::InvalidRepositories(format!(
+                    "repository {name}: `memory` is a built-in repository name and cannot be stubbed"
+                )));
+            }
+            if target != "memory" {
+                return Err(TestDocError::InvalidRepositories(format!(
+                    "repository {registry} `{name}`: unsupported stub target `{target}`; \
+                     only `memory` is supported"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
