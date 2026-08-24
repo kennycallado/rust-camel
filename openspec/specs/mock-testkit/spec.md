@@ -26,6 +26,44 @@ a copy while the real send continues). Documents declaring
 two or three route sources, or none, SHALL be rejected. Unknown fields
 SHALL be rejected, including inside intercept action objects.
 
+Matcher grammar. Body matcher keys: `equals`, `regex`, `contains`,
+`startsWith`, `endsWith`, `exists`, `jsonSubset`. Header matcher keys:
+`equals`, `regex`, `exists`. `exists` takes no argument (a `null` value).
+`jsonSubset` SHALL be an object mapping and applies to bodies only; it is
+a document error on a header value. An object whose sole key is
+`predicate` SHALL be rejected with a message stating predicate matchers
+are not supported, in every grammar position; in dual-grammar positions
+(header values and `expectReply.body`), an object with multiple keys that
+merely contains a `predicate` key is a literal value and parses
+unchanged (in strict `bodies` entries, multi-key maps are rejected as
+usual). Matchers SHALL be validated at
+parse time: `regex` patterns SHALL compile and malformed values SHALL fail
+parsing with exit code 2 naming the document field and the offending key.
+
+Matcher positions. `expects.bodies` list entries SHALL use strict matcher
+syntax: a bare string is `equals` (exactly as before this change); a map
+with exactly one recognized body matcher key is that matcher; any other
+scalar, a bare array, or a map with zero, multiple, or unrecognized keys
+is a document error (exit 2) stating body entries must be strings or
+matcher maps, naming the key where present.
+
+Header values (`expects.headers` and `expectReply.headers`) accepted any
+JSON value before this change and SHALL keep that behavior: a bare scalar
+or array, or an object that is not a single-recognized-key matcher map,
+is a literal `equals` value compared structurally; a map whose sole key
+is a recognized header matcher key (`equals`, `regex`, `exists`) is that
+matcher. A sole `jsonSubset` key on a header value is a document error
+stating `jsonSubset` applies to bodies only, and a sole `predicate` key
+is rejected with the reserved-key message.
+
+`expectReply.body` accepted strings and JSON structures before this
+change, so it keeps both: every bare scalar (string, number, boolean,
+null) and every array is a literal `equals` value; a JSON object with
+exactly one recognized matcher key is that matcher; a JSON object whose
+sole key is `predicate` is
+rejected (exit 2); any other JSON object is a literal `equals` value
+(structural equality), preserving the existing JSON-reply behavior.
+
 #### Scenario: valid document with reference and expectations
 
 - **Given** a test document with `routeFiles: [config/routes.yaml]` and `expects: {mock:result: {count: 3}}`
@@ -134,6 +172,72 @@ SHALL be rejected, including inside intercept action objects.
 - **When** `camel test` parses the document
 - **Then** parsing fails with exit code 2 and a message naming the unknown field
 
+#### Scenario: bare string body stays exact match
+
+- **Given** a test document with `expects: {mock:result: {count: 1, bodies: ["plain"]}}`
+- **When** `camel test` parses and executes the document against a body of `plain`
+- **Then** parsing succeeds without matcher interpretation and the expectation passes exactly as before this change
+
+#### Scenario: matcher map body accepted
+
+- **Given** a test document with `expects: {mock:result: {count: 1, bodies: [{regex: "^order-[0-9]+$"}]}}`
+- **When** `camel test` parses the document
+- **Then** parsing succeeds and one body expectation carries a regex matcher
+
+#### Scenario: matcher map header accepted
+
+- **Given** a test document with `expects: {mock:result: {count: 1, headers: {X-Trace: {regex: "^[a-f0-9]{8}$"}}}}`
+- **When** `camel test` parses the document
+- **Then** parsing succeeds and the header expectation carries a regex matcher
+
+#### Scenario: unknown matcher key rejected
+
+- **Given** a test document with `expects: {mock:result: {count: 1, bodies: [{xpath: "//id"}]}}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the field (`bodies`) and the unrecognized key (`xpath`)
+
+#### Scenario: reserved predicate key rejected
+
+- **Given** a test document whose body expectation uses the sole key `predicate`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 stating predicate matchers are not supported
+
+#### Scenario: multi-key object containing predicate stays literal
+
+- **Given** a header value `{predicate: "raw", mode: "batch"}` (multiple keys)
+- **When** `camel test` parses and executes the document against a received header equal to that object
+- **Then** parsing succeeds without matcher interpretation and the header expectation passes by structural equality
+
+#### Scenario: matcher map with wrong key count rejected
+
+- **Given** a test document with a body expectation `{}` or `{regex: "a", contains: "b"}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 stating a matcher map must have exactly one key
+
+#### Scenario: invalid regex rejected at parse
+
+- **Given** a test document with a body expectation `{regex: "(unclosed"}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the field and the regex error
+
+#### Scenario: jsonSubset with non-object rejected at parse
+
+- **Given** a test document with a body expectation `{jsonSubset: [1, 2]}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 stating `jsonSubset` must be an object
+
+#### Scenario: jsonSubset on a header value rejected at parse
+
+- **Given** a test document with a header expectation `{jsonSubset: {a: 1}}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 stating `jsonSubset` applies to bodies only
+
+#### Scenario: reply body object without matcher keys stays literal JSON
+
+- **Given** an input with `expectReply: {body: {"status": "ok"}}` (single unrecognized key)
+- **When** `camel test` parses and executes the document against the JSON reply body `{"status": "ok"}`
+- **Then** parsing succeeds without matcher interpretation and the reply assertion passes by structural equality
+
 ### Requirement: In-process route execution
 
 `camel test` SHALL boot a `CamelContext` in-process per document, register the
@@ -169,30 +273,63 @@ scheme SHALL be a document error.
 For each entry in `expects`, the runner SHALL obtain the endpoint via
 `MockComponent::get_endpoint` (name = URI suffix after `mock:`), map fields to
 change #1 setters (`count` → `expect_count`, `minCount` →
-`expect_minimum_count`, `bodies` → ordered `expect_body`, `headers` →
-`expect_header`), and evaluate with `try_assert_satisfied()`. `count` and
-`minCount` in the same entry SHALL be a document error (exit 2). Assertion
-failures SHALL be reported without aborting remaining endpoints.
+`expect_minimum_count`, `bodies` → `expect_body_matcher` (bare strings as
+`equals`, matcher maps as their matcher), `headers` →
+`expect_header_matcher` (literal values as `equals`, matcher maps as
+their matcher)), and evaluate with `try_assert_satisfied()`. `count`
+and `minCount` in the same entry SHALL be a document error (exit 2).
+Assertion failures SHALL be reported without aborting remaining endpoints.
+Header regex matchers SHALL reach the existing header-regex engine; matcher
+mismatches SHALL be assertion failures (exit 1) whose error text names the
+matcher kind, its pattern or value, and the received body or header values.
 
 #### Scenario: body and count expectations pass
+
 - **Given** a running document with `expects: {mock:result: {count: 2, bodies: ["a", "b"]}}` and inputs producing exactly those bodies in order
 - **When** evaluation runs
 - **Then** the endpoint reports PASS and the summary counts it as passed
 
 #### Scenario: mismatch reports change #1 error detail
+
 - **Given** `expects: {mock:result: {count: 3}}` with only 2 exchanges received
 - **When** evaluation runs
 - **Then** the endpoint reports FAIL with the `MockAssertionError` text containing "expected 3 exchanges, got 2", remaining endpoints still evaluate, and the process exits 1
 
 #### Scenario: count and minCount together rejected
+
 - **Given** a document entry containing both `count` and `minCount`
 - **When** `camel test` parses the document
 - **Then** parsing fails with exit code 2 stating they are mutually exclusive
 
 #### Scenario: unknown mock endpoint fails the document
+
 - **Given** `expects: {mock:ghost: {count: 1}}` where no route creates `mock:ghost`
 - **When** evaluation runs
 - **Then** the endpoint reports FAIL with a message naming `ghost` as absent, and the process exits 1
+
+#### Scenario: regex body matcher passes on nondeterministic content
+
+- **Given** a document whose route emits a body matching `^order-[0-9]+$` and `expects: {mock:result: {count: 1, bodies: [{regex: "^order-[0-9]+$"}]}}`
+- **When** evaluation runs
+- **Then** the endpoint reports PASS
+
+#### Scenario: body matcher mismatch names the matcher
+
+- **Given** a route emitting `total: 12` and `expects: {mock:result: {count: 1, bodies: [{contains: "total: 13"}]}}`
+- **When** evaluation runs
+- **Then** the endpoint reports FAIL with text naming the `contains` matcher, its value, and the received body, and the process exits 1
+
+#### Scenario: header regex matcher evaluated
+
+- **Given** a route emitting header `X-Trace: ab12cd34` and `expects: {mock:result: {count: 1, headers: {X-Trace: {regex: "^[a-f0-9]{8}$"}}}}`
+- **When** evaluation runs
+- **Then** the endpoint reports PASS
+
+#### Scenario: jsonSubset partial body match passes
+
+- **Given** a route emitting the JSON body `{"id": 7, "status": "ok", "meta": {"ts": "...", "seq": 3}}` and `expects: {mock:result: {count: 1, bodies: [{jsonSubset: {status: "ok", meta: {seq: 3}}}]}}`
+- **When** evaluation runs
+- **Then** the endpoint reports PASS (unmatched fields are ignored; nested subset matches)
 
 ### Requirement: Settling before assertion
 
@@ -519,17 +656,25 @@ invocation outside the list SHALL be a document error (exit 2).
 
 `camel test` SHALL capture the reply exchange each `direct:` input's producer
 oneshot returns and SHALL support asserting it via an optional per-input
-`expectReply: {body?, headers?}` block. Reply assertions SHALL be exact-match
-against the reply message — the reply's `output` message when the route set
-one, else its final input message — body (string or JSON) and/or an exact
-`headers` submap (JSON values, matching `Message.headers`). At least one of
-`body`/`headers` SHALL be present (an empty `expectReply` is a document
-error, exit 2). Replies pair with inputs by delivery order (delivery is
-strictly sequential). A failed reply assertion SHALL be an assertion failure
-— a `FAIL` line counted into the summary and exit code 1 — never a document
-error. Inputs without `expectReply` SHALL behave exactly as before (reply
-captured, nothing asserted). The document-level `expects` relaxation for
-reply-only documents is specified in the MODIFIED parsing requirement.
+`expectReply: {body?, headers?}` block. Reply `body` SHALL use the dual
+grammar of the MODIFIED parsing requirement (all bare scalars — string,
+number, boolean, null —, arrays, and non-matcher objects are literal
+`equals`; a single-recognized-key object is
+that matcher). Reply `headers` values SHALL use the same dual header
+grammar as `expects.headers` (literal JSON values stay `equals`; a
+sole-key `equals`/`regex`/`exists` map is that matcher). Reply assertions
+SHALL be evaluated through the mock component's public
+matcher API, not a CLI-private comparison. The reply's message is its
+`output` message when the route set one, else its final input message —
+body (string or JSON) and/or `headers` (JSON values, matching
+`Message.headers`). At least one of `body`/`headers` SHALL be present (an
+empty `expectReply` is a document error, exit 2). Replies pair with inputs
+by delivery order (delivery is strictly sequential). A failed reply
+assertion SHALL be an assertion failure — a `FAIL` line counted into the
+summary and exit code 1 — never a document error. Inputs without
+`expectReply` SHALL behave exactly as before (reply captured, nothing
+asserted). The document-level `expects` relaxation for reply-only documents
+is specified in the MODIFIED parsing requirement.
 
 #### Scenario: reply body asserted
 
@@ -590,6 +735,30 @@ reply-only documents is specified in the MODIFIED parsing requirement.
 - **Given** a route `from: direct:in` with a `bean: {name: enricher, method: enrich}` step backed by a `beans: {enricher: {kind: setBody, config: {body: enriched}}}` stub, and an input `expectReply: {body: "enriched"}`
 - **When** `camel test` executes the document
 - **Then** the reply assertion passes against the stub's transformation
+
+#### Scenario: reply body regex matcher passes
+
+- **Given** a route whose steps set the body to `order-42` and an input `expectReply: {body: {regex: "^order-[0-9]+$"}}`
+- **When** `camel test` executes the document
+- **Then** the reply assertion passes
+
+#### Scenario: reply body jsonSubset matcher passes
+
+- **Given** a route whose steps set a JSON body `{"status": "ok", "ts": 1234}` and an input `expectReply: {body: {jsonSubset: {status: "ok"}}}`
+- **When** `camel test` executes the document
+- **Then** the reply assertion passes
+
+#### Scenario: reply matcher mismatch names the matcher
+
+- **Given** a route whose steps set the body to `done` and an input `expectReply: {body: {contains: "unfinished"}}`
+- **When** `camel test` executes the document
+- **Then** a FAIL line names the `contains` matcher, its value, and the received reply body, and the exit code is 1
+
+#### Scenario: reply header regex matcher passes
+
+- **Given** a route whose steps set header `X-Trace` to an 8-char hex value and an input `expectReply: {headers: {X-Trace: {regex: "^[a-f0-9]{8}$"}}}`
+- **When** `camel test` executes the document
+- **Then** the reply assertion passes
 
 ### Requirement: Declarative repository stubs
 
