@@ -44,7 +44,7 @@ const MATCHER_SENTINEL: &str = "invalid matcher: ";
 /// Upper bound for the `settle` quiet window.
 const SETTLE_MAX: Duration = Duration::from_secs(5);
 /// Registry kinds `repositories:` accepts; displayed order in error messages.
-const SUPPORTED_REGISTRY_KINDS: [&str; 3] = ["cache", "idempotent", "claimCheck"];
+pub(crate) const SUPPORTED_REGISTRY_KINDS: [&str; 3] = ["cache", "idempotent", "claimCheck"];
 
 /// Parsed `*.test.yaml` document. `expects` keys are normalized to bare mock
 /// endpoint names during [`parse_test_document`] validation.
@@ -154,6 +154,33 @@ pub struct RepositoriesDoc {
     /// Unknown registry kinds, captured rather than rejected by serde.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_yaml::Value>,
+}
+
+impl RepositoriesDoc {
+    /// Label/name pairs for every declared repository stub, in registry-kind
+    /// order (`cache` → `idempotent` → `claimCheck`), then map iteration
+    /// order. Single source of truth for registry label strings and warning
+    /// formatting; validation order in [`validate_repositories`] follows the
+    /// same [`SUPPORTED_REGISTRY_KINDS`] sequence.
+    pub(crate) fn stub_pairs(&self) -> Vec<(&'static str, &str)> {
+        let mut out = Vec::new();
+        if let Some(cache) = &self.cache {
+            for name in cache.keys() {
+                out.push((SUPPORTED_REGISTRY_KINDS[0], name.as_str()));
+            }
+        }
+        if let Some(idempotent) = &self.idempotent {
+            for name in idempotent.keys() {
+                out.push((SUPPORTED_REGISTRY_KINDS[1], name.as_str()));
+            }
+        }
+        if let Some(claim_check) = &self.claim_check {
+            for name in claim_check.keys() {
+                out.push((SUPPORTED_REGISTRY_KINDS[2], name.as_str()));
+            }
+        }
+        out
+    }
 }
 
 /// Declarative intercept action: exactly one of `skipTo` / `divertCopyTo`.
@@ -900,8 +927,13 @@ fn validate_repositories(doc: &TestDocument) -> Result<(), TestDocError> {
             .map(|kind| format!("`{kind}`"))
             .collect::<Vec<_>>()
             .join(", ");
+        let noun = if repos.extra.len() == 1 {
+            "unknown registry kind"
+        } else {
+            "unknown registry kinds"
+        };
         return Err(TestDocError::InvalidRepositories(format!(
-            "unknown registry kind {kinds}; supported kinds: {}",
+            "{noun} {kinds}; supported kinds: {}",
             SUPPORTED_REGISTRY_KINDS.join(", ")
         )));
     }

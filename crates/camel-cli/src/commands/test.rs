@@ -180,22 +180,11 @@ pub async fn run_tests(
             }
         };
         if let Some(stubs) = doc.repository_stubs() {
-            let mut pairs: Vec<String> = Vec::new();
-            if let Some(cache) = &stubs.cache {
-                for name in cache.keys() {
-                    pairs.push(format!("cache={name}"));
-                }
-            }
-            if let Some(idempotent) = &stubs.idempotent {
-                for name in idempotent.keys() {
-                    pairs.push(format!("idempotent={name}"));
-                }
-            }
-            if let Some(claim_check) = &stubs.claim_check {
-                for name in claim_check.keys() {
-                    pairs.push(format!("claimCheck={name}"));
-                }
-            }
+            let pairs: Vec<String> = stubs
+                .stub_pairs()
+                .iter()
+                .map(|(kind, name)| format!("{kind}={name}"))
+                .collect();
             if !pairs.is_empty() {
                 let _ = writeln!(
                     err,

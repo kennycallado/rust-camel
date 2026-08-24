@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use camel_cli::commands::test::document::parse_test_document;
 use camel_cli::commands::test::run_tests;
-use camel_cli::commands::test::runner::run_test_doc;
+use camel_cli::commands::test::runner::{TestDocResult, run_test_doc};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -20,6 +20,23 @@ fn temp_dir(tag: &str) -> PathBuf {
     ));
     fs::create_dir_all(&dir).expect("create temp dir"); // allow-unwrap
     dir
+}
+
+fn assert_green(result: &TestDocResult, expected_endpoints: usize) {
+    assert!(
+        result.doc_error.is_none(),
+        "doc_error: {:?}",
+        result.doc_error
+    );
+    assert_eq!(result.endpoint_results.len(), expected_endpoints);
+    for er in &result.endpoint_results {
+        assert!(
+            er.outcome.is_ok(),
+            "endpoint {} failed: {:?}",
+            er.endpoint,
+            er.outcome
+        );
+    }
 }
 
 /// A `cache:` step naming a stub-declared repository: the first input misses
@@ -55,20 +72,51 @@ expects:
 "#;
     let doc = parse_test_document(yaml).expect("document should parse"); // allow-unwrap
     let (result, _) = run_test_doc(&doc, &dir).await;
+    assert_green(&result, 2);
+}
+
+/// An empty `cache: {}` map declares no repository stubs: the built-in
+/// `memory` repository still serves the route, the document runs green, and
+/// no `R-REPOSITORY-STUB` warning is emitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_cache_map_no_warning() {
+    let dir = temp_dir("empty-cache-map");
+    let path = dir.join("empty.test.yaml");
+    fs::write(
+        &path,
+        r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - cache:
+          repository: memory
+          key: k
+          on_miss:
+            - to: "mock:miss"
+      - to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: "first"
+repositories:
+  cache: {}
+expects:
+  mock:miss:
+    count: 1
+  mock:out:
+    count: 1
+"#,
+    )
+    .expect("write empty-cache doc"); // allow-unwrap
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 0, "document must run green");
+    let err = String::from_utf8(err).expect("stderr utf-8"); // allow-unwrap
     assert!(
-        result.doc_error.is_none(),
-        "doc_error: {:?}",
-        result.doc_error
+        !err.contains("R-REPOSITORY-STUB"),
+        "err must NOT carry the stub warning: {err}"
     );
-    assert_eq!(result.endpoint_results.len(), 2);
-    for er in &result.endpoint_results {
-        assert!(
-            er.outcome.is_ok(),
-            "endpoint {} failed: {:?}",
-            er.endpoint,
-            er.outcome
-        );
-    }
 }
 
 /// A `cache:` step naming a repository the document does NOT stub fails route
@@ -143,20 +191,7 @@ expects:
 "#;
     let doc = parse_test_document(yaml).expect("document should parse"); // allow-unwrap
     let (result, _) = run_test_doc(&doc, &dir).await;
-    assert!(
-        result.doc_error.is_none(),
-        "doc_error: {:?}",
-        result.doc_error
-    );
-    assert_eq!(result.endpoint_results.len(), 1);
-    for er in &result.endpoint_results {
-        assert!(
-            er.outcome.is_ok(),
-            "endpoint {} failed: {:?}",
-            er.endpoint,
-            er.outcome
-        );
-    }
+    assert_green(&result, 1);
 }
 
 /// A document declaring a repository stub emits one `R-REPOSITORY-STUB`
@@ -287,18 +322,5 @@ expects:
 "#;
     let doc = parse_test_document(yaml).expect("document should parse"); // allow-unwrap
     let (result, _) = run_test_doc(&doc, &dir).await;
-    assert!(
-        result.doc_error.is_none(),
-        "doc_error: {:?}",
-        result.doc_error
-    );
-    assert_eq!(result.endpoint_results.len(), 1);
-    for er in &result.endpoint_results {
-        assert!(
-            er.outcome.is_ok(),
-            "endpoint {} failed: {:?}",
-            er.endpoint,
-            er.outcome
-        );
-    }
+    assert_green(&result, 1);
 }
