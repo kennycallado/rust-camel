@@ -188,6 +188,41 @@ volume. Concurrent writers to the same key are last-index-wins. The
 surviving row references its own blob, and the loser reclaims at its death
 epoch.
 
+### Retention and TTL changes apply to future writes only
+
+Every blob's death epoch is computed at `set()` time with the retention
+values in force at that moment, and the sweeper deletes by the filename
+epoch alone — runtime config never takes part in deletion. Changing
+`stale_retention`, `payload_max_ttl`, or `payload_sweep_interval` therefore
+never applies retroactively:
+
+- **Lowering `stale_retention`** gives no immediate disk relief. Existing
+  blobs die at their baked epoch, so the orphan window after a purge grows
+  temporarily. Relief comes only from `clear()` or from waiting out the old
+  cycle.
+- **Raising `stale_retention`** opens a redb-only transient window where a
+  row outlives its blob: the row is reclaimed at
+  `expires_at + new_retention` (redb recomputes with the runtime value),
+  while the blob dies at its baked epoch. Reads in between are a MISS with
+  WARN. The window is bounded by
+  `new_retention − old_retention − payload_sweep_interval` and closes by
+  itself when the redb sweep removes the row — cold keys heal without
+  churn. Pair a large raise with `clear()` when stale-serve continuity
+  matters during the transition. Redis has no such window: the key expires
+  at the immutable EXAT set at write time, which is the same death line the
+  blob already encodes.
+- **`payload_max_ttl`** changes affect only the expiry fabricated for
+  future `ttl = None` writes; existing blobs keep their baked epochs.
+- **`payload_sweep_interval`** changes affect only the grace of future
+  writes plus the runtime sweep cadence and `.tmp` GC age.
+- **Mixed-config replicas** sharing one `payload_dir` are safe: the
+  sweeper is filename-driven, so different retention settings only shift
+  windows, never correctness.
+
+The sweeper logs one INFO line per pass with live and reclaimed blob
+counts and bytes, so operators can watch the volume during any of these
+transitions.
+
 ## Load-bearing citations
 
 | File:line | Element |

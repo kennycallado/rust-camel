@@ -328,7 +328,7 @@ Optional cache repository configuration. When unset, only the default `"memory"`
 |-------|------|---------|-------------|
 | `backend` | string | `"memory"` | `"memory"` (moka-backed, size-eviction only), `"redb"` (persistent, survives restarts), or `"redis"` (persistent, shared across processes). |
 | `path` | string | (required for redb) | Path to the `.redb` file. Created if it does not exist. Must not be empty. Redb only. |
-| `stale_retention` | duration string | `7d` (wiring fallback) | How long after expiry a stale entry stays readable. Redb: the sweep reclaims the entry after this window. Redis: the key expires at `expires_at + stale_retention`. Duration strings, for example `"168h"`, `"7d"`, `"30m"`. Redb and redis. |
+| `stale_retention` | duration string | `7d` (wiring fallback) | How long after expiry a stale entry stays readable. Redb: the sweep reclaims the entry after this window. Redis: the key expires at `expires_at + stale_retention`. Duration strings, for example `"168h"`, `"7d"`, `"30m"`. Applies to writes in force at `set()` time — changing it never applies retroactively (see ADR-0065). Redb and redis. |
 | `max_entries` | integer | `1000000` | Maximum entry count for the redb backend; new-key writes are rejected at the cap. Redb only. |
 | `cache_size` | byte-size string | (required for redb) | Bounds the redb page cache, e.g. `"384MB"`, `"256MiB"`, or plain bytes (`1073741824`). Decimal suffixes are powers of 1000, binary suffixes powers of 1024. Redb only. |
 | `sweep_interval` | duration string | `1h` | How often the redb background sweep runs. Must be positive. Redb only. |
