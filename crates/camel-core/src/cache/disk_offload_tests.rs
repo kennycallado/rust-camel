@@ -711,6 +711,12 @@ async fn sweep_unlinks_dead_and_keeps_live_blobs() {
         (1, 0),
         "one dead blob unlinked, nothing else"
     );
+    assert_eq!(swept.live_blobs, 1, "the surviving blob is counted");
+    assert_eq!(
+        swept.live_blob_bytes,
+        live.metadata().unwrap().len(),
+        "live bytes track the survivor's size"
+    );
     assert!(!dead.exists(), "dead blob must be reclaimed");
     assert!(live.exists(), "live blob must survive the sweep");
 }
