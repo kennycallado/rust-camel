@@ -1,4 +1,6 @@
 # Sample route for camel test — see routes/hello.test.yaml
+# The send to `log:done` is intercepted by the test document and diverted
+# to `mock:result`, so no component dependency is needed to assert on it.
 routes:
   - id: "hello"
     from: "direct:start"
@@ -6,4 +8,4 @@ routes:
       - set_header:
           key: "source"
           value: "hello"
-      - to: "mock:result"
+      - to: "log:done"

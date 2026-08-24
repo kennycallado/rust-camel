@@ -5,6 +5,10 @@ inputs:
   - to: "direct:start"
     body: "hello"
 
+intercepts:
+  log:done:
+    skipTo: "mock:result"
+
 expects:
   mock:result:
     count: 1
