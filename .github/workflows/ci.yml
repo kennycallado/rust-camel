@@ -104,6 +104,8 @@ jobs:
         run: cargo test -p camel-test --features integration-tests --test redis_test
       - name: Redis repositories integration tests (testcontainers)
         run: cargo test -p camel-test --features integration-tests --test redis_repositories_test
+      - name: Cache payload offload integration tests (testcontainers)
+        run: cargo test -p camel-test --features integration-tests --test cache_payload_offload
       - name: OpenSearch integration tests (testcontainers)
         run: cargo test -p camel-test --features integration-tests --test opensearch_test
       - name: Kubernetes integration tests (testcontainers K3s)

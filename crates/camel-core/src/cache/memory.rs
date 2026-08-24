@@ -156,6 +156,7 @@ mod tests {
     fn entry() -> CacheEntry {
         CacheEntry {
             bytes: vec![1, 2, 3],
+            payload_path: None,
             content_type: camel_api::cache::ContentType::Bytes,
             expires_at: None,
         }

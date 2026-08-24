@@ -1,12 +1,13 @@
 use camel_api::cache::{CacheEntry, CacheRepository, ContentType};
 use camel_config::CamelConfig;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
 
 fn entry() -> CacheEntry {
     CacheEntry {
         bytes: vec![1, 2, 3],
+        payload_path: None,
         content_type: ContentType::Bytes,
         expires_at: None,
     }
@@ -1463,4 +1464,446 @@ fn example_camel_toml_round_trips_validate_and_endpoints() {
         .expect("example cache_repo.url must build a redis endpoint");
     camel_config::redis_endpoint_from_idempotent_repo(idem)
         .expect("example idempotent_repo.url must build a redis endpoint");
+}
+
+// ── Disk-offload payload config fields (cache-payload-offload task 2.1) ────
+
+/// Like [`make_cfg`] but returns the deserialization `Result` so tests can
+/// assert on failures that reject the config before `validate()` runs.
+fn try_make_cfg(toml: &str) -> Result<CamelConfig, config::ConfigError> {
+    config::Config::builder()
+        .add_source(config::File::from_str(toml, config::FileFormat::Toml))
+        .build()
+        .unwrap()
+        .try_deserialize::<CamelConfig>()
+}
+
+#[test]
+fn disk_payload_without_payload_dir_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "disk"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_dir"),
+        "validation error must name cache_repo.payload_dir, got: {msg}"
+    );
+}
+
+#[test]
+fn memory_backend_rejects_disk_payload() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+payload = "disk"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload"),
+        "validation error must name cache_repo.payload, got: {msg}"
+    );
+}
+
+#[test]
+fn payload_fields_rejected_under_inline() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload_dir = "/tmp/camel-payload"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_dir"),
+        "validation error must name cache_repo.payload_dir, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload_sweep_interval = "30m"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_sweep_interval"),
+        "validation error must name cache_repo.payload_sweep_interval, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload_max_ttl = "24h"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_max_ttl"),
+        "validation error must name cache_repo.payload_max_ttl, got: {msg}"
+    );
+}
+
+#[test]
+fn payload_fields_rejected_under_memory() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+payload_dir = "/tmp/camel-payload"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_dir"),
+        "validation error must name cache_repo.payload_dir, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+payload_sweep_interval = "30m"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_sweep_interval"),
+        "validation error must name cache_repo.payload_sweep_interval, got: {msg}"
+    );
+
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+payload_max_ttl = "24h"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_max_ttl"),
+        "validation error must name cache_repo.payload_max_ttl, got: {msg}"
+    );
+}
+
+#[test]
+fn malformed_payload_value_rejected() {
+    let res = try_make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "spool"
+"#,
+    );
+
+    let err = res.expect_err("payload = \"spool\" must be rejected at deserialization");
+    assert!(
+        err.to_string().contains("cache_repo.payload"),
+        "deserialization error must name cache_repo.payload, got: {err}"
+    );
+}
+
+#[test]
+fn malformed_payload_sweep_interval_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "disk"
+payload_dir = "/tmp/camel-payload"
+payload_sweep_interval = "thirty"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_sweep_interval"),
+        "validation error must name cache_repo.payload_sweep_interval, got: {msg}"
+    );
+}
+
+#[test]
+fn zero_payload_sweep_interval_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "disk"
+payload_dir = "/tmp/camel-payload"
+payload_sweep_interval = "0s"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_sweep_interval"),
+        "validation error must name cache_repo.payload_sweep_interval, got: {msg}"
+    );
+}
+
+#[test]
+fn malformed_payload_max_ttl_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "disk"
+payload_dir = "/tmp/camel-payload"
+payload_max_ttl = "forever"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_max_ttl"),
+        "validation error must name cache_repo.payload_max_ttl, got: {msg}"
+    );
+}
+
+#[test]
+fn zero_payload_max_ttl_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "disk"
+payload_dir = "/tmp/camel-payload"
+payload_max_ttl = "0s"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_max_ttl"),
+        "validation error must name cache_repo.payload_max_ttl, got: {msg}"
+    );
+}
+
+#[test]
+fn payload_dir_env_placeholder_resolves() {
+    // cache_repo is a strict-interpolation section (STRICT_PREFIXES), so a
+    // `${env:}` placeholder on payload_dir must resolve at load time and
+    // leave a literal path that validate() accepts. Mirrors the placeholder
+    // e2e tests: unique env var name, panic-safe cleanup.
+    struct EnvCleanup(&'static str);
+    impl Drop for EnvCleanup {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(self.0) };
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("Camel.toml");
+    let toml = r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "disk"
+payload_dir = "${env:RUST_CAMEL_TEST_CACHE_PAYLOAD_DIR}"
+"#;
+    std::fs::write(&config_path, toml).unwrap();
+
+    let expected = dir.path().to_str().unwrap();
+    unsafe {
+        std::env::set_var("RUST_CAMEL_TEST_CACHE_PAYLOAD_DIR", expected);
+    }
+    let _env = EnvCleanup("RUST_CAMEL_TEST_CACHE_PAYLOAD_DIR");
+
+    let cfg = CamelConfig::from_file(config_path.to_str().unwrap())
+        .expect("config with a resolvable payload_dir placeholder must load");
+    let cache = cfg.cache_repo.as_ref().expect("cache_repo must load");
+    assert_eq!(
+        cache.payload_dir.as_deref(),
+        Some(expected),
+        "the ${{env:}} placeholder on cache_repo.payload_dir must resolve to the env value"
+    );
+    cfg.validate()
+        .expect("resolved payload_dir with payload = \"disk\" must pass validation");
+}
+
+// ── Disk payload offload wiring ───────────────────────────────────────────
+
+/// Records the `message` field of each event into a shared buffer.
+struct MessageVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for MessageVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            *self.0 = format!("{value:?}");
+        }
+    }
+}
+
+/// `tracing_subscriber` layer recording WARN event messages.
+struct CaptureLayer {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl<C> tracing_subscriber::Layer<C> for CaptureLayer
+where
+    C: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, C>,
+    ) {
+        if *event.metadata().level() != tracing::Level::WARN {
+            return;
+        }
+        let mut message = String::new();
+        event.record(&mut MessageVisitor(&mut message));
+        if !message.is_empty() {
+            self.events.lock().unwrap().push(message);
+        }
+    }
+}
+
+/// Install a thread-local subscriber recording WARN messages; returns the
+/// shared buffer and the default-subscriber guard.
+///
+/// Mirrors the camel-core disk-offload test technique: `set_default`
+/// (guard-scoped, thread-local) instead of `with_default`, because a sync
+/// closure cannot span the `.await` points of an async test body.
+fn capture_warns() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
+    use tracing_subscriber::prelude::*;
+    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let layer = CaptureLayer {
+        events: Arc::clone(&events),
+    };
+    let guard = tracing_subscriber::registry().with(layer).set_default();
+    (events, guard)
+}
+
+#[tokio::test]
+async fn redb_disk_payload_wraps_repository_and_round_trips() {
+    let db_dir = tempdir().unwrap();
+    let payload_dir = tempdir().unwrap();
+    let toml = format!(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "{}"
+cache_size = "256MiB"
+payload = "disk"
+payload_dir = "{}"
+"#,
+        db_dir.path().join("cache.redb").to_str().unwrap(),
+        payload_dir.path().to_str().unwrap()
+    );
+
+    let (warns, _guard) = capture_warns();
+    let cfg = make_cfg(&toml);
+    let ctx = CamelConfig::configure_context(&cfg).await.unwrap();
+    let repo = ctx.cache_repository("persistent").unwrap();
+
+    repo.set("k", entry(), Some(Duration::from_secs(3600)))
+        .await
+        .unwrap();
+
+    // Exactly one offloaded payload blob lives in the payload dir.
+    let blob_count = std::fs::read_dir(payload_dir.path())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "blob")
+        })
+        .count();
+    assert_eq!(blob_count, 1, "exactly one .blob payload file expected");
+
+    let got = repo.get("k").await.unwrap().expect("entry present");
+    assert_eq!(got.bytes, vec![1, 2, 3], "payload must round-trip");
+
+    let dir_str = payload_dir.path().to_str().unwrap();
+    assert!(
+        warns.lock().unwrap().iter().any(|m| m.contains(dir_str)),
+        "startup WARN naming the payload dir expected, got {:?}",
+        warns.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn inline_payload_builds_no_sweeper_and_no_dir() {
+    let db_dir = tempdir().unwrap();
+    let would_be_payload_dir = db_dir.path().join("payload");
+    let toml = format!(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "{}"
+cache_size = "256MiB"
+"#,
+        db_dir.path().join("cache.redb").to_str().unwrap()
+    );
+
+    let cfg = make_cfg(&toml);
+    let ctx = CamelConfig::configure_context(&cfg).await.unwrap();
+    let repo = ctx.cache_repository("persistent").unwrap();
+    repo.set("k", entry(), Some(Duration::from_secs(3600)))
+        .await
+        .unwrap();
+
+    assert!(
+        !would_be_payload_dir.exists(),
+        "inline payload must never create the payload dir"
+    );
+}
+
+#[tokio::test]
+async fn disk_defaults_apply_when_intervals_unset() {
+    let db_dir = tempdir().unwrap();
+    let payload_dir = tempdir().unwrap();
+    let toml = format!(
+        r#"
+[cache_repo]
+backend = "redb"
+path = "{}"
+cache_size = "256MiB"
+payload = "disk"
+payload_dir = "{}"
+"#,
+        db_dir.path().join("cache.redb").to_str().unwrap(),
+        payload_dir.path().to_str().unwrap()
+    );
+
+    let cfg = make_cfg(&toml);
+    let ctx = CamelConfig::configure_context(&cfg).await.unwrap();
+    let repo = ctx.cache_repository("persistent").unwrap();
+
+    // No explicit ttl: the wiring's default payload_max_ttl applies.
+    repo.set("k", entry(), None).await.unwrap();
+    let got = repo.get("k").await.unwrap().expect("entry present");
+    assert_eq!(
+        got.bytes,
+        vec![1, 2, 3],
+        "payload must round-trip with default offload durations"
+    );
 }

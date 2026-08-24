@@ -18,6 +18,9 @@ use crate::CamelError;
 pub struct CacheEntry {
     /// The raw cached bytes.
     pub bytes: Vec<u8>,
+    /// Relative blob filename when the payload is offloaded to disk; `None` = bytes live inline.
+    #[serde(default)]
+    pub payload_path: Option<String>,
     /// The content type of the cached data.
     pub content_type: ContentType,
     /// When this entry expires (if set). `None` means no expiry.
@@ -127,11 +130,34 @@ mod tests {
     fn cache_entry_construction() {
         let entry = CacheEntry {
             bytes: vec![b'x'],
+            payload_path: None,
             content_type: ContentType::Bytes,
             expires_at: None,
         };
         assert_eq!(entry.bytes.len(), 1);
         assert_eq!(entry.content_type, ContentType::Bytes);
+    }
+
+    #[test]
+    fn legacy_json_without_payload_path_deserializes_as_none() {
+        let json = r#"{"bytes":[1,2,3],"content_type":"Bytes","expires_at":null}"#;
+        let entry: CacheEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.payload_path, None);
+        assert_eq!(entry.bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn payload_path_round_trips_through_serde() {
+        let entry = CacheEntry {
+            bytes: vec![1, 2, 3],
+            payload_path: Some("abc.blob".into()),
+            content_type: ContentType::Bytes,
+            expires_at: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"payload_path\":\"abc.blob\""));
+        let back: CacheEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.payload_path, Some("abc.blob".to_string()));
     }
 
     #[test]

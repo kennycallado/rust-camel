@@ -317,6 +317,7 @@ mod tests {
     fn plain_entry() -> CacheEntry {
         CacheEntry {
             bytes: vec![1, 2, 3],
+            payload_path: None,
             content_type: ContentType::Bytes,
             expires_at: None,
         }
@@ -429,6 +430,7 @@ mod tests {
         let repo = repo(fixed_clock(now()), fake.clone());
         let expired = CacheEntry {
             bytes: vec![9],
+            payload_path: None,
             content_type: ContentType::Text,
             expires_at: Some(now() - Duration::from_secs(1)),
         };

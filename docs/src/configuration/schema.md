@@ -332,6 +332,10 @@ Optional cache repository configuration. When unset, only the default `"memory"`
 | `max_entries` | integer | `1000000` | Maximum entry count for the redb backend; new-key writes are rejected at the cap. Redb only. |
 | `cache_size` | byte-size string | (required for redb) | Bounds the redb page cache, e.g. `"384MB"`, `"256MiB"`, or plain bytes (`1073741824`). Decimal suffixes are powers of 1000, binary suffixes powers of 1024. Redb only. |
 | `sweep_interval` | duration string | `1h` | How often the redb background sweep runs. Must be positive. Redb only. |
+| `payload` | string | `"inline"` | Payload storage mode. `"inline"` keeps payload bytes in the repository entry. `"disk"` offloads payload bodies to blob files under `payload_dir`. Rejected on the memory backend. Redb and redis. |
+| `payload_dir` | path string | (required when disk) | Directory holding offloaded payload files. Required and non-empty when `payload = "disk"`; rejected otherwise. No default. Supports `${env:}` strict interpolation. Redb and redis. |
+| `payload_sweep_interval` | duration string | `1h` | How often the offloaded-payload sweep runs when `payload = "disk"`. The interval also widens every blob's death epoch as a grace window. Must be positive. Redb and redis. |
+| `payload_max_ttl` | duration string | `720h` (30d) | Expiry fabricated for entries stored without a TTL when `payload = "disk"`, so index row and blob file share one death timeline. Must be positive. Redb and redis. |
 | `max_capacity` | integer | `10000` (default memory repo) | Entry cap for the memory backend. Memory only. |
 | `url` | string | (required for redis) | Standalone endpoint, `redis://` or `rediss://`. Mutually exclusive with `sentinel_nodes`. Redis only. |
 | `sentinel_nodes` | string array | (alternative to `url`) | Sentinel node addresses. Mutually exclusive with `url`. Redis only. |
@@ -345,7 +349,7 @@ Optional cache repository configuration. When unset, only the default `"memory"`
 
 In `url` mode the URI carries the password and the database. The password rides the userinfo and the database rides the `?db=N` query parameter, as in `redis://:pass@host:port?db=N`. A username in the URI is not supported.
 
-Fields that do not apply to the configured `backend` are rejected at validation (fail-closed), and a malformed `cache_size`, `sweep_interval`, or `stale_retention` fails validation with an error naming the field.
+Fields that do not apply to the configured `backend` are rejected at validation (fail-closed), and a malformed `cache_size`, `sweep_interval`, `stale_retention`, `payload_sweep_interval`, or `payload_max_ttl` fails validation with an error naming the field. The same applies to payload fields set while `payload` is inline or unset.
 
 A runnable redis configuration lives in `examples/redis-repositories`:
 

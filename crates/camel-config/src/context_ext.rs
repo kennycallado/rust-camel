@@ -1,11 +1,12 @@
 use crate::config::{
-    CacheRepoConfig, CamelConfig, IdempotentRepoConfig, KubernetesPlatformCamelConfig,
+    CacheRepoConfig, CamelConfig, IdempotentRepoConfig, KubernetesPlatformCamelConfig, PayloadMode,
     PlatformCamelConfig, parse_byte_size,
 };
 #[cfg(feature = "otel")]
 use crate::config::{OtelProtocol, OtelSampler};
 use crate::discovery::discover_routes_with_threshold;
 use async_trait::async_trait;
+use camel_api::cache::CacheRepository;
 use camel_api::{
     CamelError, HealthReport, HealthSource, HealthStatus, PlatformService as PlatformServiceTrait,
     ServiceHealth, ServiceStatus,
@@ -28,6 +29,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -133,14 +135,7 @@ async fn build_persistent_cache_repo(
         })
         .and_then(|s| parse_byte_size(s).map_err(CamelError::Config))?;
 
-    let stale_retention = match ccfg.stale_retention.as_deref() {
-        None => std::time::Duration::from_secs(7 * 24 * 3600),
-        Some(s) => humantime::parse_duration(s).map_err(|_| {
-            CamelError::Config(format!(
-                "cache_repo.stale_retention: invalid duration '{s}'"
-            ))
-        })?,
-    };
+    let stale_retention = parse_stale_retention(ccfg)?;
 
     let sweep_interval = match ccfg.sweep_interval.as_deref() {
         None => std::time::Duration::from_secs(3600),
@@ -276,18 +271,69 @@ async fn build_redis_cache_repo(
     ccfg: &CacheRepoConfig,
 ) -> Result<RedisCacheRepository, CamelError> {
     let endpoint = redis_endpoint_from_cache_repo(ccfg)?;
-    let stale_retention = match ccfg.stale_retention.as_deref() {
-        None => Duration::from_secs(7 * 24 * 3600),
-        Some(s) => humantime::parse_duration(s).map_err(|_| {
-            CamelError::Config(format!(
-                "cache_repo.stale_retention: invalid duration '{s}'"
-            ))
-        })?,
-    };
+    let stale_retention = parse_stale_retention(ccfg)?;
     let key_prefix = ccfg.key_prefix.as_deref().unwrap_or("camel:cache");
     RedisCacheRepository::connect("redis", &endpoint, key_prefix, stale_retention)
         .await
         .map_err(|e| CamelError::Config(format!("cache_repo: {e}")))
+}
+
+/// Parse `cache_repo.stale_retention` with the 7-day default. Shared by
+/// the redb builder, the redis builder, and the disk-offload wrapper so
+/// the decorator and its inner backend can never disagree on the
+/// retention window.
+fn parse_stale_retention(ccfg: &CacheRepoConfig) -> Result<Duration, CamelError> {
+    match ccfg.stale_retention.as_deref() {
+        None => Ok(Duration::from_secs(7 * 24 * 3600)),
+        Some(s) => humantime::parse_duration(s).map_err(|_| {
+            CamelError::Config(format!(
+                "cache_repo.stale_retention: invalid duration '{s}'"
+            ))
+        }),
+    }
+}
+
+/// Wrap a built cache backend with [`DiskOffloadRepository`] when the
+/// validated config selects `payload = "disk"`; otherwise return the bare
+/// backend unchanged.
+///
+/// The decorator is registered under the same name the bare backend used
+/// ("persistent"/"redis"), so route references are payload-mode agnostic.
+/// The one startup WARN names the resolved payload directory: consumers
+/// that do not share it cannot read offloaded entries.
+fn wrap_disk_offload(
+    ccfg: &CacheRepoConfig,
+    backend: Arc<dyn CacheRepository>,
+    shutdown_token: CancellationToken,
+) -> Result<Arc<dyn CacheRepository>, CamelError> {
+    if ccfg.payload != Some(PayloadMode::Disk) {
+        return Ok(backend);
+    }
+    // validate() guarantees a non-empty dir for this mode.
+    let dir: std::path::PathBuf = ccfg
+        .payload_dir
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CamelError::Config(
+                "cache_repo.payload_dir must be set when payload = \"disk\"".to_string(),
+            )
+        })?
+        .into();
+    let stale_retention = parse_stale_retention(ccfg)?;
+    let (sweep_interval, payload_max_ttl) = ccfg.payload_durations();
+    warn!(
+        "cache_repo.payload = \"disk\": offloaded entries under '{}' are unreadable by consumers that do not share this directory",
+        dir.display()
+    );
+    Ok(Arc::new(camel_core::cache::DiskOffloadRepository::new(
+        backend,
+        dir,
+        stale_retention,
+        sweep_interval,
+        payload_max_ttl,
+        shutdown_token,
+    )))
 }
 
 /// Build the redis-backed idempotent repository from a validated
@@ -462,12 +508,15 @@ impl CamelConfig {
         // default "memory" repo. When set with `backend = "redis"`, register
         // a RedisCacheRepository under the name "redis". When set with
         // `backend = "memory"` and a custom `max_capacity`, replace the
-        // default memory repo.
+        // default memory repo. With `payload = "disk"`, the redb/redis repo
+        // is wrapped in a DiskOffloadRepository under the same name; the
+        // memory arm never wraps (validation rejects disk on memory).
         if let Some(ref ccfg) = config.cache_repo {
             match ccfg.backend.as_str() {
                 "redb" => {
-                    let repo = build_persistent_cache_repo(ccfg, ctx.shutdown_token()).await?;
-                    ctx.register_cache_repository("persistent", Arc::new(repo))
+                    let bare = build_persistent_cache_repo(ccfg, ctx.shutdown_token()).await?;
+                    let repo = wrap_disk_offload(ccfg, Arc::new(bare), ctx.shutdown_token())?;
+                    ctx.register_cache_repository("persistent", repo)
                         .map_err(|e| {
                             CamelError::Config(format!(
                                 "register cache repository 'persistent': {e:?}"
@@ -475,13 +524,13 @@ impl CamelConfig {
                         })?;
                 }
                 "redis" => {
-                    let repo = build_redis_cache_repo(ccfg).await?;
-                    ctx.register_cache_repository("redis", Arc::new(repo))
-                        .map_err(|e| {
-                            CamelError::Config(format!(
-                                "cache_repo: register 'redis' cache repository: {e:?}"
-                            ))
-                        })?;
+                    let bare = build_redis_cache_repo(ccfg).await?;
+                    let repo = wrap_disk_offload(ccfg, Arc::new(bare), ctx.shutdown_token())?;
+                    ctx.register_cache_repository("redis", repo).map_err(|e| {
+                        CamelError::Config(format!(
+                            "cache_repo: register 'redis' cache repository: {e:?}"
+                        ))
+                    })?;
                 }
                 "memory" => {
                     if let Some(cap) = ccfg.max_capacity {
@@ -1790,6 +1839,10 @@ mod tests {
             cache_size: cache_size.map(str::to_string),
             stale_retention: stale_retention.map(str::to_string),
             sweep_interval: sweep_interval.map(str::to_string),
+            payload: None,
+            payload_dir: None,
+            payload_sweep_interval: None,
+            payload_max_ttl: None,
             max_entries: None,
             url: None,
             sentinel_nodes: None,
@@ -1937,6 +1990,10 @@ mod tests {
             cache_size: Some("256MiB".to_string()),
             stale_retention: None,
             sweep_interval: None,
+            payload: None,
+            payload_dir: None,
+            payload_sweep_interval: None,
+            payload_max_ttl: None,
             max_entries: None,
             url: None,
             sentinel_nodes: None,

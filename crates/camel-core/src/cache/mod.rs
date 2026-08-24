@@ -3,9 +3,11 @@
 //! Each backend implements [`camel_api::cache::CacheRepository`] and is
 //! registered with the runtime through the cache registry.
 
+pub mod disk_offload;
 pub mod memory;
 pub mod redb;
 
+pub use disk_offload::DiskOffloadRepository;
 pub use memory::MemoryCacheRepository;
 pub use redb::RedbCacheRepository;
 

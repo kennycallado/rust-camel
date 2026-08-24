@@ -703,6 +703,7 @@ mod tests {
     fn entry() -> CacheEntry {
         CacheEntry {
             bytes: vec![1, 2, 3],
+            payload_path: None,
             content_type: camel_api::cache::ContentType::Bytes,
             expires_at: None,
         }
@@ -1020,11 +1021,13 @@ mod tests {
         let repo = new_repo(&dir, token).await;
         let a = CacheEntry {
             bytes: vec![1, 2, 3],
+            payload_path: None,
             content_type: camel_api::cache::ContentType::Bytes,
             expires_at: None,
         };
         let b = CacheEntry {
             bytes: vec![1, 2, 3, 4, 5],
+            payload_path: None,
             content_type: camel_api::cache::ContentType::Bytes,
             expires_at: None,
         };
@@ -1040,6 +1043,7 @@ mod tests {
         let repo = new_repo(&dir, token).await;
         let a = CacheEntry {
             bytes: vec![1, 2, 3],
+            payload_path: None,
             content_type: camel_api::cache::ContentType::Bytes,
             expires_at: None,
         };

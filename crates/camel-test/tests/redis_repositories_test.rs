@@ -65,6 +65,7 @@ async fn own_redis() -> (ContainerAsync<GenericImage>, String) {
 fn cache_entry() -> CacheEntry {
     CacheEntry {
         bytes: b"redis-repo-payload".to_vec(),
+        payload_path: None,
         content_type: ContentType::Bytes,
         expires_at: None,
     }

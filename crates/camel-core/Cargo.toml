@@ -16,6 +16,7 @@ categories.workspace = true
 camel-api.workspace = true
 camel-processor.workspace = true
 bytes.workspace = true
+blake3.workspace = true
 camel-component-api.workspace = true
 camel-endpoint.workspace = true
 camel-language-api.workspace = true
@@ -79,6 +80,7 @@ camel-component-seda.workspace = true
 criterion.workspace = true
 uuid.workspace = true
 toml = { workspace = true }
+filetime.workspace = true
 
 [[bench]]
 name = "context"

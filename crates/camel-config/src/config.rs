@@ -654,6 +654,19 @@ impl std::fmt::Debug for IdempotentRepoConfig {
 /// sweep_interval = "1h"
 /// max_entries = 1_000_000
 /// ```
+/// Payload storage mode for the cache repository: `"inline"` keeps payload
+/// bytes inside the repository entry, `"disk"` offloads payload bodies to
+/// files under `cache_repo.payload_dir`. Disk mode applies to the redb and
+/// redis backends; the memory backend rejects it. Exhaustive by contract
+/// (closed 2-variant set, mirroring `ContentType`'s ADR-0049 exception
+/// note) — not `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PayloadMode {
+    Inline,
+    Disk,
+}
+
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CacheRepoConfig {
@@ -691,6 +704,29 @@ pub struct CacheRepoConfig {
     /// human-readable durations like "1h", "30m". Must be positive.
     #[serde(default)]
     pub sweep_interval: Option<String>,
+
+    /// Payload storage mode: `"inline"` (default) keeps payload bytes in
+    /// the repository entry; `"disk"` offloads payload bodies to files
+    /// under `payload_dir`. Disk mode is rejected on the memory backend.
+    #[serde(default)]
+    pub payload: Option<PayloadMode>,
+
+    /// Directory holding offloaded payload files. Required when
+    /// `payload = "disk"`; rejected otherwise and on the memory backend.
+    /// Supports `${env:}` strict interpolation.
+    #[serde(default)]
+    pub payload_dir: Option<String>,
+
+    /// How often the offloaded-payload sweep runs when `payload = "disk"`.
+    /// Accepts human-readable durations like "1h", "30m". Must be positive.
+    #[serde(default)]
+    pub payload_sweep_interval: Option<String>,
+
+    /// Maximum time an offloaded payload file may outlive its cache entry
+    /// when `payload = "disk"`. Accepts human-readable durations like
+    /// "720h". Must be positive.
+    #[serde(default)]
+    pub payload_max_ttl: Option<String>,
 
     /// Maximum entry count for the redb backend. Default: 1_000_000.
     #[serde(default)]
@@ -755,6 +791,30 @@ fn default_cache_backend() -> String {
 
 fn default_stale_retention() -> Option<String> {
     None
+}
+
+impl CacheRepoConfig {
+    /// Offload wiring durations: `(payload_sweep_interval, payload_max_ttl)`
+    /// parsed with humantime, defaulting to 1h and 720h when unset.
+    ///
+    /// Only the `payload = "disk"` wiring consumes these. `validate()`
+    /// (fail-closed) already rejected malformed or non-positive values on
+    /// that path, so the fallback covers genuinely unset fields only.
+    pub(crate) fn payload_durations(&self) -> (Duration, Duration) {
+        const DEFAULT_SWEEP: Duration = Duration::from_secs(3600);
+        const DEFAULT_MAX_TTL: Duration = Duration::from_secs(720 * 3600);
+        let sweep = self
+            .payload_sweep_interval
+            .as_deref()
+            .and_then(|s| humantime::parse_duration(s).ok())
+            .unwrap_or(DEFAULT_SWEEP);
+        let max_ttl = self
+            .payload_max_ttl
+            .as_deref()
+            .and_then(|s| humantime::parse_duration(s).ok())
+            .unwrap_or(DEFAULT_MAX_TTL);
+        (sweep, max_ttl)
+    }
 }
 
 /// Parse a human-readable byte size (used by `cache_repo.cache_size`).
@@ -1002,6 +1062,10 @@ impl Default for CacheRepoConfig {
             cache_size: None,
             stale_retention: None,
             sweep_interval: None,
+            payload: None,
+            payload_dir: None,
+            payload_sweep_interval: None,
+            payload_max_ttl: None,
             max_entries: None,
             url: None,
             sentinel_nodes: None,
@@ -1042,6 +1106,10 @@ impl std::fmt::Debug for CacheRepoConfig {
             .field("cache_size", &self.cache_size)
             .field("stale_retention", &self.stale_retention)
             .field("sweep_interval", &self.sweep_interval)
+            .field("payload", &self.payload)
+            .field("payload_dir", &self.payload_dir)
+            .field("payload_sweep_interval", &self.payload_sweep_interval)
+            .field("payload_max_ttl", &self.payload_max_ttl)
             .field("max_entries", &self.max_entries)
             .field("url", &self.url.as_deref().map(redact_url))
             .field("sentinel_nodes", &self.sentinel_nodes)
@@ -1734,6 +1802,30 @@ impl CamelConfig {
                             .to_string(),
                     ));
                 }
+                if cache.payload == Some(PayloadMode::Disk) {
+                    return Err(CamelError::Config(
+                        "cache_repo.payload = \"disk\" does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.payload_dir.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.payload_dir does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.payload_sweep_interval.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.payload_sweep_interval does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
+                if cache.payload_max_ttl.is_some() {
+                    return Err(CamelError::Config(
+                        "cache_repo.payload_max_ttl does not apply to the \"memory\" backend"
+                            .to_string(),
+                    ));
+                }
                 if cache.max_entries.is_some() {
                     return Err(CamelError::Config(
                         "cache_repo.max_entries does not apply to the \"memory\" backend"
@@ -1802,6 +1894,68 @@ impl CamelConfig {
                         "cache_repo.stale_retention: invalid duration '{stale}'"
                     ))
                 })?;
+            }
+            // Disk-offload payload matrix (fail-closed), shared by the redb
+            // and redis backends: the memory branch above has already
+            // rejected every payload field, so only the two persistent
+            // backends reach this block.
+            if cache.backend != "memory" {
+                if cache.payload == Some(PayloadMode::Disk) {
+                    let dir_empty = match cache.payload_dir.as_deref() {
+                        None => true,
+                        Some(d) => d.is_empty(),
+                    };
+                    if dir_empty {
+                        return Err(CamelError::Config(
+                            "cache_repo.payload_dir must be set when payload = \"disk\""
+                                .to_string(),
+                        ));
+                    }
+                    if let Some(sweep) = cache.payload_sweep_interval.as_deref() {
+                        let parsed = humantime::parse_duration(sweep).map_err(|_| {
+                            CamelError::Config(format!(
+                                "cache_repo.payload_sweep_interval: invalid duration '{sweep}'"
+                            ))
+                        })?;
+                        if parsed.is_zero() {
+                            return Err(CamelError::Config(
+                                "cache_repo.payload_sweep_interval must be positive (greater than zero)"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    if let Some(ttl) = cache.payload_max_ttl.as_deref() {
+                        let parsed = humantime::parse_duration(ttl).map_err(|_| {
+                            CamelError::Config(format!(
+                                "cache_repo.payload_max_ttl: invalid duration '{ttl}'"
+                            ))
+                        })?;
+                        if parsed.is_zero() {
+                            return Err(CamelError::Config(
+                                "cache_repo.payload_max_ttl must be positive (greater than zero)"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    // Inline/unset mode: no payload field may carry a value.
+                    if cache.payload_dir.is_some() {
+                        return Err(CamelError::Config(
+                            "cache_repo.payload_dir requires payload = \"disk\"".to_string(),
+                        ));
+                    }
+                    if cache.payload_sweep_interval.is_some() {
+                        return Err(CamelError::Config(
+                            "cache_repo.payload_sweep_interval requires payload = \"disk\""
+                                .to_string(),
+                        ));
+                    }
+                    if cache.payload_max_ttl.is_some() {
+                        return Err(CamelError::Config(
+                            "cache_repo.payload_max_ttl requires payload = \"disk\"".to_string(),
+                        ));
+                    }
+                }
             }
             if cache.backend == "redb" {
                 if cache.max_capacity.is_some() {

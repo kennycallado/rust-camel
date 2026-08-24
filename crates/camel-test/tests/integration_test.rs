@@ -826,6 +826,7 @@ async fn circuit_breaker_fallback_gate_path_serves_body() {
             "tile-xyz",
             CacheEntry {
                 bytes: b"tile-stale-value".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Text,
                 expires_at: None,
             },
@@ -941,6 +942,7 @@ async fn circuit_breaker_fallback_layer_path_serves_body() {
             "tile-xyz",
             CacheEntry {
                 bytes: b"tile-stale-value".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Text,
                 expires_at: None,
             },

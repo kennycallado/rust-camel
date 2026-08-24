@@ -247,6 +247,7 @@ async fn write_back(
     if serialized.len() <= max_entry_bytes {
         let entry = CacheEntry {
             bytes: serialized,
+            payload_path: None,
             content_type,
             expires_at: None,
         };
@@ -443,6 +444,7 @@ impl CacheService {
                 // into_bytes already enforced max_entry_bytes, so it fits by construction.
                 let entry = CacheEntry {
                     bytes: materialized.to_vec(),
+                    payload_path: None,
                     content_type: ContentType::Bytes,
                     expires_at: None,
                 };
@@ -1366,6 +1368,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"cached-payload".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: None,
             },
@@ -1669,6 +1672,7 @@ mod tests {
         run_case(
             CacheEntry {
                 bytes: b"raw".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: None,
             },
@@ -1678,6 +1682,7 @@ mod tests {
         run_case(
             CacheEntry {
                 bytes: b"hi".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Text,
                 expires_at: None,
             },
@@ -1687,6 +1692,7 @@ mod tests {
         run_case(
             CacheEntry {
                 bytes: br#"{"k":1}"#.to_vec(),
+                payload_path: None,
                 content_type: ContentType::Json,
                 expires_at: None,
             },
@@ -1696,6 +1702,7 @@ mod tests {
         run_case(
             CacheEntry {
                 bytes: b"<a/>".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Xml,
                 expires_at: None,
             },
@@ -1742,6 +1749,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"stale-payload".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Text,
                 expires_at: None,
             },
@@ -1848,6 +1856,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"stale-payload".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: Some(SystemTime::now() - Duration::from_millis(1)),
             },
@@ -1880,6 +1889,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"fresh-payload".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
             },
@@ -2063,6 +2073,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"to-go".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: None,
             },
@@ -2184,6 +2195,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"cached".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: None,
             },
@@ -2259,6 +2271,7 @@ mod tests {
             "k",
             CacheEntry {
                 bytes: b"v".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: None,
             },
@@ -2370,6 +2383,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"cached".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: None,
             },
@@ -2403,6 +2417,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"to-go".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: None,
             },
@@ -2465,6 +2480,7 @@ mod tests {
             "cache-key",
             CacheEntry {
                 bytes: b"to-go".to_vec(),
+                payload_path: None,
                 content_type: ContentType::Bytes,
                 expires_at: None,
             },
@@ -2501,6 +2517,7 @@ mod tests {
                 key,
                 CacheEntry {
                     bytes: key.as_bytes().to_vec(),
+                    payload_path: None,
                     content_type: ContentType::Bytes,
                     expires_at: None,
                 },
