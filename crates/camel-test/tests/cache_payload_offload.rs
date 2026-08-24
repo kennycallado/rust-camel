@@ -22,8 +22,10 @@
 //! the file name, so worst-case reclamation is `ttl + stale_retention +
 //! sweep_interval` plus up to one second of truncation plus one sweep
 //! tick. The sweeper tests therefore poll with `wait::wait_until`
-//! (5s budget) instead of a fixed sleep — a bare 500ms sleep would
-//! flake whenever the write lands early in a wall-clock second.
+//! (8s budget) instead of a fixed sleep — a bare 500ms sleep would
+//! flake whenever the write lands early in a wall-clock second. The
+//! sweep interval cannot shrink below 1s (validation floor), so the
+//! budgets must absorb the full second-scale worst case.
 //!
 //! Each test provisions its own Redis container so keyspaces and blob
 //! directories stay isolated.
@@ -327,18 +329,14 @@ async fn redis_disk_offload_early_sweep_is_miss() {
 async fn redis_disk_offload_sweeper_reclaims_orphan() {
     let (_container, url) = own_redis().await;
     let dir = tempfile::TempDir::new().expect("payload dir tempdir");
-    let ctx = context_with_disk_offload(
-        &url,
-        dir.path(),
-        "1ms",
-        "payload_sweep_interval = \"100ms\"",
-    )
-    .await;
+    let ctx =
+        context_with_disk_offload(&url, dir.path(), "1ms", "payload_sweep_interval = \"1s\"").await;
     let repo = ctx
         .cache_repository("redis")
         .expect("redis cache repository registered");
 
-    // ttl 100ms + retention 1ms + sweep 100ms: the entry dies almost
+    // ttl 100ms + retention 1ms + sweep 1s (the validation floor —
+    // sub-second intervals are rejected): the entry dies almost
     // immediately, orphaning the blob for the sweeper to reclaim.
     repo.set(
         "k",
@@ -349,11 +347,12 @@ async fn redis_disk_offload_sweeper_reclaims_orphan() {
     .expect("set succeeds");
     let blob = the_blob(dir.path());
 
-    // Death epochs truncate to whole seconds (worst case ~1.3s here), so
-    // poll with a generous budget instead of a fixed sleep.
+    // Death epochs truncate to whole seconds and the sweep ticks every
+    // 1s (worst case ~3.1s here), so poll with a generous budget
+    // instead of a fixed sleep.
     support::wait::wait_until(
         "sweeper reclaims the dead payload blob",
-        Duration::from_secs(5),
+        Duration::from_secs(8),
         Duration::from_millis(100),
         || async { Ok(!blob.exists()) },
     )
@@ -373,7 +372,7 @@ async fn redis_disk_offload_no_ttl_capped() {
         &url,
         dir.path(),
         "1ms",
-        "payload_sweep_interval = \"100ms\"\npayload_max_ttl = \"200ms\"",
+        "payload_sweep_interval = \"1s\"\npayload_max_ttl = \"1s\"",
     )
     .await;
     let repo = ctx
@@ -385,19 +384,28 @@ async fn redis_disk_offload_no_ttl_capped() {
         .expect("set without ttl succeeds");
     let blob = the_blob(dir.path());
 
-    // The fabricated 200ms expiry has passed (redis EXAT dropped the row
-    // at ~ttl + retention): get must read as absent.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let got = repo.get("k").await.expect("get succeeds");
-    assert!(
-        got.is_none(),
-        "no-ttl entry must expire at payload_max_ttl, got {got:?}"
-    );
+    // The fabricated 1s expiry (the validation floor) has passed (redis
+    // EXAT dropped the row at ~ttl + retention): poll for the miss —
+    // a fixed sleep would have to out-live the full second and still
+    // race the truncation.
+    support::wait::wait_until(
+        "no-ttl entry expires at payload_max_ttl",
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+        || async {
+            repo.get("k")
+                .await
+                .map(|entry| entry.is_none())
+                .map_err(|e| e.to_string())
+        },
+    )
+    .await
+    .expect("no-ttl entry must expire at payload_max_ttl");
 
     // The dead blob is swept from the payload dir.
     support::wait::wait_until(
         "sweeper reclaims the capped payload blob",
-        Duration::from_secs(5),
+        Duration::from_secs(8),
         Duration::from_millis(100),
         || async { Ok(!blob.exists()) },
     )
