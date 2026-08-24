@@ -204,10 +204,11 @@ never applies retroactively:
   row outlives its blob: the row is reclaimed at
   `expires_at + new_retention` (redb recomputes with the runtime value),
   while the blob dies at its baked epoch. Reads in between are a MISS with
-  WARN. The window is bounded by
-  `new_retention − old_retention − payload_sweep_interval` and closes by
-  itself when the redb sweep removes the row — cold keys heal without
-  churn. Pair a large raise with `clear()` when stale-serve continuity
+  WARN. The window is nominally bounded by
+  `new_retention − old_retention − payload_sweep_interval` (the grace baked
+  into the blob), plus up to one redb sweep tick before the row goes. It
+  closes by itself when the redb sweep removes the row — cold keys heal
+  without churn. Pair a large raise with `clear()` when stale-serve continuity
   matters during the transition. Redis has no such window: the key expires
   at the immutable EXAT set at write time, which is the same death line the
   blob already encodes.
