@@ -141,6 +141,11 @@ impl CacheRepository for MemoryCacheRepository {
 
     async fn clear(&self) -> Result<(), CamelError> {
         self.inner.invalidate_all();
+        // moka removal is eventual: without draining pending maintenance
+        // tasks, `entry_count` can still report evicted entries right after
+        // clear returns (bd rc-cdnz). Draining keeps clear observably
+        // synchronous for stats snapshots.
+        self.inner.run_pending_tasks().await;
         Ok(())
     }
 
@@ -203,6 +208,27 @@ mod tests {
     async fn invalidate_is_noop_on_absent_key() {
         let repo = MemoryCacheRepository::new("test", 100);
         repo.invalidate("absent").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_leaves_entry_count_immediately_zero() {
+        // Regression guard (bd rc-cdnz): moka removal is eventual, so clear
+        // drains pending maintenance tasks before returning. Loop to catch
+        // any scheduling jitter the drain might miss.
+        let repo = MemoryCacheRepository::new("test", 100);
+        for round in 0..20 {
+            for i in 0..5 {
+                repo.set(&format!("k{round}-{i}"), entry(), None)
+                    .await
+                    .unwrap();
+            }
+            repo.clear().await.unwrap();
+            assert_eq!(
+                repo.stats().await.entries,
+                0,
+                "entry count must be zero right after clear (round {round})"
+            );
+        }
     }
 
     #[tokio::test]

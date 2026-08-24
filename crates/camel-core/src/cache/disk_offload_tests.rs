@@ -68,25 +68,6 @@ fn dir_names(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Poll `inner.stats().entries` until it reaches `want`.
-///
-/// `MemoryCacheRepository::clear` maps to moka `invalidate_all`, whose
-/// actual removal runs as a background maintenance task; `entry_count`
-/// may briefly report stale counts under load (a documented moka
-/// caveat). Polling keeps the post-clear assertions deterministic
-/// without loosening them.
-async fn entries_settle_to(inner: &MemoryCacheRepository, want: u64) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let got = inner.stats().await.entries;
-        if got == want || tokio::time::Instant::now() >= deadline {
-            assert_eq!(got, want, "inner index entry count must settle");
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
 // ── WARN capture ────────────────────────────────────────────────────────
 
 /// Records the `message` field of each event into a shared buffer.
@@ -572,7 +553,7 @@ async fn clear_unlinks_dir_and_delegates() {
 
     repo.clear().await.expect("clear");
 
-    entries_settle_to(&inner, 0).await;
+    assert_eq!(inner.stats().await.entries, 0);
     assert!(
         dir_names(dir.path()).is_empty(),
         "payload dir must hold no blob files after clear"
@@ -610,7 +591,7 @@ async fn clear_swallows_unlink_failures() {
         cleared.is_ok(),
         "clear must never Err on its own unlink failures: {cleared:?}"
     );
-    entries_settle_to(&inner, 0).await;
+    assert_eq!(inner.stats().await.entries, 0);
     assert!(
         warns.lock().iter().any(|m| m.contains("unlink")),
         "expected WARNs about failed blob unlinks, got {:?}",
