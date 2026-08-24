@@ -10,8 +10,12 @@ document SHALL contain exactly one route source: `routeFiles` (paths to
 route YAML files, resolved relative to the test document's directory),
 `routeFilesFromRoot` (paths resolved against the nearest ancestor
 `Camel.toml` directory), or inline `routes` (same schema as route files).
-It MAY contain optional `inputs` and SHALL contain a mandatory non-empty
-`expects` map keyed by mock endpoint name. It MAY contain an optional
+It MAY contain optional `inputs` (each input MAY declare an optional
+`expectReply` block, see Reply capture and assertion) and SHALL contain a
+mandatory non-empty `expects` map keyed by mock endpoint name — except that
+a document MAY omit `expects` (or leave it empty) when at least one input
+declares `expectReply`; a document with neither endpoint expectations nor any
+`expectReply` SHALL be rejected. It MAY contain an optional
 `intercepts` map keyed by real endpoint URI (any scheme except `mock:`),
 where each key is used verbatim (no trimming or normalization; query
 parameters are significant and participate in exact matching) and each value
@@ -36,9 +40,9 @@ SHALL be rejected, including inside intercept action objects.
 
 #### Scenario: empty expects rejected
 
-- **Given** a test document with `expects: {}` or no `expects` key
+- **Given** a test document with `expects: {}` or no `expects` key and no input declaring `expectReply`
 - **When** `camel test` parses the document
-- **Then** parsing fails with exit code 2 stating that `expects` is mandatory
+- **Then** parsing fails with exit code 2 stating that `expects` is mandatory unless an input declares `expectReply`
 
 #### Scenario: both routeFiles and routes rejected
 
@@ -223,13 +227,14 @@ settle-timeout message (exit 1), never hang.
 document-level error (unreadable file, parse error, boot failure, or input
 delivery failure such as a processor error propagating out of the route)
 SHALL be reported and execution SHALL continue with the next document; a
-document whose input delivery failed SHALL skip settling and endpoint
-evaluation for that document. Exit codes: 0 when every expectation of every
-document passes; 1 when any expectation fails or a settle timeout occurs;
-2 for misuse, unreadable files, document/route parse errors, and input
-delivery failures. When classes coexist, precedence is 2 > 1 > 0. stdout
-SHALL carry one `PASS`/`FAIL` line per endpoint per document and a final
-`N passed, M failed` summary.
+document whose input delivery failed SHALL skip settling, endpoint
+evaluation, and reply evaluation for that document. Exit codes: 0 when every
+expectation of every document passes; 1 when any expectation (endpoint or
+reply) fails or a settle timeout occurs; 2 for misuse, unreadable files,
+document/route parse errors, and input delivery failures. When classes
+coexist, precedence is 2 > 1 > 0. stdout SHALL carry one `PASS`/`FAIL` line
+per endpoint per document, one `PASS`/`FAIL` line per asserted reply per
+document, and a final `N passed, M failed` summary.
 
 #### Scenario: all pass
 - **Given** a document whose expectations all hold
@@ -509,4 +514,80 @@ invocation outside the list SHALL be a document error (exit 2).
 - **Given** a `*.test.yaml` file containing an intentionally invalid `beans:` declaration (`beans: {x: {kind: teleport}}`) and a route file loadable by `camel run`
 - **When** `camel run` executes the route file
 - **Then** `camel run` never reads the test document; neither stdout nor stderr contains the test-document filename, the invalid kind name `teleport` (which exists only in the test document), or the validation fragment `unknown variant`
+
+### Requirement: Reply capture and assertion
+
+`camel test` SHALL capture the reply exchange each `direct:` input's producer
+oneshot returns and SHALL support asserting it via an optional per-input
+`expectReply: {body?, headers?}` block. Reply assertions SHALL be exact-match
+against the reply message — the reply's `output` message when the route set
+one, else its final input message — body (string or JSON) and/or an exact
+`headers` submap (JSON values, matching `Message.headers`). At least one of
+`body`/`headers` SHALL be present (an empty `expectReply` is a document
+error, exit 2). Replies pair with inputs by delivery order (delivery is
+strictly sequential). A failed reply assertion SHALL be an assertion failure
+— a `FAIL` line counted into the summary and exit code 1 — never a document
+error. Inputs without `expectReply` SHALL behave exactly as before (reply
+captured, nothing asserted). The document-level `expects` relaxation for
+reply-only documents is specified in the MODIFIED parsing requirement.
+
+#### Scenario: reply body asserted
+
+- **Given** a test document with a route `from: direct:in` whose steps set the body to `enriched` then `to: mock:out`, and one input `{to: direct:in, body: "x", expectReply: {body: "enriched"}}`
+- **When** `camel test` executes the document
+- **Then** the reply assertion passes, a PASS line is printed for the reply, and the summary counts it
+
+#### Scenario: reply body mismatch fails with exit 1
+
+- **Given** the same route with an input `expectReply: {body: "wrong"}`
+- **When** `camel test` executes the document
+- **Then** a FAIL line is printed for the reply, the summary counts one failed, and the exit code is 1
+
+#### Scenario: reply headers asserted
+
+- **Given** a route whose steps set header `stamp` to `yes` then `to: mock:out`, and an input `expectReply: {headers: {stamp: "yes"}}`
+- **When** `camel test` executes the document
+- **Then** the reply assertion passes
+
+#### Scenario: reply composes with endpoint expectations
+
+- **Given** a document whose route both transforms the body and forwards to `mock:out`, with `expects: {mock:out: {count: 1, bodies: ["enriched"]}}` and `expectReply: {body: "enriched"}` on the input
+- **When** `camel test` executes the document
+- **Then** both the endpoint expectation and the reply assertion evaluate and both PASS lines print, exit code 0
+
+#### Scenario: absent expectReply keeps behavior
+
+- **Given** a document identical to the body-asserted scenario but without `expectReply`
+- **When** `camel test` executes the document
+- **Then** no reply line is printed and the result is identical to the pre-change behavior (endpoint expectations only)
+
+#### Scenario: empty expectReply is a document error
+
+- **Given** a test document with an input `expectReply: {}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 stating `body` or `headers` must be present
+
+#### Scenario: multiple inputs pair by order
+
+- **Given** a route that appends a per-input marker and two inputs, the first `expectReply: {body: "first-done"}`, the second `expectReply: {body: "second-done"}`
+- **When** `camel test` executes the document
+- **Then** each reply is matched to its own input's expectation and both pass
+
+#### Scenario: reply-only document
+
+- **Given** a test document with no `expects` block, one route `from: direct:in` whose steps set the body to `done`, and one input `{to: direct:in, body: "x", expectReply: {body: "done"}}`
+- **When** `camel test` executes the document
+- **Then** the document is valid, the reply assertion passes, and the exit code is 0
+
+#### Scenario: JSON reply body
+
+- **Given** a route whose steps set the body to a JSON document and an input `expectReply: {body: {"status": "ok"}}` (JSON form)
+- **When** `camel test` executes the document
+- **Then** the reply assertion passes against the JSON body
+
+#### Scenario: bean stub reply
+
+- **Given** a route `from: direct:in` with a `bean: {name: enricher, method: enrich}` step backed by a `beans: {enricher: {kind: setBody, config: {body: enriched}}}` stub, and an input `expectReply: {body: "enriched"}`
+- **When** `camel test` executes the document
+- **Then** the reply assertion passes against the stub's transformation
 

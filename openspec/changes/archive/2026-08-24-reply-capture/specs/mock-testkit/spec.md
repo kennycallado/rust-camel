@@ -153,7 +153,7 @@ SHALL be rejected, including inside intercept action objects.
 - **When** `camel test` parses the document
 - **Then** parsing fails with exit code 2 and a message naming the unknown field
 
-#### Scenario: empty expects rejected without expectReply
+#### Scenario: empty expects rejected
 
 - **Given** a test document with `expects: {}` or no `expects` key and no input declaring `expectReply`
 - **When** `camel test` parses the document
