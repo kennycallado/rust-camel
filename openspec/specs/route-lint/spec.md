@@ -19,8 +19,8 @@ hexagonal-architecture test SHALL be extended to assert that `camel-lint` does n
 
 #### Scenario: Valid document yields no diagnostics
 
-- **GIVEN** a syntactically valid, schema-valid route file whose URIs and options are all known to the catalog
-- **WHEN** the engine runs all five rules over the document
+- **GIVEN** a syntactically valid, schema-valid route file whose URIs and options are all known to the catalog and whose `to`/`endpoints` sends target no `mock:` endpoint
+- **WHEN** the engine runs all six rules over the document
 - **THEN** the engine returns an empty diagnostic list
 
 #### Scenario: Diagnostic span is byte-exact, not a line range
@@ -334,7 +334,9 @@ engine or CLI misuse (e.g. an unreadable or missing file).
 The `camel-cli` integration test `tests/lint_corpus.rs` SHALL discover every route file in the
 repository by a glob rule (covering `examples/**/*.{yaml,json}` and
 `crates/**/tests/fixtures/**/*.{yaml,json}`, plus any route fixtures referenced by the
-schema-validation corpus), run the engine with the production catalog over each, and compare
+schema-validation corpus), run the engine with the production catalog over each, apply the
+same `R-MOCK-IN-PRODUCTION` fixture-path suppression the CLI applies (files under a
+`tests/fixtures/` path component contribute no `R-MOCK-IN-PRODUCTION` expectations), and compare
 the emitted diagnostics against a checked-in baseline file
 `tests/fixtures/lint-corpus-baseline.ron` (parsed with the `ron` crate, a `camel-cli`
 dev-dependency). The test SHALL fail if any emitted diagnostic is absent from the baseline (a
@@ -347,7 +349,7 @@ the merge gate: a rule that cannot meet zero false positives on the corpus SHALL
 
 #### Scenario: Corpus run matches the checked-in baseline
 
-- **GIVEN** the engine built with the production catalog and all five rules active, and the checked-in baseline
+- **GIVEN** the engine built with the production catalog and all six rules active, the fixture-path suppression, and the checked-in baseline
 - **WHEN** `tests/lint_corpus.rs` runs over the discovered corpus
 - **THEN** the set of emitted diagnostics equals the baseline set exactly; the test passes
 
@@ -574,4 +576,78 @@ test documents.
 - **GIVEN** a test document whose `expects` and `inputs` keys do not conform to the route schema
 - **WHEN** `camel lint` runs on it
 - **THEN** no R-SCHEMA or other rule diagnostics are emitted for the test document
+
+### Requirement: R-MOCK-IN-PRODUCTION warns on intercept-replaceable mock sends
+
+The lint catalog SHALL include a rule with stable code `R-MOCK-IN-PRODUCTION`
+that emits a `Warning` diagnostic for every endpoint whose origin key is
+`to` or `endpoints` (the send surfaces that compile to interceptable
+`To` steps) and whose URI value starts with `mock:`. Endpoints emitted from
+other URI-bearing keys (`from`, `uri`, `wire_tap`, `enrich`, `poll_enrich`,
+`dead_letter_channel`) SHALL NOT be flagged: no declarative interception
+replacement exists for them. The diagnostic message SHALL point at the
+migration: declare `intercepts:` (`skipTo`/`divertCopyTo`) in a
+`*.test.yaml` instead (see the testing guide). Warning severity SHALL NOT
+affect the `camel lint` exit code. The CLI SHALL suppress
+`R-MOCK-IN-PRODUCTION` (and only that code) for files under a
+`tests/fixtures/` path component — the fixture exemption of ADR-0064 §5
+("inline `mock:` stays legitimate in pure test-fixture routes that
+`camel run` never loads"); other rules' diagnostics SHALL be unaffected by
+the suppression. Escalation to Error severity is a documented future change
+gated on ecosystem conversion (ADR-0064 §5 lazy migration, no flag-day); it
+SHALL NOT be encoded in this rule's initial severity.
+
+#### Scenario: to mock send warns
+
+- **GIVEN** a route file with a step `to: mock:out`
+- **WHEN** the engine runs the rule over the document
+- **THEN** exactly one `R-MOCK-IN-PRODUCTION` Warning is emitted with a span at the `mock:out` URI and a message naming the intercepts migration
+
+#### Scenario: endpoints recipient list mock warns per occurrence
+
+- **GIVEN** a route file with a recipient list `endpoints: [mock:a, mock:b]`
+- **WHEN** the engine runs the rule over the document
+- **THEN** two `R-MOCK-IN-PRODUCTION` Warnings are emitted, one per mock occurrence, each with its own span
+
+#### Scenario: mock with query parameters warns
+
+- **GIVEN** a route file with a step `to: mock:out?count=2`
+- **WHEN** the engine runs the rule over the document
+- **THEN** one `R-MOCK-IN-PRODUCTION` Warning is emitted for the occurrence
+
+#### Scenario: two to-mock steps warn twice
+
+- **GIVEN** a route file with steps `to: mock:first` and `to: mock:second`
+- **WHEN** the engine runs the rule over the document
+- **THEN** two `R-MOCK-IN-PRODUCTION` Warnings are emitted with distinct spans
+
+#### Scenario: non-mock send is silent
+
+- **GIVEN** a route file with a step `to: kafka:orders`
+- **WHEN** the engine runs the rule over the document
+- **THEN** no `R-MOCK-IN-PRODUCTION` diagnostic is emitted
+
+#### Scenario: non-interceptable origins are silent
+
+- **GIVEN** a route file containing `wire_tap: mock:tap`, `enrich: mock:enr`, `poll_enrich: mock:poll`, `enrich: {uri: mock:uri}` (object form), `from: mock:src`, and `dead_letter_channel: mock:dlq`
+- **WHEN** the engine runs the rule over the document
+- **THEN** no `R-MOCK-IN-PRODUCTION` diagnostic is emitted for any of them
+
+#### Scenario: warning does not affect exit code
+
+- **GIVEN** a route file whose only finding is an `R-MOCK-IN-PRODUCTION` Warning
+- **WHEN** `camel lint <file>` runs
+- **THEN** the diagnostic is printed and the exit code is 0
+
+#### Scenario: fixture path suppresses only the mock rule
+
+- **GIVEN** a route file under a `tests/fixtures/` path containing both `to: mock:result` and an unknown option for a known scheme
+- **WHEN** `camel lint <file>` runs
+- **THEN** no `R-MOCK-IN-PRODUCTION` diagnostic is emitted and the unknown-option Error diagnostic is emitted (suppression is code-scoped)
+
+#### Scenario: test documents are skipped
+
+- **GIVEN** a `*.test.yaml` containing an `intercepts:` block with `mock:` targets
+- **WHEN** `camel lint` is invoked on it
+- **THEN** the file is skipped with the existing info diagnostic and no `R-MOCK-IN-PRODUCTION` is emitted
 
