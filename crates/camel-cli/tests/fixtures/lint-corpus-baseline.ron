@@ -103,14 +103,6 @@
         [("R-URI-known:unverified-scheme", "info")],
     ),
 
-    // intercepts-demo.yaml (added by declarative-intercepts). The `kafka:`
-    // scheme is not registered by `register_builtin_components_for_lint`,
-    // so unverified-scheme Info is by-design, matching the parameters.json
-    // precedent.
-    (
-        "examples/yaml-dsl/config/intercepts-demo.yaml",
-        [("R-URI-known:unverified-scheme", "info")],
-    ),
 
     // R-SECRET: `authPassword` (catalog-secret http option) supplied as a
     // literal via the sibling `parameters:` map instead of the query string.
