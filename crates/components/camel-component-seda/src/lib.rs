@@ -560,6 +560,10 @@ struct SedaConsumer {
     started: bool,
     cancel_token: CancellationToken,
     forwarder_handles: Vec<JoinHandle<Result<(), CamelError>>>,
+    /// Handle to the forwarder-shared receiver for Single mode. Set on start,
+    /// `None` for Fanout. Used by `stop()` to restore the receiver into the
+    /// endpoint state so a later consumer can start again.
+    shared_rx: Option<Arc<AsyncMutex<Option<mpsc::Receiver<ExchangeEnvelope>>>>>,
     /// Phase B will use this for `rt.metrics().increment_errors(...)` and
     /// `rt.health().force_unhealthy_for_route(...)` calls per ADR-0012.
     #[allow(dead_code)]
@@ -578,6 +582,7 @@ impl SedaConsumer {
             started: false,
             cancel_token: CancellationToken::new(),
             forwarder_handles: Vec::new(),
+            shared_rx: None,
             runtime,
         }
     }
@@ -615,7 +620,8 @@ impl Consumer for SedaConsumer {
                 })?;
                 drop(rx_guard);
 
-                let shared_rx = Arc::new(AsyncMutex::new(receiver));
+                let shared_rx = Arc::new(AsyncMutex::new(Some(receiver)));
+                self.shared_rx = Some(Arc::clone(&shared_rx));
                 let concurrent = self.state.config.concurrent_consumers;
 
                 for _ in 0..concurrent {
@@ -626,9 +632,15 @@ impl Consumer for SedaConsumer {
                         loop {
                             let envelope = {
                                 let mut guard = shared_rx.lock().await;
-                                tokio::select! {
-                                    env = guard.recv() => env,
-                                    _ = cancel.cancelled() => return Ok(()),
+                                match guard.as_mut() {
+                                    Some(rx) => {
+                                        tokio::select! {
+                                            env = rx.recv() => env,
+                                            _ = cancel.cancelled() => return Ok(()),
+                                        }
+                                    }
+                                    // Stop took the receiver back; exit cleanly.
+                                    None => return Ok(()),
                                 }
                             };
                             let Some(envelope) = envelope else {
@@ -684,8 +696,18 @@ impl Consumer for SedaConsumer {
             handle.abort();
         }
         match &self.state.mode {
-            SedaMode::Single { active, .. } => {
+            SedaMode::Single { rx, active, .. } => {
+                // Flag-first: clear `active` before publishing the restored
+                // receiver so a concurrent start that acquires the receiver
+                // does so only after `active` is false, making its own
+                // `active.store(true)` the final write (race closure).
                 active.store(false, Ordering::SeqCst);
+                if let Some(shared_rx) = self.shared_rx.take() {
+                    let receiver = shared_rx.lock().await.take();
+                    if let Some(recv) = receiver {
+                        *rx.lock().unwrap_or_else(|e| e.into_inner()) = Some(recv);
+                    }
+                }
             }
             SedaMode::Fanout { subscribers } => {
                 subscribers
@@ -1758,7 +1780,7 @@ mod consumer_producer_tests {
     #[tokio::test]
     async fn test_seda_concurrent_forwarders_count() {
         let comp = create_component();
-        let ep = comp
+        let _ep = comp
             .create_endpoint("seda:cfc?concurrentConsumers=4", &NoOpComponentContext)
             .unwrap();
 
@@ -1855,7 +1877,7 @@ mod consumer_producer_tests {
     #[tokio::test]
     async fn test_seda_concurrent_consumers_one_still_single() {
         let comp = create_component();
-        let ep = comp
+        let _ep = comp
             .create_endpoint("seda:cco?concurrentConsumers=1", &NoOpComponentContext)
             .unwrap();
 
@@ -1874,5 +1896,300 @@ mod consumer_producer_tests {
         assert_eq!(consumer.forwarder_count(), 1);
 
         consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_consumer_restart_restores_receiver() {
+        let state = Arc::new(SedaEndpointState::new(
+            &SedaConfig::from_uri("seda:restart1").unwrap(),
+        ));
+
+        // First cycle: A starts, stops; fresh B starts -> Ok, active.
+        let mut a = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_a, _rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_a = ConsumerContext::new(
+            tx_a,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        a.start(ctx_a).await.unwrap();
+        a.stop().await.unwrap();
+
+        let mut b = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_b, _rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_b = ConsumerContext::new(
+            tx_b,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        b.start(ctx_b).await.unwrap();
+        assert!(state.has_active_consumers());
+        b.stop().await.unwrap();
+
+        // Repeat full stop/start cycle on fresh instances 3x — every start Ok.
+        for _ in 0..3 {
+            let mut c = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+            let (tx_c, _rx_c) = mpsc::channel::<ExchangeEnvelope>(16);
+            let ctx_c = ConsumerContext::new(
+                tx_c,
+                CancellationToken::new(),
+                "seda-test-route".to_string(),
+            );
+            c.start(ctx_c).await.unwrap();
+            assert!(state.has_active_consumers());
+            c.stop().await.unwrap();
+        }
+
+        // After a restart, producer send succeeds (unfenced).
+        let mut d = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_d, _rx_d) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_d = ConsumerContext::new(
+            tx_d,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        d.start(ctx_d).await.unwrap();
+
+        let ep = SedaEndpoint {
+            uri: "seda:restart1".to_string(),
+            config: SedaConfig::from_uri("seda:restart1").unwrap(),
+            state: Arc::clone(&state),
+        };
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        let result = producer
+            .oneshot(Exchange::new(Message::new("post-restart")))
+            .await;
+        assert!(result.is_ok());
+
+        d.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_consumer_restart_preserves_buffered_envelopes() {
+        let state = Arc::new(SedaEndpointState::new(
+            &SedaConfig::from_uri("seda:restart2").unwrap(),
+        ));
+
+        // Capacity-1 context channel; receiver retained but NOT read (blocked context).
+        let (ctx_tx, mut retained_rx) = mpsc::channel::<ExchangeEnvelope>(1);
+        let ctx = ConsumerContext::new(
+            ctx_tx.clone(),
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+
+        let mut a = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        a.start(ctx).await.unwrap();
+
+        // Push 3 identifiable envelopes directly through the Single-mode tx.
+        let tx = match &state.mode {
+            SedaMode::Single { tx, .. } => tx.clone(),
+            SedaMode::Fanout { .. } => panic!("expected single mode"),
+        };
+        // Establish the steady state observably instead of with a fixed sleep.
+        // Phase 1: e1 alone. Wait until the forwarder delivered e1 into the
+        // (unread) context channel: retained receiver length == 1 proves the
+        // forwarder parked its send and went back to recv.
+        for body in ["e1"] {
+            tx.send(ExchangeEnvelope {
+                exchange: Exchange::new(Message::new(body)),
+                reply_tx: None,
+            })
+            .await
+            .unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(2_000);
+        while retained_rx.len() != 1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "forwarder never delivered e1; retained_rx.len() = {}",
+                retained_rx.len()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // Phase 2: e2 only. The forwarder dequeues e2 (FIFO) and parks on
+        // the send into the still-full context channel — that send cannot
+        // progress because nothing reads the retained receiver before stop.
+        // Yield a few slots so the forwarder reaches that parked send.
+        tx.send(ExchangeEnvelope {
+            exchange: Exchange::new(Message::new("e2")),
+            reply_tx: None,
+        })
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        // Phase 3: e3 last. The forwarder is parked on the e2 send, so e3
+        // CANNOT be dequeued before stop — it is deterministically the
+        // still-queued envelope the restore path must preserve.
+        tx.send(ExchangeEnvelope {
+            exchange: Exchange::new(Message::new("e3")),
+            reply_tx: None,
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        a.stop().await.unwrap();
+
+        // Start fresh B on a clone of the SAME sender wired to the retained receiver.
+        let mut b = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let ctx_b = ConsumerContext::new(
+            ctx_tx,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        b.start(ctx_b).await.unwrap();
+
+        // Drain the retained receiver with a timeout; assert e1 and e3 arrive.
+        let mut bodies = Vec::new();
+        let drained = tokio::time::timeout(Duration::from_millis(500), async {
+            while let Some(env) = retained_rx.recv().await {
+                bodies.push(env.exchange.input.body.as_text().unwrap().to_string());
+                if bodies.len() >= 2 {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(drained.is_ok(), "timed out draining retained receiver");
+        assert!(bodies.contains(&"e1".to_string()));
+        assert!(bodies.contains(&"e3".to_string()));
+
+        b.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_consumer_concurrent_restart() {
+        let state = Arc::new(SedaEndpointState::new(
+            &SedaConfig::from_uri("seda:restart3?concurrentConsumers=4").unwrap(),
+        ));
+
+        let mut a = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_a, _rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_a = ConsumerContext::new(
+            tx_a,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        a.start(ctx_a).await.unwrap();
+        assert_eq!(a.forwarder_count(), 4);
+        a.stop().await.unwrap();
+
+        let mut b = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_b, mut rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_b = ConsumerContext::new(
+            tx_b,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        b.start(ctx_b).await.unwrap();
+        assert_eq!(b.forwarder_count(), 4);
+
+        // Envelope sent post-restart (via producer after B active) is delivered on B's context receiver.
+        let ep = SedaEndpoint {
+            uri: "seda:restart3?concurrentConsumers=4".to_string(),
+            config: SedaConfig::from_uri("seda:restart3?concurrentConsumers=4").unwrap(),
+            state: Arc::clone(&state),
+        };
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        producer
+            .oneshot(Exchange::new(Message::new("post-restart")))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(Duration::from_millis(500), rx_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.exchange.input.body.as_text(), Some("post-restart"));
+
+        b.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_second_start_while_active_still_errors() {
+        let state = Arc::new(SedaEndpointState::new(
+            &SedaConfig::from_uri("seda:restart4").unwrap(),
+        ));
+
+        let mut a = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_a, _rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_a = ConsumerContext::new(
+            tx_a,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        a.start(ctx_a).await.unwrap();
+
+        let mut c = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_c, _rx_c) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_c = ConsumerContext::new(
+            tx_c,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        let result = c.start(ctx_c).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already has a registered consumer")
+        );
+
+        a.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fanout_consumer_restart_cycle() {
+        let state = Arc::new(SedaEndpointState::new(
+            &SedaConfig::from_uri("seda:fanrestart?multipleConsumers=true").unwrap(),
+        ));
+
+        let mut a = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_a, _rx_a) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_a = ConsumerContext::new(
+            tx_a,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        a.start(ctx_a).await.unwrap();
+        a.stop().await.unwrap();
+
+        let mut b = SedaConsumer::new(Arc::clone(&state), next_consumer_id(), rt());
+        let (tx_b, mut rx_b) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx_b = ConsumerContext::new(
+            tx_b,
+            CancellationToken::new(),
+            "seda-test-route".to_string(),
+        );
+        b.start(ctx_b).await.unwrap();
+
+        let ep = SedaEndpoint {
+            uri: "seda:fanrestart?multipleConsumers=true".to_string(),
+            config: SedaConfig::from_uri("seda:fanrestart?multipleConsumers=true").unwrap(),
+            state: Arc::clone(&state),
+        };
+        let producer = ep.create_producer(rt(), &test_producer_ctx()).unwrap();
+        producer
+            .oneshot(Exchange::new(Message::new("fanout restart")))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(Duration::from_millis(500), rx_b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.exchange.input.body.as_text(),
+            Some("fanout restart")
+        );
+
+        b.stop().await.unwrap();
     }
 }

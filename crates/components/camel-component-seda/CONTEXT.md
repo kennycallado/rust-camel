@@ -37,7 +37,12 @@ others are crash-unsupervised during steady operation. This is accepted for v1.0
 SEDA honors the Component SPI shutdown contract. `background_task_handle()` transfers the primary
 forwarder handle to the Runtime for supervision. On shutdown, the Runtime aborts that handle and
 then calls `stop()`. `stop()` cancels the private token, aborts retained forwarders, and clears the
-active Consumer or fanout subscriber registration.
+ active Consumer or fanout subscriber registration. Single-mode `stop()` also restores the queue
+ receiver into the endpoint state (clearing the active flag first), so a fresh Consumer on the same
+ endpoint can start again. Route stop/start cycles work in default mode; resume shares the same
+ consumer-recreation path. Envelopes still queued inside the receiver when restoration occurs
+ survive the cycle and are delivered after restart; already-dequeued or in-flight envelopes keep
+ the existing best-effort shutdown behavior (no in-flight drain at stop).
 
 Route stop does not drain an in-flight reply. An interrupted InOut Producer can receive
 `CamelError::ChannelClosed`. This is the current best-effort contract for in-memory staging, not an

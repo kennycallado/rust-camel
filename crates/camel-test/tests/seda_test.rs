@@ -1,5 +1,9 @@
+use camel_api::{Exchange, Message};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::NoOpComponentContext;
 use camel_test::CamelTestContext;
+use std::sync::Arc;
+use tower::ServiceExt;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_seda_connects_two_routes() {
@@ -147,4 +151,68 @@ async fn test_seda_fanout_integration() {
 
     endpoint_a.assert_exchange_count(3).await;
     endpoint_b.assert_exchange_count(3).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn seda_single_consumer_survives_context_restart() {
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_seda()
+        .with_mock()
+        .build()
+        .await;
+
+    let consumer_route = RouteBuilder::from("seda:out")
+        .route_id("consumer-route")
+        .to("mock:result")
+        .build()
+        .unwrap();
+
+    let send_route = RouteBuilder::from("direct:in")
+        .route_id("send-route")
+        .to("seda:out")
+        .build()
+        .unwrap();
+
+    h.add_route(consumer_route).await.unwrap();
+    h.add_route(send_route).await.unwrap();
+    h.start().await;
+
+    // Stop/restart through the locked underlying context — NOT via
+    // h.stop()/h.start(): h.stop() permanently latches the harness `stopped`
+    // flag and would make the final teardown a no-op.
+    let mut ctx = h.ctx().lock().await;
+    ctx.stop().await.unwrap();
+    ctx.start().await.unwrap();
+    drop(ctx);
+
+    // Send one exchange into direct:in, holding a fresh lock across the whole
+    // resolve/create/send sequence.
+    let ctx = h.ctx().lock().await;
+    let component = ctx
+        .registry()
+        .get("direct")
+        .expect("direct component not registered");
+    let producer_ctx = ctx.producer_context();
+    let endpoint = component
+        .create_endpoint("direct:in", &*ctx)
+        .expect("failed to create direct endpoint");
+    let producer = endpoint
+        .create_producer(Arc::new(NoOpComponentContext), &producer_ctx)
+        .expect("failed to create direct producer");
+    producer
+        .oneshot(Exchange::new(Message::new("after-restart")))
+        .await
+        .expect("direct call should succeed");
+    drop(ctx);
+
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    endpoint
+        .await_exchanges(1, std::time::Duration::from_secs(5))
+        .await;
+    endpoint.assert_exchange_count(1).await;
+    let received = endpoint.get_received_exchanges().await;
+    assert_eq!(received[0].input.body.as_text(), Some("after-restart"));
+
+    h.stop().await;
 }

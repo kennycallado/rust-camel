@@ -485,14 +485,12 @@ async fn real_producer_readiness_is_driven_before_call_failure_verbatim() {
 /// A divert survives a route stop and restart: after restart the copy still
 /// reaches the tap and the real message still reaches the consumer.
 ///
-/// The consumer URI uses `multipleConsumers=true` (fanout mode): a fanout
-/// consumer registers a fresh subscriber on every start, so the consumer can
-/// re-register after the restart. A single-consumer seda endpoint consumes
-/// its one-shot receiver on the first start and cannot re-register — a
-/// pre-existing seda limitation independent of interception (bd rc-gwvs).
+/// The consumer URI uses the default single-consumer mode: stop restores the
+/// seda receiver, so the consumer can re-register after the restart (bd
+/// rc-gwvs fix).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn divert_survives_route_stop_and_restart() {
-    let consumer_uri = "seda:out?multipleConsumers=true";
+    let consumer_uri = "seda:out";
     let (mut ctx, mock) =
         boot_context_with_intercept(Some(divert_rules(consumer_uri, "mock:tap"))).await;
     ctx.add_route_definition(
