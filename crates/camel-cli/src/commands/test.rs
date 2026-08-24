@@ -2,12 +2,14 @@
 //! documents.
 //!
 //! Each document boots a lean `CamelContext` in-process, loads its routes,
-//! delivers `direct:` inputs, settles traffic, and evaluates expectations
-//! against the real mock component. Documents execute in CLI argument order,
-//! sequentially; a document-level error is reported and execution continues
-//! with the next document. Exit codes: 0 all pass, 1 any expectation failure
-//! or settle timeout, 2 misuse/unreadable file/parse error (precedence 2 > 1
-//! > 0).
+//! delivers `direct:` inputs (capturing replies for `expectReply`
+//! assertions), settles traffic, and evaluates expectations against the
+//! real mock component. Reply assertion rows flow through the same
+//! per-endpoint `PASS`/`FAIL` path. Documents execute in CLI argument
+//! order, sequentially; a document-level error is reported and execution
+//! continues with the next document. Exit codes: 0 all pass, 1 any
+//! expectation failure or settle timeout, 2 misuse/unreadable file/parse
+//! error (precedence 2 > 1 > 0).
 //!
 //! Spec: openspec/changes/mock-declarative-testkit (design D2, D7).
 

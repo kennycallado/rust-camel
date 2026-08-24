@@ -1,0 +1,26 @@
+# =============================================================================
+# `camel test` document for the reply-demo route.
+#
+# References the route file above, delivers one `direct:` input, intercepts
+# the `log:replied` send with `skipTo: mock:replied`, and asserts the reply
+# body with `expectReply`. The `expects` block asserts that `mock:replied`
+# received the enriched body. The example composes reply assertions, endpoint
+# expectations, and route interception in one document.
+# =============================================================================
+
+routeFiles: [reply-demo.yaml]
+
+inputs:
+  - to: "direct:enrich"
+    body: "plain"
+    expectReply:
+      body: "enriched"
+
+intercepts:
+  log:replied:
+    skipTo: mock:replied
+
+expects:
+  mock:replied:
+    count: 1
+    bodies: ["enriched"]

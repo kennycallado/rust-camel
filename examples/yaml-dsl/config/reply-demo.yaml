@@ -1,0 +1,18 @@
+# =============================================================================
+# Route for the `camel test` reply-demo example.
+#
+# A single `direct:` route that replaces the input body with "enriched" and
+# then sends to `log:replied`. The paired `reply-demo.test.yaml` document
+# delivers one input, intercepts the `log:replied` send with
+# `skipTo: mock:replied`, and asserts both the reply body and the recorded
+# exchange. This production file contains routes only; the test doubles live
+# in the test document.
+# =============================================================================
+
+routes:
+  - id: "reply-demo"
+    from: "direct:enrich"
+    steps:
+      - set_body:
+          value: "enriched"
+      - to: "log:replied"

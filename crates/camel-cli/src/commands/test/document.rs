@@ -2,10 +2,13 @@
 //!
 //! A `*.test.yaml` sidecar declares one executable test: a route source
 //! (`routeFiles` or `routeFilesFromRoot` reference OR inline `routes`,
-//! exactly one), optional `direct:` inputs, non-empty `expects` keyed by
-//! `mock:` URIs, an optional `settle` quiet window (`0 < settle <= 5s`),
-//! and an optional `intercepts` block (real endpoint URIs mapped to mock
-//! endpoints), and an optional `beans` block (declarative stub beans). Unknown fields are
+//! exactly one), optional `direct:` inputs (each optionally carrying an
+//! `expectReply` block that asserts against the producer's reply
+//! exchange), non-empty `expects` keyed by `mock:` URIs (relaxed to
+//! optional when at least one input declares `expectReply`), an optional
+//! `settle` quiet window (`0 < settle <= 5s`), an optional `intercepts`
+//! block (real endpoint URIs mapped to mock endpoints), and an optional
+//! `beans` block (declarative stub beans). Unknown fields are
 //! rejected (`deny_unknown_fields`); input bodies are restricted to string,
 //! object, and array forms — null, boolean, and number scalars are document
 //! errors.
@@ -120,6 +123,20 @@ pub struct InterceptActionDoc {
     pub divert_copy_to: Option<String>,
 }
 
+/// Expected reply assertion for one input delivery: exact-match against the
+/// reply exchange the `direct:` producer returns. At least one of `body` /
+/// `headers` must be present (validated in [`parse_test_document`]).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ExpectReply {
+    /// Reply body restricted to string (`Text`) or object/array (`Json`)
+    /// forms, same rule as input bodies.
+    #[serde(default, deserialize_with = "deserialize_option_input_body")]
+    pub body: Option<InputBody>,
+    /// Expected reply headers (exact submap of JSON values).
+    pub headers: Option<HashMap<String, serde_json::Value>>,
+}
+
 /// One input delivery to a `direct:` endpoint.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -131,6 +148,9 @@ pub struct TestInput {
     pub body: Option<InputBody>,
     /// Optional headers attached to the input message.
     pub headers: Option<HashMap<String, serde_json::Value>>,
+    /// Optional reply assertion checked against the exchange the producer
+    /// returns; absent means the reply is captured but not asserted.
+    pub expect_reply: Option<ExpectReply>,
 }
 
 /// Accepted input body forms. Construction only via the deserializer match —
@@ -224,6 +244,9 @@ pub enum TestDocError {
     /// A `beans:` declaration failed validation; the message carries the
     /// precise reason verbatim.
     InvalidBeans(String),
+    /// An `expectReply` block failed validation; the message carries the
+    /// precise reason verbatim.
+    InvalidReply(String),
 }
 
 impl fmt::Display for TestDocError {
@@ -256,7 +279,10 @@ impl fmt::Display for TestDocError {
                 "NoProjectRoot: routeFilesFromRoot requires a Camel.toml in an ancestor \
                  directory of {doc_dir}; none was found."
             ),
-            Self::ExpectsEmpty => write!(f, "expects must declare at least one mock: endpoint"),
+            Self::ExpectsEmpty => write!(
+                f,
+                "expects must declare at least one mock: endpoint unless an input declares expectReply"
+            ),
             Self::ExpectKeyMissingScheme { key } => {
                 write!(f, "expects key `{key}` must start with `mock:`")
             }
@@ -291,6 +317,7 @@ impl fmt::Display for TestDocError {
             ),
             Self::InterceptInvalid(msg) => write!(f, "invalid intercept: {msg}"),
             Self::InvalidBeans(msg) => write!(f, "{msg}"),
+            Self::InvalidReply(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -339,8 +366,10 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     if present.len() != 1 {
         return Err(TestDocError::RouteSourceConflict { present });
     }
-    // (b) `expects` is mandatory and non-empty.
-    if doc.expects.is_empty() {
+    // (b) `expects` is mandatory and non-empty, unless at least one input
+    // declares `expectReply` (a reply-only document).
+    let any_expect_reply = doc.inputs.iter().any(|i| i.expect_reply.is_some());
+    if doc.expects.is_empty() && !any_expect_reply {
         return Err(TestDocError::ExpectsEmpty);
     }
     // (c) Every key must be a `mock:` URI.
@@ -367,12 +396,21 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
         }
         doc.settle_parsed = Some(parsed);
     }
-    // (f) Inputs deliver through `direct:` endpoints only.
+    // (f) Inputs deliver through `direct:` endpoints only; each `expectReply`
+    // must declare at least one of `body` / `headers`.
     for input in &doc.inputs {
         if !input.to.starts_with(DIRECT_SCHEME_PREFIX) {
             return Err(TestDocError::UnsupportedInputScheme {
                 target: input.to.clone(),
             });
+        }
+        if let Some(reply) = input.expect_reply.as_ref()
+            && reply.body.is_none()
+            && reply.headers.is_none()
+        {
+            return Err(TestDocError::InvalidReply(
+                "expectReply must declare body or headers".to_string(),
+            ));
         }
     }
     // Intercepts: validate and build InterceptRules (BTreeMap order).

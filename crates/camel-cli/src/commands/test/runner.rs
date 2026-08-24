@@ -1,5 +1,6 @@
 //! In-process mock test runner: boots a lean `CamelContext`, loads routes,
-//! delivers `direct:` inputs, settles traffic, and evaluates expectations.
+//! delivers `direct:` inputs (capturing each producer reply for
+//! `expectReply` assertions), settles traffic, and evaluates expectations.
 //!
 //! Spec: openspec/changes/mock-declarative-testkit (design D3-D7).
 
@@ -21,7 +22,7 @@ use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 use super::beans::{collect_bean_calls, stub_from_decl};
-use super::document::{ExpectSet, InputBody, TestDocError, TestDocument, TestInput};
+use super::document::{ExpectReply, ExpectSet, InputBody, TestDocError, TestDocument, TestInput};
 
 /// Instability budget: traffic must quiesce within this window after the
 /// quiet window elapses, anchored at route-execution begin.
@@ -148,8 +149,12 @@ async fn load_routes(
 }
 
 /// Deliver one input to a `direct:` endpoint, retrying the consumer-startup
-/// race. A non-race `Err` is a document error.
-async fn deliver_input(ctx: &Arc<Mutex<CamelContext>>, input: &TestInput) -> Result<(), String> {
+/// race, and return the reply exchange the producer received. A non-race
+/// `Err` is a document error.
+async fn deliver_input(
+    ctx: &Arc<Mutex<CamelContext>>,
+    input: &TestInput,
+) -> Result<Exchange, String> {
     let body = match &input.body {
         Some(InputBody::Text(s)) => Body::Text(s.clone()),
         Some(InputBody::Json(v)) => Body::Json(v.clone()),
@@ -180,7 +185,7 @@ async fn deliver_input(ctx: &Arc<Mutex<CamelContext>>, input: &TestInput) -> Res
                 .map_err(|e| format!("failed to create producer for {}: {e}", input.to))?
         };
         match producer.oneshot(exchange.clone()).await {
-            Ok(_) => return Ok(()),
+            Ok(reply) => return Ok(reply),
             Err(e) => {
                 let is_startup_race = matches!(e, camel_api::CamelError::EndpointCreationFailed(_))
                     || e.to_string().contains("not registered");
@@ -286,6 +291,65 @@ async fn evaluate_endpoint(mock: &MockComponent, name: &str, set: &ExpectSet) ->
     }
 }
 
+/// Variant-tagged reply body equality, mirroring camel-mock's private
+/// `body_eq`: text compares exactly, JSON compares structurally
+/// (serde_json `Value` equality), and mismatched variants never match.
+/// Re-exporting camel-mock's helper would cross this crate's
+/// no-camel-mock-change boundary, so the arms are restated here.
+fn reply_body_eq(expected: &InputBody, actual: &Body) -> bool {
+    match (expected, actual) {
+        (InputBody::Text(a), Body::Text(b)) => a == b,
+        (InputBody::Json(a), Body::Json(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Evaluate one input's `expectReply` against its captured reply exchange.
+/// The asserted message is the output message when present, else the input
+/// (lean route steps mutate the in-message; none sets `exchange.output`).
+/// `body` and `headers` are optional and independent; expected headers
+/// form an exact submap of the reply message headers. Failure details are
+/// deterministic (sorted keys) so tests can assert substrings.
+fn evaluate_reply_expectation(
+    expect: &ExpectReply,
+    reply: &Exchange,
+    label: &str,
+) -> EndpointResult {
+    let message = reply.output.as_ref().unwrap_or(&reply.input);
+    if let Some(expected_body) = &expect.body
+        && !reply_body_eq(expected_body, &message.body)
+    {
+        return EndpointResult {
+            endpoint: label.to_string(),
+            outcome: Err(format!(
+                "reply body mismatch: expected {expected_body:?}, actual {:?}",
+                message.body
+            )),
+        };
+    }
+    if let Some(expected_headers) = &expect.headers {
+        let mut entries: Vec<(&String, &serde_json::Value)> = expected_headers.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, expected_value) in entries {
+            let actual = match message.headers.get(key) {
+                Some(actual_value) if actual_value == expected_value => continue,
+                Some(actual_value) => format!("{actual_value:?}"),
+                None => "<missing>".to_string(),
+            };
+            return EndpointResult {
+                endpoint: label.to_string(),
+                outcome: Err(format!(
+                    "reply header mismatch '{key}': expected {expected_value:?}, actual {actual}"
+                )),
+            };
+        }
+    }
+    EndpointResult {
+        endpoint: label.to_string(),
+        outcome: Ok(()),
+    }
+}
+
 /// Build the stub-bean registry for a document, or `Ok(None)` when the
 /// document declares no `beans` block (current behavior: no registry wiring).
 ///
@@ -357,13 +421,18 @@ async fn run_phases(
         Instant::now()
     };
 
-    // (d) Deliver inputs.
+    // (d) Deliver inputs, capturing each reply exchange in input order
+    // (delivery stays strictly sequential).
+    let mut replies: Vec<Exchange> = Vec::with_capacity(doc.inputs.len());
     for input in &doc.inputs {
-        if let Err(e) = deliver_input(ctx, input).await {
-            return TestDocResult {
-                endpoint_results: vec![],
-                doc_error: Some(e),
-            };
+        match deliver_input(ctx, input).await {
+            Ok(reply) => replies.push(reply),
+            Err(e) => {
+                return TestDocResult {
+                    endpoint_results: vec![],
+                    doc_error: Some(e),
+                };
+            }
         }
     }
 
@@ -380,10 +449,20 @@ async fn run_phases(
         };
     }
 
-    // (f) Evaluate expectations.
+    // (f) Evaluate expectations, then reply assertions in input order.
+    // Reply rows reuse the `EndpointResult` shape so the driver prints one
+    // PASS/FAIL line per reply and counts them into its summary with no
+    // branching; the `endpoint` field holds the reply label
+    // (`reply[i] <input.to>`).
     let mut endpoint_results = Vec::with_capacity(doc.expects.len());
     for (name, set) in &doc.expects {
         endpoint_results.push(evaluate_endpoint(mock, name, set).await);
+    }
+    for (index, (input, reply)) in doc.inputs.iter().zip(&replies).enumerate() {
+        if let Some(expect) = input.expect_reply.as_ref() {
+            let label = format!("reply[{index}] {}", input.to);
+            endpoint_results.push(evaluate_reply_expectation(expect, reply, &label));
+        }
     }
     TestDocResult {
         endpoint_results,
@@ -479,5 +558,38 @@ mod tests {
         let nested = root.path().join("nested");
         std::fs::create_dir_all(&nested).expect("create nested dir"); // allow-unwrap
         assert_eq!(find_camel_toml_root(&nested), None);
+    }
+
+    /// Output-message precedence at the reply-evaluation boundary: with a
+    /// hand-built exchange carrying input body `A` and output body `B`, an
+    /// expectation of `B` passes and one of `A` fails — the output message
+    /// is preferred when present, regardless of DSL reachability (no
+    /// lean-set step sets `exchange.output`).
+    #[test]
+    fn reply_output_message_precedence() {
+        let mut exchange = Exchange::new(Message::new(Body::Text("A".to_string())));
+        exchange.output = Some(Message::new(Body::Text("B".to_string())));
+
+        let expect_b = ExpectReply {
+            body: Some(InputBody::Text("B".to_string())),
+            headers: None,
+        };
+        let row = evaluate_reply_expectation(&expect_b, &exchange, "reply[0] direct:in");
+        assert_eq!(row.endpoint, "reply[0] direct:in");
+        assert!(
+            row.outcome.is_ok(),
+            "expected B must match output body B: {:?}",
+            row.outcome
+        );
+
+        let expect_a = ExpectReply {
+            body: Some(InputBody::Text("A".to_string())),
+            headers: None,
+        };
+        let row = evaluate_reply_expectation(&expect_a, &exchange, "reply[0] direct:in");
+        assert!(
+            row.outcome.is_err(),
+            "expected A must NOT match output body B (output takes precedence)"
+        );
     }
 }

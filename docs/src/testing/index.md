@@ -132,3 +132,25 @@ The `methods` list is an allowlist. When omitted, the stub accepts every method 
 A `fail` stub surfaces as a document error. The runner reports it on stderr and exits with code 2. Settling and evaluation are skipped. The default message `fail bean <name>` uses the declared bean name.
 
 The stub beans mirror the `bean:` step. The step looks up a bean by name and calls a method on it. The stub supplies that lookup in the test. See [Bean](../steps/bean.md) for the step contract. The example pair lives in [`examples/yaml-dsl/config/beans-demo.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/beans-demo.yaml) and [`beans-demo.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/beans-demo.test.yaml).
+
+### Reply assertions
+
+An input may declare `expectReply` to assert against the reply message the `direct:` producer returns. The block holds two optional keys: `body` and `headers`. At least one must be present. An empty `expectReply` is a document error.
+
+```yaml
+inputs:
+  - to: "direct:enrich"
+    body: "plain"
+    expectReply:
+      body: "enriched"
+```
+
+The `body` value is a string or a JSON value. A string matches the reply body exactly. A JSON value matches structurally. The `headers` value is a map from header name to JSON value. The reply must carry every expected header with an equal value. Extra headers on the reply do not fail the assertion.
+
+The reply message is the route output when the route set one. Otherwise it is the final input message. Nothing in the lean `camel test` component set sets the output today. The reply pairs with the input by delivery order. Inputs deliver strictly sequentially, so `reply[i]` matches the `i`-th input.
+
+Each asserted input produces one result row labeled `reply[i] <input.to>`. A mismatch is an assertion failure. It surfaces as a `FAIL` line and counts toward `failed`. The document exits with code 1. A delivery error is a document error. It exits with code 2 and skips reply evaluation.
+
+A document may omit `expects` when at least one input declares `expectReply`. The reply assertions then drive the outcome. A document with neither endpoint expectations nor any `expectReply` still fails to parse.
+
+The example pair lives in [`examples/yaml-dsl/config/reply-demo.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/reply-demo.yaml) and [`reply-demo.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/reply-demo.test.yaml).

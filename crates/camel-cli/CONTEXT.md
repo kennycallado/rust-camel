@@ -32,7 +32,7 @@ Metrics instrumentation for CLI commands is not yet wired; processor-crate instr
 
 ## camel test failure modes
 
-`camel test` runs each `*.test.yaml` document in-process and reports one `PASS`/`FAIL` line per endpoint, then a final `N passed, M failed` summary. Exit-code precedence is `2 > 1 > 0`: any parse-error class forces 2, else any failed endpoint forces 1, else 0. A document-level error is reported to stderr and execution continues with the next document. Directory arguments expand recursively to `*.test.yaml`/`*.test.yml` documents (sorted, with `target`/`.git`/`node_modules` skipped).
+`camel test` runs each `*.test.yaml` document in-process and reports one `PASS`/`FAIL` line per endpoint or asserted reply, then a final `N passed, M failed` summary. Exit-code precedence is `2 > 1 > 0`: any parse-error class forces 2, else any failed endpoint or reply assertion forces 1, else 0. A document-level error is reported to stderr and execution continues with the next document. Directory arguments expand recursively to `*.test.yaml`/`*.test.yml` documents (sorted, with `target`/`.git`/`node_modules` skipped).
 
 | Failure mode | Trigger | Exit code |
 |--------------|---------|-----------|
@@ -41,7 +41,8 @@ Metrics instrumentation for CLI commands is not yet wired; processor-crate instr
 | Expansion error | zero-document directory argument or unreadable directory during walk | 2 |
 | Settle timeout | traffic does not quiesce within the quiet window plus the 5s instability budget | 1 |
 | Assertion failure | expectation mismatch reported by `MockEndpointInner::try_assert_satisfied` | 1 |
+| Reply assertion failure | `expectReply` mismatch on a captured reply (FAIL reply line) | 1 |
 
-Precedence when classes mix: any parse-error class ⇒ 2, else any failed endpoint ⇒ 1, else 0. The settle timeout and assertion failure both surface as a `FAIL` line and count toward `failed`; parse-error and boot failures surface on stderr and do not count toward `passed`/`failed`.
+Precedence when classes mix: any parse-error class ⇒ 2, else any failed endpoint ⇒ 1, else 0. The settle timeout, assertion failure, and reply assertion failure all surface as a `FAIL` line and count toward `failed`; parse-error and boot failures surface on stderr and do not count toward `passed`/`failed`.
 
-The `intercepts` block in `*.test.yaml` maps source URIs to `skipTo` or `divertCopyTo` `mock:` targets before route load; see [Declarative camel test — Intercepts](../../docs/src/testing/index.md#intercepts) and the [route-interception spec](../../openspec/specs/route-interception/spec.md). The `beans:` block declares stub beans (echo, setBody, fail) for `bean:` steps; see [Declarative camel test — Bean stubs](../../docs/src/testing/index.md#bean-stubs).
+The `intercepts` block in `*.test.yaml` maps source URIs to `skipTo` or `divertCopyTo` `mock:` targets before route load; see [Declarative camel test — Intercepts](../../docs/src/testing/index.md#intercepts) and the [route-interception spec](../../openspec/specs/route-interception/spec.md). The `beans:` block declares stub beans (echo, setBody, fail) for `bean:` steps; see [Declarative camel test — Bean stubs](../../docs/src/testing/index.md#bean-stubs). An input may declare `expectReply` to assert against the reply message the `direct:` producer returns; see [Declarative camel test — Reply assertions](../../docs/src/testing/index.md#reply-assertions).
