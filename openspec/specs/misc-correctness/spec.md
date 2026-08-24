@@ -31,8 +31,10 @@ are present.
 ### Requirement: SEDA concurrent consumer delivery
 
 The SEDA component SHALL spawn one forwarder task per `concurrentConsumers`
-value when the mode is Single, using a shared `tokio::sync::Mutex<Receiver>`
-so that forwarders process envelopes in parallel.
+value when the mode is Single, using a shared
+`tokio::sync::Mutex<Option<Receiver>>` so that forwarders process envelopes in
+parallel. A forwarder that observes `None` in the shared receiver (the consumer
+stopped and the stop path took the receiver back) SHALL exit successfully.
 
 #### Scenario: concurrentConsumers=4 spawns four forwarders
 
