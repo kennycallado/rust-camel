@@ -566,7 +566,9 @@ struct SweepStats {
     blob_bytes_reclaimed: u64,
     /// Stale tmp files unlinked this pass.
     tmps_unlinked: u64,
-    /// Blobs still on disk after the pass (live or orphan pre-epoch).
+    /// Blobs still on disk after the pass (live, orphan pre-epoch, or
+    /// foreign names — anything the sweep kept; a blob that vanishes
+    /// mid-pass via the ENOENT race is counted here until the next pass).
     live_blobs: u64,
     /// Total bytes of those surviving blobs.
     live_blob_bytes: u64,
