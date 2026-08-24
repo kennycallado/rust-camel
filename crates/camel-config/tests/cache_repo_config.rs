@@ -1705,6 +1705,56 @@ payload_max_ttl = "0s"
 }
 
 #[test]
+fn sub_second_payload_sweep_interval_rejected() {
+    // The blob death epoch truncates to whole seconds; a sub-second sweep
+    // interval could collapse the grace to zero (bd rc-v289).
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "disk"
+payload_dir = "/tmp/camel-payload"
+payload_sweep_interval = "500ms"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_sweep_interval"),
+        "validation error must name cache_repo.payload_sweep_interval, got: {msg}"
+    );
+    assert!(
+        msg.contains("at least one second"),
+        "error must state the one-second floor, got: {msg}"
+    );
+}
+
+#[test]
+fn sub_second_payload_max_ttl_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "disk"
+payload_dir = "/tmp/camel-payload"
+payload_max_ttl = "999ms"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload_max_ttl"),
+        "validation error must name cache_repo.payload_max_ttl, got: {msg}"
+    );
+    assert!(
+        msg.contains("at least one second"),
+        "error must state the one-second floor, got: {msg}"
+    );
+}
+
+#[test]
 fn payload_dir_env_placeholder_resolves() {
     // cache_repo is a strict-interpolation section (STRICT_PREFIXES), so a
     // `${env:}` placeholder on payload_dir must resolve at load time and

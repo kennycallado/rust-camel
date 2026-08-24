@@ -57,8 +57,9 @@ const TMP_NAME_ATTEMPTS: u32 = 8;
 ///
 /// Wraps any index backend; see the [module docs](self) for the blob
 /// lifecycle and failure policy. `stale_retention`, `sweep_interval`, and
-/// `payload_max_ttl` must be non-zero — enforced by `CacheRepoConfig`
-/// validation, not here.
+/// `payload_max_ttl` must be non-zero (the payload intervals at least one
+/// second — the death epoch truncates to whole seconds) — enforced by
+/// `CacheRepoConfig` validation, not here.
 pub struct DiskOffloadRepository {
     /// Decorated index backend (memory, redb, redis, …).
     inner: Arc<dyn CacheRepository>,

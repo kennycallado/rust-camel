@@ -334,8 +334,8 @@ Optional cache repository configuration. When unset, only the default `"memory"`
 | `sweep_interval` | duration string | `1h` | How often the redb background sweep runs. Must be positive. Redb only. |
 | `payload` | string | `"inline"` | Payload storage mode. `"inline"` keeps payload bytes in the repository entry. `"disk"` offloads payload bodies to blob files under `payload_dir`. Rejected on the memory backend. Redb and redis. |
 | `payload_dir` | path string | (required when disk) | Directory holding offloaded payload files. Required and non-empty when `payload = "disk"`; rejected otherwise. No default. Supports `${env:}` strict interpolation. Redb and redis. |
-| `payload_sweep_interval` | duration string | `1h` | How often the offloaded-payload sweep runs when `payload = "disk"`. The interval also widens every blob's death epoch as a grace window. Must be positive. Redb and redis. |
-| `payload_max_ttl` | duration string | `720h` (30d) | Expiry fabricated for entries stored without a TTL when `payload = "disk"`, so index row and blob file share one death timeline. Must be positive. Redb and redis. |
+| `payload_sweep_interval` | duration string | `1h` | How often the offloaded-payload sweep runs when `payload = "disk"`. The interval also widens every blob's death epoch as a grace window. Must be at least one second. Redb and redis. |
+| `payload_max_ttl` | duration string | `720h` (30d) | Expiry fabricated for entries stored without a TTL when `payload = "disk"`, so index row and blob file share one death timeline. Must be at least one second. Redb and redis. |
 | `max_capacity` | integer | `10000` (default memory repo) | Entry cap for the memory backend. Memory only. |
 | `url` | string | (required for redis) | Standalone endpoint, `redis://` or `rediss://`. Mutually exclusive with `sentinel_nodes`. Redis only. |
 | `sentinel_nodes` | string array | (alternative to `url`) | Sentinel node addresses. Mutually exclusive with `url`. Redis only. |

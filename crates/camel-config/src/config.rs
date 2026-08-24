@@ -1917,9 +1917,13 @@ impl CamelConfig {
                                 "cache_repo.payload_sweep_interval: invalid duration '{sweep}'"
                             ))
                         })?;
-                        if parsed.is_zero() {
+                        // Sub-second intervals are rejected: the blob
+                        // death epoch truncates to whole seconds, so a
+                        // sub-second sweep could collapse the grace to zero
+                        // (a live index row out-living its blob).
+                        if parsed < Duration::from_secs(1) {
                             return Err(CamelError::Config(
-                                "cache_repo.payload_sweep_interval must be positive (greater than zero)"
+                                "cache_repo.payload_sweep_interval must be at least one second"
                                     .to_string(),
                             ));
                         }
@@ -1930,9 +1934,9 @@ impl CamelConfig {
                                 "cache_repo.payload_max_ttl: invalid duration '{ttl}'"
                             ))
                         })?;
-                        if parsed.is_zero() {
+                        if parsed < Duration::from_secs(1) {
                             return Err(CamelError::Config(
-                                "cache_repo.payload_max_ttl must be positive (greater than zero)"
+                                "cache_repo.payload_max_ttl must be at least one second"
                                     .to_string(),
                             ));
                         }
