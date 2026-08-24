@@ -17,6 +17,9 @@ mod beans;
 pub mod document;
 pub mod runner;
 
+#[cfg(test)]
+mod document_tests;
+
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};

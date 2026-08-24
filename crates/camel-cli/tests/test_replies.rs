@@ -431,7 +431,7 @@ expects:
     );
     let rows = reply_rows(&result);
     assert_eq!(rows.len(), 1, "rows: {:?}", endpoint_labels(&result));
-    let detail = rows[0].outcome.as_ref().err().expect("reply row must fail"); // allow-unwrap
+    let detail = rows[0].outcome.as_ref().expect_err("reply row must fail"); // allow-unwrap
     assert!(
         detail.contains("reply header mismatch 'stamp'"),
         "failure detail must name the mismatched key, got: {detail}"

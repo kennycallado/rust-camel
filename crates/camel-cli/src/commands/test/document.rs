@@ -525,7 +525,3 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     }
     Ok(doc)
 }
-
-#[cfg(test)]
-#[path = "document_tests.rs"]
-mod tests;
