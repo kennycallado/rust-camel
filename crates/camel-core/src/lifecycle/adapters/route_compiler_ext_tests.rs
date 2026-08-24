@@ -5,7 +5,7 @@ use camel_api::security_policy::{
     AccessMode, AudienceBinding, AuthContext, AuthorizationDecision, CredentialSource, Principal,
     SecurityPolicy, SecurityPolicyConfig,
 };
-use camel_api::{CamelError, Exchange};
+use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor};
 use camel_auth::{ProviderEntry, TokenAuthenticator};
 use camel_component_api::{
     Component, ComponentContext, ConcurrencyModel, Consumer, ConsumerContext, ConsumerStartupMode,
