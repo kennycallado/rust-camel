@@ -125,6 +125,10 @@ pub fn send_term(child: &Child) {
 /// passed: watching is controlled by the fixture config (`watch = true`
 /// enables it, otherwise the run is single-shot). The child is wrapped in a
 /// kill-on-drop guard so a failed assertion mid-test cannot leak the process.
+// Shared by run_watch_test_doc_test.rs and test_intercepts.rs only; the
+// test binaries that include `common` without calling these would otherwise
+// warn dead_code (each compilation unit gets its own copy of the module).
+#[allow(dead_code)]
 pub fn spawn_camel_run(dir: &Path) -> KillOnDrop {
     let config_path = dir.join("Camel.toml");
     let child = Command::new(env!("CARGO_BIN_EXE_camel"))
@@ -142,6 +146,7 @@ pub fn spawn_camel_run(dir: &Path) -> KillOnDrop {
 
 /// Wait for the child to exit, but at most `timeout`. If it is still alive
 /// at the deadline, force-kill and reap, returning `false`.
+#[allow(dead_code)]
 pub fn wait_exit_bounded(child: &mut Child, timeout: Duration) -> bool {
     let start = Instant::now();
     let step = Duration::from_millis(25);
