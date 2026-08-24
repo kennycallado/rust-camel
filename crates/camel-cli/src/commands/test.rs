@@ -11,6 +11,7 @@
 //!
 //! Spec: openspec/changes/mock-declarative-testkit (design D2, D7).
 
+mod beans;
 pub mod document;
 pub mod runner;
 

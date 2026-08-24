@@ -102,3 +102,33 @@ Matching uses the full URI verbatim. Query parameters are part of the key. `kafk
 Failure handling stays unchanged. Parse errors in the `intercepts` map and route-load errors from interception (for example, a `divertCopyTo` whose source has no registered component) are document errors. `camel test` reports them on stderr and exits with code 2. No endpoint result counts toward `passed` or `failed` in that case.
 
 The contract lives in [ADR-0064](../adr/0064-two-tier-testing-contract.md) and the route-interception spec (`openspec/specs/route-interception/spec.md` in the repository — outside the rendered book).
+
+### Bean stubs
+
+A `beans:` block declares stub beans for the `bean:` steps in the routes. A stub bean is an in-process processor registered in the bean registry before the context boots. The `bean:` step resolves against it, so the test runs without a real bean implementation. The block maps a bean name to a declaration.
+
+```yaml
+beans:
+  validator:
+    kind: echo
+  enricher:
+    kind: setBody
+    config:
+      body: enriched
+```
+
+Each declaration has a `kind` and an optional `methods` list and `config` map. The `kind` selects the stub behavior.
+
+| Kind | Config | Behavior |
+|------|--------|----------|
+| `echo` | none | Passes the exchange through untouched. |
+| `setBody` | `body` (required) | Replaces the input body with the configured string. |
+| `fail` | `message` (optional) | Fails with the configured message. Without `message`, it fails with exactly `fail bean <name>`. |
+
+`echo` accepts no config keys. `setBody` requires `body` and rejects any other key. `fail` accepts only `message`. A config key that does not fit the kind is a document error.
+
+The `methods` list is an allowlist. When omitted, the stub accepts every method the routes invoke on it. When present, the runner cross-validates it against the methods the routes call before boot. A route that calls a method outside the list is a document error and exits with code 2.
+
+A `fail` stub surfaces as a document error. The runner reports it on stderr and exits with code 2. Settling and evaluation are skipped. The default message `fail bean <name>` uses the declared bean name.
+
+The stub beans mirror the `bean:` step. The step looks up a bean by name and calls a method on it. The stub supplies that lookup in the test. See [Bean](../steps/bean.md) for the step contract. The example pair lives in [`examples/yaml-dsl/config/beans-demo.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/beans-demo.yaml) and [`beans-demo.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/beans-demo.test.yaml).

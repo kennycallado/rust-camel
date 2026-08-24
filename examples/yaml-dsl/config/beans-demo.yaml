@@ -1,0 +1,21 @@
+# =============================================================================
+# Route for the `camel test` beans-demo example.
+#
+# A single `direct:` route that calls two registered beans and then sends to
+# `log:processed`. The paired `beans-demo.test.yaml` document declares stub
+# beans for `validator` and `enricher`, so the test passes without real bean
+# implementations. This production file contains routes only; the test
+# doubles live in the test document.
+# =============================================================================
+
+routes:
+  - id: "beans-demo"
+    from: "direct:orders"
+    steps:
+      - bean:
+          name: validator
+          method: validate
+      - bean:
+          name: enricher
+          method: enrich
+      - to: "log:processed"

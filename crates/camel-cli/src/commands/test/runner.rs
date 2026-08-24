@@ -20,6 +20,7 @@ use noyalib::compat::serde_yaml;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
+use super::beans::{collect_bean_calls, stub_from_decl};
 use super::document::{ExpectSet, InputBody, TestDocError, TestDocument, TestInput};
 
 /// Instability budget: traffic must quiesce within this window after the
@@ -54,12 +55,18 @@ pub struct TestDocResult {
 /// Boot a lean `CamelContext` with the mock component plus the direct, timer,
 /// log, and seda defaults (mirrors camel-test's `build_context`). Returns the
 /// context and the shared mock handle used for sampling and assertions.
+/// `beans`, when present, threads a stub-bean registry into the builder so
+/// `bean:` steps resolve at route-add time.
 async fn boot_context(
     intercepts: Option<InterceptRules>,
+    beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
 ) -> Result<(CamelContext, MockComponent), String> {
     let mut builder = CamelContext::builder();
     if let Some(rules) = intercepts {
         builder = builder.with_intercept_rules(rules);
+    }
+    if let Some(registry) = beans {
+        builder = builder.beans(registry);
     }
     let mut ctx = builder
         .build()
@@ -279,26 +286,56 @@ async fn evaluate_endpoint(mock: &MockComponent, name: &str, set: &ExpectSet) ->
     }
 }
 
-/// Run the load/start/deliver/settle/evaluate phases (steps b–f) of one test
-/// document. Returns the outcome; the caller is responsible for stopping the
-/// context afterwards.
+/// Build the stub-bean registry for a document, or `Ok(None)` when the
+/// document declares no `beans` block (current behavior: no registry wiring).
+///
+/// Cross-validation runs BEFORE any registry is built: when a declaration
+/// carries an explicit `methods` allowlist, every `(name, method)` the routes
+/// invoke on that bean must be declared, else
+/// [`TestDocError::InvalidBeans`] names the offending method. Each stub's
+/// wildcard allowlist is the deduplicated set of methods the routes invoke
+/// on that bean.
+fn stub_registry(
+    doc: &TestDocument,
+    defs: &[camel_core::RouteDefinition],
+) -> Result<Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>, String> {
+    let Some(decls) = doc.bean_decls() else {
+        return Ok(None);
+    };
+    let calls = collect_bean_calls(defs);
+    let registry = camel_bean::BeanRegistry::new();
+    for (name, decl) in decls {
+        if let Some(declared) = decl.methods.as_ref() {
+            for (bean_name, method) in &calls {
+                if bean_name == name && !declared.contains(method) {
+                    return Err(TestDocError::InvalidBeans(format!(
+                        "bean {name}: method {method} is not declared"
+                    ))
+                    .to_string());
+                }
+            }
+        }
+        let invoked: Vec<String> = calls
+            .iter()
+            .filter(|(bean_name, _)| bean_name == name)
+            .map(|(_, method)| method.clone())
+            .collect();
+        registry
+            .register(name.clone(), stub_from_decl(name, decl, &invoked))
+            .map_err(|e| format!("failed to register bean {name}: {e}"))?;
+    }
+    Ok(Some(Arc::new(std::sync::Mutex::new(registry))))
+}
+
+/// Run the start/deliver/settle/evaluate phases (steps c–f) of one test
+/// document against the pre-parsed route definitions. Returns the outcome;
+/// the caller is responsible for stopping the context afterwards.
 async fn run_phases(
     ctx: &Arc<Mutex<CamelContext>>,
     mock: &MockComponent,
     doc: &TestDocument,
-    doc_dir: &Path,
+    defs: Vec<camel_core::RouteDefinition>,
 ) -> TestDocResult {
-    // (b) Load routes.
-    let defs = match load_routes(doc, doc_dir).await {
-        Ok(defs) => defs,
-        Err(e) => {
-            return TestDocResult {
-                endpoint_results: vec![],
-                doc_error: Some(e),
-            };
-        }
-    };
-
     // (c) Register and start routes; anchor the settle deadline at
     // route-execution begin.
     let route_started_at = {
@@ -354,14 +391,47 @@ async fn run_phases(
     }
 }
 
-/// Run one test document in-process. Boots the context, runs the phases, then
-/// unconditionally stops the context on every exit path after a successful
-/// boot (mirrors camel-test's `TestGuard` — prevents doc N's live timers
-/// polluting doc N+1 in the multi-doc driver). Returns the outcome plus the
-/// shared mock handle (used by callers to sample `received_count` after
-/// return, e.g. to prove the context was stopped).
+/// Run one test document in-process. Loads routes BEFORE boot (definitions
+/// parse once and feed both stub-bean collection and route registration),
+/// builds the stub-bean registry when the document declares `beans`, boots
+/// the context, runs the phases, then unconditionally stops the context on
+/// every exit path after a successful boot (mirrors camel-test's `TestGuard`
+/// — prevents doc N's live timers polluting doc N+1 in the multi-doc
+/// driver). Returns the outcome plus the shared mock handle (used by callers
+/// to sample `received_count` after return, e.g. to prove the context was
+/// stopped).
 pub async fn run_test_doc(doc: &TestDocument, doc_dir: &Path) -> (TestDocResult, MockComponent) {
-    let (ctx, mock) = match boot_context(doc.intercept_rules()).await {
+    // (b) Load routes before boot: ctx-free, parsed exactly once.
+    let defs = match load_routes(doc, doc_dir).await {
+        Ok(defs) => defs,
+        Err(e) => {
+            return (
+                TestDocResult {
+                    endpoint_results: vec![],
+                    doc_error: Some(e),
+                },
+                MockComponent::new(),
+            );
+        }
+    };
+
+    // Stub beans: cross-validate and register BEFORE boot so `bean:` steps
+    // resolve at route-add time; undeclared methods exit 2 here, not at
+    // runtime.
+    let beans = match stub_registry(doc, &defs) {
+        Ok(beans) => beans,
+        Err(e) => {
+            return (
+                TestDocResult {
+                    endpoint_results: vec![],
+                    doc_error: Some(e),
+                },
+                MockComponent::new(),
+            );
+        }
+    };
+
+    let (ctx, mock) = match boot_context(doc.intercept_rules(), beans).await {
         Ok((ctx, mock)) => (Arc::new(Mutex::new(ctx)), mock),
         Err(e) => {
             return (
@@ -374,7 +444,7 @@ pub async fn run_test_doc(doc: &TestDocument, doc_dir: &Path) -> (TestDocResult,
         }
     };
 
-    let result = run_phases(&ctx, &mock, doc, doc_dir).await;
+    let result = run_phases(&ctx, &mock, doc, defs).await;
 
     // (g) Mandatory stop on every exit path after a successful boot.
     {

@@ -4,7 +4,8 @@
 //! (`routeFiles` or `routeFilesFromRoot` reference OR inline `routes`,
 //! exactly one), optional `direct:` inputs, non-empty `expects` keyed by
 //! `mock:` URIs, an optional `settle` quiet window (`0 < settle <= 5s`),
-//! and an optional `intercepts` block (real endpoint URIs mapped to mock endpoints). Unknown fields are
+//! and an optional `intercepts` block (real endpoint URIs mapped to mock
+//! endpoints), and an optional `beans` block (declarative stub beans). Unknown fields are
 //! rejected (`deny_unknown_fields`); input bodies are restricted to string,
 //! object, and array forms — null, boolean, and number scalars are document
 //! errors.
@@ -60,6 +61,8 @@ pub struct TestDocument {
     /// Parsed intercept rules, populated during validation.
     #[serde(skip)]
     intercept_rules_parsed: Option<InterceptRules>,
+    /// Declarative stub beans keyed by bean name.
+    pub beans: Option<BTreeMap<String, BeanDeclDoc>>,
 }
 
 impl TestDocument {
@@ -72,6 +75,39 @@ impl TestDocument {
     pub fn intercept_rules(&self) -> Option<InterceptRules> {
         self.intercept_rules_parsed.clone()
     }
+
+    /// Declared stub beans, if the document declares any. Validation ran
+    /// eagerly in [`parse_test_document`], so the accessor is infallible.
+    pub fn bean_decls(&self) -> Option<&BTreeMap<String, BeanDeclDoc>> {
+        self.beans.as_ref()
+    }
+}
+
+/// Declarative stub bean: a built-in in-process processor registered before
+/// routes load. `methods` omitted means the stub accepts every method the
+/// routes invoke on it (resolved by the runner); `config` is kind-specific.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BeanDeclDoc {
+    /// Stub behavior kind.
+    pub kind: BeanKindDoc,
+    /// Explicit method allowlist; omitted means wildcard.
+    pub methods: Option<Vec<String>>,
+    /// Kind-specific configuration (`setBody` requires `body`; `fail`
+    /// accepts only `message`; `echo` accepts none).
+    pub config: Option<BTreeMap<String, String>>,
+}
+
+/// Supported stub bean kinds.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum BeanKindDoc {
+    /// Pass the exchange through untouched.
+    Echo,
+    /// Replace the input body with the configured `body` string.
+    SetBody,
+    /// Fail with the configured `message` (or `fail bean <name>`).
+    Fail,
 }
 
 /// Declarative intercept action: exactly one of `skipTo` / `divertCopyTo`.
@@ -185,6 +221,9 @@ pub enum TestDocError {
     InterceptEmptyTargetPath { key: String },
     /// Intercept target failed Stage A validation (e.g. non-`mock:` target).
     InterceptInvalid(String),
+    /// A `beans:` declaration failed validation; the message carries the
+    /// precise reason verbatim.
+    InvalidBeans(String),
 }
 
 impl fmt::Display for TestDocError {
@@ -251,6 +290,7 @@ impl fmt::Display for TestDocError {
                 "intercept target for `{key}` needs a mock endpoint name: `mock:` requires a non-empty endpoint path"
             ),
             Self::InterceptInvalid(msg) => write!(f, "invalid intercept: {msg}"),
+            Self::InvalidBeans(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -278,7 +318,8 @@ fn classify_yaml_error(raw: &str) -> TestDocError {
 /// `routes`); (b) non-empty `expects`; (c) every `expects` key uses the
 /// `mock:` scheme (then the map is rebuilt with bare endpoint names);
 /// (d) `count`/`minCount` exclusivity; (e) `settle` range; (f) every
-/// input targets `direct:`.
+/// input targets `direct:`; (g) intercepts validate and build rules;
+/// (h) `beans:` declarations validate (names, methods, per-kind config).
 pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
     let mut doc = serde_yaml::from_str::<TestDocument>(text)
         .map_err(|e| classify_yaml_error(&e.to_string()))?;
@@ -383,689 +424,70 @@ pub fn parse_test_document(text: &str) -> Result<TestDocument, TestDocError> {
             }
         }
     }
+    // Beans: validate declarations (BTreeMap order).
+    if let Some(beans) = doc.beans.as_ref() {
+        for (name, decl) in beans {
+            if name.trim().is_empty() {
+                return Err(TestDocError::InvalidBeans(
+                    "bean names must be non-blank".to_string(),
+                ));
+            }
+            if decl.methods == Some(vec![]) {
+                return Err(TestDocError::InvalidBeans(format!(
+                    "bean {name}: methods must be non-empty or omitted"
+                )));
+            }
+            if let Some(methods) = decl.methods.as_ref() {
+                for entry in methods {
+                    if entry.trim().is_empty() {
+                        return Err(TestDocError::InvalidBeans(format!(
+                            "bean {name}: method names must be non-blank"
+                        )));
+                    }
+                }
+            }
+            match decl.kind {
+                BeanKindDoc::Echo => {
+                    if let Some(config) = decl.config.as_ref()
+                        && let Some(key) = config.keys().next()
+                    {
+                        return Err(TestDocError::InvalidBeans(format!(
+                            "bean {name}: config key {key} is not valid for kind echo"
+                        )));
+                    }
+                }
+                BeanKindDoc::SetBody => {
+                    let Some(config) = decl.config.as_ref().filter(|c| c.contains_key("body"))
+                    else {
+                        return Err(TestDocError::InvalidBeans(format!(
+                            "bean {name}: kind setBody requires config key body"
+                        )));
+                    };
+                    for key in config.keys() {
+                        if key != "body" {
+                            return Err(TestDocError::InvalidBeans(format!(
+                                "bean {name}: config key {key} is not valid for kind setBody"
+                            )));
+                        }
+                    }
+                }
+                BeanKindDoc::Fail => {
+                    if let Some(config) = decl.config.as_ref() {
+                        for key in config.keys() {
+                            if key != "message" {
+                                return Err(TestDocError::InvalidBeans(format!(
+                                    "bean {name}: config key {key} is not valid for kind fail"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(doc)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn err_of(yaml: &str) -> TestDocError {
-        match parse_test_document(yaml) {
-            Ok(doc) => panic!("document should fail to parse, got: {doc:?}"),
-            Err(e) => e,
-        }
-    }
-
-    #[test]
-    fn valid_reference_doc_parses() {
-        let yaml = r#"
-routeFiles: [config/routes.yaml]
-expects:
-  mock:result:
-    count: 3
-"#;
-        let doc = parse_test_document(yaml).expect("valid document should parse"); // allow-unwrap
-        assert_eq!(
-            doc.route_files,
-            Some(vec!["config/routes.yaml".to_string()])
-        );
-        assert!(doc.routes.is_none());
-        // Key normalized: `mock:` prefix stripped to bare endpoint name.
-        let set = doc
-            .expects
-            .get("result")
-            .expect("normalized key `result` present"); // allow-unwrap
-        assert_eq!(set.count, Some(3));
-        assert!(!doc.expects.contains_key("mock:result"));
-    }
-
-    #[test]
-    fn valid_inline_routes_parses() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    minCount: 2
-"#;
-        let doc = parse_test_document(yaml).expect("valid document should parse"); // allow-unwrap
-        assert!(doc.route_files.is_none());
-        assert!(doc.routes.is_some());
-        let set = doc
-            .expects
-            .get("result")
-            .expect("normalized key `result` present"); // allow-unwrap
-        assert_eq!(set.min_count, Some(2));
-    }
-
-    #[test]
-    fn unknown_field_rejected() {
-        let yaml = r#"
-bogus: 1
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-"#;
-        let err = err_of(yaml);
-        assert!(
-            matches!(err, TestDocError::UnknownField(ref msg) if msg.contains("bogus")),
-            "expected UnknownField naming `bogus`, got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn empty_expects_rejected() {
-        let explicit = r#"
-routes:
-  - id: r1
-    from: "timer:tick"
-expects: {}
-"#;
-        assert!(
-            matches!(err_of(explicit), TestDocError::ExpectsEmpty),
-            "explicit empty expects must be rejected"
-        );
-        // No `expects` key at all: serde default yields an empty map that
-        // reaches validation.
-        let missing = r#"
-routeFiles: [config/routes.yaml]
-"#;
-        assert!(
-            matches!(err_of(missing), TestDocError::ExpectsEmpty),
-            "missing expects must be rejected"
-        );
-    }
-
-    #[test]
-    fn bare_expect_key_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  result:
-    count: 1
-"#;
-        assert!(matches!(
-            err_of(yaml),
-            TestDocError::ExpectKeyMissingScheme { ref key } if key == "result"
-        ));
-    }
-
-    #[test]
-    fn route_source_conflict_rejected() {
-        let both = r#"
-routeFiles: [config/routes.yaml]
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-"#;
-        assert!(matches!(
-            err_of(both),
-            TestDocError::RouteSourceConflict { .. }
-        ));
-        // Neither source present is the same conflict.
-        let neither = r#"
-expects:
-  mock:result:
-    count: 1
-"#;
-        assert!(matches!(
-            err_of(neither),
-            TestDocError::RouteSourceConflict { .. }
-        ));
-    }
-
-    #[test]
-    fn route_files_from_root_parses() {
-        let yaml = r#"
-routeFilesFromRoot: [config/routes.yaml]
-expects:
-  mock:result:
-    count: 1
-"#;
-        let doc = parse_test_document(yaml).expect("valid document should parse"); // allow-unwrap
-        assert_eq!(
-            doc.route_files_from_root,
-            Some(vec!["config/routes.yaml".to_string()])
-        );
-        assert!(doc.route_files.is_none());
-        assert!(doc.routes.is_none());
-    }
-
-    #[test]
-    fn route_files_from_root_plus_route_files_rejected() {
-        let yaml = r#"
-routeFiles: [config/routes.yaml]
-routeFilesFromRoot: [config/routes.yaml]
-expects:
-  mock:result:
-    count: 1
-"#;
-        let err = err_of(yaml);
-        let msg = err.to_string();
-        assert!(
-            matches!(
-                err,
-                TestDocError::RouteSourceConflict { ref present }
-                    if *present == ["routeFiles", "routeFilesFromRoot"]
-            ),
-            "expected RouteSourceConflict listing routeFiles + routeFilesFromRoot, got: {err:?}"
-        );
-        assert!(
-            msg.contains("routeFiles") && msg.contains("routeFilesFromRoot"),
-            "display must name both keys, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn route_files_from_root_plus_routes_rejected() {
-        let yaml = r#"
-routeFilesFromRoot: [config/routes.yaml]
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-"#;
-        let err = err_of(yaml);
-        let msg = err.to_string();
-        assert!(
-            matches!(
-                err,
-                TestDocError::RouteSourceConflict { ref present }
-                    if *present == ["routeFilesFromRoot", "routes"]
-            ),
-            "expected RouteSourceConflict listing routeFilesFromRoot + routes, got: {err:?}"
-        );
-        assert!(
-            msg.contains("routeFilesFromRoot") && msg.contains("routes"),
-            "display must name both keys, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn no_route_source_rejected() {
-        let yaml = r#"
-expects:
-  mock:result:
-    count: 1
-"#;
-        let err = err_of(yaml);
-        let msg = err.to_string();
-        assert!(
-            matches!(
-                err,
-                TestDocError::RouteSourceConflict { ref present } if present.is_empty()
-            ),
-            "expected RouteSourceConflict with empty present, got: {err:?}"
-        );
-        assert!(
-            msg.contains("exactly one") && msg.contains("required"),
-            "display must state exactly one route source is required, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn all_three_route_sources_rejected() {
-        let yaml = r#"
-routeFiles: [config/routes.yaml]
-routeFilesFromRoot: [config/routes.yaml]
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-"#;
-        let err = err_of(yaml);
-        assert!(
-            matches!(
-                err,
-                TestDocError::RouteSourceConflict { ref present }
-                    if *present == ["routeFiles", "routeFilesFromRoot", "routes"]
-            ),
-            "expected RouteSourceConflict listing all three keys, got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn route_files_and_routes_still_rejected() {
-        let yaml = r#"
-routeFiles: [config/routes.yaml]
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-"#;
-        let err = err_of(yaml);
-        let msg = err.to_string();
-        assert!(
-            matches!(
-                err,
-                TestDocError::RouteSourceConflict { ref present }
-                    if *present == ["routeFiles", "routes"]
-            ),
-            "expected RouteSourceConflict listing routeFiles + routes, got: {err:?}"
-        );
-        assert!(
-            msg.contains("routeFiles") && msg.contains("routes"),
-            "display must name both keys, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn count_and_min_count_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-    minCount: 2
-"#;
-        assert!(matches!(
-            err_of(yaml),
-            TestDocError::CountAndMinCount(ref endpoint) if endpoint == "result"
-        ));
-    }
-
-    #[test]
-    fn settle_zero_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-settle: "0ms"
-"#;
-        assert!(
-            matches!(err_of(yaml), TestDocError::SettleOutOfRange(ref raw) if raw == "0ms"),
-            "settle 0ms must be out of range"
-        );
-    }
-
-    #[test]
-    fn settle_over_5s_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-settle: "10s"
-"#;
-        assert!(
-            matches!(err_of(yaml), TestDocError::SettleOutOfRange(ref raw) if raw == "10s"),
-            "settle 10s must be out of range"
-        );
-    }
-
-    #[test]
-    fn settle_boundaries_accepted() {
-        fn doc_with_settle(raw: &str) -> String {
-            format!(
-                r#"
-routes:
-  - id: r1
-    from: "direct:start"
-expects:
-  mock:result:
-    count: 1
-settle: "{raw}"
-"#
-            )
-        }
-        let doc = parse_test_document(&doc_with_settle("1ms")).expect("1ms is inside the range"); // allow-unwrap
-        assert_eq!(doc.settle_duration(), Some(Duration::from_millis(1)));
-        let doc =
-            parse_test_document(&doc_with_settle("5s")).expect("5s is the inclusive upper bound"); // allow-unwrap
-        assert_eq!(doc.settle_duration(), Some(Duration::from_secs(5)));
-    }
-
-    #[test]
-    fn non_direct_input_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-inputs:
-  - to: "seda:q"
-    body: x
-expects:
-  mock:result:
-    count: 1
-"#;
-        assert!(matches!(
-            err_of(yaml),
-            TestDocError::UnsupportedInputScheme { ref target } if target == "seda:q"
-        ));
-    }
-
-    #[test]
-    fn body_scalars_rejected() {
-        fn doc_with_body(body: &str) -> String {
-            format!(
-                r#"
-routes:
-  - id: r1
-    from: "direct:start"
-inputs:
-  - to: "direct:start"
-    body: {body}
-expects:
-  mock:result:
-    count: 1
-"#
-            )
-        }
-        for (raw, expected) in [("null", "null"), ("true", "true"), ("7", "7")] {
-            let err = err_of(&doc_with_body(raw));
-            assert!(
-                matches!(err, TestDocError::UnsupportedBodyScalar(ref s) if s == expected),
-                "body `{raw}` must surface UnsupportedBodyScalar(\"{expected}\"), got: {err:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn body_forms_accepted() {
-        fn doc_with_body(body: &str) -> String {
-            format!(
-                r#"
-routes:
-  - id: r1
-    from: "direct:start"
-inputs:
-  - to: "direct:start"
-    body: {body}
-expects:
-  mock:result:
-    count: 1
-"#
-            )
-        }
-        let doc = parse_test_document(&doc_with_body("x")).expect("string body parses"); // allow-unwrap
-        assert!(matches!(
-            doc.inputs[0].body,
-            Some(InputBody::Text(ref s)) if s == "x"
-        ));
-        let doc = parse_test_document(&doc_with_body("{a: 1}")).expect("object body parses"); // allow-unwrap
-        assert!(matches!(
-            doc.inputs[0].body,
-            Some(InputBody::Json(ref v)) if v.get("a") == Some(&serde_json::json!(1))
-        ));
-        let doc = parse_test_document(&doc_with_body("[1, 2]")).expect("array body parses"); // allow-unwrap
-        assert!(matches!(
-            doc.inputs[0].body,
-            Some(InputBody::Json(ref v)) if *v == serde_json::json!([1, 2])
-        ));
-        // A missing body key is legal (None), unlike an explicit null.
-        let no_body = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-inputs:
-  - to: "direct:start"
-expects:
-  mock:result:
-    count: 1
-"#;
-        let doc = parse_test_document(no_body).expect("input without body parses"); // allow-unwrap
-        assert!(doc.inputs[0].body.is_none());
-    }
-
-    #[test]
-    fn intercepts_skip_to_parses() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  kafka:orders:
-    skipTo: mock:orders
-"#;
-        let doc = parse_test_document(yaml).expect("valid intercept doc should parse"); // allow-unwrap
-        let rules = doc.intercept_rules().expect("intercept_rules is Some"); // allow-unwrap
-        assert_eq!(
-            rules.lookup("kafka:orders"),
-            Some(&camel_core::intercept::InterceptAction::SkipTo {
-                uri: "mock:orders".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn intercepts_divert_copy_to_parses() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  seda:audit:
-    divertCopyTo: mock:audit
-"#;
-        let doc = parse_test_document(yaml).expect("valid intercept doc should parse"); // allow-unwrap
-        let rules = doc.intercept_rules().expect("intercept_rules is Some"); // allow-unwrap
-        assert_eq!(
-            rules.lookup("seda:audit"),
-            Some(&camel_core::intercept::InterceptAction::DivertCopyTo {
-                uri: "mock:audit".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn intercept_action_both_keys_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  kafka:orders:
-    skipTo: mock:orders
-    divertCopyTo: mock:audit
-"#;
-        let err = err_of(yaml);
-        assert!(
-            matches!(
-                err,
-                TestDocError::InterceptActionKeys { ref key, problem: "both" } if key == "kafka:orders"
-            ),
-            "expected InterceptActionKeys both for kafka:orders, got: {err:?}"
-        );
-        assert!(err.to_string().contains("kafka:orders"));
-    }
-
-    #[test]
-    fn intercept_action_neither_key_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  kafka:orders: {}
-"#;
-        let err = err_of(yaml);
-        assert!(
-            matches!(
-                err,
-                TestDocError::InterceptActionKeys { ref key, problem: "neither" } if key == "kafka:orders"
-            ),
-            "expected InterceptActionKeys neither for kafka:orders, got: {err:?}"
-        );
-        assert!(err.to_string().contains("kafka:orders"));
-    }
-
-    #[test]
-    fn intercept_target_non_mock_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  kafka:orders:
-    skipTo: direct:orders
-"#;
-        let err = err_of(yaml);
-        let msg = err.to_string();
-        assert!(
-            matches!(err, TestDocError::InterceptInvalid(_)),
-            "expected InterceptInvalid, got: {err:?}"
-        );
-        assert!(
-            msg.contains("must start with 'mock:'"),
-            "expected Stage A fragment, got: {msg}"
-        );
-        assert!(
-            msg.contains("direct:orders"),
-            "expected target in msg, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn intercept_source_mock_scheme_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  mock:a:
-    skipTo: mock:b
-"#;
-        let err = err_of(yaml);
-        assert!(
-            matches!(err, TestDocError::InterceptMockSource { ref key } if key == "mock:a"),
-            "expected InterceptMockSource for mock:a, got: {err:?}"
-        );
-        assert!(err.to_string().contains("mock:a"));
-    }
-
-    #[test]
-    fn intercept_source_empty_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  "":
-    skipTo: mock:orders
-"#;
-        let err = err_of(yaml);
-        assert!(
-            matches!(err, TestDocError::InterceptEmptySource),
-            "expected InterceptEmptySource, got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn intercept_target_empty_path_rejected() {
-        for target in ["mock:", "mock:?x=1"] {
-            let yaml = format!(
-                r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  kafka:orders:
-    skipTo: "{target}"
-"#
-            );
-            let err = err_of(&yaml);
-            assert!(
-                matches!(err, TestDocError::InterceptEmptyTargetPath { ref key } if key == "kafka:orders"),
-                "target `{target}` should be InterceptEmptyTargetPath, got: {err:?}"
-            );
-            assert!(
-                err.to_string().contains("kafka:orders"),
-                "display must name source key, got: {}",
-                err.to_string()
-            );
-        }
-    }
-
-    #[test]
-    fn intercept_action_unknown_field_rejected() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-intercepts:
-  kafka:orders:
-    replaceWith: mock:x
-"#;
-        let err = err_of(yaml);
-        assert!(
-            matches!(err, TestDocError::UnknownField(ref msg) if msg.contains("replaceWith")),
-            "expected UnknownField naming replaceWith, got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn intercepts_absent_keeps_behavior() {
-        let yaml = r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    to: "mock:result"
-expects:
-  mock:result:
-    count: 1
-"#;
-        let doc = parse_test_document(yaml).expect("doc without intercepts should parse"); // allow-unwrap
-        assert!(doc.intercept_rules().is_none());
-        assert!(doc.intercepts.is_none());
-    }
-}
+#[path = "document_tests.rs"]
+mod tests;

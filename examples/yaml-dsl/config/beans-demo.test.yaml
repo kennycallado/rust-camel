@@ -1,0 +1,32 @@
+# =============================================================================
+# `camel test` document for the beans-demo route.
+#
+# References the route file above, delivers one `direct:` input, intercepts
+# the `log:processed` send with `skipTo: mock:processed`, and declares stub
+# beans for the `bean:` steps. `validator` echoes the exchange through;
+# `enricher` replaces the body with `enriched`. The test asserts that
+# `mock:processed` received the enriched body.
+# =============================================================================
+
+routeFiles: [beans-demo.yaml]
+
+inputs:
+  - to: "direct:orders"
+    body: "order-1"
+
+intercepts:
+  log:processed:
+    skipTo: mock:processed
+
+beans:
+  validator:
+    kind: echo
+  enricher:
+    kind: setBody
+    config:
+      body: enriched
+
+expects:
+  mock:processed:
+    count: 1
+    bodies: ["enriched"]

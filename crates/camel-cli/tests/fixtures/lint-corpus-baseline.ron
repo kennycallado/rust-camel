@@ -83,6 +83,17 @@
         [("R-URI-known:unverified-scheme", "info")],
     ),
 
+    // intercepts-demo (declarative-intercepts, bd rc-7f0n). The `kafka:`
+    // scheme is not registered by `register_builtin_components_for_lint`,
+    // so unverified-scheme Info is by-design. The route file deliberately
+    // targets an unregistered `kafka:orders` — the test document diverts it
+    // to a mock, which is the example's teaching point. Matches the
+    // env-interpolation/wasm-webhook precedents.
+    (
+        "examples/yaml-dsl/config/intercepts-demo.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
+
     // parameters.json (added by add-endpoint-parameters Task 2.3). The
     // `kafka:`/`db:` schemes are not registered by
     // `register_builtin_components_for_lint`, so unverified-scheme Info is

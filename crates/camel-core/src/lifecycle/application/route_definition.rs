@@ -404,6 +404,10 @@ impl RouteDefinition {
         &self.steps
     }
 
+    pub fn circuit_breaker_fallback(&self) -> &[BuilderStep] {
+        &self.circuit_breaker_fallback
+    }
+
     /// Transform the step list, consuming and returning self.
     /// Used for post-parse instrumentation (e.g. benchmark timing injection
     /// around `To` steps). The field stays private; callers rebuild via this
@@ -1459,5 +1463,12 @@ mod tests {
         assert!(matches!(mapped.steps()[1], BuilderStep::To(ref s) if s == "mock:a"));
         // Other fields preserved.
         assert_eq!(mapped.route_id(), "my-route");
+    }
+
+    #[test]
+    fn circuit_breaker_fallback_accessor_returns_steps() {
+        let def = RouteDefinition::new("direct:start", vec![])
+            .with_circuit_breaker_fallback(vec![BuilderStep::To("mock:out".into())]);
+        assert_eq!(def.circuit_breaker_fallback().len(), 1);
     }
 }
