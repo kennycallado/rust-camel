@@ -175,10 +175,12 @@ impl MockConfig {
 mod assert;
 mod expectations;
 mod inner;
+pub mod matcher;
 
 pub use assert::MockAssertionError;
 pub use expectations::MockExpectations;
 pub use inner::{ExchangeAssert, MockEndpoint, MockEndpointInner};
+pub use matcher::{BodyMatcher, HeaderMatcher};
 
 // ---------------------------------------------------------------------------
 // MockComponent

@@ -52,6 +52,16 @@
 //! - all other parsing scenarios (unknown field, route-source exclusivity, body
 //!   scalar, settle range, intercept rules) → Task 1 `document_tests.rs` unit tests
 //!   (unchanged by this change)
+//!
+//! ## MODIFIED (mock-matchers Task 2.1) — matcher grammar on replies
+//! - `reply body regex matcher passes` → `reply_regex_matcher_passes`
+//! - `reply body jsonSubset matcher passes` → `reply_json_subset_passes`
+//! - `reply matcher mismatch names the matcher` → `reply_mismatch_names_matcher_exit_1`
+//! - `reply header regex matcher passes` → `reply_header_regex_passes`
+//! - `reply body object without matcher keys stays literal JSON` →
+//!   `literal_json_reply_body_backcompat` (pre-change JSON structural equality)
+//! - matcher parsing scenarios (reserved keys, wrong key count, invalid regex,
+//!   jsonSubset placement) → `document_tests.rs` unit tests in this change
 
 use std::fs;
 use std::path::PathBuf;
@@ -760,5 +770,242 @@ expects:
     assert!(
         stderr.contains("expectReply must declare body or headers"),
         "stderr must state the body-or-headers requirement; stderr:\n{stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// mock-matchers Task 2.1: matcher grammar on replies (subprocess pins)
+// ---------------------------------------------------------------------------
+
+/// A regex reply-body matcher passes against the transformed body.
+#[test]
+fn reply_regex_matcher_passes() {
+    let dir = temp_dir("reply-regex");
+    let doc = dir.join("a.test.yaml");
+    fs::write(
+        &doc,
+        r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - set_body:
+          value: "order-42"
+      - to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: "x"
+    expectReply:
+      body:
+        regex: "^order-[0-9]+$"
+"#,
+    )
+    .expect("write a.test.yaml"); // allow-unwrap
+
+    let output = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("test")
+        .arg(&doc)
+        .output()
+        .expect("spawn camel test"); // allow-unwrap
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "regex reply matcher must pass; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("PASS") && stdout.contains("reply[0]"),
+        "stdout must carry one PASS reply line; stdout:\n{stdout}"
+    );
+}
+
+/// A jsonSubset reply-body matcher passes against a JSON reply with extra
+/// fields.
+#[test]
+fn reply_json_subset_passes() {
+    let dir = temp_dir("reply-json-subset");
+    let doc = dir.join("a.test.yaml");
+    fs::write(
+        &doc,
+        r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - set_body:
+          value:
+            status: ok
+            ts: 1234
+      - to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: "x"
+    expectReply:
+      body:
+        jsonSubset:
+          status: ok
+"#,
+    )
+    .expect("write a.test.yaml"); // allow-unwrap
+
+    let output = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("test")
+        .arg(&doc)
+        .output()
+        .expect("spawn camel test"); // allow-unwrap
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "jsonSubset reply matcher must pass; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("PASS") && stdout.contains("reply[0]"),
+        "stdout must carry one PASS reply line; stdout:\n{stdout}"
+    );
+}
+
+/// A reply matcher mismatch FAILs naming the matcher kind, its value, and the
+/// received reply body, with exit 1.
+#[test]
+fn reply_mismatch_names_matcher_exit_1() {
+    let dir = temp_dir("reply-matcher-mismatch");
+    let doc = dir.join("a.test.yaml");
+    fs::write(
+        &doc,
+        r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - set_body:
+          value: "done"
+      - to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: "x"
+    expectReply:
+      body:
+        contains: "unfinished"
+"#,
+    )
+    .expect("write a.test.yaml"); // allow-unwrap
+
+    let output = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("test")
+        .arg(&doc)
+        .output()
+        .expect("spawn camel test"); // allow-unwrap
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "reply matcher mismatch must exit 1; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("FAIL") && stdout.contains("reply[0]"),
+        "stdout must carry a FAIL line naming the reply; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("contains") && stdout.contains("unfinished") && stdout.contains("done"),
+        "failure must name the matcher, its value, and the received body; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("0 passed, 1 failed"),
+        "summary must count the failed reply row; stdout:\n{stdout}"
+    );
+}
+
+/// A header regex matcher on `expectReply.headers` passes against the
+/// 8-hex-char reply header.
+#[test]
+fn reply_header_regex_passes() {
+    let dir = temp_dir("reply-header-regex");
+    let doc = dir.join("a.test.yaml");
+    fs::write(
+        &doc,
+        r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - set_header:
+          key: X-Trace
+          value: "ab12cd34"
+      - to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: "x"
+    expectReply:
+      headers:
+        X-Trace:
+          regex: "^[a-f0-9]{8}$"
+"#,
+    )
+    .expect("write a.test.yaml"); // allow-unwrap
+
+    let output = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("test")
+        .arg(&doc)
+        .output()
+        .expect("spawn camel test"); // allow-unwrap
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "header regex reply matcher must pass; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("PASS") && stdout.contains("reply[0]"),
+        "stdout must carry one PASS reply line; stdout:\n{stdout}"
+    );
+}
+
+/// Pre-change JSON reply behavior: an object without matcher keys is a
+/// literal equals value compared structurally.
+#[test]
+fn literal_json_reply_body_backcompat() {
+    let dir = temp_dir("reply-literal-json");
+    let doc = dir.join("a.test.yaml");
+    fs::write(
+        &doc,
+        r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - set_body:
+          value:
+            status: ok
+      - to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: "x"
+    expectReply:
+      body:
+        status: ok
+"#,
+    )
+    .expect("write a.test.yaml"); // allow-unwrap
+
+    let output = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("test")
+        .arg(&doc)
+        .output()
+        .expect("spawn camel test"); // allow-unwrap
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "literal JSON reply body must keep passing; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("PASS") && stdout.contains("reply[0]"),
+        "stdout must carry one PASS reply line; stdout:\n{stdout}"
     );
 }

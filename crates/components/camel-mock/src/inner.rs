@@ -20,6 +20,7 @@ use tracing::debug;
 
 use crate::MockAssertionError;
 use crate::MockExpectations;
+use crate::matcher::{BodyMatcher, HeaderMatcher};
 
 // ---------------------------------------------------------------------------
 // MockEndpoint / MockEndpointInner
@@ -203,6 +204,19 @@ impl MockEndpointInner {
         guard.push_body(body);
     }
 
+    /// Add a body matcher to the expectations list.
+    ///
+    /// Matchers share the ordered slot list with
+    /// [`expect_body`](Self::expect_body): mixed sequences keep their
+    /// insertion order.
+    pub fn expect_body_matcher(&self, matcher: BodyMatcher) {
+        let mut guard = self
+            .expectations
+            .lock()
+            .expect("expectations lock poisoned"); // allow-unwrap
+        guard.push_body_matcher(matcher);
+    }
+
     /// Add an expected header key-value pair to the expectations list.
     pub fn expect_header(&self, key: &str, value: impl Into<serde_json::Value>) {
         let mut guard = self
@@ -224,6 +238,20 @@ impl MockEndpointInner {
         guard.push_header_regex(key.to_string(), pattern.to_string());
     }
 
+    /// Add a header matcher to the expectations list.
+    ///
+    /// After `await_exchanges()`, `assert_satisfied()` checks whether any
+    /// received exchange has the named header satisfying the matcher.
+    /// Unlike [`expect_header_regex`](Self::expect_header_regex), a
+    /// [`HeaderMatcher::Regex`] requires the received value to be a string.
+    pub fn expect_header_matcher(&self, key: &str, matcher: HeaderMatcher) {
+        let mut guard = self
+            .expectations
+            .lock()
+            .expect("expectations lock poisoned"); // allow-unwrap
+        guard.push_header_matcher(key.to_string(), matcher);
+    }
+
     /// Assert that all registered expectations are satisfied.
     ///
     /// # Panics
@@ -231,9 +259,10 @@ impl MockEndpointInner {
     /// Panics if an expected exchange count (exact or minimum, see
     /// [`expect_count`](Self::expect_count) and
     /// [`expect_minimum_count`](Self::expect_minimum_count)) is not met, if
-    /// expected bodies do not match received bodies (in order or any order
-    /// depending on `any_order` config), if expected headers are missing, or
-    /// if header regex patterns do not match.
+    /// expected bodies or body matchers do not match received bodies (in
+    /// order or any order depending on `any_order` config), if expected
+    /// headers are missing, if header regex patterns do not match, or if
+    /// header matchers fail.
     pub async fn assert_satisfied(&self) {
         if let Err(e) = self.evaluate_expectations().await {
             panic!("{e}");

@@ -135,6 +135,36 @@ A `fail` stub surfaces as a document error. The runner reports it on stderr and 
 
 The stub beans mirror the `bean:` step. The step looks up a bean by name and calls a method on it. The stub supplies that lookup in the test. See [Bean](../steps/bean.md) for the step contract. The example pair lives in [`examples/yaml-dsl/config/beans-demo.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/beans-demo.yaml) and [`beans-demo.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/beans-demo.test.yaml).
 
+### Endpoint expectations
+
+`expects` maps a `mock:` endpoint name to an expectation object. The object may hold `count` or `minCount`, a `bodies` list, and a `headers` map. `count` and `minCount` are mutually exclusive.
+
+`bodies` uses strict grammar. Each entry is a bare string or a single-key matcher map. A bare string is exact equality (`equals`). A map with one recognized body-matcher key selects that matcher. Any other form is a document error. `camel test` exits with code 2 and names the field and the key.
+
+Body matchers in v1: `equals`, `regex`, `contains`, `startsWith`, `endsWith`, `exists`, `jsonSubset`. `exists` takes `null` and takes no argument. `jsonSubset` takes a JSON object. A `regex` value must be a valid pattern. The runner rejects an invalid pattern at parse time and exits with code 2.
+
+`headers` values use dual grammar. Any literal JSON value stays exact structural equality (`equals`). A map whose sole key is `equals`, `regex`, or `exists` selects that matcher. Any other value stays a literal. `jsonSubset` on a header is a document error. `camel test` exits with code 2.
+
+```yaml
+expects:
+  mock:result:
+    count: 2
+    bodies:
+      - regex: "^order-[0-9]+$"
+      - jsonSubset: {status: "ok"}
+    headers:
+      X-Trace: { regex: "^[a-f0-9]{8}$" }
+      mode: {batch: 1, predicate: "raw"}
+```
+
+`jsonSubset` requires a JSON object pattern. The received body may be `Body::Json` or `Body::Text` that parses as JSON. A text body that does not parse fails the matcher. The received top-level JSON must be an object. Objects match recursively. Every pattern key must exist with a matching value. Nested objects match by subset. Arrays compare exactly by length, order, and element equality. Extra fields in the received object do not fail the assertion.
+
+A sole `predicate` key is reserved. `camel test` rejects it with `predicate matchers are not supported` and exits with code 2. This applies in every matcher position. A multi-key object that contains `predicate` stays a literal in dual positions. It does not select a matcher.
+
+Matcher mismatches are assertion failures. `camel test` prints a `FAIL` line that names the matcher, its pattern, and the received value. The received value is rendered whole. The document exits with code 1. Parse-time errors (invalid regex, non-object `jsonSubset`, wrong key count) exit with code 2.
+
+Migration note: only literals whose single key is a matcher key change meaning in dual positions (`expectReply.body`, `expects.headers` values, `expectReply.headers` values). For example `expectReply: {body: {equals: "x"}}` previously meant literal equality of `{"equals": "x"}`. With matchers it selects `equals "x"`. Wrap the literal to keep the old meaning: `body: {equals: {equals: "x"}}`. `expects.bodies` entries were strings before, so matcher maps there add no migration. A sole `predicate` key, or a sole `jsonSubset` key on a header, parsed as a literal before; it now fails at parse with exit 2.
+
 ### Reply assertions
 
 An input may declare `expectReply` to assert against the reply message the `direct:` producer returns. The block holds two optional keys: `body` and `headers`. At least one must be present. An empty `expectReply` is a document error.
@@ -147,7 +177,7 @@ inputs:
       body: "enriched"
 ```
 
-The `body` value is a string or a JSON value. A string matches the reply body exactly. A JSON value matches structurally. The `headers` value is a map from header name to JSON value. The reply must carry every expected header with an equal value. Extra headers on the reply do not fail the assertion.
+`expectReply.body` uses dual grammar. Every bare scalar (string, number, boolean, `null`) and every array is literal `equals`. A string becomes `Body::Text`. Other scalars and arrays become `Body::Json`. An object with one recognized body-matcher key selects that matcher. Any other object is literal `equals` with structural equality. `expectReply.headers` values use the same dual header grammar as `expects.headers`. The reply must satisfy every expected header. Extra headers on the reply do not fail the assertion.
 
 The reply message is the route output when the route set one. Otherwise it is the final input message. Nothing in the lean `camel test` component set sets the output today. The reply pairs with the input by delivery order. Inputs deliver strictly sequentially, so `reply[i]` matches the `i`-th input.
 

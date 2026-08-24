@@ -20,8 +20,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
+use camel_api::Body;
+use camel_component_mock::BodyMatcher;
+use camel_component_mock::HeaderMatcher;
 use camel_core::intercept::{InterceptAction, InterceptRule, InterceptRules};
 use noyalib::compat::serde_yaml;
+use regex::Regex;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
@@ -33,6 +37,10 @@ const DIRECT_SCHEME_PREFIX: &str = "direct:";
 /// Sentinel prefix the body deserializer embeds in serde errors; the token
 /// after it is the compact JSON rendering of the rejected scalar.
 const BODY_SCALAR_SENTINEL: &str = "unsupported body scalar: ";
+/// Sentinel prefix the matcher deserializers embed in serde errors; the text
+/// after it is the rendered [`TestDocError::InvalidMatcher`] message (any
+/// trailing serde location suffix is stripped during classification).
+const MATCHER_SENTINEL: &str = "invalid matcher: ";
 /// Upper bound for the `settle` quiet window.
 const SETTLE_MAX: Duration = Duration::from_secs(5);
 /// Registry kinds `repositories:` accepts; displayed order in error messages.
@@ -158,18 +166,21 @@ pub struct InterceptActionDoc {
     pub divert_copy_to: Option<String>,
 }
 
-/// Expected reply assertion for one input delivery: exact-match against the
+/// Expected reply assertion for one input delivery: matcher-based against the
 /// reply exchange the `direct:` producer returns. At least one of `body` /
 /// `headers` must be present (validated in [`parse_test_document`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ExpectReply {
-    /// Reply body restricted to string (`Text`) or object/array (`Json`)
-    /// forms, same rule as input bodies.
-    #[serde(default, deserialize_with = "deserialize_option_input_body")]
-    pub body: Option<InputBody>,
-    /// Expected reply headers (exact submap of JSON values).
-    pub headers: Option<HashMap<String, serde_json::Value>>,
+    /// Reply body under the dual grammar: bare scalars, arrays, and
+    /// non-matcher objects are literal `equals`; a single-recognized-key
+    /// object is that matcher.
+    #[serde(default, deserialize_with = "deserialize_reply_body")]
+    pub body: Option<BodyMatcher>,
+    /// Expected reply headers (dual grammar: literal JSON values stay
+    /// `equals`; a sole-key `equals`/`regex`/`exists` map is that matcher).
+    #[serde(default, deserialize_with = "deserialize_reply_headers")]
+    pub headers: Option<HashMap<String, HeaderMatcher>>,
 }
 
 /// One input delivery to a `direct:` endpoint.
@@ -206,10 +217,14 @@ pub struct ExpectSet {
     pub count: Option<usize>,
     /// Minimum received count; mutually exclusive with `count`.
     pub min_count: Option<usize>,
-    /// Ordered expected bodies.
-    pub bodies: Option<Vec<String>>,
-    /// Expected headers.
-    pub headers: Option<HashMap<String, serde_json::Value>>,
+    /// Ordered expected bodies under the strict matcher grammar (bare
+    /// strings are exact `equals`).
+    #[serde(default, deserialize_with = "deserialize_bodies")]
+    pub bodies: Option<Vec<BodyMatcher>>,
+    /// Expected headers under the dual grammar (literal values stay
+    /// `equals`; a sole-key `equals`/`regex`/`exists` map is that matcher).
+    #[serde(default, deserialize_with = "deserialize_expect_headers")]
+    pub headers: Option<HashMap<String, HeaderMatcher>>,
 }
 
 /// Maps a deserialized JSON value to [`InputBody`], rejecting scalars with a
@@ -237,6 +252,291 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     input_body_from_value(value).map_err(D::Error::custom)
+}
+
+// ---------------------------------------------------------------------------
+// Matcher grammar (mock-matchers Task 2.1)
+// ---------------------------------------------------------------------------
+
+/// Recognized body matcher keys.
+fn is_body_matcher_key(key: &str) -> bool {
+    matches!(
+        key,
+        "equals" | "regex" | "contains" | "startsWith" | "endsWith" | "exists" | "jsonSubset"
+    )
+}
+
+/// Reserved key rejected with the same message in every grammar position.
+fn predicate_error(field: &str) -> TestDocError {
+    TestDocError::InvalidMatcher(format!("{field}: predicate matchers are not supported"))
+}
+
+/// Map a JSON value to a [`Body`] using the input-body rule: strings are
+/// text, every other JSON form (object, array, number, boolean, null) is
+/// carried as JSON.
+fn body_from_json(value: &serde_json::Value) -> Body {
+    match value {
+        serde_json::Value::String(s) => Body::Text(s.clone()),
+        other => Body::Json(other.clone()),
+    }
+}
+
+/// Build the body matcher for one recognized matcher key and its payload.
+/// `equals` maps its payload through the input-body value-to-Body mapping;
+/// `regex`/`contains`/`startsWith`/`endsWith` require a string payload
+/// (regex patterns compile-verified at parse time); `exists` requires a null
+/// payload; `jsonSubset` requires an object.
+fn body_matcher_from_map(
+    key: &str,
+    payload: &serde_json::Value,
+    field: &str,
+) -> Result<BodyMatcher, TestDocError> {
+    match key {
+        "equals" => Ok(BodyMatcher::Equals(body_from_json(payload))),
+        "regex" | "contains" | "startsWith" | "endsWith" => {
+            let Some(pattern) = payload.as_str() else {
+                return Err(TestDocError::InvalidMatcher(format!(
+                    "{field}: `{key}` requires a string payload"
+                )));
+            };
+            if key == "regex"
+                && let Err(e) = Regex::new(pattern)
+            {
+                return Err(TestDocError::InvalidMatcher(format!(
+                    "{field}: invalid regex in `{key}` `{pattern}`: {e}"
+                )));
+            }
+            Ok(match key {
+                "regex" => BodyMatcher::Regex(pattern.to_string()),
+                "contains" => BodyMatcher::Contains(pattern.to_string()),
+                "startsWith" => BodyMatcher::StartsWith(pattern.to_string()),
+                _ => BodyMatcher::EndsWith(pattern.to_string()),
+            })
+        }
+        "exists" => {
+            if payload.is_null() {
+                Ok(BodyMatcher::Exists)
+            } else {
+                Err(TestDocError::InvalidMatcher(format!(
+                    "{field}: `exists` takes no argument"
+                )))
+            }
+        }
+        "jsonSubset" => match payload {
+            serde_json::Value::Object(map) => Ok(BodyMatcher::JsonSubset(
+                serde_json::Value::Object(map.clone()),
+            )),
+            _ => Err(TestDocError::InvalidMatcher(format!(
+                "{field}: `jsonSubset` must be an object"
+            ))),
+        },
+        _ => Err(TestDocError::InvalidMatcher(format!(
+            "{field}: unknown matcher key `{key}`"
+        ))),
+    }
+}
+
+/// Shape error for a strict body entry that is neither a bare string nor a
+/// single-recognized-key matcher map; names the offending keys when present.
+fn body_entry_shape_error(
+    map: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> TestDocError {
+    let mut keys = map.iter();
+    let detail = match (map.len(), keys.next()) {
+        (0, None) => "a matcher map must have exactly one key (empty map)".to_string(),
+        (1, Some((key, _))) => format!("unknown matcher key `{key}`"),
+        _ => format!(
+            "a matcher map must have exactly one key (got {})",
+            map.keys()
+                .map(|key| format!("`{key}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    TestDocError::InvalidMatcher(format!(
+        "{field} entries must be strings or matcher maps: {detail}"
+    ))
+}
+
+/// Strict grammar for `expects.bodies` entries: a bare string is an exact
+/// `equals`; a map with exactly one recognized body matcher key is that
+/// matcher; any other scalar, a bare array, or a map with zero, multiple, or
+/// unrecognized keys is a document error.
+fn parse_body_entry(value: &serde_json::Value, field: &str) -> Result<BodyMatcher, TestDocError> {
+    match value {
+        serde_json::Value::String(s) => Ok(BodyMatcher::Equals(Body::Text(s.clone()))),
+        serde_json::Value::Object(map) => {
+            let mut keys = map.iter();
+            let sole = if map.len() == 1 { keys.next() } else { None };
+            if let Some((key, payload)) = sole {
+                if key == "predicate" {
+                    return Err(predicate_error(field));
+                }
+                if is_body_matcher_key(key) {
+                    return body_matcher_from_map(key, payload, field);
+                }
+            }
+            Err(body_entry_shape_error(map, field))
+        }
+        _ => Err(TestDocError::InvalidMatcher(format!(
+            "{field} entries must be strings or matcher maps: bare scalars and \
+             arrays are not body expectations"
+        ))),
+    }
+}
+
+/// Dual grammar for header values (`expects.headers` and
+/// `expectReply.headers`): a map whose sole key is a recognized header
+/// matcher key (`equals`, `regex`, `exists`) is that matcher; any other
+/// value — scalar, array, multi-key or non-matcher object — is a literal
+/// `equals` compared structurally. A sole `jsonSubset` or `predicate` key is
+/// a document error.
+fn parse_header_value(
+    value: &serde_json::Value,
+    field: &str,
+) -> Result<HeaderMatcher, TestDocError> {
+    let serde_json::Value::Object(map) = value else {
+        return Ok(HeaderMatcher::Equals(value.clone()));
+    };
+    let mut keys = map.iter();
+    let sole = if map.len() == 1 { keys.next() } else { None };
+    if let Some((key, payload)) = sole {
+        match key.as_str() {
+            "equals" => Ok(HeaderMatcher::Equals(payload.clone())),
+            "regex" => {
+                let Some(pattern) = payload.as_str() else {
+                    return Err(TestDocError::InvalidMatcher(format!(
+                        "{field}: `regex` requires a string payload"
+                    )));
+                };
+                Regex::new(pattern).map_err(|e| {
+                    TestDocError::InvalidMatcher(format!(
+                        "{field}: invalid regex in `regex` `{pattern}`: {e}"
+                    ))
+                })?;
+                Ok(HeaderMatcher::Regex(pattern.to_string()))
+            }
+            "exists" => {
+                if payload.is_null() {
+                    Ok(HeaderMatcher::Exists)
+                } else {
+                    Err(TestDocError::InvalidMatcher(format!(
+                        "{field}: `exists` takes no argument"
+                    )))
+                }
+            }
+            "jsonSubset" => Err(TestDocError::InvalidMatcher(format!(
+                "{field}: `jsonSubset` applies to bodies only"
+            ))),
+            "predicate" => Err(predicate_error(field)),
+            _ => Ok(HeaderMatcher::Equals(value.clone())),
+        }
+    } else {
+        Ok(HeaderMatcher::Equals(value.clone()))
+    }
+}
+
+/// Dual grammar for `expectReply.body`: every bare scalar (string, number,
+/// boolean, null) and every array is a literal `equals` value; a JSON object
+/// with exactly one recognized body matcher key is that matcher; a sole
+/// `predicate` key is a document error; any other JSON object is a literal
+/// `equals` value (structural equality).
+fn parse_reply_body(value: &serde_json::Value, field: &str) -> Result<BodyMatcher, TestDocError> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys = map.iter();
+            let sole = if map.len() == 1 { keys.next() } else { None };
+            if let Some((key, payload)) = sole {
+                if key == "predicate" {
+                    return Err(predicate_error(field));
+                }
+                if is_body_matcher_key(key) {
+                    return body_matcher_from_map(key, payload, field);
+                }
+            }
+            Ok(BodyMatcher::Equals(Body::Json(value.clone())))
+        }
+        serde_json::Value::String(s) => Ok(BodyMatcher::Equals(Body::Text(s.clone()))),
+        scalar_or_array => Ok(BodyMatcher::Equals(Body::Json(scalar_or_array.clone()))),
+    }
+}
+
+/// Field-level deserializer for `expects.bodies` (strict grammar). Errors
+/// carry the matcher sentinel so [`classify_yaml_error`] reconstructs
+/// [`TestDocError::InvalidMatcher`].
+fn deserialize_bodies<'de, D>(deserializer: D) -> Result<Option<Vec<BodyMatcher>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+    let Some(entries) = raw else {
+        return Ok(None);
+    };
+    let mut matchers = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        let matcher = parse_body_entry(entry, "bodies")
+            .map_err(|e| D::Error::custom(format!("{MATCHER_SENTINEL}{e}")))?;
+        matchers.push(matcher);
+    }
+    Ok(Some(matchers))
+}
+
+/// Shared map-value deserializer for the two header positions; `field_prefix`
+/// distinguishes `headers` from `expectReply.headers` in error messages.
+fn deserialize_header_map<'de, D>(
+    deserializer: D,
+    field_prefix: &str,
+) -> Result<Option<HashMap<String, HeaderMatcher>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<HashMap<String, serde_json::Value>>::deserialize(deserializer)?;
+    let Some(headers) = raw else {
+        return Ok(None);
+    };
+    let mut matchers = HashMap::with_capacity(headers.len());
+    for (key, value) in &headers {
+        let field = format!("{field_prefix}[{key}]");
+        let matcher = parse_header_value(value, &field)
+            .map_err(|e| D::Error::custom(format!("{MATCHER_SENTINEL}{e}")))?;
+        matchers.insert(key.clone(), matcher);
+    }
+    Ok(Some(matchers))
+}
+
+/// Field-level deserializer for `expects.headers` values (dual grammar).
+fn deserialize_expect_headers<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, HeaderMatcher>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_header_map(deserializer, "headers")
+}
+
+/// Field-level deserializer for `expectReply.headers` values (dual grammar).
+fn deserialize_reply_headers<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, HeaderMatcher>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_header_map(deserializer, "expectReply.headers")
+}
+
+/// Field-level deserializer for `expectReply.body` (dual grammar).
+/// Deserializes a plain `serde_json::Value` (NOT `Option<Value>`): a missing
+/// field never reaches this helper, while an explicit `body: null` is the
+/// literal `equals null` matcher.
+fn deserialize_reply_body<'de, D>(deserializer: D) -> Result<Option<BodyMatcher>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    parse_reply_body(&value, "expectReply.body")
+        .map(Some)
+        .map_err(|e| D::Error::custom(format!("{MATCHER_SENTINEL}{e}")))
 }
 
 /// Validation and parse errors for test documents.
@@ -285,6 +585,9 @@ pub enum TestDocError {
     /// An `expectReply` block failed validation; the message carries the
     /// precise reason verbatim.
     InvalidReply(String),
+    /// A matcher entry failed grammar validation; the message carries the
+    /// precise reason verbatim.
+    InvalidMatcher(String),
 }
 
 impl fmt::Display for TestDocError {
@@ -357,21 +660,28 @@ impl fmt::Display for TestDocError {
             Self::InvalidBeans(msg) => write!(f, "{msg}"),
             Self::InvalidRepositories(msg) => write!(f, "{msg}"),
             Self::InvalidReply(msg) => write!(f, "{msg}"),
+            Self::InvalidMatcher(msg) => write!(f, "{msg}"),
         }
     }
 }
 
 impl std::error::Error for TestDocError {}
 
-/// Classifies a noyalib (serde_yaml compat) error text. The body-scalar
-/// sentinel is extracted first — it originates inside the field deserializer
-/// and must not be swallowed by the generic branches. The scalar token is the
-/// first whitespace-delimited word after the sentinel, which strips any
-/// location suffix the compat layer appends.
+/// Classifies a noyalib (serde_yaml compat) error text. The body-scalar and
+/// matcher sentinels are extracted first — they originate inside field
+/// deserializers and must not be swallowed by the generic branches. The
+/// scalar token is the first whitespace-delimited word after the sentinel,
+/// which strips any location suffix the compat layer appends; the matcher
+/// message spans multiple words, so a trailing ` at line ...` suffix is cut
+/// explicitly.
 fn classify_yaml_error(raw: &str) -> TestDocError {
     if let Some((_, after)) = raw.split_once(BODY_SCALAR_SENTINEL) {
         let scalar = after.split_whitespace().next().unwrap_or_default();
         return TestDocError::UnsupportedBodyScalar(scalar.to_string());
+    }
+    if let Some((_, after)) = raw.split_once(MATCHER_SENTINEL) {
+        let msg = after.split_once(" at line ").map_or(after, |(msg, _)| msg);
+        return TestDocError::InvalidMatcher(msg.to_string());
     }
     if raw.contains("unknown field") {
         return TestDocError::UnknownField(raw.to_string());

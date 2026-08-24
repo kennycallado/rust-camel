@@ -1393,6 +1393,7 @@ dependencies = [
  "mimalloc",
  "noyalib",
  "percent-encoding",
+ "regex",
  "ron",
  "rustls",
  "serde",

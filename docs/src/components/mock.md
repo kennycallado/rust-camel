@@ -86,6 +86,16 @@ The Rust API offers three assertion styles. Pick by what your test needs to expr
 
 `expect_body`, `expect_header`, and `expect_header_regex` register a batch of expectations up front. Call `assert_satisfied()` after the exchanges have arrived. Batch mode matches in strict order by default. Set `MockConfig::any_order = true` to match each expected body against any received exchange exactly once.
 
+`BodyMatcher` and `HeaderMatcher` are the public matcher vocabulary. Use `expect_body_matcher(BodyMatcher)` and `expect_header_matcher(key, HeaderMatcher)` to register matcher expectations. They share the ordered slot list with `expect_body`. Insertion order across `expect_body` and `expect_body_matcher` is preserved. Header matcher entries use any-exchange semantics, same as `expect_header` and `expect_header_regex`.
+
+`BodyMatcher` variants: `Equals(Body)`, `Regex(String)`, `Contains(String)`, `StartsWith(String)`, `EndsWith(String)`, `Exists`, `JsonSubset(serde_json::Value)`. `HeaderMatcher` variants: `Equals(serde_json::Value)`, `Regex(String)`, `Exists`. `exists` takes no argument. `jsonSubset` takes a JSON object. `regex` takes a string pattern. An invalid regex is a malformed-pattern error. It never passes and never latches into `fail_fast_error`.
+
+`JsonSubset` matches recursively over objects. Arrays compare exactly. A text body that parses as JSON is accepted. A text body that does not parse fails the matcher. A non-object pattern or a non-object received top-level value fails the matcher.
+
+Failures name the matcher kind, its pattern, and the received value. The display forms are `equals <json>`, `regex <pattern>`, `contains <needle>`, `startsWith <prefix>`, `endsWith <suffix>`, `exists`, `jsonSubset <json>`. When the body is not text, a string-matcher failure adds `body is not text`. When the body is not JSON, a `JsonSubset` failure adds `body is not JSON` or `body is not a JSON object`. When a header regex sees a non-string value, the failure adds `value is not a string`. The received value is rendered whole.
+
+`expect_header_regex` remains available. It coerces non-string header values with `to_string()` before matching. `HeaderMatcher::Regex` is strict. It requires a string value and fails with `value is not a string` otherwise. The divergence is intentional.
+
 `await_exchanges(n, timeout)` blocks until `n` exchanges arrive or the timeout elapses. It uses `Notify`, not polling, so it returns the instant the producer appends. Call it before `exchange(idx)` to avoid an out-of-bounds panic. The method needs a multi-threaded Tokio runtime; `#[tokio::test(flavor = "multi_thread")]` is the right shape.
 
 ## MockConfig

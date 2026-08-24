@@ -557,3 +557,193 @@ fn route_files_from_root_cwd_independent_subprocess() {
         elsewhere.display(),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Matcher expectations (mock-matchers Task 2.1)
+// ---------------------------------------------------------------------------
+
+/// A regex body matcher passes on nondeterministic-shaped content: the route
+/// emits `order-42` and `^order-[0-9]+$` matches (exit 0 through the driver).
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoint_regex_body_matcher_passes() {
+    let dir = temp_dir("regex-body");
+    let doc = dir.join("a.test.yaml");
+    fs::write(
+        &doc,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - set_body:
+          value: "order-42"
+      - to: "mock:result"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:result:
+    count: 1
+    bodies:
+      - regex: "^order-[0-9]+$"
+"#,
+    )
+    .expect("write a.test.yaml"); // allow-unwrap
+    let (summary, out, err) = run_cli(&doc).await;
+    assert_eq!(summary.exit_code, 0, "out:\n{out}\nerr:\n{err}");
+    assert_eq!(summary.failed, 0, "out:\n{out}\nerr:\n{err}");
+    assert!(
+        out.contains("PASS") && out.contains("#result"),
+        "endpoint row must pass, out:\n{out}"
+    );
+}
+
+/// A contains-matcher mismatch FAILs naming the matcher kind, its value, and
+/// the received body, with exit 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoint_contains_mismatch_names_matcher() {
+    let dir = temp_dir("contains-mismatch");
+    let doc = dir.join("a.test.yaml");
+    fs::write(
+        &doc,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - set_body:
+          value: "total: 12"
+      - to: "mock:result"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:result:
+    count: 1
+    bodies:
+      - contains: "total: 13"
+"#,
+    )
+    .expect("write a.test.yaml"); // allow-unwrap
+    let (summary, out, err) = run_cli(&doc).await;
+    assert_eq!(summary.exit_code, 1, "out:\n{out}\nerr:\n{err}");
+    assert_eq!(summary.failed, 1, "out:\n{out}\nerr:\n{err}");
+    assert!(
+        out.contains("FAIL") && out.contains("#result"),
+        "endpoint row must fail, out:\n{out}"
+    );
+    assert!(
+        out.contains("contains") && out.contains("total: 13") && out.contains("total: 12"),
+        "failure must name the matcher, its value, and the received body, out:\n{out}"
+    );
+}
+
+/// A header regex matcher is evaluated by the endpoint engine.
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoint_header_regex_evaluated() {
+    let dir = temp_dir("header-regex");
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - set_header:
+          key: X-Trace
+          value: "ab12cd34"
+      - to: "mock:out"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:out:
+    count: 1
+    headers:
+      X-Trace:
+        regex: "^[a-f0-9]{8}$"
+"#;
+    let result = run(yaml, &dir).await;
+    assert!(
+        result.doc_error.is_none(),
+        "doc_error: {:?}",
+        result.doc_error
+    );
+    assert_eq!(result.endpoint_results.len(), 1);
+    let er = &result.endpoint_results[0];
+    assert_eq!(er.endpoint, "out");
+    assert!(er.outcome.is_ok(), "expected Ok, got {:?}", er.outcome);
+}
+
+/// jsonSubset matches partially and recursively: unmatched received fields
+/// are ignored, nested objects match as subsets.
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoint_json_subset_partial_match() {
+    let dir = temp_dir("json-subset");
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - set_body:
+          value:
+            id: 7
+            status: ok
+            meta:
+              ts: "..."
+              seq: 3
+      - to: "mock:result"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:result:
+    count: 1
+    bodies:
+      - jsonSubset:
+          status: ok
+          meta:
+            seq: 3
+"#;
+    let result = run(yaml, &dir).await;
+    assert!(
+        result.doc_error.is_none(),
+        "doc_error: {:?}",
+        result.doc_error
+    );
+    assert_eq!(result.endpoint_results.len(), 1);
+    let er = &result.endpoint_results[0];
+    assert!(er.outcome.is_ok(), "expected Ok, got {:?}", er.outcome);
+}
+
+/// Bare string bodies and literal header values keep executing exactly as
+/// before the matcher grammar (all-Equals backcompat).
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoint_bare_bodies_backcompat_execution() {
+    let dir = temp_dir("bare-backcompat");
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "mock:out"
+inputs:
+  - to: "direct:start"
+    body: "x"
+    headers:
+      kind: greeting
+expects:
+  mock:out:
+    count: 1
+    bodies: ["x"]
+    headers:
+      kind: greeting
+"#;
+    let result = run(yaml, &dir).await;
+    assert!(
+        result.doc_error.is_none(),
+        "doc_error: {:?}",
+        result.doc_error
+    );
+    assert_eq!(result.endpoint_results.len(), 1);
+    let er = &result.endpoint_results[0];
+    assert!(er.outcome.is_ok(), "expected Ok, got {:?}", er.outcome);
+}

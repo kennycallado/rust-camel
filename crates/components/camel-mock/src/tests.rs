@@ -2594,3 +2594,497 @@ async fn diagnostic_lists_cap_at_eight_entries() {
         "message should not list the 9th and 10th values, got: {msg}"
     );
 }
+
+// -----------------------------------------------------------------------
+// mock-matchers: body/header matcher expectation surface
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn header_matcher_setter_pass() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-hdr-pass", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-hdr-pass").unwrap();
+
+    inner.expect_header_matcher("X-Trace", HeaderMatcher::Regex("^[a-f0-9]{8}$".into()));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("body");
+    msg.headers
+        .insert("X-Trace".into(), serde_json::json!("ab12cd34"));
+    producer.call(Exchange::new(msg)).await.unwrap();
+
+    inner.assert_satisfied().await;
+}
+
+#[tokio::test]
+async fn header_matcher_setter_fail_names_values() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-hdr-fail", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-hdr-fail").unwrap();
+
+    inner.expect_header_matcher("X-Trace", HeaderMatcher::Regex("^[a-f0-9]{8}$".into()));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("body");
+    msg.headers
+        .insert("X-Trace".into(), serde_json::json!("xyz"));
+    producer.call(Exchange::new(msg)).await.unwrap();
+    inner
+        .await_exchanges(1, std::time::Duration::from_millis(500))
+        .await;
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("header matcher mismatch must Err")
+        .to_string();
+    assert!(
+        msg.contains("X-Trace") && msg.contains("regex") && msg.contains("xyz"),
+        "message should name the header, matcher kind, and received value, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn header_matcher_any_exchange() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-hdr-any", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-hdr-any").unwrap();
+
+    inner.expect_header_matcher("X-A", HeaderMatcher::Equals(serde_json::json!("ok")));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    producer
+        .call(Exchange::new(Message::new("first")))
+        .await
+        .unwrap();
+    let mut msg = Message::new("second");
+    msg.headers.insert("X-A".into(), serde_json::json!("ok"));
+    producer.call(Exchange::new(msg)).await.unwrap();
+
+    inner.assert_satisfied().await;
+}
+
+#[tokio::test]
+async fn header_matcher_invalid_regex_direct_api() {
+    let config = MockConfig {
+        fail_fast: true,
+        ..Default::default()
+    };
+    let component = MockComponent::with_config(config);
+    let endpoint = component
+        .create_endpoint("mock:m-hdr-bad-re", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-hdr-bad-re").unwrap();
+
+    inner.expect_header_matcher("X", HeaderMatcher::Regex("(unclosed".into()));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("body");
+    msg.headers.insert("X".into(), serde_json::json!("v"));
+    producer.call(Exchange::new(msg)).await.unwrap();
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("invalid header matcher regex must Err, not a panic");
+    assert!(
+        matches!(err, MockAssertionError::InvalidHeaderPattern { .. }),
+        "expected InvalidHeaderPattern, got: {err:?}"
+    );
+    assert!(
+        inner.fail_fast_error().is_none(),
+        "malformed expectation must not trip the fail-fast latch"
+    );
+}
+
+#[tokio::test]
+async fn ordered_mixed_exact_and_matcher_slots() {
+    // Pass: exact slot 0 then matcher slot 1, received in insertion order.
+    {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:m-mixed-ok", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("m-mixed-ok").unwrap();
+        inner.expect_body(camel_component_api::Body::Text("x".into()));
+        inner.expect_body_matcher(BodyMatcher::Regex("^b-".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("x")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("b-2")))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+    // Fail naming index 1: the matcher slot receives a non-matching body.
+    {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:m-mixed-idx", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("m-mixed-idx").unwrap();
+        inner.expect_body(camel_component_api::Body::Text("x".into()));
+        inner.expect_body_matcher(BodyMatcher::Regex("^b-".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("x")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("a-1")))
+            .await
+            .unwrap();
+
+        let msg = inner
+            .try_assert_satisfied()
+            .await
+            .expect_err("non-matching matcher slot must Err")
+            .to_string();
+        assert!(
+            msg.contains("body[1]"),
+            "message should name index 1, got: {msg}"
+        );
+    }
+    // Fail: insertion order enforced — swapped bodies break the exact slot.
+    {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:m-mixed-swap", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("m-mixed-swap").unwrap();
+        inner.expect_body(camel_component_api::Body::Text("x".into()));
+        inner.expect_body_matcher(BodyMatcher::Regex("^b-".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("b-2")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("x")))
+            .await
+            .unwrap();
+
+        let msg = inner
+            .try_assert_satisfied()
+            .await
+            .expect_err("swapped bodies must violate insertion order")
+            .to_string();
+        assert!(
+            msg.contains("body[0]"),
+            "message should fail on slot 0 (exact expectation kept first), got: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn matcher_count_mismatch_fails_not_panics() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-count", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-count").unwrap();
+    inner.expect_body_matcher(BodyMatcher::Regex("^a-".into()));
+    inner.expect_body_matcher(BodyMatcher::Regex("^b-".into()));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    producer
+        .call(Exchange::new(Message::new("a-1")))
+        .await
+        .unwrap();
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("fewer received bodies than matcher expectations must Err");
+    assert!(
+        matches!(err, MockAssertionError::BodyCountMismatch { .. }),
+        "expected BodyCountMismatch, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn matcher_any_order_passes() {
+    for (name, first, second) in [("m-any-ab", "a-1", "b-2"), ("m-any-ba", "b-2", "a-1")] {
+        let config = MockConfig {
+            any_order: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint(&format!("mock:{name}"), &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint(name).unwrap();
+        inner.expect_body_matcher(BodyMatcher::Regex("^a-".into()));
+        inner.expect_body_matcher(BodyMatcher::Regex("^b-".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new(first)))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new(second)))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+}
+
+#[tokio::test]
+async fn body_matcher_failure_text_identifies() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-diag-idx", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-diag-idx").unwrap();
+    inner.expect_body_matcher(BodyMatcher::Regex("^first$".into()));
+    inner.expect_body_matcher(BodyMatcher::Regex("^ok$".into()));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    producer
+        .call(Exchange::new(Message::new("first")))
+        .await
+        .unwrap();
+    producer
+        .call(Exchange::new(Message::new("denied")))
+        .await
+        .unwrap();
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("non-matching ordered matcher must Err")
+        .to_string();
+    assert!(
+        msg.contains("body[1]")
+            && msg.contains("regex")
+            && msg.contains("^ok$")
+            && msg.contains("denied"),
+        "message should name the index, matcher kind, pattern, and received body, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn string_matcher_failure_states_not_text() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-diag-text", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-diag-text").unwrap();
+    inner.expect_body_matcher(BodyMatcher::Contains("a".into()));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("");
+    msg.body = camel_component_api::Body::Json(serde_json::json!({"b": 1}));
+    producer.call(Exchange::new(msg)).await.unwrap();
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("string matcher against a JSON body must Err")
+        .to_string();
+    assert!(
+        msg.contains("body is not text"),
+        "message should state the body is not text, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn json_subset_failure_states_not_json() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-diag-nojson", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-diag-nojson").unwrap();
+    inner.expect_body_matcher(BodyMatcher::JsonSubset(serde_json::json!({"a": 1})));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    producer
+        .call(Exchange::new(Message::new("nope")))
+        .await
+        .unwrap();
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("jsonSubset against a non-JSON text must Err")
+        .to_string();
+    assert!(
+        msg.contains("body is not JSON"),
+        "message should state the body is not JSON, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn json_subset_failure_names_key_via_pattern() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-diag-key", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-diag-key").unwrap();
+    inner.expect_body_matcher(BodyMatcher::JsonSubset(serde_json::json!({"err": null})));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("");
+    msg.body = camel_component_api::Body::Json(serde_json::json!({"err": 0}));
+    producer.call(Exchange::new(msg)).await.unwrap();
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("jsonSubset with a null pattern value must Err")
+        .to_string();
+    assert!(
+        msg.contains("err") && msg.contains("{\"err\":0}"),
+        "message should name the failing key and the whole received body, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn json_subset_array_failure_names_matcher_and_array() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-diag-arr", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-diag-arr").unwrap();
+    inner.expect_body_matcher(BodyMatcher::JsonSubset(serde_json::json!({
+        "tags": ["a", "b"]
+    })));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("");
+    msg.body = camel_component_api::Body::Json(serde_json::json!({
+        "tags": ["b", "a"]
+    }));
+    producer.call(Exchange::new(msg)).await.unwrap();
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("jsonSubset with an out-of-order array must Err")
+        .to_string();
+    assert!(
+        msg.contains("jsonSubset") && msg.contains("[\"b\",\"a\"]"),
+        "message should name the jsonSubset matcher and the received array, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn exists_body_failure_names_matcher() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-diag-exists", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-diag-exists").unwrap();
+    inner.expect_body_matcher(BodyMatcher::Exists);
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("");
+    msg.body = camel_component_api::Body::Empty;
+    producer.call(Exchange::new(msg)).await.unwrap();
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("exists matcher against an empty body must Err")
+        .to_string();
+    assert!(
+        msg.contains("exists"),
+        "message should name the exists matcher, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn invalid_body_regex_is_error_not_pass() {
+    let config = MockConfig {
+        fail_fast: true,
+        ..Default::default()
+    };
+    let component = MockComponent::with_config(config);
+    let endpoint = component
+        .create_endpoint("mock:m-bad-body-re", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-bad-body-re").unwrap();
+
+    inner.expect_body_matcher(BodyMatcher::Regex("(unclosed".into()));
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    producer
+        .call(Exchange::new(Message::new("any")))
+        .await
+        .unwrap();
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("invalid body matcher regex must Err, not a panic");
+    assert!(
+        matches!(err, MockAssertionError::InvalidBodyPattern { .. }),
+        "expected InvalidBodyPattern, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("(unclosed"),
+        "message should name the failing pattern, got: {err}"
+    );
+    assert!(
+        inner.fail_fast_error().is_none(),
+        "malformed expectation must not trip the fail-fast latch"
+    );
+}
+
+#[tokio::test]
+async fn exists_header_absent_key() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-hdr-absent", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-hdr-absent").unwrap();
+
+    inner.expect_header_matcher("X-B", HeaderMatcher::Exists);
+
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("body");
+    msg.headers.insert("X-Other".into(), serde_json::json!("v"));
+    producer.call(Exchange::new(msg)).await.unwrap();
+
+    let msg = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("exists header matcher on an absent key must Err")
+        .to_string();
+    assert!(
+        msg.contains("X-B") && msg.contains("absent"),
+        "message should name the absent key, got: {msg}"
+    );
+}

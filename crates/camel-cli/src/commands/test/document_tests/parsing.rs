@@ -1,5 +1,8 @@
 use super::*;
 
+use camel_api::Body;
+use camel_component_mock::{BodyMatcher, HeaderMatcher};
+
 #[test]
 fn valid_reference_doc_parses() {
     let yaml = r#"
@@ -431,4 +434,376 @@ expects:
 "#;
     let doc = parse_test_document(no_body).expect("input without body parses"); // allow-unwrap
     assert!(doc.inputs[0].body.is_none());
+}
+
+// --- mock-matchers grammar tests (ported from monolith during rebase) ---
+
+fn doc_with_body_entry(entry: &str) -> String {
+    format!(
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+    bodies:
+      - {entry}
+"#
+    )
+}
+
+fn doc_with_expects_header(value: &str) -> String {
+    format!(
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+    headers:
+      X-Trace: {value}
+"#
+    )
+}
+
+#[test]
+fn bare_string_body_stays_exact() {
+    let doc =
+        parse_test_document(&doc_with_body_entry("plain")).expect("bare string body should parse"); // allow-unwrap
+    let bodies = doc.expects["result"]
+        .bodies
+        .as_ref()
+        .expect("bodies present"); // allow-unwrap
+    assert_eq!(bodies.len(), 1);
+    assert!(matches!(
+        bodies[0],
+        BodyMatcher::Equals(Body::Text(ref s)) if s == "plain"
+    ));
+}
+
+#[test]
+fn matcher_map_body_accepted() {
+    let doc = parse_test_document(&doc_with_body_entry(r#"{regex: "^order-[0-9]+$"}"#))
+        .expect("regex matcher map should parse"); // allow-unwrap
+    let bodies = doc.expects["result"]
+        .bodies
+        .as_ref()
+        .expect("bodies present"); // allow-unwrap
+    assert!(matches!(
+        bodies[0],
+        BodyMatcher::Regex(ref p) if p == "^order-[0-9]+$"
+    ));
+}
+
+#[test]
+fn matcher_map_header_accepted() {
+    let doc = parse_test_document(&doc_with_expects_header(r#"{regex: "^[a-f0-9]{8}$"}"#))
+        .expect("header regex matcher should parse"); // allow-unwrap
+    let headers = doc.expects["result"]
+        .headers
+        .as_ref()
+        .expect("headers present"); // allow-unwrap
+    assert!(matches!(
+        headers.get("X-Trace"),
+        Some(HeaderMatcher::Regex(p)) if p == "^[a-f0-9]{8}$"
+    ));
+}
+
+#[test]
+fn header_literal_object_stays_equals() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+    headers:
+      mode: {batch: 1, predicate: "raw"}
+"#;
+    let doc = parse_test_document(yaml).expect("multi-key literal header should parse"); // allow-unwrap
+    let headers = doc.expects["result"]
+        .headers
+        .as_ref()
+        .expect("headers present"); // allow-unwrap
+    // A multi-key object is not a matcher map; it stays a literal `equals`.
+    assert!(matches!(
+        headers.get("mode"),
+        Some(HeaderMatcher::Equals(v))
+            if v.get("batch") == Some(&serde_json::json!(1))
+                && v.get("predicate") == Some(&serde_json::json!("raw"))
+    ));
+}
+
+#[test]
+fn unknown_matcher_key_rejected() {
+    let err = err_of(&doc_with_body_entry(r#"{xpath: "//id"}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "unknown matcher key must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("bodies") && msg.contains("xpath"),
+        "message must name the field and the unknown key, got: {msg}"
+    );
+}
+
+#[test]
+fn reserved_predicate_key_rejected_bodies() {
+    let err = err_of(&doc_with_body_entry(r#"{predicate: "x"}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "predicate in bodies must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("predicate matchers are not supported"),
+        "message must reject predicate matchers, got: {msg}"
+    );
+}
+
+#[test]
+fn reserved_predicate_key_rejected_header() {
+    let err = err_of(&doc_with_expects_header(r#"{predicate: "x"}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "predicate in headers must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("predicate matchers are not supported"),
+        "message must reject predicate matchers, got: {msg}"
+    );
+}
+
+#[test]
+fn matcher_map_wrong_key_count_rejected() {
+    for entry in ["{}", r#"{regex: "a", contains: "b"}"#] {
+        let err = err_of(&doc_with_body_entry(entry));
+        let msg = err.to_string();
+        assert!(
+            matches!(err, TestDocError::InvalidMatcher(_)),
+            "body entry `{entry}` must fail parsing, got: {err:?}"
+        );
+        assert!(
+            msg.contains("exactly one key"),
+            "message must state the one-key rule for `{entry}`, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn bare_scalar_bodies_rejected() {
+    let err = err_of(&doc_with_body_entry("7"));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "bare scalar body entry must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("bodies entries must be strings or matcher maps"),
+        "message must state the entry shape rule, got: {msg}"
+    );
+}
+
+#[test]
+fn bare_array_bodies_rejected() {
+    let err = err_of(&doc_with_body_entry("[1, 2]"));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "bare array body entry must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("bodies entries must be strings or matcher maps"),
+        "message must state the entry shape rule, got: {msg}"
+    );
+}
+
+#[test]
+fn exists_non_null_payload_rejected_bodies() {
+    let err = err_of(&doc_with_body_entry(r#"{exists: "x"}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "exists with a payload must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("`exists` takes no argument"),
+        "message must reject the exists payload, got: {msg}"
+    );
+}
+
+#[test]
+fn exists_non_null_payload_rejected_header() {
+    let err = err_of(&doc_with_expects_header(r#"{exists: "y"}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "header exists with a payload must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("`exists` takes no argument"),
+        "message must reject the exists payload, got: {msg}"
+    );
+}
+
+#[test]
+fn invalid_regex_rejected_at_parse_bodies() {
+    let err = err_of(&doc_with_body_entry(r#"{regex: "(unclosed"}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "expected InvalidMatcher, got: {err:?}"
+    );
+    assert!(
+        msg.contains("bodies") && msg.contains("regex"),
+        "message must name the field and the regex error, got: {msg}"
+    );
+    assert!(
+        msg.contains("unclosed group"),
+        "message must contain regex compile error, got: {msg}"
+    );
+}
+
+#[test]
+fn invalid_regex_rejected_at_parse_header() {
+    let err = err_of(&doc_with_expects_header(r#"{regex: "(unclosed"}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(ref m) if m.contains("regex")),
+        "invalid header regex must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("unclosed group"),
+        "message must contain regex compile error, got: {msg}"
+    );
+}
+
+#[test]
+fn json_subset_non_object_rejected() {
+    let err = err_of(&doc_with_body_entry(r#"{jsonSubset: [1, 2]}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "non-object jsonSubset must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("must be an object"),
+        "message must require an object payload, got: {msg}"
+    );
+}
+
+#[test]
+fn json_subset_on_header_rejected() {
+    // expects.headers position.
+    let err = err_of(&doc_with_expects_header(r#"{jsonSubset: {a: 1}}"#));
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "jsonSubset in expects.headers must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("applies to bodies only"),
+        "message must state the bodies-only rule, got: {msg}"
+    );
+    // expectReply.headers position.
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: x
+    expectReply:
+      headers:
+        X: {jsonSubset: {a: 1}}
+"#;
+    let err = err_of(yaml);
+    let msg = err.to_string();
+    assert!(
+        matches!(err, TestDocError::InvalidMatcher(_)),
+        "jsonSubset in expectReply.headers must fail parsing, got: {err:?}"
+    );
+    assert!(
+        msg.contains("applies to bodies only"),
+        "message must state the bodies-only rule, got: {msg}"
+    );
+}
+
+#[test]
+fn equals_wrapped_scalar_maps_to_json() {
+    let doc = parse_test_document(&doc_with_body_entry(r#"{equals: 7}"#))
+        .expect("wrapped equals should parse"); // allow-unwrap
+    let bodies = doc.expects["result"]
+        .bodies
+        .as_ref()
+        .expect("bodies present"); // allow-unwrap
+    assert!(matches!(
+        bodies[0],
+        BodyMatcher::Equals(Body::Json(ref v)) if v == &serde_json::json!(7)
+    ));
+}
+
+#[test]
+fn backcompat_all_bare_documents_parse() {
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: x
+    expectReply:
+      body:
+        status: ok
+expects:
+  mock:out:
+    count: 1
+    bodies:
+      - plain
+      - "another"
+    headers:
+      count: 2
+      flag: "yes"
+"#;
+    let doc = parse_test_document(yaml).expect("backcompat document should parse"); // allow-unwrap
+    let set = doc
+        .expects
+        .get("out")
+        .expect("normalized key `out` present"); // allow-unwrap
+    let bodies = set.bodies.as_ref().expect("bodies present"); // allow-unwrap
+    assert!(matches!(
+        bodies[0],
+        BodyMatcher::Equals(Body::Text(ref s)) if s == "plain"
+    ));
+    assert!(matches!(
+        bodies[1],
+        BodyMatcher::Equals(Body::Text(ref s)) if s == "another"
+    ));
+    let headers = set.headers.as_ref().expect("headers present"); // allow-unwrap
+    assert!(matches!(
+        headers.get("count"),
+        Some(HeaderMatcher::Equals(v)) if v == &serde_json::json!(2)
+    ));
+    assert!(matches!(
+        headers.get("flag"),
+        Some(HeaderMatcher::Equals(v)) if v == &serde_json::json!("yes")
+    ));
+    let reply = doc.inputs[0]
+        .expect_reply
+        .as_ref()
+        .expect("expect_reply present"); // allow-unwrap
+    assert!(matches!(
+        reply.body,
+        Some(BodyMatcher::Equals(Body::Json(ref v))) if v.get("status") == Some(&serde_json::json!("ok"))
+    ));
 }

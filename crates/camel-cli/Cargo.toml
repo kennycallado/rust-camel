@@ -29,6 +29,7 @@ humantime.workspace = true
 include_dir = "0.7"
 noyalib.workspace = true
 percent-encoding.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio-util.workspace = true

@@ -12,6 +12,7 @@ use camel_api::{Body, Exchange, Message};
 use camel_component_api::NoOpComponentContext;
 use camel_component_direct::DirectComponent;
 use camel_component_log::LogComponent;
+use camel_component_mock::HeaderMatcher;
 use camel_component_mock::MockComponent;
 use camel_component_seda::SedaComponent;
 use camel_component_timer::TimerComponent;
@@ -294,13 +295,13 @@ fn set_expectations(inner: &camel_component_mock::MockEndpointInner, set: &Expec
         inner.expect_minimum_count(m);
     }
     if let Some(bodies) = &set.bodies {
-        for b in bodies {
-            inner.expect_body(Body::Text(b.clone()));
+        for matcher in bodies {
+            inner.expect_body_matcher(matcher.clone());
         }
     }
     if let Some(headers) = &set.headers {
-        for (k, v) in headers {
-            inner.expect_header(k, v.clone());
+        for (key, matcher) in headers {
+            inner.expect_header_matcher(key, matcher.clone());
         }
     }
 }
@@ -328,55 +329,56 @@ async fn evaluate_endpoint(mock: &MockComponent, name: &str, set: &ExpectSet) ->
     }
 }
 
-/// Variant-tagged reply body equality, mirroring camel-mock's private
-/// `body_eq`: text compares exactly, JSON compares structurally
-/// (serde_json `Value` equality), and mismatched variants never match.
-/// Re-exporting camel-mock's helper would cross this crate's
-/// no-camel-mock-change boundary, so the arms are restated here.
-fn reply_body_eq(expected: &InputBody, actual: &Body) -> bool {
-    match (expected, actual) {
-        (InputBody::Text(a), Body::Text(b)) => a == b,
-        (InputBody::Json(a), Body::Json(b)) => a == b,
-        _ => false,
+/// Render a received body for reply failure messages (text verbatim, JSON
+/// compactly, other variants via their debug form).
+fn render_body(body: &Body) -> String {
+    match body {
+        Body::Text(s) => s.clone(),
+        Body::Json(v) => v.to_string(),
+        other => format!("{other:?}"),
     }
 }
 
 /// Evaluate one input's `expectReply` against its captured reply exchange.
 /// The asserted message is the output message when present, else the input
 /// (lean route steps mutate the in-message; none sets `exchange.output`).
-/// `body` and `headers` are optional and independent; expected headers
-/// form an exact submap of the reply message headers. Failure details are
-/// deterministic (sorted keys) so tests can assert substrings.
+/// `body` and `headers` are optional and independent; both evaluate through
+/// the mock component's public matcher API (never a CLI-private comparison).
+/// Expected headers form a submap of the reply message headers. Failure
+/// details are deterministic (sorted keys) so tests can assert substrings.
 fn evaluate_reply_expectation(
     expect: &ExpectReply,
     reply: &Exchange,
     label: &str,
 ) -> EndpointResult {
     let message = reply.output.as_ref().unwrap_or(&reply.input);
-    if let Some(expected_body) = &expect.body
-        && !reply_body_eq(expected_body, &message.body)
+    if let Some(matcher) = &expect.body
+        && !matcher.matches(&message.body)
     {
         return EndpointResult {
             endpoint: label.to_string(),
             outcome: Err(format!(
-                "reply body mismatch: expected {expected_body:?}, actual {:?}",
-                message.body
+                "reply body mismatch: expected {matcher}, actual {}",
+                render_body(&message.body)
             )),
         };
     }
     if let Some(expected_headers) = &expect.headers {
-        let mut entries: Vec<(&String, &serde_json::Value)> = expected_headers.iter().collect();
+        let mut entries: Vec<(&String, &HeaderMatcher)> = expected_headers.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
-        for (key, expected_value) in entries {
-            let actual = match message.headers.get(key) {
-                Some(actual_value) if actual_value == expected_value => continue,
-                Some(actual_value) => format!("{actual_value:?}"),
+        for (key, matcher) in entries {
+            let actual = message.headers.get(key);
+            if matcher.matches(actual) {
+                continue;
+            }
+            let actual_render = match actual {
+                Some(value) => value.to_string(),
                 None => "<missing>".to_string(),
             };
             return EndpointResult {
                 endpoint: label.to_string(),
                 outcome: Err(format!(
-                    "reply header mismatch '{key}': expected {expected_value:?}, actual {actual}"
+                    "reply header mismatch '{key}': expected {matcher}, actual {actual_render}"
                 )),
             };
         }
@@ -609,7 +611,9 @@ mod tests {
         exchange.output = Some(Message::new(Body::Text("B".to_string())));
 
         let expect_b = ExpectReply {
-            body: Some(InputBody::Text("B".to_string())),
+            body: Some(camel_component_mock::BodyMatcher::Equals(Body::Text(
+                "B".to_string(),
+            ))),
             headers: None,
         };
         let row = evaluate_reply_expectation(&expect_b, &exchange, "reply[0] direct:in");
@@ -621,7 +625,9 @@ mod tests {
         );
 
         let expect_a = ExpectReply {
-            body: Some(InputBody::Text("A".to_string())),
+            body: Some(camel_component_mock::BodyMatcher::Equals(Body::Text(
+                "A".to_string(),
+            ))),
             headers: None,
         };
         let row = evaluate_reply_expectation(&expect_a, &exchange, "reply[0] direct:in");
