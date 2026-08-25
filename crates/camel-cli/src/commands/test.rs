@@ -16,9 +16,14 @@
 mod beans;
 pub mod document;
 pub mod runner;
+// JUnit report writer + report types (consumed by run_tests_full).
+mod junit;
 
 #[cfg(test)]
 mod document_tests;
+
+#[cfg(test)]
+mod driver_tests;
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -36,6 +41,55 @@ pub struct TestArgs {
     /// Paths to `*.test.yaml` documents or directories to expand, in order.
     #[arg(value_name = "FILE|DIR", required = true)]
     pub files: Vec<PathBuf>,
+    /// Write a JUnit XML report to this path after the run.
+    #[arg(long, value_name = "FILE")]
+    pub junit: Option<PathBuf>,
+    /// Keep only documents whose displayed path matches this glob
+    /// (repeatable; `*` does not cross `/`, `**` does).
+    #[arg(long = "filter-file", value_name = "GLOB")]
+    pub filter_files: Vec<String>,
+    /// Keep only documents whose `expects` keys contain this endpoint name
+    /// (repeatable; exact match).
+    #[arg(long = "filter-endpoint", value_name = "NAME")]
+    pub filter_endpoints: Vec<String>,
+}
+
+/// Configuration for a `camel test` run.
+///
+/// `Default` yields the no-flags config: all files, no JUnit report, no
+/// filters. All fields are honored by `run_tests_full` (files, JUnit report
+/// path, compiled file globs, endpoint names). An empty config behaves
+/// exactly like the historical `run_tests`.
+#[derive(Debug, Default)]
+pub struct TestRunConfig {
+    /// Paths to `*.test.yaml` documents or directories to expand, in order.
+    pub files: Vec<PathBuf>,
+    /// JUnit report path; `None` writes no report.
+    pub junit: Option<PathBuf>,
+    /// File glob filters; empty means no file filtering.
+    pub filter_files: Vec<glob::Pattern>,
+    /// Endpoint name filters; empty means no endpoint filtering.
+    pub filter_endpoints: Vec<String>,
+}
+
+/// Build a `TestRunConfig` from parsed CLI args.
+///
+/// Compiles each `--filter-file` glob once. An invalid pattern is a misuse
+/// error: the dispatch prints it to stderr and exits 2 before any document
+/// runs and before any report path is touched.
+pub fn config_from_args(args: &TestArgs) -> Result<TestRunConfig, String> {
+    let mut filter_files = Vec::with_capacity(args.filter_files.len());
+    for glob in &args.filter_files {
+        let pattern = glob::Pattern::new(glob)
+            .map_err(|e| format!("invalid --filter-file pattern {glob}: {e}"))?;
+        filter_files.push(pattern);
+    }
+    Ok(TestRunConfig {
+        files: args.files.clone(),
+        junit: args.junit.clone(),
+        filter_files,
+        filter_endpoints: args.filter_endpoints.clone(),
+    })
 }
 
 /// Outcome of a multi-document `camel test` run.
@@ -51,7 +105,7 @@ pub struct TestRunSummary {
 /// Directory names skipped during expansion, at any depth.
 const EXCLUDED_DIR_NAMES: [&str; 3] = ["target", ".git", "node_modules"];
 
-/// Expand CLI path arguments into test documents and error strings.
+/// Expand CLI path arguments into test documents and structured errors.
 ///
 /// File arguments pass through verbatim. Directory arguments expand to the
 /// test documents found recursively, skipping `target`, `.git`, and
@@ -62,7 +116,10 @@ const EXCLUDED_DIR_NAMES: [&str; 3] = ["target", ".git", "node_modules"];
 /// an error naming it. Symlinked directories are not followed during the walk
 /// (cycle safety); non-directory entries whose name matches the test suffix are
 /// collected regardless of file type.
-fn expand_test_paths(args: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
+///
+/// Errors are `(path, message)` pairs carrying the bare message (no path
+/// prefix); the print site formats `{path}: {message}`.
+fn expand_test_paths(args: &[PathBuf]) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
     let mut documents = Vec::new();
     let mut errors = Vec::new();
     let mut seen = HashSet::new();
@@ -73,7 +130,7 @@ fn expand_test_paths(args: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
             collect_test_documents(arg, &mut found, &mut errors);
             found.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
             if found.is_empty() {
-                errors.push(format!("{}: no test documents found", arg.display()));
+                errors.push((arg.clone(), "no test documents found".to_string()));
             }
             for path in found {
                 push_unique(path, &mut documents, &mut seen);
@@ -90,12 +147,16 @@ fn expand_test_paths(args: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
 /// Directory entries named `target`, `.git`, or `node_modules` are skipped.
 /// Symlinked directories are not followed (cycle safety); non-directory entries
 /// whose name matches the test suffix are collected regardless of file type.
-/// Unreadable entries push an error string naming the path.
-fn collect_test_documents(dir: &Path, found: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
+/// Unreadable entries push a `(path, message)` error pair naming the path.
+fn collect_test_documents(
+    dir: &Path,
+    found: &mut Vec<PathBuf>,
+    errors: &mut Vec<(PathBuf, String)>,
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
-            errors.push(format!("{}: {e}", dir.display()));
+            errors.push((dir.to_path_buf(), e.to_string()));
             return;
         }
     };
@@ -103,7 +164,7 @@ fn collect_test_documents(dir: &Path, found: &mut Vec<PathBuf>, errors: &mut Vec
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                errors.push(format!("{}: {e}", dir.display()));
+                errors.push((dir.to_path_buf(), e.to_string()));
                 continue;
             }
         };
@@ -111,7 +172,7 @@ fn collect_test_documents(dir: &Path, found: &mut Vec<PathBuf>, errors: &mut Vec
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(e) => {
-                errors.push(format!("{}: {e}", path.display()));
+                errors.push((path.clone(), e.to_string()));
                 continue;
             }
         };
@@ -146,28 +207,77 @@ fn push_unique(path: PathBuf, documents: &mut Vec<PathBuf>, seen: &mut HashSet<P
 /// A document-level error (unreadable file, parse error, boot failure) is
 /// reported to `err` and execution continues with the next document. Per
 /// endpoint, one `PASS`/`FAIL` line is written to `out`. Exit precedence when
-/// classes mix: any parse-error class ⇒ 2, else any failed ⇒ 1, else 0.
-pub async fn run_tests(
-    files: &[PathBuf],
+/// classes mix: any parse-error or misuse class ⇒ 2, else any failed ⇒ 1,
+/// else 0.
+///
+/// `config.filter_files` narrows the expanded set before any document is
+/// read (glob semantics: `*` does not cross `/`); `config.filter_endpoints`
+/// narrows file-admitted documents to those whose `expects` keys contain a
+/// given name. A filter set with no surviving document is misuse: a stderr
+/// error naming the filters, exit 2. `config.junit` writes a JUnit report
+/// after the summary line; a write failure is a stderr message and exit 2.
+/// An empty config behaves exactly like the historical `run_tests`.
+pub async fn run_tests_full(
+    config: &TestRunConfig,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> TestRunSummary {
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut had_parse_error = false;
+    let mut had_misuse = false;
+    let mut any_survivor = false;
 
-    let (documents, expansion_errors) = expand_test_paths(files);
-    for message in &expansion_errors {
+    let (documents, expansion_errors) = expand_test_paths(&config.files);
+    // Every expansion error becomes one `ExpansionReport` (name = displayed
+    // path, error = bare message) consumed by the JUnit writer after the loop.
+    let mut expansion_reports: Vec<junit::ExpansionReport> = Vec::new();
+    for (path, message) in &expansion_errors {
         had_parse_error = true;
-        let _ = writeln!(err, "{message}");
+        let _ = writeln!(err, "{}: {message}", path.display());
+        expansion_reports.push(junit::ExpansionReport {
+            name: path.display().to_string(),
+            error: message.clone(),
+        });
     }
 
-    for path in &documents {
+    // File filter: applied after expansion, before any document is read.
+    // A document is admitted iff its ENTIRE displayed-path string matches
+    // any pattern; `*` does not cross `/` (require_literal_separator).
+    let any_filter = !config.filter_files.is_empty() || !config.filter_endpoints.is_empty();
+    let mut admitted: Vec<&PathBuf> = Vec::new();
+    if config.filter_files.is_empty() {
+        admitted.extend(documents.iter());
+    } else {
+        let options = glob::MatchOptions {
+            require_literal_separator: true,
+            ..glob::MatchOptions::new()
+        };
+        for path in &documents {
+            let displayed = path.display().to_string();
+            if config
+                .filter_files
+                .iter()
+                .any(|pattern| pattern.matches_with(&displayed, options))
+            {
+                admitted.push(path);
+            }
+        }
+    }
+
+    let mut doc_reports: Vec<junit::DocReport> = Vec::new();
+    for path in admitted {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) => {
                 had_parse_error = true;
+                any_survivor = true;
                 let _ = writeln!(err, "{}: {e}", path.display());
+                doc_reports.push(junit::DocReport {
+                    path: path.clone(),
+                    rows: Vec::new(),
+                    doc_error: Some(e.to_string()),
+                });
                 continue;
             }
         };
@@ -175,10 +285,28 @@ pub async fn run_tests(
             Ok(doc) => doc,
             Err(e) => {
                 had_parse_error = true;
+                any_survivor = true;
                 let _ = writeln!(err, "{}: {e}", path.display());
+                doc_reports.push(junit::DocReport {
+                    path: path.clone(),
+                    rows: Vec::new(),
+                    doc_error: Some(e.to_string()),
+                });
                 continue;
             }
         };
+        // Endpoint filter: run iff `expects` keys contain any given
+        // name; filtered-out documents produce no rows, no counts, no
+        // DocReport.
+        if !config.filter_endpoints.is_empty()
+            && !config
+                .filter_endpoints
+                .iter()
+                .any(|name| doc.expects.contains_key(name))
+        {
+            continue;
+        }
+        any_survivor = true;
         if let Some(stubs) = doc.repository_stubs() {
             let pairs: Vec<String> = stubs
                 .stub_pairs()
@@ -202,10 +330,15 @@ pub async fn run_tests(
         if let Some(doc_error) = result.doc_error {
             had_parse_error = true;
             let _ = writeln!(err, "{}: {doc_error}", path.display());
+            doc_reports.push(junit::DocReport {
+                path: path.clone(),
+                rows: Vec::new(),
+                doc_error: Some(doc_error),
+            });
             continue;
         }
-        for er in result.endpoint_results {
-            match er.outcome {
+        for er in &result.endpoint_results {
+            match &er.outcome {
                 Ok(()) => {
                     passed += 1;
                     let _ = writeln!(out, "PASS {}#{}", path.display(), er.endpoint);
@@ -216,299 +349,79 @@ pub async fn run_tests(
                 }
             }
         }
+        doc_reports.push(junit::DocReport {
+            path: path.clone(),
+            rows: result.endpoint_results,
+            doc_error: None,
+        });
+    }
+    if any_filter && !any_survivor {
+        // A non-survivor is a document that was not file-admitted, or parsed
+        // but excluded by the endpoint filter; read/parse failures of
+        // file-admitted documents count as survivors.
+        had_misuse = true;
+        let _ = writeln!(err, "{}", filter_misuse_message(config));
     }
 
-    let exit_code = if had_parse_error {
+    let mut exit_code = if had_parse_error || had_misuse {
         2
     } else if failed > 0 {
         1
     } else {
         0
     };
-    let summary = TestRunSummary {
+    let _ = writeln!(out, "{passed} passed, {failed} failed");
+    // JUnit report: written on exit-0/1/2 runs alike, after the human
+    // summary line. A write failure is stderr + exit 2 (raise only).
+    if let Some(path) = &config.junit
+        && let Err(e) = junit::write_report(path, &expansion_reports, &doc_reports)
+    {
+        let _ = writeln!(err, "failed to write {}: {e}", path.display());
+        if exit_code < 2 {
+            exit_code = 2;
+        }
+    }
+    TestRunSummary {
         exit_code,
         passed,
         failed,
-    };
-    let _ = writeln!(out, "{} passed, {} failed", summary.passed, summary.failed);
-    summary
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::path::Path;
-
-    /// Create a unique temp directory for one test.
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("camel-test-cli-{tag}-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create temp dir"); // allow-unwrap
-        dir
+/// Render the zero-survivors misuse error naming the given filters.
+///
+/// Lists only the kinds that were given, values space-separated in CLI
+/// order: `no test documents matched --filter-file {f1} {f2}
+/// --filter-endpoint {e1}`.
+fn filter_misuse_message(config: &TestRunConfig) -> String {
+    let mut message = String::from("no test documents matched");
+    if !config.filter_files.is_empty() {
+        message.push_str(" --filter-file");
+        for pattern in &config.filter_files {
+            message.push(' ');
+            message.push_str(pattern.as_str());
+        }
     }
-
-    /// Write a passing document (one `direct:` input → `mock:out`, count 1).
-    fn write_passing(dir: &Path, name: &str) -> PathBuf {
-        let path = dir.join(name);
-        fs::write(
-            &path,
-            r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    steps:
-      - to: "mock:out"
-inputs:
-  - to: "direct:start"
-    body: "x"
-expects:
-  mock:out:
-    count: 1
-"#,
-        )
-        .expect("write passing doc"); // allow-unwrap
-        path
+    if !config.filter_endpoints.is_empty() {
+        message.push_str(" --filter-endpoint");
+        for name in &config.filter_endpoints {
+            message.push(' ');
+            message.push_str(name);
+        }
     }
+    message
+}
 
-    /// Write a failing document (expects 3 exchanges, only 1 delivered).
-    fn write_failing(dir: &Path, name: &str) -> PathBuf {
-        let path = dir.join(name);
-        fs::write(
-            &path,
-            r#"
-routes:
-  - id: r1
-    from: "direct:start"
-    steps:
-      - to: "mock:out"
-inputs:
-  - to: "direct:start"
-    body: "x"
-expects:
-  mock:out:
-    count: 3
-"#,
-        )
-        .expect("write failing doc"); // allow-unwrap
-        path
-    }
-
-    /// Write an invalid-YAML document.
-    fn write_bad(dir: &Path, name: &str) -> PathBuf {
-        let path = dir.join(name);
-        fs::write(&path, "routes: [unclosed").expect("write bad doc"); // allow-unwrap
-        path
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn all_pass_exits_zero() {
-        let dir = temp_dir("all-pass");
-        let path = write_passing(&dir, "a.test.yaml");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = run_tests(&[path], &mut out, &mut err).await;
-        assert_eq!(summary.exit_code, 0);
-        assert_eq!(summary.passed, 1, "summary must count the passing endpoint");
-        assert_eq!(summary.failed, 0, "summary must count zero failures");
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("PASS"), "out: {out}");
-        assert!(out.contains("1 passed, 0 failed"), "out: {out}");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn assertion_failure_exits_one() {
-        let dir = temp_dir("assert-fail");
-        let path = write_failing(&dir, "a.test.yaml");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = run_tests(&[path], &mut out, &mut err).await;
-        assert_eq!(summary.exit_code, 1);
-        assert_eq!(summary.passed, 0, "summary must count zero passes");
-        assert_eq!(summary.failed, 1, "summary must count the failing endpoint");
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("FAIL"), "out: {out}");
-        assert!(out.contains("0 passed, 1 failed"), "out: {out}");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn parse_error_continues_and_exits_two() {
-        let dir = temp_dir("parse-continue");
-        let a = write_passing(&dir, "a.test.yaml");
-        let bad = write_bad(&dir, "bad.test.yaml");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = run_tests(&[a, bad.clone()], &mut out, &mut err).await;
-        assert_eq!(summary.exit_code, 2);
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("PASS"), "a must be attempted: {out}");
-        let err = String::from_utf8(err).unwrap();
-        assert!(err.contains("bad.test.yaml"), "err: {err}");
-        assert!(!err.is_empty(), "err must carry the parse error text");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn precedence_parse_beats_assertion() {
-        let dir = temp_dir("precedence");
-        let a = write_failing(&dir, "a.test.yaml");
-        let bad = write_bad(&dir, "bad.test.yaml");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = run_tests(&[a, bad], &mut out, &mut err).await;
-        assert_eq!(summary.exit_code, 2);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn multi_doc_second_failing_both_evaluated() {
-        let dir = temp_dir("multi-second-fail");
-        let a = write_passing(&dir, "a.test.yaml");
-        let b = write_failing(&dir, "b.test.yaml");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = run_tests(&[a, b], &mut out, &mut err).await;
-        assert_eq!(summary.exit_code, 1);
-        assert_eq!(summary.passed, 1, "one passing endpoint across both docs");
-        assert_eq!(summary.failed, 1, "one failing endpoint across both docs");
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("a.test.yaml#out"), "out: {out}");
-        assert!(out.contains("b.test.yaml#out"), "out: {out}");
-        assert!(out.contains("1 passed, 1 failed"), "out: {out}");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn multi_doc_arg_order() {
-        let dir = temp_dir("arg-order");
-        let a = write_passing(&dir, "a.test.yaml");
-        let b = write_passing(&dir, "b.test.yaml");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = run_tests(&[a, b], &mut out, &mut err).await;
-        assert_eq!(summary.exit_code, 0);
-        let out = String::from_utf8(out).unwrap();
-        let ia = out.find("a.test.yaml#out").expect("a PASS line"); // allow-unwrap
-        let ib = out.find("b.test.yaml#out").expect("b PASS line"); // allow-unwrap
-        assert!(ia < ib, "a must precede b in out: {out}");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn missing_file_exits_two() {
-        let dir = temp_dir("missing");
-        let path = dir.join("nope.test.yaml");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = run_tests(std::slice::from_ref(&path), &mut out, &mut err).await;
-        assert_eq!(summary.exit_code, 2);
-        let err = String::from_utf8(err).unwrap();
-        assert!(err.contains("nope.test.yaml"), "err: {err}");
-    }
-
-    #[test]
-    fn dir_expansion_recursive_sorted() {
-        let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
-        let root = dir.path();
-        fs::write(root.join("b.test.yaml"), "").expect("write b"); // allow-unwrap
-        fs::write(root.join("a.test.yaml"), "").expect("write a"); // allow-unwrap
-        fs::create_dir_all(root.join("sub")).expect("create sub"); // allow-unwrap
-        fs::write(root.join("sub/c.test.yml"), "").expect("write c"); // allow-unwrap
-        let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
-        assert!(errors.is_empty(), "errors: {errors:?}");
-        let expected = [
-            root.join("a.test.yaml"),
-            root.join("b.test.yaml"),
-            root.join("sub/c.test.yml"),
-        ];
-        assert_eq!(
-            docs, expected,
-            "documents must be byte-sorted within the directory"
-        );
-    }
-
-    #[test]
-    fn dir_expansion_skips_excluded_dirs() {
-        let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
-        let root = dir.path();
-        fs::write(root.join("ok.test.yaml"), "").expect("write ok"); // allow-unwrap
-        fs::create_dir_all(root.join("target")).expect("create target"); // allow-unwrap
-        fs::write(root.join("target/gen.test.yaml"), "").expect("write gen"); // allow-unwrap
-        let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
-        assert!(errors.is_empty(), "errors: {errors:?}");
-        assert_eq!(
-            docs,
-            vec![root.join("ok.test.yaml")],
-            "target must be skipped"
-        );
-    }
-
-    #[test]
-    fn dir_expansion_empty_dir_is_error() {
-        let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
-        let root = dir.path();
-        fs::write(root.join(".keep"), "").expect("write keep"); // allow-unwrap
-        let (docs, errors) = expand_test_paths(&[root.to_path_buf()]);
-        assert!(docs.is_empty(), "docs: {docs:?}");
-        assert_eq!(errors.len(), 1, "errors: {errors:?}");
-        assert!(
-            errors[0].contains(&root.display().to_string()),
-            "error must name the directory: {errors:?}"
-        );
-    }
-
-    #[test]
-    fn dir_expansion_dedupes_first_occurrence() {
-        let dir = tempfile::tempdir().expect("create tempdir"); // allow-unwrap
-        let root = dir.path();
-        let a = root.join("a.test.yaml");
-        fs::write(&a, "").expect("write a"); // allow-unwrap
-        let (docs, errors) = expand_test_paths(&[root.to_path_buf(), a.clone()]);
-        assert!(errors.is_empty(), "errors: {errors:?}");
-        assert_eq!(
-            docs,
-            vec![a],
-            "duplicate must collapse to the first occurrence"
-        );
-    }
-
-    #[test]
-    fn dir_expansion_file_args_verbatim() {
-        let args = vec![PathBuf::from("foo.yaml")];
-        let (docs, errors) = expand_test_paths(&args);
-        assert!(errors.is_empty(), "errors: {errors:?}");
-        assert_eq!(docs, args, "file args pass through unchanged");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn mixed_args_dir_file_empty_order_and_exit_two() {
-        let dir_a = tempfile::tempdir().expect("create dir_a"); // allow-unwrap
-        let empty_dir = tempfile::tempdir().expect("create empty_dir"); // allow-unwrap
-        let file_x_dir = tempfile::tempdir().expect("create file_x dir"); // allow-unwrap
-        // dir_a contains one passing document
-        write_passing(dir_a.path(), "a.test.yaml");
-        // file_x is a standalone passing document
-        let file_x = write_passing(file_x_dir.path(), "standalone.test.yaml");
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let summary = run_tests(
-            &[
-                dir_a.path().to_path_buf(),
-                file_x.clone(),
-                empty_dir.path().to_path_buf(),
-            ],
-            &mut out,
-            &mut err,
-        )
-        .await;
-        assert_eq!(summary.exit_code, 2, "empty dir must force exit 2");
-        let out = String::from_utf8(out).unwrap(); // allow-unwrap
-        assert!(
-            out.contains("standalone.test.yaml#out"),
-            "file_x must still run despite expansion error: {out}"
-        );
-        let ia = out.find("a.test.yaml#out").expect("dir_a PASS line"); // allow-unwrap
-        let ib = out
-            .find("standalone.test.yaml#out")
-            .expect("file_x PASS line"); // allow-unwrap
-        assert!(
-            ia < ib,
-            "dir_a must precede file_x across mixed args: {out}"
-        );
-    }
+/// Run every test document in CLI argument order, sequentially, with no
+/// filters and no JUnit report (the historical entry point).
+pub async fn run_tests(
+    files: &[PathBuf],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> TestRunSummary {
+    let config = TestRunConfig {
+        files: files.to_vec(),
+        ..Default::default()
+    };
+    run_tests_full(&config, out, err).await
 }

@@ -208,3 +208,23 @@ The built-in name `memory` is not stubbable. Registering it would collide with t
 Stubs are lossy. The `R-REPOSITORY-STUB` warning on stderr names each stubbed registry and repository and lists the semantics the memory backend does not exercise: for `cache`, prefix purge, TTL/stale timing, disk offload, and stats; for `idempotent` and `claimCheck`, persistence; for all, backend failure. Cover these in the integration tier.
 
 The example pair lives in [`examples/yaml-dsl/config/repositories-demo.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/repositories-demo.yaml) and [`repositories-demo.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/yaml-dsl/config/repositories-demo.test.yaml).
+
+### CI output and filters
+
+`camel test` accepts three flags for CI use: `--junit`, `--filter-file`, and `--filter-endpoint`.
+
+`--junit <FILE>` writes a JUnit XML report after the run. The report holds one `testsuite` per attempted document, named by the document path as displayed in stdout. Each assertion row becomes one `testcase` with the same label as its `PASS`/`FAIL` line (endpoint name, `reply[i] <to>` reply label, `<settle>`). A failing row carries a `<failure>` element. A document-level error (unreadable file, parse error, boot failure, route load failure, input delivery failure) becomes one `<error>` testcase named `<document>` in that document's suite. An expansion-level error (unreadable directory entry, zero-document directory) becomes one synthetic suite named by the path in the error, with a single `<error>` testcase named `<expansion>`. The report is written on exit-0, exit-1, and exit-2 runs alike. It is not written when a filter flag fails validation (see below). A report write failure prints to stderr and exits 2.
+
+`--filter-file <GLOB>` narrows the expanded document set to documents whose entire displayed-path string matches the glob. The glob follows `glob`-crate semantics: `*` does not cross `/`, and `**` does. The match happens before reading, so filtered-out documents are never read or parsed. Directory arguments display the paths as collected: a `.` argument yields `./`-prefixed paths, and an absolute argument yields absolute paths. Patterns must account for the prefix. For example, `--filter-file './sub/**'` matches the `./sub/`-prefixed paths a `.` argument produces.
+
+`--filter-endpoint <NAME>` narrows the set to file-admitted documents whose `expects` map contains the given name. The match is exact against the bare endpoint name (the URI suffix after `mock:`). A file-admitted document that fails to parse still reports its error and sets exit 2, regardless of the endpoint filter.
+
+Filters combine as AND across kinds and OR within repeats of one kind. When at least one filter is given and no document survives, `camel test` prints a misuse error naming the filters and exits 2. An invalid glob pattern prints to stderr and exits 2 before any document runs.
+
+Split a large suite across CI jobs with `--filter-file`. Each job runs one shard and writes its own report. Example: a job that runs only the `shard-1` documents:
+
+```text
+camel test . --junit shard-1.xml --filter-file './src/**/shard-1*'
+```
+
+Annotating pull requests from the report requires the CI platform's JUnit publisher or report-ingest integration. On GitHub Actions, upload the report as an artifact and pass it to a JUnit-annotation action of your choice.

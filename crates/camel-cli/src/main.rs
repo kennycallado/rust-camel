@@ -167,9 +167,19 @@ async fn main() {
             std::process::exit(code);
         }
         Commands::Test(args) => {
+            // Config validation happens before any document runs and before
+            // any report path is touched: an invalid --filter-file pattern
+            // is misuse (stderr + exit 2, no report written).
+            let config = match commands::test::config_from_args(&args) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
             let mut out = std::io::stdout().lock();
             let mut err = std::io::stderr().lock();
-            let summary = commands::test::run_tests(&args.files, &mut out, &mut err).await;
+            let summary = commands::test::run_tests_full(&config, &mut out, &mut err).await;
             std::process::exit(summary.exit_code);
         }
     }
