@@ -279,12 +279,15 @@ async fn route_controller_starts_lazy_route() {
 // Test 4: ControlBus stops a running route
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread")]
+// Deterministic under CPU contention: tokio time is paused via the time
+// controller, so the pass/fail path never depends on wall-clock deadlines.
+#[tokio::test]
 async fn controlbus_stops_route() {
-    let h = CamelTestContext::builder()
+    let (h, time) = CamelTestContext::builder()
         .with_timer()
         .with_mock()
         .with_component(ControlBusComponent::new())
+        .with_time_control()
         .build()
         .await;
 
@@ -318,11 +321,30 @@ async fn controlbus_stops_route() {
         "Auto route should be Started"
     );
 
-    // Wait until the ControlBus route has completed the stop action.
+    // Drive the ControlBus stop action on virtual time: bounded 50ms advances
+    // with yield bursts, instead of a wall-clock deadline (rc-08ng).
     let stop_endpoint = h.mock().get_endpoint("stop-done").unwrap();
-    stop_endpoint
-        .await_exchanges(1, Duration::from_secs(3))
-        .await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    let mut delivered = false;
+    for _ in 0..20 {
+        time.advance(Duration::from_millis(50)).await;
+        for _ in 0..30 {
+            tokio::task::yield_now().await;
+        }
+        if !stop_endpoint.get_received_exchanges().await.is_empty() {
+            delivered = true;
+            break;
+        }
+    }
+    // Restore real time BEFORE any assert that may panic, so failure-path
+    // teardown (TestGuard spawned cleanup) can still progress.
+    time.resume();
+    assert!(
+        delivered,
+        "stop trigger did not fire within 1s of virtual time (20 × 50ms)"
+    );
 
     // Now the auto route should be stopped
     let status_after = route_status(&h, "auto-route").await;
