@@ -1346,3 +1346,355 @@ async fn boot_reconciler_leaves_stable_states_untouched() {
         );
     }
 }
+
+// --- rc-slvd: Phase 2a supersede tolerance (watcher's FailRoute racing the
+// confirm-start persist) ---
+
+/// UoW fake backed by the SAME shared in-memory repo as `deps.repo`, so the
+/// Phase 2a confirm persist genuinely version-conflicts when the execution
+/// fake has meanwhile mutated the shared backing store.
+#[derive(Clone)]
+struct SharedRepoUow {
+    repo: InMemoryTestRepo,
+}
+
+#[async_trait]
+impl RuntimeUnitOfWorkPort for SharedRepoUow {
+    async fn persist_upsert(
+        &self,
+        aggregate: RouteRuntimeAggregate,
+        expected_version: Option<u64>,
+        _projection: RouteStatusProjection,
+        _events: &[RuntimeEvent],
+    ) -> Result<(), DomainError> {
+        match expected_version {
+            Some(expected) => self.repo.save_if_version(aggregate, expected).await,
+            None => self.repo.save(aggregate).await,
+        }
+    }
+
+    async fn persist_delete(
+        &self,
+        _route_id: &str,
+        _events: &[RuntimeEvent],
+    ) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn recover_from_journal(&self) -> Result<(), DomainError> {
+        Ok(())
+    }
+}
+
+/// Execution-port fake whose `start_route()` mutates the SHARED backing
+/// repo DURING Phase 2 — after Phase 1's Starting@V+1 persist, before
+/// returning Ok — playing the detached failure watcher racing the
+/// confirm-start persist.
+///
+/// - supersede mode: applies `fail("watcher")` → Failed@V+2.
+/// - non-Failed mode: chains `fail("watcher")` then Stop
+///   (Failed@V+2 → Stopped@V+3; Stop is invalid straight from Starting,
+///   hence the fail-first chain).
+struct Phase2aMutationExecution {
+    repo: InMemoryTestRepo,
+    fail_then_stop: bool,
+}
+
+#[async_trait]
+impl RuntimeExecutionPort for Phase2aMutationExecution {
+    async fn register_route(&self, _definition: RouteDefinition) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn start_route(&self, route_id: &str) -> Result<(), DomainError> {
+        let mut aggregate = self
+            .repo
+            .load(route_id)
+            .await?
+            .expect("route must be at Starting after Phase 1");
+        aggregate.fail("watcher".to_string());
+        self.repo.save(aggregate.clone()).await?;
+        if self.fail_then_stop {
+            aggregate.apply_command(RouteLifecycleCommand::Stop)?;
+            self.repo.save(aggregate).await?;
+        }
+        Ok(())
+    }
+
+    async fn stop_route(&self, _route_id: &str) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn suspend_route(&self, _route_id: &str) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn resume_route(&self, route_id: &str) -> Result<(), DomainError> {
+        // rc-slvd: same shared-repo mutation as start_route, applied during
+        // Resume's side-effect window — the watcher's FailRoute commits
+        // Failed before the resume's own confirm persist.
+        let mut aggregate = self
+            .repo
+            .load(route_id)
+            .await?
+            .expect("route must be suspended for the resume");
+        aggregate.fail("watcher".to_string());
+        self.repo.save(aggregate.clone()).await?;
+        if self.fail_then_stop {
+            aggregate.apply_command(RouteLifecycleCommand::Stop)?;
+            self.repo.save(aggregate).await?;
+        }
+        Ok(())
+    }
+
+    async fn reload_route(&self, _route_id: &str) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn remove_route(&self, _route_id: &str) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError> {
+        Ok(InFlightCountResult::RouteNotFound {
+            route_id: route_id.to_string(),
+        })
+    }
+}
+
+/// Shared setup for the four phase2a tests: deps with the mutation fake as
+/// execution port, an optional uow backed by the same shared repo, and the
+/// route registered (Registered@0).
+async fn build_phase2a_deps(
+    with_uow: bool,
+    fail_then_stop: bool,
+    route_id: &str,
+) -> (CommandDeps, InMemoryTestRepo) {
+    let repo = InMemoryTestRepo::default();
+    let execution: Arc<dyn RuntimeExecutionPort> = Arc::new(Phase2aMutationExecution {
+        repo: repo.clone(),
+        fail_then_stop,
+    });
+    let deps = CommandDeps {
+        repo: Arc::new(repo.clone()),
+        projections: Arc::new(InMemoryTestProjectionStore::default()),
+        events: Arc::new(InMemoryTestEventPublisher::default()),
+        uow: with_uow.then(|| Arc::new(SharedRepoUow { repo: repo.clone() }) as _),
+        execution: Some(execution),
+        health_registry: None,
+    };
+    let def = RouteDefinition::new("timer:test", vec![]).with_route_id(route_id);
+    handle_register_internal(&deps, def).await.unwrap();
+    (deps, repo)
+}
+
+#[tokio::test]
+async fn phase2a_uow_supersede_failed_returns_ok() {
+    let (deps, repo) = build_phase2a_deps(true, false, "p2a-uow-super").await;
+
+    let result = execute_command(
+        &deps,
+        RuntimeCommand::StartRoute {
+            route_id: "p2a-uow-super".to_string(),
+            command_id: "p2a-cmd".to_string(),
+            causation_id: None,
+        },
+    )
+    .await;
+
+    match result {
+        Ok(RuntimeCommandResult::RouteStateChanged { status, .. }) => {
+            assert_eq!(status, "Failed");
+        }
+        other => panic!("watcher's terminal Failed must supersede the start: {other:?}"),
+    }
+
+    let reloaded = repo.load("p2a-uow-super").await.unwrap().unwrap();
+    assert!(
+        matches!(reloaded.state(), RouteRuntimeState::Failed(_)),
+        "repo must be durably Failed, got {:?}",
+        reloaded.state()
+    );
+}
+
+#[tokio::test]
+async fn phase2a_repo_supersede_failed_returns_ok() {
+    let (deps, repo) = build_phase2a_deps(false, false, "p2a-repo-super").await;
+
+    let result = execute_command(
+        &deps,
+        RuntimeCommand::StartRoute {
+            route_id: "p2a-repo-super".to_string(),
+            command_id: "p2a-cmd".to_string(),
+            causation_id: None,
+        },
+    )
+    .await;
+
+    match result {
+        Ok(RuntimeCommandResult::RouteStateChanged { status, .. }) => {
+            assert_eq!(status, "Failed");
+        }
+        other => panic!("watcher's terminal Failed must supersede the start: {other:?}"),
+    }
+
+    let reloaded = repo.load("p2a-repo-super").await.unwrap().unwrap();
+    assert!(
+        matches!(reloaded.state(), RouteRuntimeState::Failed(_)),
+        "repo must be durably Failed, got {:?}",
+        reloaded.state()
+    );
+}
+
+#[tokio::test]
+async fn phase2a_uow_non_failed_conflict_returns_err() {
+    let (deps, repo) = build_phase2a_deps(true, true, "p2a-uow-conflict").await;
+
+    let err = execute_command(
+        &deps,
+        RuntimeCommand::StartRoute {
+            route_id: "p2a-uow-conflict".to_string(),
+            command_id: "p2a-cmd".to_string(),
+            causation_id: None,
+        },
+    )
+    .await
+    .expect_err("non-Failed conflicts must propagate unchanged");
+
+    assert!(
+        err.to_string().contains("optimistic lock conflict"),
+        "expected the version-conflict error, got: {err}"
+    );
+
+    // The discriminator is terminal-Failed ONLY: re-loaded Stopped is not
+    // superseded.
+    let reloaded = repo.load("p2a-uow-conflict").await.unwrap().unwrap();
+    assert_eq!(*reloaded.state(), RouteRuntimeState::Stopped);
+}
+
+#[tokio::test]
+async fn phase2a_repo_non_failed_conflict_returns_err() {
+    let (deps, repo) = build_phase2a_deps(false, true, "p2a-repo-conflict").await;
+
+    let err = execute_command(
+        &deps,
+        RuntimeCommand::StartRoute {
+            route_id: "p2a-repo-conflict".to_string(),
+            command_id: "p2a-cmd".to_string(),
+            causation_id: None,
+        },
+    )
+    .await
+    .expect_err("non-Failed conflicts must propagate unchanged");
+
+    assert!(
+        err.to_string().contains("optimistic lock conflict"),
+        "expected the version-conflict error, got: {err}"
+    );
+
+    let reloaded = repo.load("p2a-repo-conflict").await.unwrap().unwrap();
+    assert_eq!(*reloaded.state(), RouteRuntimeState::Stopped);
+}
+
+/// Shared setup for the resume-supersede tests: deps with NO execution
+/// port (pure state machine) drive the route registered → started →
+/// suspended; the mutation fake is swapped in for the resume only, so its
+/// resume_route commits Failed DURING Resume's side-effect window.
+async fn build_phase2_resume_deps(
+    with_uow: bool,
+    fail_then_stop: bool,
+    route_id: &str,
+) -> (CommandDeps, InMemoryTestRepo) {
+    let repo = InMemoryTestRepo::default();
+    let mut deps = CommandDeps {
+        repo: Arc::new(repo.clone()),
+        projections: Arc::new(InMemoryTestProjectionStore::default()),
+        events: Arc::new(InMemoryTestEventPublisher::default()),
+        uow: with_uow.then(|| Arc::new(SharedRepoUow { repo: repo.clone() }) as _),
+        execution: None,
+        health_registry: None,
+    };
+    let def = RouteDefinition::new("timer:test", vec![]).with_route_id(route_id);
+    handle_register_internal(&deps, def).await.unwrap();
+
+    for cmd in [
+        RuntimeCommand::StartRoute {
+            route_id: route_id.to_string(),
+            command_id: format!("{route_id}-start"),
+            causation_id: None,
+        },
+        RuntimeCommand::SuspendRoute {
+            route_id: route_id.to_string(),
+            command_id: format!("{route_id}-suspend"),
+            causation_id: None,
+        },
+    ] {
+        execute_command(&deps, cmd).await.unwrap();
+    }
+
+    deps.execution = Some(Arc::new(Phase2aMutationExecution {
+        repo: repo.clone(),
+        fail_then_stop,
+    }));
+    (deps, repo)
+}
+
+#[tokio::test]
+async fn phase2_resume_supersede_failed_returns_ok() {
+    // rc-slvd task 2.1: the watcher's FailRoute commits DURING Resume's
+    // side-effect window (Failed@V+2 conflicting the confirm persist) —
+    // the resume must recognize the terminal-Failed supersede and return
+    // Ok, not the conflict.
+    let (deps, repo) = build_phase2_resume_deps(true, false, "p2-resume-super").await;
+
+    let result = execute_command(
+        &deps,
+        RuntimeCommand::ResumeRoute {
+            route_id: "p2-resume-super".to_string(),
+            command_id: "p2-cmd".to_string(),
+            causation_id: None,
+        },
+    )
+    .await;
+
+    match result {
+        Ok(RuntimeCommandResult::RouteStateChanged { status, .. }) => {
+            assert_eq!(status, "Failed");
+        }
+        other => panic!("watcher's terminal Failed must supersede the resume: {other:?}"),
+    }
+
+    let reloaded = repo.load("p2-resume-super").await.unwrap().unwrap();
+    assert!(
+        matches!(reloaded.state(), RouteRuntimeState::Failed(_)),
+        "repo must be durably Failed, got {:?}",
+        reloaded.state()
+    );
+}
+
+#[tokio::test]
+async fn phase2_resume_non_failed_conflict_returns_err() {
+    // Cheap non-Failed twin: the fake chains fail→Stop during the resume
+    // side-effect window, so the reload shows Stopped — the conflict
+    // propagates unchanged (the discriminator is terminal-Failed ONLY).
+    let (deps, repo) = build_phase2_resume_deps(false, true, "p2-resume-conflict").await;
+
+    let err = execute_command(
+        &deps,
+        RuntimeCommand::ResumeRoute {
+            route_id: "p2-resume-conflict".to_string(),
+            command_id: "p2-cmd".to_string(),
+            causation_id: None,
+        },
+    )
+    .await
+    .expect_err("non-Failed conflicts must propagate unchanged");
+
+    assert!(
+        err.to_string().contains("optimistic lock conflict"),
+        "expected the version-conflict error, got: {err}"
+    );
+
+    let reloaded = repo.load("p2-resume-conflict").await.unwrap().unwrap();
+    assert_eq!(*reloaded.state(), RouteRuntimeState::Stopped);
+}

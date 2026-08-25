@@ -778,4 +778,70 @@ mod tests {
             RuntimeQueryResult::RouteNotFound { route_id } if route_id == "unknown"
         ));
     }
+
+    #[tokio::test]
+    async fn watcher_duplicate_failroute_is_noop() {
+        // rc-slvd: bus-level dedup pin — the failure watcher retries with
+        // the SAME command_id; the second execute must return the dedup
+        // outcome and cause exactly ONE lifecycle transition to Failed.
+        // REAL bus (a fake would make dedup vacuously green).
+        use crate::lifecycle::domain::RouteRuntimeState;
+        use camel_api::RuntimeCommand;
+
+        let bus = build_test_runtime_bus();
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("dup-fail-route");
+        InternalRuntimeCommandBus::register_route(&bus, def)
+            .await
+            .expect("register route");
+
+        let cmd = RuntimeCommand::FailRoute {
+            route_id: "dup-fail-route".into(),
+            error: "watcher".into(),
+            command_id: "fail-once".into(),
+            causation_id: None,
+        };
+        let first = bus.execute(cmd.clone()).await.unwrap();
+        assert!(
+            matches!(
+                &first,
+                RuntimeCommandResult::RouteStateChanged { status, .. } if status == "Failed"
+            ),
+            "first FailRoute must transition to Failed, got {first:?}"
+        );
+
+        let second = bus.execute(cmd).await.unwrap();
+        assert!(
+            matches!(
+                &second,
+                RuntimeCommandResult::Duplicate { command_id } if command_id == "fail-once"
+            ),
+            "duplicate command_id must return the dedup no-op, got {second:?}"
+        );
+
+        // Exactly ONE transition: aggregate Failed at version 1 (0 was the
+        // register), and the status query agrees.
+        let aggregate = bus
+            .repo()
+            .load("dup-fail-route")
+            .await
+            .unwrap()
+            .expect("route exists");
+        assert!(matches!(aggregate.state(), RouteRuntimeState::Failed(_)));
+        assert_eq!(
+            aggregate.version(),
+            1,
+            "the duplicate must not apply a second transition"
+        );
+
+        let status = bus
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "dup-fail-route".into(),
+            })
+            .await
+            .unwrap();
+        match status {
+            RuntimeQueryResult::RouteStatus { status, .. } => assert_eq!(status, "Failed"),
+            other => panic!("unexpected query result: {other:?}"),
+        }
+    }
 }

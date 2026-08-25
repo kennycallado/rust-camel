@@ -1099,27 +1099,40 @@ impl DefaultRouteController {
 
         // Start consumer after pipeline loop is spawned to avoid startup races
         // where consumers emit exchanges before the route pipeline begins polling.
-        let (consumer_handle, startup_rx) = super::consumer_management::spawn_consumer_task(
-            route_id.to_string(),
-            consumer,
-            consumer_ctx,
-            crash_notifier,
-            runtime_for_consumer,
-            false,
-        );
+        // rc-kh7c cleanup parity: capture the consumer's cancel token before
+        // consumer_ctx moves into the task so the failure arm can stop child
+        // tasks spawned by consumer.start().
+        let consumer_cancel_for_cleanup = consumer_ctx.cancel_token();
+        let (consumer_handle, startup_rx, watcher_inputs) =
+            super::consumer_management::spawn_consumer_task(
+                route_id.to_string(),
+                consumer,
+                consumer_ctx,
+                crash_notifier,
+                runtime_for_consumer,
+                false,
+            );
 
         // rc-w1u9: await consumer startup handshake for aggregate routes too
         // so bind failures surface as route-start errors.
+        // For Immediate consumers the receiver is pre-resolved (rc-slvd).
+        let startup_result =
+            super::consumer_management::await_consumer_startup(startup_rx, "startup").await;
         // rc-kh7c: on failure, abort the orphaned consumer task and cancel the
         // pipeline so neither runs detached. The aggregate pipeline loop would
         // eventually self-clean via rx-drop + late_tx-drop, but cancelling
         // pipeline_cancel also triggers force_complete_all (aggregate cleanup).
-        if let Err(e) =
-            super::consumer_management::await_consumer_startup(startup_rx, "startup").await
-        {
+        if let Err(e) = startup_result {
             consumer_handle.abort();
             pipeline_cancel_for_monitor.cancel();
+            // Deliberate Explicit-failure cleanup parity with the trait start arm (rc-kh7c).
+            consumer_cancel_for_cleanup.cancel();
             return Err(e);
+        }
+
+        // Detached failure watcher for Immediate consumers (rc-slvd).
+        if let Some(inputs) = watcher_inputs {
+            super::consumer_management::spawn_failure_watcher(inputs);
         }
 
         // Extend the stored consumer handle through aggregate force-completion.

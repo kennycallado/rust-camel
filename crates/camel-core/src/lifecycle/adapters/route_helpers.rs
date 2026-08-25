@@ -280,16 +280,25 @@ pub(super) async fn ready_with_backoff(
     }
 }
 
-/// Build a `FailRoute` command for a runtime failure.
-pub(super) fn runtime_failure_command(route_id: &str, error: &str) -> RuntimeCommand {
+/// Build a command_id for a FailRoute command. Shared source of the stamp
+/// format so both the watcher and the deferred/shutdown paths use one format.
+pub(super) fn fail_command_id(route_id: &str) -> String {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    format!("ctrl-fail-{route_id}-{stamp}")
+}
+
+/// Build a `FailRoute` command for a runtime failure. The command_id is
+/// stamped via [`fail_command_id`] — the shared stamp format for the
+/// deferred/shutdown publishers (the Immediate watcher builds its
+/// FailRoute inline to reuse its pre-allocated id).
+pub(super) fn runtime_failure_command(route_id: &str, error: &str) -> RuntimeCommand {
     RuntimeCommand::FailRoute {
         route_id: route_id.to_string(),
         error: error.to_string(),
-        command_id: format!("ctrl-fail-{route_id}-{stamp}"),
+        command_id: fail_command_id(route_id),
         causation_id: None,
     }
 }

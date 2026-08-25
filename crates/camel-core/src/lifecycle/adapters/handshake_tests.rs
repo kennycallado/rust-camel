@@ -1,7 +1,11 @@
-//! Tests for the rc-w1u9 consumer startup handshake (Option E).
+//! Tests for the consumer startup handshake.
 //!
 //! Covers `ConsumerStartupMode` integration with `spawn_consumer_task`:
-//! - Immediate consumers get a pre-resolved receiver (fire-and-forget).
+//! - Immediate consumers' receiver is pre-resolved — it never yields,
+//!   without any signal from the consumer itself. The prompt `start()`
+//!   return (Ok or Err) is observed ONLY by the detached failure watcher
+//!   through the rc-slvd outcome latches (watcher tests live in
+//!   `consumer_management.rs`).
 //! - Explicit consumers' receiver resolves only after `ctx.mark_ready()`.
 //! - Explicit consumers whose `start()` returns `Err` surface the error.
 //! - Explicit consumers that return `Ok` without signalling are rescued by
@@ -111,11 +115,12 @@ impl Consumer for ExplicitOkNoMarkReadyConsumer {
 
 #[tokio::test]
 async fn spawn_consumer_task_immediate_consumer_returns_resolved_receiver() {
-    // Immediate consumers must NOT block the controller — the receiver
-    // returned by spawn_consumer_task must be already resolved as Ok
-    // even though the consumer's start() loop has not yet signalled
-    // anything (and never will — Immediate consumers don't call
-    // mark_ready).
+    // rc-slvd contract: the receiver returned for an Immediate consumer
+    // is PRE-RESOLVED (StartupReceiver::immediate()) — the controller's
+    // handshake completes on first poll with zero yield; the consumer's
+    // lifetime loop never signals anything itself (Immediate consumers
+    // don't call mark_ready — the detached watcher owns failure
+    // observation).
     let (tx, _rx) = mpsc::channel(1);
     let cancel = CancellationToken::new();
     let ctx = ConsumerContext::new(tx, cancel.clone(), "immediate-route".to_string());
@@ -125,7 +130,7 @@ async fn spawn_consumer_task_immediate_consumer_returns_resolved_receiver() {
         started: Arc::clone(&started),
     };
 
-    let (handle, startup_rx) = spawn_consumer_task(
+    let (handle, startup_rx, watcher_inputs) = spawn_consumer_task(
         "immediate-route".to_string(),
         Box::new(consumer),
         ctx,
@@ -134,12 +139,23 @@ async fn spawn_consumer_task_immediate_consumer_returns_resolved_receiver() {
         false,
     );
 
-    // The receiver MUST resolve Ok without waiting on the consumer's
-    // lifetime loop. Bounded timeout proves non-blocking.
+    // The receiver is pre-resolved (StartupReceiver::immediate) — must
+    // resolve Ok without waiting on the consumer's lifetime loop.
     let result = tokio::time::timeout(Duration::from_millis(200), startup_rx.await_ready())
         .await
         .expect("immediate startup receiver must not block");
-    assert!(result.is_ok(), "immediate receiver resolves Ok");
+    assert!(
+        result.is_ok(),
+        "immediate receiver resolves Ok at invocation"
+    );
+
+    // The watcher inputs must be present for Immediate consumers (they
+    // carry the outcome latches for the detached failure watcher).
+    assert!(
+        watcher_inputs.is_some(),
+        "Immediate consumers must yield watcher inputs"
+    );
+    drop(watcher_inputs);
 
     // Sanity: the consumer did run.
     for _ in 0..50 {
@@ -177,7 +193,7 @@ async fn spawn_consumer_task_explicit_consumer_waits_for_mark_ready() {
         mark_ready_called: Arc::clone(&mark_ready_called),
     };
 
-    let (handle, startup_rx) = spawn_consumer_task(
+    let (handle, startup_rx, _watcher_inputs) = spawn_consumer_task(
         "explicit-route".to_string(),
         Box::new(consumer),
         ctx,
@@ -227,7 +243,7 @@ async fn spawn_consumer_task_explicit_consumer_start_error_propagates() {
     let cancel = CancellationToken::new();
     let ctx = ConsumerContext::new(tx, cancel, "explicit-fail-route".to_string());
 
-    let (handle, startup_rx) = spawn_consumer_task(
+    let (handle, startup_rx, _watcher_inputs) = spawn_consumer_task(
         "explicit-fail-route".to_string(),
         Box::new(ExplicitBindFailConsumer),
         ctx,
@@ -265,7 +281,7 @@ async fn spawn_consumer_task_explicit_consumer_ok_without_mark_ready_does_not_ha
     let cancel = CancellationToken::new();
     let ctx = ConsumerContext::new(tx, cancel.clone(), "explicit-no-mark-ready".to_string());
 
-    let (handle, startup_rx) = spawn_consumer_task(
+    let (handle, startup_rx, _watcher_inputs) = spawn_consumer_task(
         "explicit-no-mark-ready".to_string(),
         Box::new(ExplicitOkNoMarkReadyConsumer),
         ctx,
@@ -333,7 +349,7 @@ async fn spawn_consumer_task_explicit_deferred_mark_ready_not_defeated_by_fallba
 
     let consumer = ExplicitDeferredMarkReadyConsumer { bg_handle: None };
 
-    let (handle, startup_rx) = spawn_consumer_task(
+    let (handle, startup_rx, _watcher_inputs) = spawn_consumer_task(
         "deferred-ready".to_string(),
         Box::new(consumer),
         ctx,

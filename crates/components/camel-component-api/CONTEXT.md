@@ -15,7 +15,12 @@ Concrete component crates own all I/O.
 `Consumer::startup_mode()` selects one of two readiness contracts:
 
 - `Immediate` is the default. `start()` is the consumer lifetime loop. The Runtime does not wait
-  for a separate readiness signal.
+  for a separate readiness signal. A promptly returning `Err` from an Immediate consumer's
+  `start()` transitions the Route to `Failed` asynchronously. A detached failure watcher issues
+  one `FailRoute`, with at most one defensive retry under the same `command_id`. The lifecycle
+  operation returns without waiting, so Immediate startup timing is unchanged. An error arriving
+  after the grace keeps the existing logged/crash-notified behavior. For loop-style Immediate
+  consumers (start runs until cancellation), the watcher exits when the grace budget elapses.
 - `Explicit` is for consumers that bind a resource inside `start()`. They call
   `ConsumerContext::mark_ready()` only after the bind succeeds. This lets the Runtime report bind
   failures before it marks the Route as started.

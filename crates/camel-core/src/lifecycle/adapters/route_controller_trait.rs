@@ -545,22 +545,26 @@ impl camel_api::RouteController for DefaultRouteController {
 
         // Start consumer after pipeline task is spawned to minimize the chance of
         // fire-and-forget events being produced before the pipeline loop is active.
-        let (consumer_handle, startup_rx) = consumer_management::spawn_consumer_task(
-            route_id.to_string(),
-            consumer,
-            consumer_ctx,
-            crash_notifier,
-            runtime_for_consumer,
-            false,
-        );
+        let (consumer_handle, startup_rx, watcher_inputs) =
+            consumer_management::spawn_consumer_task(
+                route_id.to_string(),
+                consumer,
+                consumer_ctx,
+                crash_notifier,
+                runtime_for_consumer,
+                false,
+            );
         #[cfg(test)]
         emit_start_route_event("consumer_spawned", route_id);
 
-        // rc-w1u9: await consumer startup handshake before returning. For
-        // Immediate consumers this is a no-op (pre-resolved receiver); for
-        // Explicit consumers (HTTP, WebSocket) it propagates bind failures as
-        // proper startup errors instead of silent background logs.
-        match consumer_management::await_consumer_startup(startup_rx, "startup").await {
+        // rc-w1u9: await consumer startup handshake. For Explicit consumers
+        // (HTTP, WebSocket) it propagates bind failures as proper startup
+        // errors. For Immediate consumers the receiver is pre-resolved
+        // (StartupReceiver::immediate) so this returns instantly — the
+        // controller never yields during the Immediate handshake (rc-slvd).
+        let startup_result =
+            consumer_management::await_consumer_startup(startup_rx, "startup").await;
+        match startup_result {
             Ok(()) => {}
             Err(e) => {
                 // rc-kh7c: abort the orphaned consumer task and cancel the
@@ -577,6 +581,13 @@ impl camel_api::RouteController for DefaultRouteController {
                 rollback_started(route_id, &lifecycle_handles).await;
                 return Err(e);
             }
+        }
+
+        // Detached failure watcher for Immediate consumers (rc-slvd).
+        // The route owns the JoinHandle; the watcher owns the AbortHandle,
+        // oneshot, and command_id — ownership split prevents any coupling.
+        if let Some(inputs) = watcher_inputs {
+            consumer_management::spawn_failure_watcher(inputs);
         }
 
         // Store handles and update status
@@ -750,18 +761,34 @@ impl camel_api::RouteController for DefaultRouteController {
             ConsumerContext::new(sender, consumer_cancel.clone(), route_id.to_string());
 
         // Spawn consumer task
-        let (consumer_handle, startup_rx) = consumer_management::spawn_consumer_task(
-            route_id.to_string(),
-            consumer,
-            consumer_ctx,
-            crash_notifier,
-            runtime_for_consumer,
-            true,
-        );
+        let (consumer_handle, startup_rx, watcher_inputs) =
+            consumer_management::spawn_consumer_task(
+                route_id.to_string(),
+                consumer,
+                consumer_ctx,
+                crash_notifier,
+                runtime_for_consumer,
+                true,
+            );
 
         // rc-w1u9: await consumer startup handshake on resume too — bind
         // failures during resume must surface as resume errors.
-        consumer_management::await_consumer_startup(startup_rx, "resume").await?;
+        // For Immediate consumers the receiver is pre-resolved (rc-slvd).
+        let resume_result = consumer_management::await_consumer_startup(startup_rx, "resume").await;
+        if let Err(e) = resume_result {
+            // rc-kh7c cleanup parity with the start path: the consumer task
+            // must not run detached after a failed resume, and child tasks
+            // spawned by consumer.start() that observe ctx.cancelled() must
+            // stop too.
+            consumer_handle.abort();
+            consumer_cancel.cancel();
+            return Err(e);
+        }
+
+        // Detached failure watcher for Immediate consumers (rc-slvd).
+        if let Some(inputs) = watcher_inputs {
+            consumer_management::spawn_failure_watcher(inputs);
+        }
 
         // Store consumer handle and update status
         let managed = self

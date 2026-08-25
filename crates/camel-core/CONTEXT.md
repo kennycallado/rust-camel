@@ -112,6 +112,13 @@ The process of calling `component.metadata()` once at registration time (inside
 without re-invoking the component. The scheme is validated and normalized on mismatch.
 _Avoid_: metadata collection, metadata extraction
 
+**Immediate startup grace**:
+The observation budget (50ms) of the detached failure watcher spawned with each Immediate
+consumer start. On a prompt `start()` error the Route reaches `Failed` within ~grace. No actor
+path waits for the grace. Loop-style Immediate consumers (timer, file, sql, cron, keycloak)
+surface nothing inside the budget, so the watcher exits when it elapses. `CamelContext::start()`
+does not fail fast on Immediate errors. Explicit bind failures still do.
+
 ## Compiled Step Variants
 
 **Process**:

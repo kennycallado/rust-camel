@@ -34,6 +34,42 @@ pub struct CommandDeps {
     pub health_registry: Option<Arc<dyn HealthCheckRegistryTrait>>,
 }
 
+/// Detect optimistic-lock conflicts in the error chain.
+/// Uses string matching — the established precedent from in_memory.rs:488-491.
+/// Accepts any Display error (DomainError and CamelError both carry the
+/// conflict text through their Display impls).
+fn is_optimistic_conflict(err: &impl std::fmt::Display) -> bool {
+    err.to_string().contains("optimistic lock conflict")
+}
+
+/// rc-slvd: shared conflict→reload→terminal-Failed recognition for the
+/// side-effect windows where the detached failure watcher's FailRoute can
+/// commit DURING this command's own persist (Resume confirm, Start Phase
+/// 2a). A reloaded terminal-Failed aggregate means the watcher superseded
+/// the command — report Failed as Ok. Any other reloaded state propagates
+/// the ORIGINAL conflict error; a failing reload also returns the original
+/// conflict (the reload error must not mask it).
+async fn resolve_superseded_conflict<E: Into<CamelError>>(
+    deps: &CommandDeps,
+    conflict: E,
+    route_id: &str,
+) -> Result<RuntimeCommandResult, CamelError> {
+    match deps.repo.load(route_id).await {
+        Ok(Some(reloaded))
+            if matches!(
+                reloaded.state(),
+                crate::lifecycle::domain::RouteRuntimeState::Failed(_)
+            ) =>
+        {
+            Ok(RuntimeCommandResult::RouteStateChanged {
+                route_id: route_id.to_string(),
+                status: "Failed".to_string(),
+            })
+        }
+        _ => Err(conflict.into()),
+    }
+}
+
 pub async fn execute_command(
     deps: &CommandDeps,
     cmd: RuntimeCommand,
@@ -382,6 +418,24 @@ async fn handle_lifecycle(
 
     // Runtime succeeded: apply command and persist
     let events = aggregate.apply_command(execution_command.clone())?;
+    // rc-slvd: Resume is the only lifecycle command (besides Start, which
+    // has its own Phase 2a) whose runtime side effect spawns the consumer —
+    // a prompt Immediate start error lets the detached watcher's FailRoute
+    // commit DURING the side effect, superseding this command's own persist.
+    // Same victim-tolerance as Phase 2a: on optimistic conflict, re-load and
+    // recognize the terminal-Failed supersede; any other reloaded state (or
+    // non-conflict error) propagates unchanged.
+    if matches!(execution_command, RouteLifecycleCommand::Resume) {
+        return match persist_and_return(deps, aggregate, expected_version, events, route_id.clone())
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(e) if is_optimistic_conflict(&e) => {
+                resolve_superseded_conflict(deps, e, &route_id).await
+            }
+            Err(e) => Err(e),
+        };
+    }
     persist_and_return(deps, aggregate, expected_version, events, route_id).await
 }
 
@@ -526,17 +580,33 @@ async fn handle_lifecycle_start(
     let confirm_events = aggregate.confirm_start().map_err(CamelError::from)?;
     if !confirm_events.is_empty() {
         if let Some(uow) = &deps.uow {
-            uow.persist_upsert(
-                aggregate.clone(),
-                Some(aggregate.version()),
-                project_from_aggregate(&aggregate),
-                &confirm_events,
-            )
-            .await?;
+            if let Err(e) = uow
+                .persist_upsert(
+                    aggregate.clone(),
+                    Some(aggregate.version()),
+                    project_from_aggregate(&aggregate),
+                    &confirm_events,
+                )
+                .await
+            {
+                if is_optimistic_conflict(&e) {
+                    // Watcher's FailRoute may have superseded this start.
+                    return resolve_superseded_conflict(deps, e, &route_id).await;
+                }
+                return Err(e.into());
+            }
         } else {
-            deps.repo
+            if let Err(e) = deps
+                .repo
                 .save_if_version(aggregate.clone(), aggregate.version())
-                .await?;
+                .await
+            {
+                if is_optimistic_conflict(&e) {
+                    // Watcher's FailRoute may have superseded this start.
+                    return resolve_superseded_conflict(deps, e, &route_id).await;
+                }
+                return Err(e.into());
+            }
             deps.events.publish(&confirm_events).await?;
             match upsert_projection_with_reconciliation(
                 &*deps.projections,
