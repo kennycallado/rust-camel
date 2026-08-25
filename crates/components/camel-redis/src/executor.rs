@@ -250,6 +250,14 @@ pub struct MultiplexedExecutor {
     config: RedisEndpointConfig,
     topology: Arc<dyn RedisTopology>,
     conn: Arc<Mutex<Option<MultiplexedConnection>>>,
+    /// Single-flight guard collapsing concurrent cache-miss builds to one
+    /// leader (storm elimination at failover). Waiters double-check the
+    /// cache after the gate; cancellation-safe — a dropped leader releases
+    /// it.
+    // Lock ordering: the gate is always acquired BEFORE `conn` for the
+    // double-check and store sections; the fast path takes only `conn`;
+    // the reverse nesting never occurs.
+    connect_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     response_timeout: Option<Duration>,
 }
 
@@ -260,6 +268,7 @@ impl MultiplexedExecutor {
             config,
             topology,
             conn: Arc::new(Mutex::new(None)),
+            connect_gate: Arc::new(tokio::sync::Mutex::new(())),
             response_timeout: None,
         }
     }
@@ -285,7 +294,8 @@ impl MultiplexedExecutor {
     /// `pub` so out-of-crate services (repository service) can reuse the same
     /// lazily-cached connection as the producer's `check_connection`.
     pub async fn get_conn(&self) -> Result<MultiplexedConnection, CamelError> {
-        // Fast path: reuse the cached connection.
+        // Step A (fast path): reuse the cached connection. Only `conn` is
+        // locked here — a cache hit never touches the connect gate.
         {
             let guard = self.conn.lock().await;
             if let Some(c) = guard.as_ref() {
@@ -293,7 +303,22 @@ impl MultiplexedExecutor {
             }
         }
 
-        // Resolve the master address through the topology, then connect.
+        // Step B: single-flight gate, held through the double-check and
+        // the leader build below so concurrent cache misses collapse to
+        // one connector.
+        let _gate = self.connect_gate.lock().await;
+
+        // Step C (double-check): a leader may have stored a connection
+        // while this caller waited for the gate.
+        {
+            let guard = self.conn.lock().await;
+            if let Some(c) = guard.as_ref() {
+                return Ok(c.clone());
+            }
+        }
+
+        // Step D (leader): resolve the master address through the
+        // topology, then connect.
         let client = self.topology.resolve(ServerKind::Master).await?;
         let redis_url_safe = self.config.redis_url_safe();
         let timeout_secs = self.config.connection_timeout_secs;
@@ -355,6 +380,13 @@ impl MultiplexedExecutor {
     #[cfg(test)]
     pub(crate) fn conn_arc(&self) -> Arc<Mutex<Option<MultiplexedConnection>>> {
         Arc::clone(&self.conn)
+    }
+
+    /// Expose the single-flight gate Arc so in-module tests can hold or
+    /// probe the gate directly.
+    #[cfg(test)]
+    pub(crate) fn gate_arc(&self) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        std::sync::Arc::clone(&self.connect_gate)
     }
 }
 
@@ -746,5 +778,170 @@ mod tests {
             2,
             "each reconnect should re-resolve the topology"
         );
+    }
+
+    // Task 1.1 (redis-single-flight): the cached fast path in `get_conn`
+    // must NOT take the connect gate. A foreign task holds the gate for
+    // the whole probe; a cache hit must still be served immediately. A
+    // gate-contending fast path would park on the held gate and the 5s
+    // probe would time out instead.
+    #[tokio::test]
+    async fn cached_fast_path_skips_gate() {
+        use std::sync::atomic::AtomicBool;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::Notify;
+
+        // ------------------------------------------------------------------
+        // Full-handshake answering stub (frame parser adapted from
+        // tests/response_timeout.rs).
+        // ------------------------------------------------------------------
+
+        fn invalid_data(message: impl Into<String>) -> std::io::Error {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
+        }
+
+        /// Parse `<marker><digits>\r\n` starting at `offset`. Returns the
+        /// parsed integer and the byte offset just past the header line,
+        /// `Ok(None)` when the header is not fully buffered yet.
+        fn parse_integer_header(
+            buf: &[u8],
+            offset: usize,
+            marker: u8,
+        ) -> std::io::Result<Option<(usize, usize)>> {
+            let Some(&first) = buf.get(offset) else {
+                return Ok(None);
+            };
+            if first != marker {
+                return Err(invalid_data(format!(
+                    "expected '{}' RESP marker, got {:?}",
+                    marker as char, first as char
+                )));
+            }
+            let mut cursor = offset + 1;
+            loop {
+                match buf.get(cursor) {
+                    Some(byte) if byte.is_ascii_digit() => cursor += 1,
+                    Some(b'\r') => match buf.get(cursor + 1) {
+                        Some(b'\n') => {
+                            let digits = &buf[offset + 1..cursor];
+                            let text = std::str::from_utf8(digits)
+                                .map_err(|_| invalid_data("non-UTF-8 header digits"))?;
+                            let value: usize = text
+                                .parse()
+                                .map_err(|_| invalid_data("header integer overflow"))?;
+                            return Ok(Some((value, cursor + 2)));
+                        }
+                        Some(_) => return Err(invalid_data("expected \n after \r in header")),
+                        None => return Ok(None),
+                    },
+                    Some(_) => return Err(invalid_data("unexpected byte in RESP header")),
+                    None => return Ok(None),
+                }
+            }
+        }
+
+        /// Try to parse one complete RESP array-of-bulk-strings frame from
+        /// `buf`. Returns `Ok(Some(total_len))` when a full frame is
+        /// buffered, `Ok(None)` when more bytes are needed, `Err` on
+        /// malformed input.
+        fn parse_frame(buf: &[u8]) -> std::io::Result<Option<usize>> {
+            let Some((elements, mut pos)) = parse_integer_header(buf, 0, b'*')? else {
+                return Ok(None);
+            };
+            for _ in 0..elements {
+                let Some((len, payload_at)) = parse_integer_header(buf, pos, b'$')? else {
+                    return Ok(None);
+                };
+                let Some(end) = payload_at.checked_add(len).and_then(|e| e.checked_add(2)) else {
+                    return Err(invalid_data("bulk string length overflow"));
+                };
+                if buf.len() < end {
+                    return Ok(None);
+                }
+                pos = end;
+            }
+            Ok(Some(pos))
+        }
+
+        // Every complete request frame gets `+OK` — the driver pipelines
+        // its handshake (CLIENT SETINFO ×2 etc.), so a single-frame reply
+        // would break the handshake.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let stub_addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    // Persistent read buffer: one TCP read can carry
+                    // several pipelined frames.
+                    let mut buf: Vec<u8> = Vec::with_capacity(64);
+                    let mut chunk = [0u8; 256];
+                    loop {
+                        match parse_frame(&buf) {
+                            Ok(Some(frame_len)) => {
+                                let _ = buf.drain(..frame_len);
+                                if stream.write_all(b"+OK\r\n").await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => {
+                                let n = match stream.read(&mut chunk).await {
+                                    Ok(0) => break, // clean EOF
+                                    Ok(n) => n,
+                                    Err(_) => break,
+                                };
+                                buf.extend_from_slice(&chunk[..n]);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+            }
+        });
+
+        // Build the executor and prime the cache: the stub answers the
+        // full handshake, so this connect succeeds and caches.
+        let config = RedisEndpointConfig::from_uri(&format!("redis://{stub_addr}"))
+            .expect("valid standalone URI for the stub");
+        let topology = Arc::new(FakeTopology::addrs(vec![format!("redis://{stub_addr}")]));
+        let executor = MultiplexedExecutor::new(config, topology);
+        executor
+            .get_conn()
+            .await
+            .expect("handshake answered; connection cached");
+
+        // Foreign task grabs the gate and parks on a notify.
+        let gate = executor.gate_arc();
+        let acquired = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+        let holder_acquired = Arc::clone(&acquired);
+        let holder_notify = Arc::clone(&notify);
+        let holder = tokio::spawn(async move {
+            let _g = gate.lock().await;
+            holder_acquired.store(true, Ordering::SeqCst);
+            holder_notify.notified().await;
+        });
+
+        // PROOF the gate is held before the probe: poll until the holder
+        // reports acquisition.
+        while !acquired.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+
+        // Probe: the cached fast path must be served without the gate.
+        let _conn = tokio::time::timeout(Duration::from_secs(5), executor.get_conn())
+            .await
+            .expect("cached fast path must not wait on the connect gate")
+            .expect("cache hit must serve Ok");
+
+        // Deterministic cleanup: release the holder and join bounded.
+        notify.notify_one();
+        let joined = tokio::time::timeout(Duration::from_secs(5), holder).await;
+        assert!(joined.is_ok(), "holder must release the gate after notify");
     }
 }

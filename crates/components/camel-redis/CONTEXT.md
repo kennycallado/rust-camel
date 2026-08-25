@@ -72,6 +72,22 @@ Default: 10 seconds (in `RedisConfig::default()`). Applied at 4 connection sites
 Derived from `connection_timeout_secs + 5` seconds. The outer timeout at `check()` (`fn check`, health.rs:113)
 must exceed the inner connection timeout so the inner fires first with a specific error message.
 
+### Single-flight connection builds (`MultiplexedExecutor::get_conn`, executor.rs)
+
+Concurrent cache-miss builds collapse through a single-flight gate: the first
+cache-miss caller becomes the leader and holds `connect_gate` across
+resolve+connect; concurrent callers park on the gate and double-check into the
+stored connection. At most one resolve+connect is in flight at any instant —
+the failover refresh herd (N tasks whose commands fail together) performs one
+rebuild instead of N. The herd-collapse guarantee holds for callers whose
+invalidation completed before the leader's store; a straggler whose drop lands
+after the store forces at most one extra sequential rebuild. The cached fast
+path never takes the gate. A leader failure is never cached and never
+inherited: waiters attempt sequentially, each with its own resolve (accepted
+trade: under a persistent outage, up to N sequential bounded connect attempts —
+latency instead of a connection storm). Cancellation-safe: a dropped leader
+releases the gate (change `redis-single-flight`, bd rc-wmwu).
+
 ## Sentinel topology
 
 ### `RedisTopology` seam (`fn topology_from_config`, topology.rs:266)
