@@ -154,6 +154,41 @@ async fn cache_roundtrip_and_ttl() {
 }
 
 // ===========================================================================
+// Configured database index: ?db=2 must reach the executor connection
+// ===========================================================================
+
+/// Regression for the `?db=` URL parameter: a cache repository configured
+/// with `db=2` must issue its handshake `SELECT 2` so keys land in db 2,
+/// not in the default db 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_repo_writes_to_configured_db_live() {
+    let (_container, base_url) = own_redis().await;
+    let db_url = format!("{base_url}?db=2");
+    let mut verifier_db2 = raw_connection(&format!("{base_url}/2")).await;
+    let mut verifier_db0 = raw_connection(&base_url).await;
+
+    let ctx = context_with_redis_cache(&db_url, "30s").await;
+    let repo = ctx
+        .cache_repository("redis")
+        .expect("redis cache repository registered when backend = redis");
+
+    repo.set("k", cache_entry(), Some(Duration::from_secs(60)))
+        .await
+        .expect("set succeeds");
+
+    let db2: i64 = redis::cmd("DBSIZE")
+        .query_async(&mut verifier_db2)
+        .await
+        .expect("DBSIZE reads on db 2");
+    let db0: i64 = redis::cmd("DBSIZE")
+        .query_async(&mut verifier_db0)
+        .await
+        .expect("DBSIZE reads on db 0");
+    assert!(db2 >= 1, "cache put must land in db 2, DBSIZE = {db2}");
+    assert_eq!(db0, 0, "db 0 must stay empty, DBSIZE = {db0}");
+}
+
+// ===========================================================================
 // In-band expiry and peek_stale
 // ===========================================================================
 

@@ -78,7 +78,8 @@ must exceed the inner connection timeout so the inner fires first with a specifi
 
 Connection targets are resolved through the `RedisTopology` trait
 (`resolve(ServerKind)`), never through a fixed URL. Two implementations exist:
-- **`StandaloneTopology`** — returns a client for one fixed URL for both
+- **`StandaloneTopology`** — returns a client for one fixed, structurally
+  built connection (address, database, credentials) for both
   `ServerKind::Master` and `ServerKind::Replica`. Default for non-sentinel
   deployments.
 - **`SentinelTopology`** (feature `sentinel`) — re-queries the Sentinel cluster

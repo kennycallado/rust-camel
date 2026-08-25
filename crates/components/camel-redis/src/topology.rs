@@ -31,26 +31,55 @@ pub trait RedisTopology: Send + Sync {
     async fn resolve(&self, kind: ServerKind) -> Result<Client, CamelError>;
 }
 
-/// A topology that always returns a client for a single fixed URL.
+/// A topology that always returns a client for a single fixed connection.
 ///
 /// Both [`ServerKind::Master`] and [`ServerKind::Replica`] resolve to the same
 /// connection. This is the default topology for non-sentinel deployments.
+///
+/// The connection is built structurally (address, database, credentials) from
+/// [`RedisEndpointConfig`] instead of a URL string: redis-rs parses `?db=` only
+/// for unix-socket URLs, while a TCP database rides the URL path segment, so a
+/// `redis://host:port?db=N` URL string silently drops db (bd rc-c5l7).
 #[derive(Clone, Debug)]
 pub struct StandaloneTopology {
-    url: String,
+    addr: redis::ConnectionAddr,
+    settings: redis::RedisConnectionInfo,
 }
 
 impl StandaloneTopology {
-    /// Create a new standalone topology pointing at `url`.
-    pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+    /// Create a new standalone topology for `config`.
+    pub fn new(config: &RedisEndpointConfig) -> Self {
+        let host = config.host.clone().unwrap_or_else(|| "localhost".into());
+        let port = config.port.unwrap_or(6379);
+        let addr = if config.is_ssl_enabled() {
+            redis::ConnectionAddr::TcpTls {
+                host,
+                port,
+                insecure: false,
+                tls_params: None,
+            }
+        } else {
+            redis::ConnectionAddr::Tcp(host, port)
+        };
+        Self {
+            addr,
+            settings: node_redis_connection_info(config),
+        }
     }
 }
 
 #[async_trait]
 impl RedisTopology for StandaloneTopology {
     async fn resolve(&self, _kind: ServerKind) -> Result<Client, CamelError> {
-        Client::open(self.url.as_str())
+        let info = self
+            .addr
+            .clone()
+            .into_connection_info()
+            .map_err(|e| {
+                CamelError::ProcessorError(format!("failed to build Redis connection info: {e}"))
+            })?
+            .set_redis_settings(self.settings.clone());
+        Client::open(info)
             .map_err(|e| CamelError::ProcessorError(format!("failed to open Redis client: {e}")))
     }
 }
@@ -303,7 +332,7 @@ pub fn topology_from_config(
     config: &RedisEndpointConfig,
 ) -> Result<Arc<dyn RedisTopology>, CamelError> {
     match &config.topology_kind {
-        TopologyKind::Standalone => Ok(Arc::new(StandaloneTopology::new(config.redis_url()))),
+        TopologyKind::Standalone => Ok(Arc::new(StandaloneTopology::new(config))),
         #[cfg(feature = "sentinel")]
         TopologyKind::Sentinel(s) => {
             let sentinel_creds = Some((s.username.clone(), s.password.clone()))
@@ -329,10 +358,9 @@ pub fn topology_from_config(
     }
 }
 
-/// Build the [`redis::RedisConnectionInfo`] for the Redis nodes (not the
+/// Build the [`redis::RedisConnectionInfo`] for a Redis node (not the
 /// sentinels) from the endpoint's node credentials: username, password, and
-/// database number.
-#[cfg(feature = "sentinel")]
+/// database number. Shared by the standalone and sentinel topologies.
 fn node_redis_connection_info(config: &RedisEndpointConfig) -> redis::RedisConnectionInfo {
     let mut redis_info = redis::RedisConnectionInfo::default().set_db(config.db as i64);
     if let Some(u) = &config.username {
@@ -362,7 +390,8 @@ mod tests {
 
     #[tokio::test]
     async fn standalone_topology_resolve_returns_fixed_client() {
-        let topology = StandaloneTopology::new("redis://127.0.0.1:6379");
+        let cfg = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379").expect("valid uri");
+        let topology = StandaloneTopology::new(&cfg);
 
         let r1 = topology.resolve(ServerKind::Master).await;
         let r2 = topology.resolve(ServerKind::Master).await;
@@ -376,6 +405,78 @@ mod tests {
         assert_eq!(
             c2.get_connection_info().addr().to_string(),
             "127.0.0.1:6379"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_topology_carries_configured_db() {
+        let cfg = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&db=2")
+            .expect("valid uri");
+        let topology = StandaloneTopology::new(&cfg);
+
+        let client = topology
+            .resolve(ServerKind::Master)
+            .await
+            .expect("resolve should succeed");
+
+        assert_eq!(client.get_connection_info().redis_settings().db(), 2);
+    }
+
+    #[tokio::test]
+    async fn standalone_topology_default_db_zero() {
+        let cfg =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").expect("valid uri");
+        let topology = StandaloneTopology::new(&cfg);
+
+        let client = topology
+            .resolve(ServerKind::Master)
+            .await
+            .expect("resolve should succeed");
+
+        assert_eq!(client.get_connection_info().redis_settings().db(), 0);
+    }
+
+    #[tokio::test]
+    async fn standalone_topology_tls_addr_keeps_db() {
+        let cfg = RedisEndpointConfig::from_uri("rediss://localhost:6380?command=GET&db=3")
+            .expect("valid uri");
+        let topology = StandaloneTopology::new(&cfg);
+
+        let client = topology
+            .resolve(ServerKind::Master)
+            .await
+            .expect("resolve should succeed");
+
+        let info = client.get_connection_info();
+        assert!(
+            matches!(
+                info.addr(),
+                redis::ConnectionAddr::TcpTls {
+                    insecure: false,
+                    ..
+                }
+            ),
+            "expected TcpTls with insecure=false, got {:?}",
+            info.addr()
+        );
+        assert_eq!(info.redis_settings().db(), 3);
+    }
+
+    #[tokio::test]
+    async fn standalone_topology_password_raw() {
+        let cfg =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&password=p@ss:word")
+                .expect("valid uri");
+        let topology = StandaloneTopology::new(&cfg);
+
+        let client = topology
+            .resolve(ServerKind::Master)
+            .await
+            .expect("resolve should succeed");
+
+        assert_eq!(
+            client.get_connection_info().redis_settings().password(),
+            Some("p@ss:word")
         );
     }
 

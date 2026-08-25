@@ -536,9 +536,10 @@ mod tests {
     }
 
     // Task 2.3: a `redis://` endpoint must construct a StandaloneTopology that
-    // resolves the fixed URL. `RedisTopology` is a trait, so assert indirectly:
-    // resolve against the consumer's topology and check the client address.
-    // No broker needed — `Client::open` only parses the URL.
+    // resolves the fixed, structurally built connection. `RedisTopology` is a
+    // trait, so assert indirectly: resolve against the consumer's topology
+    // and check the client address.
+    // No broker needed — `Client::open` only parses the connection info.
     #[tokio::test]
     async fn standalone_consumer_uses_standalone_topology() {
         let config = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=BLPOP&key=demo")
@@ -549,7 +550,7 @@ mod tests {
             .topology()
             .resolve(ServerKind::Master)
             .await
-            .expect("standalone topology should resolve the fixed URL");
+            .expect("standalone topology should resolve the fixed, structurally built connection");
         assert_eq!(
             client.get_connection_info().addr().to_string(),
             "127.0.0.1:6379"

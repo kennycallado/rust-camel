@@ -256,7 +256,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::is_transient_redis_error;
+    use crate::config::{RedisEndpointConfig, is_transient_redis_error};
     use crate::topology::{FakeTopology, StandaloneTopology};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -485,11 +485,14 @@ mod tests {
 
     // Task 2.3: the intentional PubSub stream-end behavior change. A real
     // StandaloneTopology feeds the reconnect loop, which re-resolves the same
-    // fixed URL and returns Err on budget exhaustion (NOT graceful Ok), so
-    // Route supervision fires (ADR-0007). No broker — connect fails via the fake.
+    // fixed connection and returns Err on budget exhaustion (NOT graceful
+    // Ok), so Route supervision fires (ADR-0007). No broker — connect fails
+    // via the fake.
     #[tokio::test]
     async fn standalone_pubsub_stream_end_returns_err_on_budget() {
-        let topology = StandaloneTopology::new("redis://127.0.0.1:6379");
+        let cfg = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=SUBSCRIBE")
+            .expect("valid uri");
+        let topology = StandaloneTopology::new(&cfg);
         let mut io = FakePubSubIo::new(vec![Err(CamelError::ProcessorError(
             "connection refused".into(),
         ))]);
