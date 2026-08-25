@@ -34,10 +34,13 @@ unreachable topology fails fast at context build
 `refresh` after a failed command. Retry-safe operations (`GET`, `EXISTS`,
 `UNLINK`, `SCAN`, plain `SET`) may refresh and re-issue at most once.
 
-Every command carries a 30-second response-timeout backstop; the redis
-driver's own per-request timeout (500 ms by default) usually fires first,
-and either deadline surfaces as transient `Io` that triggers re-resolve on
-the next call (`src/executor.rs`, ADR-0063 Decision 13, e_opus review I1).
+Every command carries a 30-second response-timeout backstop; the
+connection's driver-level response deadline is set to 35 seconds
+(30 s backstop + 5 s margin, ADR-0063 Decision 13 as amended by change
+`redis-response-timeout`), so the LOCAL backstop fires first and governs
+classification — the driver deadline is defense-in-depth only. Either
+deadline surfaces as transient `Io` that triggers re-resolve on
+the next call (`src/executor.rs`, `src/connection.rs`, e_opus review I1).
 Credentials
 are captured at construction: `refresh` re-resolves the topology but not
 credentials, so password rotation requires a context rebuild.

@@ -174,11 +174,19 @@ timeout wraps `query_async` inside `MultiplexedRepoExecutor::execute` in the
 service crate, so component consumers keep their existing behavior. The redis
 driver also enforces its own default response timeout on multiplexed
 connections; the service-crate timeout is the crate's own contract and does
-not depend on driver defaults. Effective bound today: the driver default
-(500 ms in redis 1.6.0) fires before the 30-second backstop, so a
-slow-but-healthy peer can trip the driver deadline and cause refresh churn;
-plumbing `set_response_timeout` through the component's `get_conn` so the
-service crate's own value governs end to end is tracked as a follow-up.
+not depend on driver defaults. Plumbing the driver's response timeout
+through the component landed (OpenSpec change `redis-response-timeout`,
+bd rc-dq7a). `MultiplexedExecutor` now accepts
+`with_response_timeout(Duration)`, applied in `get_conn` on the initial
+connect and on every `refresh`/`reconnect` rebuild. On that branch the
+driver's parallel 1 s connect default is disabled through
+`set_connection_timeout(None)`, so the component's `connection_timeout_secs`
+wrapper stays the sole connect bound. The repository service crate
+constructs its executor with a 35 s driver response timeout (30 s backstop
+plus 5 s margin), so the service crate's own 30 s contract governs end to
+end and the driver deadline is defense-in-depth only. Component consumers
+that do not call the builder keep the driver default. Their behavior does
+not change.
 
 ## Rejected alternatives
 

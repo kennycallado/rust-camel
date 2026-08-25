@@ -19,6 +19,11 @@ tokio.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+# `tokio::time::pause()` in the connection tests (virtual-time response
+# deadline ordering) requires test-util; regular builds never enable it.
+tokio = { workspace = true, features = ["test-util"] }
+
 [features]
 default = []
 tls = ["camel-component-redis/tls", "redis/tls-rustls-webpki-roots", "redis/tokio-rustls-comp"]

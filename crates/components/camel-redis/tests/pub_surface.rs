@@ -15,4 +15,6 @@ fn get_conn_and_topology_from_config_are_pub() {
         camel_api::CamelError,
     > = topology_from_config;
     let _ = std::any::type_name::<MultiplexedExecutor>();
+    let _: fn(MultiplexedExecutor, std::time::Duration) -> MultiplexedExecutor =
+        MultiplexedExecutor::with_response_timeout;
 }

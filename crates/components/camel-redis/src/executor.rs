@@ -3,6 +3,7 @@ use camel_component_api::{CamelError, Exchange, NetworkRetryPolicy};
 // retry_async is used in tests (the regression test in this file).
 #[cfg(test)]
 use camel_component_api::retry_async;
+use redis::AsyncConnectionConfig;
 use redis::aio::MultiplexedConnection;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -249,6 +250,7 @@ pub struct MultiplexedExecutor {
     config: RedisEndpointConfig,
     topology: Arc<dyn RedisTopology>,
     conn: Arc<Mutex<Option<MultiplexedConnection>>>,
+    response_timeout: Option<Duration>,
 }
 
 impl MultiplexedExecutor {
@@ -258,7 +260,24 @@ impl MultiplexedExecutor {
             config,
             topology,
             conn: Arc::new(Mutex::new(None)),
+            response_timeout: None,
         }
+    }
+
+    /// Set the driver-level per-command response deadline.
+    ///
+    /// When `Some`, [`Self::get_conn`] builds connections with
+    /// [`AsyncConnectionConfig::set_response_timeout`], so each command that
+    /// awaits a Redis reply fails once `timeout` elapses. The default `None`
+    /// keeps the redis driver default (500ms in 1.6.0).
+    ///
+    /// This does not affect `connection_timeout_secs` (TCP connect only).
+    /// It is distinct from camel-redis-repo's
+    /// `MultiplexedRepoExecutor::with_response_timeout` test seam: that sizes
+    /// the LOCAL backstop, this sizes the DRIVER deadline.
+    pub fn with_response_timeout(mut self, timeout: Duration) -> Self {
+        self.response_timeout = Some(timeout);
+        self
     }
 
     /// Return a cached connection, or resolve and build one on first use.
@@ -279,23 +298,35 @@ impl MultiplexedExecutor {
         let redis_url_safe = self.config.redis_url_safe();
         let timeout_secs = self.config.connection_timeout_secs;
 
-        let new_conn = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            client.get_multiplexed_async_connection(),
-        )
-        .await
-        .map_err(|_| {
-            CamelError::ProcessorError(format!(
-                "Redis connection to '{}' timed out after {}s",
-                redis_url_safe, timeout_secs
-            ))
-        })?
-        .map_err(|e| {
-            CamelError::ProcessorError(format!(
-                "Failed to connect to Redis at '{}': {}",
-                redis_url_safe, e
-            ))
-        })?;
+        let connect = async {
+            match self.response_timeout {
+                Some(t) => {
+                    client
+                        .get_multiplexed_async_connection_with_config(
+                            &AsyncConnectionConfig::new()
+                                .set_response_timeout(Some(t))
+                                .set_connection_timeout(None),
+                        )
+                        .await
+                }
+                None => client.get_multiplexed_async_connection().await,
+            }
+        };
+
+        let new_conn = tokio::time::timeout(Duration::from_secs(timeout_secs), connect)
+            .await
+            .map_err(|_| {
+                CamelError::ProcessorError(format!(
+                    "Redis connection to '{}' timed out after {}s",
+                    redis_url_safe, timeout_secs
+                ))
+            })?
+            .map_err(|e| {
+                CamelError::ProcessorError(format!(
+                    "Failed to connect to Redis at '{}': {}",
+                    redis_url_safe, e
+                ))
+            })?;
 
         let mut guard = self.conn.lock().await;
         *guard = Some(new_conn.clone());

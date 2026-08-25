@@ -63,7 +63,7 @@ Auto-enables TLS for non-loopback hosts when `tls=false`. Logic in `effective_tl
 
 Default: 10 seconds (in `RedisConfig::default()`). Applied at 4 connection sites via `tokio::time::timeout`:
 - **Health check** (`fn connect_and_ping`, health.rs:38): `get_multiplexed_async_connection()` wrapped in `connection_timeout`.
-- **Producer** (`MultiplexedExecutor::get_conn`, executor.rs:268): lazy `get_multiplexed_async_connection()` wrapped in `connection_timeout`.
+- **Producer** (`MultiplexedExecutor::get_conn`, executor.rs:291): lazy connect wrapped in `connection_timeout`; default path uses the config-less `get_multiplexed_async_connection()`, while `with_response_timeout(Duration)` builds via `get_multiplexed_async_connection_with_config` with the driver response deadline set and the driver's parallel 1 s connect default disabled (`set_connection_timeout(None)`), leaving the component wrapper the sole connect bound.
 - **Consumer PubSub** (`fn run_pubsub_consumer`, consumer.rs:266): `RedisPubSubIo::new(config.connection_timeout_secs)` wraps the pub/sub connect in `connection_timeout`.
 - **Consumer Queue** (`fn run_queue_consumer`, consumer.rs:342): `RedisQueueIo::new(config.connection_timeout_secs, ...)` wraps the multiplexed connect in `connection_timeout`.
 

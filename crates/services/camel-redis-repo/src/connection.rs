@@ -16,6 +16,14 @@ use camel_component_redis::RedisTopology;
 use camel_component_redis::TopologyKind;
 use camel_component_redis::topology_from_config;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Driver-level response deadline for repository connections: strictly
+/// above the crate-local 30 s `DEFAULT_RESPONSE_TIMEOUT` backstop
+/// (ADR-0063 Decision 13) so the local backstop always classifies
+/// first. 5 s margin; the binding contract is strict ordering — the
+/// figure is an implementation constant.
+const DRIVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// Build the production executor for `endpoint`.
 ///
@@ -43,8 +51,10 @@ pub(crate) async fn connect_executor_with_topology(
     #[cfg(feature = "cluster")]
     reject_cluster(endpoint)?;
 
-    let executor =
-        MultiplexedRepoExecutor::new(MultiplexedExecutor::new(endpoint.clone(), topology));
+    let executor = MultiplexedRepoExecutor::new(
+        MultiplexedExecutor::new(endpoint.clone(), topology)
+            .with_response_timeout(DRIVER_RESPONSE_TIMEOUT),
+    );
 
     // Eager connect: fail construction fast when Redis is unreachable. The
     // wrapper remaps the component's ProcessorError connection failures to
@@ -80,6 +90,7 @@ mod tests {
     use camel_api::CamelError;
     use camel_component_redis::RedisEndpointConfig;
     use std::sync::Arc;
+    use std::time::Duration;
 
     /// Standalone config with a short connect timeout so dead-address tests
     /// fail fast.
@@ -171,6 +182,71 @@ mod tests {
             .await
             .expect("connected executor serves PING");
         assert!(matches!(reply, redis::Value::SimpleString(ref s) if s == "PONG"));
+    }
+
+    // Discriminating test for the deadline ordering contract: production
+    // connections must raise the driver-level response deadline strictly
+    // above the crate-local 30 s backstop so the LOCAL backstop
+    // classifies the failure (ADR-0063 Decision 13). Pre-fix, the
+    // driver's 500 ms default fires first and the error carries the
+    // driver's wording, not the local backstop's.
+    #[tokio::test]
+    async fn production_local_backstop_governs_over_driver_deadline() {
+        let (addr, _server) = FakeRedisServer::start_silent()
+            .await
+            .expect("silent stub server binds an ephemeral loopback port");
+        let endpoint = RedisEndpointConfig::from_uri(&format!("redis://{addr}"))
+            .expect("stub address parses as a standalone URI");
+
+        // Real time: the silent stub still answers the handshake, so the
+        // eager production connect succeeds against the later-silent peer.
+        let executor = connect_executor(&endpoint)
+            .await
+            .expect("production path must construct against the silent stub");
+
+        // Virtual time from here: PING is swallowed forever, so only the
+        // two response deadlines compete. The 40 s guard outlives the
+        // driver's 35 s deadline, so if the guard fires the ordering
+        // contract is broken; the expectation is the 30 s local backstop.
+        tokio::time::pause();
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(40), executor.execute(cmd("PING"))).await;
+        let result = outcome.expect("a response deadline must fire within the guard window");
+        match result {
+            Err(CamelError::Io(message)) => assert!(
+                message.starts_with("redis command response timed out after"),
+                "the LOCAL 30 s backstop must classify first, got: {message}"
+            ),
+            other => panic!("expected CamelError::Io timeout, got: {other:?}"),
+        }
+    }
+
+    // Companion: a shrunk LOCAL backstop (150 ms) fires far under the
+    // driver's 35 s deadline. Does not discriminate the pre-fix state
+    // (150 ms also beats the driver's 500 ms default); it pins the local
+    // error format for the short-local / deep-driver ordering.
+    #[tokio::test]
+    async fn short_backstop_wins_under_driver_deadline() {
+        let (addr, _server) = FakeRedisServer::start_silent()
+            .await
+            .expect("silent stub server binds an ephemeral loopback port");
+        let endpoint = RedisEndpointConfig::from_uri(&format!("redis://{addr}"))
+            .expect("stub address parses as a standalone URI");
+
+        let executor = connect_executor(&endpoint)
+            .await
+            .expect("production path must construct against the silent stub")
+            .with_response_timeout(Duration::from_millis(150));
+
+        tokio::time::pause();
+        let result = executor.execute(cmd("PING")).await;
+        match result {
+            Err(CamelError::Io(message)) => assert!(
+                message.contains("redis command response timed out after 150ms"),
+                "error must be the local 150ms backstop timeout: {message}"
+            ),
+            other => panic!("expected CamelError::Io timeout, got: {other:?}"),
+        }
     }
 
     // Design Phase-1 exit criterion: single AND sentinel topology
