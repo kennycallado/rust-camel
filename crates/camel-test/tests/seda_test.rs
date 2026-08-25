@@ -31,10 +31,14 @@ async fn test_seda_connects_two_routes() {
     h.add_route(route_b).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Event-driven settling: await the bounded repeatCount total instead of a
+    // fixed wall-clock window (rc-50ky — window lost the last tick under load).
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    endpoint
+        .await_exchanges(3, std::time::Duration::from_secs(10))
+        .await;
     h.stop().await;
 
-    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(3).await;
 }
 
@@ -64,10 +68,14 @@ async fn test_seda_concurrent_load() {
     h.add_route(route_b).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // Event-driven settling (rc-50ky): 30s is a failure backstop, ~60× the
+    // nominal 0.5s completion across 4 concurrent consumers.
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    endpoint
+        .await_exchanges(50, std::time::Duration::from_secs(30))
+        .await;
     h.stop().await;
 
-    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(50).await;
 }
 
@@ -98,10 +106,14 @@ async fn test_seda_inout_integration() {
     h.add_route(route_b).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Event-driven settling: await the bounded repeatCount total instead of a
+    // fixed wall-clock window (rc-50ky).
+    let endpoint = h.mock().get_endpoint("inout-result").unwrap();
+    endpoint
+        .await_exchanges(3, std::time::Duration::from_secs(10))
+        .await;
     h.stop().await;
 
-    let endpoint = h.mock().get_endpoint("inout-result").unwrap();
     endpoint.assert_exchange_count(3).await;
 }
 
