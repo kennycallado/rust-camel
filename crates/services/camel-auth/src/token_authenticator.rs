@@ -151,8 +151,8 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            CamelError::ProcessorError(msg) => assert!(msg.contains("auth provider unavailable")),
-            _ => panic!("expected ProcessorError, got: {err:?}"),
+            CamelError::AuthProviderUnavailable(msg) => assert!(msg.contains("connection refused")),
+            _ => panic!("expected AuthProviderUnavailable, got: {err:?}"),
         }
     }
 

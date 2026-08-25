@@ -39,9 +39,7 @@ impl From<AuthError> for CamelError {
             AuthError::Unauthorized(s) => CamelError::Unauthorized(s),
             AuthError::AuthenticationFailed(s) => CamelError::Unauthenticated(s),
             AuthError::AuthorizationDenied(s) => CamelError::Unauthorized(s),
-            AuthError::ProviderUnavailable(s) => {
-                CamelError::ProcessorError(format!("auth provider unavailable: {s}"))
-            }
+            AuthError::ProviderUnavailable(s) => CamelError::AuthProviderUnavailable(s),
             AuthError::ConfigError(s) => CamelError::Config(s),
             AuthError::Config(s) => CamelError::Config(s),
         }
@@ -84,7 +82,9 @@ mod tests {
     fn auth_error_maps_provider_unavailable() {
         let err = AuthError::ProviderUnavailable("jwks down".into());
         let camel_err: CamelError = err.into();
-        assert!(matches!(camel_err, CamelError::ProcessorError(s) if s.contains("jwks down")));
+        assert!(
+            matches!(camel_err, CamelError::AuthProviderUnavailable(s) if s.contains("jwks down"))
+        );
     }
 
     #[test]

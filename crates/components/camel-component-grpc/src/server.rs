@@ -464,11 +464,7 @@ impl futures::Stream for GrpcItemStream {
 fn auth_error_to_status(e: camel_api::CamelError) -> tonic::Status {
     match e {
         camel_api::CamelError::Unauthenticated(msg) => tonic::Status::unauthenticated(msg),
-        camel_api::CamelError::ProcessorError(ref msg)
-            if msg.contains("auth provider unavailable") =>
-        {
-            tonic::Status::unavailable(msg.clone())
-        }
+        camel_api::CamelError::AuthProviderUnavailable(msg) => tonic::Status::unavailable(msg),
         other => {
             // log-policy: system-broken
             tracing::error!(error = %other, "gRPC authentication error");
@@ -1597,8 +1593,8 @@ mod tests {
             _token: &str,
         ) -> Result<camel_api::security_policy::Principal, camel_api::CamelError> {
             if self.should_fail_unavailable {
-                return Err(camel_api::CamelError::ProcessorError(
-                    "auth provider unavailable".into(),
+                return Err(camel_api::CamelError::AuthProviderUnavailable(
+                    "auth provider down".into(),
                 ));
             }
             if self.should_fail_unauthenticated {
@@ -2165,5 +2161,32 @@ mod tests {
         assert_eq!(cfg.initial_delay, Duration::from_millis(10));
         assert_eq!(cfg.multiplier, 2.0);
         assert_eq!(cfg.max_delay, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn auth_error_to_status_provider_unavailable_is_unavailable() {
+        let err =
+            camel_api::CamelError::AuthProviderUnavailable("arbitrary wording no marker".into());
+        let status = auth_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(
+            status.message().contains("arbitrary wording no marker"),
+            "message should contain payload: {}",
+            status.message()
+        );
+    }
+
+    #[test]
+    fn auth_error_to_status_generic_processor_error_is_internal() {
+        let err = camel_api::CamelError::ProcessorError("auth provider unavailable".into());
+        let status = auth_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[test]
+    fn auth_error_to_status_unauthenticated_is_unauthenticated() {
+        let err = camel_api::CamelError::Unauthenticated("bad".into());
+        let status = auth_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 }

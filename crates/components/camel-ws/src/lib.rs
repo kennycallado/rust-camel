@@ -415,7 +415,7 @@ impl WsKernelAuth {
 fn ws_upgrade_auth_error(e: &CamelError) -> axum::response::Response {
     let (status, body) = match e {
         CamelError::Unauthenticated(_) => (StatusCode::UNAUTHORIZED, "Unauthorized"),
-        CamelError::ProcessorError(msg) if msg.contains("auth provider unavailable") => {
+        CamelError::AuthProviderUnavailable(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
@@ -3427,5 +3427,27 @@ mod tests {
 
         drop(blocker);
         let _ = consumer.stop().await;
+    }
+
+    #[test]
+    fn ws_upgrade_error_provider_unavailable_is_503() {
+        let err =
+            CamelError::AuthProviderUnavailable("totally arbitrary detail with no marker".into());
+        let resp = ws_upgrade_auth_error(&err).into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn ws_upgrade_error_generic_processor_error_is_500() {
+        let err = CamelError::ProcessorError("auth provider unavailable".into());
+        let resp = ws_upgrade_auth_error(&err).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn ws_upgrade_error_unauthenticated_is_401() {
+        let err = CamelError::Unauthenticated("bad".into());
+        let resp = ws_upgrade_auth_error(&err).into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

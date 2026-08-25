@@ -81,10 +81,8 @@ async fn introspection_provider_401_maps_to_provider_unavailable() {
 
     let err = auth.authenticate_bearer("any-token").await.unwrap_err();
     match err {
-        CamelError::ProcessorError(msg) => {
-            assert!(msg.contains("auth provider unavailable"));
-        }
-        other => panic!("expected ProcessorError, got: {other:?}"),
+        CamelError::AuthProviderUnavailable(msg) => assert!(!msg.is_empty()),
+        other => panic!("expected AuthProviderUnavailable, got: {other:?}"),
     }
 }
 
@@ -100,10 +98,8 @@ async fn introspection_provider_500_maps_to_provider_unavailable() {
 
     let err = auth.authenticate_bearer("any-token").await.unwrap_err();
     match err {
-        CamelError::ProcessorError(msg) => {
-            assert!(msg.contains("auth provider unavailable"));
-        }
-        other => panic!("expected ProcessorError, got: {other:?}"),
+        CamelError::AuthProviderUnavailable(msg) => assert!(!msg.is_empty()),
+        other => panic!("expected AuthProviderUnavailable, got: {other:?}"),
     }
 }
 

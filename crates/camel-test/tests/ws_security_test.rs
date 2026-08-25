@@ -26,8 +26,11 @@ enum MockOutcome {
     Principal,
     /// Rejects the token — the 401 idiom.
     InvalidToken,
-    /// Fails with `ProcessorError(msg)`; the message drives the 500 vs
-    /// 503 mapping in the transport's upgrade-error conversion.
+    /// Fails with `CamelError::AuthProviderUnavailable`; the variant drives the 503 mapping in the
+    /// transport's upgrade-error conversion.
+    ProviderUnavailable,
+    /// generic `ProcessorError` — always the 500 path; status selection is
+    /// variant-based
     Error(&'static str),
 }
 
@@ -43,6 +46,9 @@ impl TokenAuthenticator for MockAuthenticator {
         match &self.outcome {
             MockOutcome::Principal => Ok(test_principal()),
             MockOutcome::InvalidToken => Err(CamelError::Unauthenticated("invalid token".into())),
+            MockOutcome::ProviderUnavailable => Err(CamelError::AuthProviderUnavailable(
+                "fixture: idp unreachable".into(),
+            )),
             MockOutcome::Error(msg) => Err(CamelError::ProcessorError((*msg).into())),
         }
     }
@@ -201,6 +207,23 @@ async fn test_ws_503_provider_unavailable() {
     let path = "/ws/auth";
     let state = make_app_state(
         path,
+        Some(kernel_security_context(MockOutcome::ProviderUnavailable)),
+    );
+
+    let app = Router::new().fallback(dispatch_handler).with_state(state);
+
+    let req = ws_upgrade_request(port, path, Some("Bearer valid-token"));
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Marker substring alone must NOT yield 503 — status selection is variant-based (spec: wording independence).
+#[tokio::test]
+async fn test_ws_500_generic_processor_error_with_marker() {
+    let port = free_port();
+    let path = "/ws/auth";
+    let state = make_app_state(
+        path,
         Some(kernel_security_context(MockOutcome::Error(
             "auth provider unavailable: fixture",
         ))),
@@ -210,7 +233,7 @@ async fn test_ws_503_provider_unavailable() {
 
     let req = ws_upgrade_request(port, path, Some("Bearer valid-token"));
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 /// Verifies that a WebSocket upgrade request with a valid token accepted

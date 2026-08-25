@@ -222,10 +222,10 @@ mod tests {
             IntrospectionAuthenticator::new(Arc::new(FailingIntrospector), keycloak_mapper());
         let err = auth.authenticate_bearer("tok").await.unwrap_err();
         match err {
-            CamelError::ProcessorError(msg) => {
-                assert!(msg.contains("auth provider unavailable"));
+            CamelError::AuthProviderUnavailable(msg) => {
+                assert!(msg.contains("connection refused"));
             }
-            other => panic!("expected ProcessorError, got: {other:?}"),
+            other => panic!("expected AuthProviderUnavailable, got: {other:?}"),
         }
     }
 

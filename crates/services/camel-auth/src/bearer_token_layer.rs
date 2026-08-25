@@ -168,10 +168,10 @@ mod tests {
         let result = svc.ready().await.unwrap().call(make_exchange()).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            CamelError::ProcessorError(msg) => {
+            CamelError::AuthProviderUnavailable(msg) => {
                 assert!(msg.contains("token endpoint down"));
             }
-            other => panic!("expected ProcessorError, got: {other:?}"),
+            other => panic!("expected AuthProviderUnavailable, got: {other:?}"),
         }
     }
 

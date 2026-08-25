@@ -147,6 +147,12 @@ pub enum CamelError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    /// Auth provider (JWKS/introspection/token endpoint) is unreachable or failing.
+    /// Promotes the auth-provider-down signal from a stringly-typed ProcessorError to
+    /// a matchable variant; WebSocket and gRPC transports map it to 503 / UNAVAILABLE.
+    #[error("Auth provider unavailable: {0}")]
+    AuthProviderUnavailable(String),
+
     #[error("Validation failed: {0}")]
     ValidationError(String),
 
@@ -168,7 +174,9 @@ impl CamelError {
             Self::EndpointCreationFailed(_) | Self::InvalidUri(_) | Self::EndpointUri(_) => {
                 "endpoint"
             }
-            Self::ProcessorError(_) | Self::ProcessorErrorWithSource(_, _) => "processor",
+            Self::ProcessorError(_)
+            | Self::ProcessorErrorWithSource(_, _)
+            | Self::AuthProviderUnavailable(_) => "processor",
             Self::TypeConversionFailed(_) | Self::AlreadyConsumed => "type_conversion",
             Self::Io(_) => "io",
             Self::RouteError(_) => "route",
@@ -189,8 +197,9 @@ impl CamelError {
 
     /// Stable variant name used by `doTry` catch-by-variant matchers.
     ///
-    /// `ProcessorErrorWithSource` aliases to `"ProcessorError"` — the two variants are
-    /// not distinguishable by name in MVP (see spec §5.4).
+    /// `ProcessorErrorWithSource` and `AuthProviderUnavailable` alias to
+    /// `"ProcessorError"` — the variants are not distinguishable by name in MVP (see spec §5.4),
+    /// so existing `doTry` catch handlers keep matching.
     ///
     /// The enum is `#[non_exhaustive]`; this match lives in the defining crate (camel-api),
     /// so internal exhaustive matching is allowed. Adding a new variant without updating
@@ -201,6 +210,7 @@ impl CamelError {
             Self::EndpointCreationFailed(_) => "EndpointCreationFailed",
             Self::ProcessorError(_) => "ProcessorError",
             Self::ProcessorErrorWithSource(_, _) => "ProcessorError",
+            Self::AuthProviderUnavailable(_) => "ProcessorError",
             Self::TypeConversionFailed(_) => "TypeConversionFailed",
             Self::InvalidUri(_) => "InvalidUri",
             Self::ChannelClosed => "ChannelClosed",
@@ -281,6 +291,7 @@ mod tests {
             CamelError::StreamLimitExceeded(42),
             CamelError::Unauthenticated("token expired".to_string()),
             CamelError::Unauthorized("missing admin role".to_string()),
+            CamelError::AuthProviderUnavailable("jwks down".to_string()),
             CamelError::ValidationError("body does not match schema".to_string()),
             CamelError::TemplateReload("reload failed".to_string()),
             CamelError::EndpointUri(EndpointUriError::MissingScheme),
@@ -429,6 +440,17 @@ mod tests {
         let cloned2 = err2.clone();
         assert!(matches!(cloned2, CamelError::Unauthorized(_)));
     }
+
+    #[test]
+    fn auth_provider_unavailable_display_carries_detail() {
+        let err = CamelError::AuthProviderUnavailable("conn refused".into());
+        let msg = err.to_string();
+        assert!(msg.contains("conn refused"));
+        assert!(
+            msg.starts_with("Auth provider unavailable"),
+            "display should start with 'Auth provider unavailable', got: {msg}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -497,6 +519,10 @@ mod variant_name_tests {
                 CamelError::EndpointUri(EndpointUriError::MissingScheme),
                 "EndpointUri",
             ),
+            (
+                CamelError::AuthProviderUnavailable("x".into()),
+                "ProcessorError",
+            ),
         ];
 
         for (err, expected) in cases {
@@ -507,5 +533,17 @@ mod variant_name_tests {
                 err
             );
         }
+    }
+
+    #[test]
+    fn auth_provider_unavailable_classifies_as_processor() {
+        let err = CamelError::AuthProviderUnavailable("jwks down".into());
+        assert_eq!(err.classify(), "processor");
+    }
+
+    #[test]
+    fn auth_provider_unavailable_variant_name_aliases_processor_error() {
+        let err = CamelError::AuthProviderUnavailable("jwks down".into());
+        assert_eq!(err.variant_name(), "ProcessorError");
     }
 }
