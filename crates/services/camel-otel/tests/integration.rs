@@ -220,6 +220,7 @@ async fn test_tracing_processor_records_span() {
         0,
         DetailLevel::Minimal,
         None,
+        None,
     );
 
     // Process the exchange
@@ -435,6 +436,7 @@ async fn test_tracing_processor_chain_preserves_trace_id() {
         0,
         DetailLevel::Minimal,
         None,
+        None,
     );
 
     let processor2 = BoxProcessor::new(IdentityProcessor);
@@ -443,6 +445,7 @@ async fn test_tracing_processor_chain_preserves_trace_id() {
         "route2".to_string(),
         1,
         DetailLevel::Minimal,
+        None,
         None,
     );
 
@@ -499,8 +502,14 @@ async fn span_status_success_and_error_exported() {
 
     // --- Success cycle: Ok-returning inner exports a span with Status::Ok ---
     let inner = BoxProcessor::new(IdentityProcessor);
-    let mut ok_processor =
-        TracingProcessor::new(inner, "ok-route".to_string(), 0, DetailLevel::Minimal, None);
+    let mut ok_processor = TracingProcessor::new(
+        inner,
+        "ok-route".to_string(),
+        0,
+        DetailLevel::Minimal,
+        None,
+        None,
+    );
 
     let exchange = Exchange::new(Message::new("ok"));
     let result: Result<Exchange, _> = ok_processor.ready().await.unwrap().call(exchange).await;
@@ -528,6 +537,7 @@ async fn span_status_success_and_error_exported() {
         "err-route".to_string(),
         0,
         DetailLevel::Minimal,
+        None,
         None,
     );
 

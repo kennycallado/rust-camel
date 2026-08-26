@@ -42,6 +42,7 @@ fn compile_to(
             processor: resolved.producer,
             body_contract: resolved.body_contract,
             lifecycle: resolved.lifecycle,
+            label: None,
         })),
     }
 }
@@ -92,6 +93,7 @@ fn compile_divert(
         processor,
         body_contract: real.body_contract,
         lifecycle,
+        label: None,
     }))
 }
 
@@ -147,6 +149,7 @@ impl StepCompiler for EndpointsCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle,
+                    label: None,
                 }))
             }
 

@@ -7104,6 +7104,7 @@ mod tests {
             }),
             body_contract: None,
             lifecycle: None,
+            label: None,
         };
         let set_status_step = CompiledStep::Process {
             processor: BoxProcessor::from_fn(|mut ex: Exchange| {
@@ -7115,6 +7116,7 @@ mod tests {
             }),
             body_contract: None,
             lifecycle: None,
+            label: None,
         };
         let pipeline = compose_pipeline_with_handler(
             vec![set_body_step, set_status_step, CompiledStep::Stop],

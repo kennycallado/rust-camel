@@ -29,7 +29,7 @@ use crate::lifecycle::adapters::body_coercing::wrap_if_needed;
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::shared::observability::adapters::TracingProcessor;
 use crate::shared::observability::adapters::tracer::{
-    SpanEndGuard, capped_correlation_id, record_exception, step_span_attributes,
+    SpanEndGuard, capped_correlation_id, record_exception, step_id_for, step_span_attributes,
 };
 use crate::shared::observability::domain::DetailLevel;
 
@@ -133,7 +133,10 @@ pub fn compose_pipeline_with_handler(
 ///
 /// Each processor is wrapped with TracingProcessor to emit spans for observability,
 /// and the pipeline opens one Internal route root span per invocation (named after
-/// `route_id`) that parents every step span. Empty traced routes still return a
+/// `route_id`) that parents every step span. Step spans are named
+/// `{route_id}:{label}` when the compiled step carries a DSL label (e.g.
+/// `to:direct`, `split`); unlabeled steps fall back to the positional
+/// `{route_id}:step-{index}` name. Empty traced routes still return a
 /// `TracedPipeline` so the root span records the route invocation with zero steps.
 /// When tracing is disabled, falls back to [`compose_pipeline_with_handler`] with zero overhead.
 pub fn compose_traced_pipeline(
@@ -153,12 +156,13 @@ pub fn compose_traced_pipeline(
         .into_iter()
         .enumerate()
         .map(|(idx, step)| {
-            let (p, c, lc) = match step {
+            let (p, c, lc, lbl) = match step {
                 CompiledStep::Process {
                     processor,
                     body_contract,
                     lifecycle,
-                } => (processor, body_contract, lifecycle),
+                    label,
+                } => (processor, body_contract, lifecycle, label),
                 CompiledStep::Stop => return CompiledStep::Stop,
                 CompiledStep::Segment { .. } => return step,
             };
@@ -168,11 +172,13 @@ pub fn compose_traced_pipeline(
                 idx,
                 detail_level.clone(),
                 metrics.clone(),
+                lbl.clone(),
             ));
             CompiledStep::Process {
                 processor: traced,
                 body_contract: c,
                 lifecycle: lc,
+                label: lbl,
             }
         })
         .collect();
@@ -202,12 +208,14 @@ pub fn compose_pipeline_with_contracts(
                 processor,
                 body_contract,
                 lifecycle,
+                label,
             } => {
                 let coerced = wrap_if_needed(processor, body_contract);
                 CompiledStep::Process {
                     processor: coerced,
                     body_contract: None,
                     lifecycle,
+                    label,
                 }
             }
             CompiledStep::Stop => CompiledStep::Stop,
@@ -244,12 +252,14 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
                 processor,
                 body_contract,
                 lifecycle,
+                label,
             } => {
                 let processor = wrap_if_needed(processor, body_contract);
                 CompiledStep::Process {
                     processor,
                     body_contract: None,
                     lifecycle,
+                    label,
                 }
             }
             CompiledStep::Stop => CompiledStep::Stop,
@@ -458,12 +468,13 @@ async fn run_steps(
         let mut retryable: OwnedRetryable = match &steps.0[i] {
             CompiledStep::Stop => return PipelineOutcome::Stopped(ex),
             CompiledStep::Process { processor, .. } => OwnedRetryable::Processor(processor.clone()),
-            CompiledStep::Segment { segment, .. } => {
+            CompiledStep::Segment { segment, label, .. } => {
                 if trace {
                     OwnedRetryable::TracedSegment(TracedSegmentStep {
                         segment: segment.clone(),
                         route_id: route_id.to_string(),
                         index: i,
+                        label: label.clone(),
                     })
                 } else {
                     OwnedRetryable::Segment(segment.clone())
@@ -616,19 +627,26 @@ impl camel_api::error_handler::RetryableStep for OwnedRetryable {
     }
 }
 
-/// Start a `{route_id}:step-{index}` Internal span for one segment step
-/// attempt, parented by `entry_cx` (the traced pipeline's root context)
-/// with the Minimal-level attribute set from `step_span_attributes`
-/// (trace-model-tree T1.4).
+/// Start an Internal span for one segment step attempt, parented by
+/// `entry_cx` (the traced pipeline's root context) with the Minimal-level
+/// attribute set from `step_span_attributes` (trace-model-tree T1.4).
+///
+/// Named `{route_id}:{label}` when the segment step carries a DSL label
+/// (e.g. `split`); unlabeled segments fall back to the positional
+/// `{route_id}:step-{index}` name — same contract as process step spans.
 fn segment_span(
     tracer: &global::BoxedTracer,
     route_id: &str,
     index: usize,
+    label: Option<Arc<str>>,
     entry_cx: &OtelContext,
     correlation_id: &str,
 ) -> global::BoxedSpan {
     tracer
-        .span_builder(format!("{route_id}:step-{index}"))
+        .span_builder(format!(
+            "{route_id}:{}",
+            label.as_deref().unwrap_or(&step_id_for(index))
+        ))
         .with_kind(SpanKind::Internal)
         .with_attributes(step_span_attributes(route_id, index, correlation_id))
         .start_with_context(tracer, entry_cx)
@@ -639,12 +657,13 @@ fn segment_span(
 ///
 /// Implements `RetryableStep` so BOTH the initial invocation and every
 /// retry attempt dispatched by `RouteErrorHandler::retry_step` run
-/// through the same wrapper: each `invoke` opens one fresh
-/// `{route_id}:step-{index}` Internal span parented by the incoming
-/// context (the route root), runs the inner segment with that span
-/// active, restores the incoming context on outcomes that carry the
-/// exchange, and ends the span with the future — spans never outlive
-/// the attempt.
+/// through the same wrapper: each `invoke` opens one fresh Internal span
+/// parented by the incoming context (the route root), named
+/// `{route_id}:{label}` when the segment step carries a DSL label (e.g.
+/// `split`) and `{route_id}:step-{index}` otherwise. It runs the inner
+/// segment with that span active, restores the incoming context on
+/// outcomes that carry the exchange, and ends the span with the future —
+/// spans never outlive the attempt.
 ///
 /// Retry inputs are the error handler's preserved pre-attempt exchange,
 /// which still carries the route root context (restored by a previous
@@ -654,6 +673,7 @@ struct TracedSegmentStep {
     segment: camel_api::OutcomeSegment,
     route_id: String,
     index: usize,
+    label: Option<Arc<str>>,
 }
 
 fn finish_span_outcome(
@@ -695,6 +715,7 @@ impl camel_api::error_handler::RetryableStep for TracedSegmentStep {
                 &tracer,
                 &self.route_id,
                 self.index,
+                self.label.clone(),
                 &entry_cx,
                 exchange.correlation_id(),
             );

@@ -40,6 +40,7 @@ impl StepCompiler for RoutingCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -79,6 +80,7 @@ impl StepCompiler for RoutingCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -94,6 +96,7 @@ impl StepCompiler for RoutingCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -130,6 +133,7 @@ impl StepCompiler for RoutingCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -146,6 +150,7 @@ impl StepCompiler for RoutingCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -190,6 +195,7 @@ impl StepCompiler for RoutingCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -202,6 +208,7 @@ impl StepCompiler for RoutingCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
+                    label: None,
                 }))
             }
 
@@ -224,6 +231,7 @@ impl StepCompiler for RoutingCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(all_lifecycles),
+                    label: None,
                 }))
             }
 

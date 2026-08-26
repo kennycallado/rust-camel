@@ -108,6 +108,7 @@ impl StepCompiler for SplittingCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(split_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
+                    label: None,
                 }))
             }
 
@@ -160,6 +161,7 @@ impl StepCompiler for SplittingCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(split_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
+                    label: None,
                 }))
             }
 
@@ -317,6 +319,7 @@ impl StepCompiler for SplittingCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
+                    label: None,
                 }))
             }
 
@@ -333,6 +336,7 @@ impl StepCompiler for SplittingCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: Some(lifecycle),
+                    label: None,
                 }))
             }
 
@@ -398,6 +402,7 @@ impl StepCompiler for SplittingCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(all_lifecycles),
+                    label: None,
                 }))
             }
 

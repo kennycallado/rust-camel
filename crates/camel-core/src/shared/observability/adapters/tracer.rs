@@ -56,21 +56,28 @@ pub struct TracingProcessor {
     metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
-fn step_id_for(index: usize) -> String {
+/// Positional fallback span-name fragment for unlabeled steps. Shared by
+/// `TracingProcessor` (process steps) and `segment_span` (segment steps).
+pub(crate) fn step_id_for(index: usize) -> String {
     format!("step-{index}")
 }
 
 impl TracingProcessor {
     /// Wrap a processor with tracing.
+    ///
+    /// `label` names the span after the DSL step it wraps (e.g. `log`,
+    /// `to:direct`); when `None` the span falls back to the positional
+    /// `step-{index}` id.
     pub fn new(
         inner: BoxProcessor,
         route_id: String,
         step_index: usize,
         detail_level: DetailLevel,
         metrics: Option<Arc<dyn MetricsCollector>>,
+        label: Option<Arc<str>>,
     ) -> Self {
         let step_id = step_id_for(step_index);
-        let span_name = format!("{route_id}:{step_id}");
+        let span_name = format!("{route_id}:{}", label.as_deref().unwrap_or(&step_id));
         Self {
             inner,
             route_id,
@@ -289,7 +296,6 @@ pub(crate) fn step_span_attributes(
             capped_correlation_id(correlation_id).to_string(),
         ),
         KeyValue::new("route_id", route_id.to_string()),
-        KeyValue::new("step_id", step_id_for(step_index)),
         KeyValue::new("step_index", step_index as i64),
     ]
 }
@@ -362,7 +368,8 @@ mod tests {
         let (exchange, trace_id, parent_span_id) = exchange_under_parent_span();
 
         let inner = BoxProcessor::new(IdentityProcessor);
-        let mut proc = TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+        let mut proc =
+            TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None, None);
         let outcome = proc
             .ready()
             .await
@@ -386,6 +393,77 @@ mod tests {
                 .any(|kv| kv.key.as_str() == "duration_ms"),
             "duration_ms must not be recorded as a span attribute"
         );
+        assert!(
+            step.attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "step_index"),
+            "step_index attribute must be present"
+        );
+        assert!(
+            !step
+                .attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "step_id"),
+            "step_id must not be recorded as a span attribute"
+        );
+    }
+
+    #[tokio::test]
+    async fn tracing_processor_labeled_span_name() {
+        let spans = test_spans().await;
+        let (exchange, trace_id, _parent_span_id) = exchange_under_parent_span();
+
+        let inner = BoxProcessor::new(IdentityProcessor);
+        let mut proc = TracingProcessor::new(
+            inner,
+            "r".to_string(),
+            0,
+            DetailLevel::Minimal,
+            None,
+            Some("log".into()),
+        );
+        let outcome = proc
+            .ready()
+            .await
+            .expect("service ready")
+            .call(exchange)
+            .await;
+        outcome.expect("step call succeeds");
+
+        let all = finish(spans);
+        let matched: Vec<_> = all
+            .into_iter()
+            .filter(|s| s.span_context.trace_id() == trace_id && s.name == "r:log")
+            .collect();
+        assert_eq!(matched.len(), 1, "exactly one span named r:log");
+    }
+
+    #[tokio::test]
+    async fn tracing_processor_fallback_span_name() {
+        let spans = test_spans().await;
+        let (exchange, trace_id, _parent_span_id) = exchange_under_parent_span();
+
+        let inner = BoxProcessor::new(IdentityProcessor);
+        let mut proc =
+            TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None, None);
+        let outcome = proc
+            .ready()
+            .await
+            .expect("service ready")
+            .call(exchange)
+            .await;
+        outcome.expect("step call succeeds");
+
+        let all = finish(spans);
+        let matched: Vec<_> = all
+            .into_iter()
+            .filter(|s| s.span_context.trace_id() == trace_id && s.name == "r:step-0")
+            .collect();
+        assert_eq!(
+            matched.len(),
+            1,
+            "exactly one span named r:step-0 (fallback preserved)"
+        );
     }
 
     #[tokio::test]
@@ -398,7 +476,8 @@ mod tests {
             .with_baggage([KeyValue::new("baggage_test", "1")]);
 
         let inner = BoxProcessor::new(IdentityProcessor);
-        let mut proc = TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+        let mut proc =
+            TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None, None);
         let outcome = proc
             .ready()
             .await
@@ -424,7 +503,8 @@ mod tests {
         let (exchange, trace_id, _parent_span_id) = exchange_under_parent_span();
 
         let inner = BoxProcessor::new(ErrProcessor);
-        let mut proc = TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+        let mut proc =
+            TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None, None);
         let outcome = proc
             .ready()
             .await
@@ -473,6 +553,7 @@ mod tests {
             0,
             DetailLevel::Minimal,
             None,
+            None,
         );
 
         let exchange = Exchange::new(Message::default());
@@ -490,6 +571,7 @@ mod tests {
             0,
             DetailLevel::Medium,
             None,
+            None,
         );
 
         let exchange = Exchange::new(Message::default());
@@ -501,8 +583,14 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_full_detail() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let mut tracer =
-            TracingProcessor::new(inner, "test-route".to_string(), 0, DetailLevel::Full, None);
+        let mut tracer = TracingProcessor::new(
+            inner,
+            "test-route".to_string(),
+            0,
+            DetailLevel::Full,
+            None,
+            None,
+        );
 
         let mut exchange = Exchange::new(Message::default());
         exchange
@@ -524,6 +612,7 @@ mod tests {
             1,
             DetailLevel::Minimal,
             None,
+            None,
         );
 
         let mut cloned = tracer.clone();
@@ -540,6 +629,7 @@ mod tests {
             "test-route".to_string(),
             0,
             DetailLevel::Minimal,
+            None,
             None,
         );
 
@@ -571,6 +661,7 @@ mod tests {
             "test-route".to_string(),
             0,
             DetailLevel::Minimal,
+            None,
             None,
         );
 
@@ -609,6 +700,7 @@ mod tests {
             0,
             DetailLevel::Minimal,
             None,
+            None,
         );
 
         let exchange = Exchange::new(Message::default());
@@ -626,8 +718,14 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_span_name_format() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let tracer =
-            TracingProcessor::new(inner, "my-route".to_string(), 5, DetailLevel::Minimal, None);
+        let tracer = TracingProcessor::new(
+            inner,
+            "my-route".to_string(),
+            5,
+            DetailLevel::Minimal,
+            None,
+            None,
+        );
 
         assert_eq!(tracer.span_name, "my-route:step-5");
     }
@@ -642,6 +740,7 @@ mod tests {
             0,
             DetailLevel::Minimal,
             None,
+            None,
         );
 
         let processor2 = BoxProcessor::new(IdentityProcessor);
@@ -650,6 +749,7 @@ mod tests {
             "route2".to_string(),
             1,
             DetailLevel::Minimal,
+            None,
             None,
         );
 
@@ -747,8 +847,14 @@ mod tests {
     #[tokio::test]
     async fn tracing_processor_does_not_re_ready_clone() {
         let mock_inner = BoxProcessor::new(PermitGateInner::new());
-        let mut tracing_proc =
-            TracingProcessor::new(mock_inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+        let mut tracing_proc = TracingProcessor::new(
+            mock_inner,
+            "r".to_string(),
+            0,
+            DetailLevel::Minimal,
+            None,
+            None,
+        );
 
         let exchange = Exchange::new(Message::default());
         let outcome = tokio::time::timeout(Duration::from_secs(5), async {
@@ -763,8 +869,14 @@ mod tests {
     #[tokio::test]
     async fn tracing_processor_reusable_across_sequential_cycles() {
         let mock_inner = BoxProcessor::new(PermitGateInner::new());
-        let mut tracing_proc =
-            TracingProcessor::new(mock_inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+        let mut tracing_proc = TracingProcessor::new(
+            mock_inner,
+            "r".to_string(),
+            0,
+            DetailLevel::Minimal,
+            None,
+            None,
+        );
 
         let ex_a = Exchange::new(Message::default());
         let outcome_a = tokio::time::timeout(Duration::from_secs(5), async {

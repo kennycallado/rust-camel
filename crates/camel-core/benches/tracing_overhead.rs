@@ -11,6 +11,7 @@ fn pass_through() -> CompiledStep {
         processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
         body_contract: None,
         lifecycle: None,
+        label: None,
     }
 }
 

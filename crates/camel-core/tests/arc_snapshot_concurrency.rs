@@ -22,6 +22,7 @@ fn pass_through() -> CompiledStep {
         processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
         body_contract: None,
         lifecycle: None,
+        label: None,
     }
 }
 
@@ -42,6 +43,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
             }),
             body_contract: None,
             lifecycle: None,
+            label: None,
         })
         .chain((0..4).map(|_| pass_through()))
         .collect(),
@@ -57,6 +59,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
             }),
             body_contract: None,
             lifecycle: None,
+            label: None,
         })
         .chain((0..19).map(|_| pass_through()))
         .collect(),
@@ -177,6 +180,7 @@ async fn in_flight_call_completes_on_old_snapshot_after_swap() {
             processor: s0_proc,
             body_contract: None,
             lifecycle: None,
+            label: None,
         }],
         PipelineRuntimeCtx::compile_time(),
     );
@@ -192,6 +196,7 @@ async fn in_flight_call_completes_on_old_snapshot_after_swap() {
             processor: s1_proc,
             body_contract: None,
             lifecycle: None,
+            label: None,
         }],
         PipelineRuntimeCtx::compile_time(),
     );

@@ -1,4 +1,5 @@
 use super::*;
+use crate::lifecycle::application::route_definition::BuilderStep;
 use crate::shared::observability::adapters::span_test_util::{finish, test_spans};
 use camel_api::fragment_exchange;
 use camel_api::{ExceptionPolicy, OutcomePipeline, OutcomeSegment, RedeliveryPolicy};
@@ -13,6 +14,7 @@ fn identity_step() -> CompiledStep {
         processor: BoxProcessor::new(IdentityProcessor),
         body_contract: None,
         lifecycle: None,
+        label: None,
     }
 }
 
@@ -76,9 +78,12 @@ async fn traced_pipeline_opens_root_span_with_step_children() {
     );
     let trace_id = root.span_context.trace_id();
     let root_span_id = root.span_context.span_id();
+    // Select step spans by parent, not by name prefix: labeled spans are
+    // named `rt:{label}` (e.g. `rt:to:direct`), so a `rt:step-` prefix
+    // filter would silently miss them.
     let steps: Vec<_> = all
         .iter()
-        .filter(|s| s.span_context.trace_id() == trace_id && s.name.starts_with("rt:step-"))
+        .filter(|s| s.span_context.trace_id() == trace_id && s.parent_span_id == root_span_id)
         .collect();
     assert_eq!(steps.len(), 2, "both step spans exported");
     for step in steps {
@@ -92,6 +97,54 @@ async fn traced_pipeline_opens_root_span_with_step_children() {
             "step must end before the root span ends"
         );
     }
+}
+
+/// Task 1.3 (span-name-enrichment): `compose_traced_pipeline` threads the
+/// compiled step's label into the step span name. The label comes from the
+/// same `BuilderStep::To` mapping the registry stamps (registry stamping is
+/// covered by `compile_step_stamps_label`; the full DSL chain by
+/// camel-test's `otel_trace_tree_test`).
+#[tokio::test]
+async fn compose_threads_label_to_span_name() {
+    let spans = test_spans().await;
+    let label = BuilderStep::To("direct:y".into()).span_label();
+    let mut pipeline = compose_traced_pipeline(
+        vec![CompiledStep::Process {
+            processor: BoxProcessor::new(IdentityProcessor),
+            body_contract: None,
+            lifecycle: None,
+            label: label.map(Arc::from),
+        }],
+        "rt",
+        true,
+        DetailLevel::Minimal,
+        None,
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let exchange = Exchange::new(Message::default());
+    pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(exchange)
+        .await
+        .expect("pipeline call succeeds");
+
+    let all = finish(spans);
+    let root = all
+        .iter()
+        .find(|s| s.name == "rt")
+        .expect("root span exported");
+    let step = all
+        .iter()
+        .find(|s| s.name == "rt:to:direct")
+        .expect("labeled step span exported with name rt:to:direct");
+    assert_eq!(
+        step.parent_span_id,
+        root.span_context.span_id(),
+        "labeled step span must be parented by the route root"
+    );
 }
 
 #[tokio::test]
@@ -241,6 +294,7 @@ async fn traced_pipeline_failed_root_records_exception() {
             processor: BoxProcessor::new(ErrProcessor),
             body_contract: None,
             lifecycle: None,
+            label: None,
         }],
         "rt",
         true,
@@ -304,6 +358,7 @@ fn segment_step(segment: OutcomeSegment) -> CompiledStep {
         segment,
         body_contract: None,
         lifecycle: None,
+        label: None,
     }
 }
 
@@ -441,6 +496,51 @@ async fn segment_step_opens_span_and_restores_root() {
     assert_eq!(
         next_step.parent_span_id, root_span_id,
         "step after the segment must chain onto the route root, not the segment span"
+    );
+}
+
+/// Task 1.3 (span-name-enrichment): segment step spans use the segment's
+/// label (the registry stamps `split` for splitter segments) with the same
+/// positional `step-{index}` fallback as process steps.
+#[tokio::test]
+async fn segment_span_uses_label() {
+    let spans = test_spans().await;
+    let mut pipeline = compose_traced_pipeline(
+        vec![CompiledStep::Segment {
+            segment: OutcomeSegment::new(Box::new(CompleteSegment)),
+            body_contract: None,
+            lifecycle: None,
+            label: Some("split".into()),
+        }],
+        "srt",
+        true,
+        DetailLevel::Minimal,
+        None,
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let exchange = Exchange::new(Message::default());
+    pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(exchange)
+        .await
+        .expect("pipeline call succeeds");
+
+    let all = finish(spans);
+    let root = all
+        .iter()
+        .find(|s| s.name == "srt")
+        .expect("root span exported");
+    let segment = all
+        .iter()
+        .find(|s| s.name == "srt:split")
+        .expect("segment span exported with name srt:split");
+    assert_eq!(
+        segment.parent_span_id,
+        root.span_context.span_id(),
+        "labeled segment span must be parented by the route root"
     );
 }
 

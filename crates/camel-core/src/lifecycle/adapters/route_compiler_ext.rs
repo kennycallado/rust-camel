@@ -627,6 +627,7 @@ impl RouteCompilerExt<'_> {
                 processor: BoxProcessor::new(resequencer_svc),
                 body_contract: None,
                 lifecycle: Some(resequencer_lifecycle),
+                label: None,
             });
 
             return Ok((None, all_steps));

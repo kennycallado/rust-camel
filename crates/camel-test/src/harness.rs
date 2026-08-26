@@ -436,6 +436,7 @@ mod tests {
                 processor,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             }],
             PipelineRuntimeCtx::compile_time(),
         );
@@ -571,11 +572,13 @@ mod tests {
                     processor: step1,
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 },
                 CompiledStep::Process {
                     processor: step2,
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 },
             ],
             PipelineRuntimeCtx::compile_time(),

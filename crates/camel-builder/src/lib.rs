@@ -2071,6 +2071,7 @@ mod tests {
                 )),
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: BoxProcessor::new(MapBody::new(IdentityProcessor, |body: Body| {
@@ -2082,6 +2083,7 @@ mod tests {
                 })),
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
         ];
 
@@ -2490,6 +2492,7 @@ mod tests {
                     processor: p,
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 })
                 .collect(),
             PipelineRuntimeCtx::compile_time(),
@@ -2523,6 +2526,7 @@ mod tests {
                     processor: p,
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 })
                 .collect(),
             PipelineRuntimeCtx::compile_time(),
@@ -2560,6 +2564,7 @@ mod tests {
                     processor: p,
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 })
                 .collect(),
             PipelineRuntimeCtx::compile_time(),

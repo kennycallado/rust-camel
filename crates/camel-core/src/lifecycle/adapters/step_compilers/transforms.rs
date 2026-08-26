@@ -36,6 +36,7 @@ impl StepCompiler for TransformsCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -64,6 +65,7 @@ impl StepCompiler for TransformsCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 

@@ -30,6 +30,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 processor: BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) })),
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: BoxProcessor::from_fn(|mut ex: Exchange| {
@@ -39,6 +40,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 }),
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: BoxProcessor::from_fn(|mut ex: Exchange| {
@@ -51,6 +53,7 @@ fn pure_closure_pipeline() -> BoxProcessor {
                 }),
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),
@@ -84,16 +87,19 @@ fn concrete_processor_pipeline() -> BoxProcessor {
                 processor: noop,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: set_body,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: set_header,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),
@@ -125,16 +131,19 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
                 processor: noop,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: set_body,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: set_header,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),
@@ -168,6 +177,7 @@ fn deep_pipeline() -> BoxProcessor {
             processor: step,
             body_contract: None,
             lifecycle: None,
+            label: None,
         });
     }
 
@@ -199,16 +209,19 @@ fn expression_pipeline() -> BoxProcessor {
                 processor: noop.clone(),
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: eval_step,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
             CompiledStep::Process {
                 processor: noop,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             },
         ],
         PipelineRuntimeCtx::compile_time(),

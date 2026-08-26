@@ -88,6 +88,7 @@ fn failing_step() -> CompiledStep {
         }),
         body_contract: None,
         lifecycle: None,
+        label: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn pass_through_step() -> CompiledStep {
         processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
         body_contract: None,
         lifecycle: None,
+        label: None,
     }
 }
 

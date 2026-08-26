@@ -37,6 +37,7 @@ impl StepCompiler for ControlFlowCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(loop_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
+                    label: None,
                 }))
             }
 
@@ -75,6 +76,7 @@ impl StepCompiler for ControlFlowCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(loop_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
+                    label: None,
                 }))
             }
 
@@ -90,6 +92,7 @@ impl StepCompiler for ControlFlowCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(filter_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
+                    label: None,
                 }))
             }
 
@@ -106,6 +109,7 @@ impl StepCompiler for ControlFlowCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(filter_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(lifecycles),
+                    label: None,
                 }))
             }
 
@@ -139,6 +143,7 @@ impl StepCompiler for ControlFlowCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(choice_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(all_lifecycles),
+                    label: None,
                 }))
             }
 
@@ -170,6 +175,7 @@ impl StepCompiler for ControlFlowCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(choice_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(all_lifecycles),
+                    label: None,
                 }))
             }
 
@@ -244,6 +250,7 @@ impl StepCompiler for ControlFlowCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(do_try_segment)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(all_lifecycles),
+                    label: None,
                 }))
             }
 

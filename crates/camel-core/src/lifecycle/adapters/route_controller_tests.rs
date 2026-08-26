@@ -1545,6 +1545,7 @@ fn four_layer_identity_pipeline() -> camel_api::BoxProcessor {
         processor: camel_api::BoxProcessor::new(camel_api::IdentityProcessor),
         body_contract: None,
         lifecycle: None,
+        label: None,
     };
     compose_pipeline(
         vec![
@@ -1690,6 +1691,7 @@ async fn pipeline_swap_during_concurrent_acquisition_is_coherent() {
                     processor: camel_api::BoxProcessor::new(camel_api::IdentityProcessor),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 };
                 let stack = compose_pipeline(
                     vec![
@@ -1697,6 +1699,7 @@ async fn pipeline_swap_during_concurrent_acquisition_is_coherent() {
                             processor: marker,
                             body_contract: None,
                             lifecycle: None,
+                            label: None,
                         },
                         identity_step(),
                         identity_step(),

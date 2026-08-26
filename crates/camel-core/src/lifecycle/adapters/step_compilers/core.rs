@@ -44,6 +44,7 @@ impl StepCompiler for CoreCompiler {
                 processor: op.0,
                 body_contract: None,
                 lifecycle: None,
+                label: None,
             })),
 
             // ── Stop ──
@@ -61,6 +62,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -76,6 +78,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None, // Validate is stateless
+                    label: None,
                 }))
             }
 
@@ -116,6 +119,7 @@ impl StepCompiler for CoreCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(child_lifecycles),
+                    label: None,
                 }))
             }
 
@@ -165,6 +169,7 @@ impl StepCompiler for CoreCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
                     lifecycle: pack_lifecycles(child_lifecycles),
+                    label: None,
                 }))
             }
 
@@ -218,6 +223,7 @@ impl StepCompiler for CoreCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -244,6 +250,7 @@ impl StepCompiler for CoreCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -260,6 +267,7 @@ impl StepCompiler for CoreCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -276,6 +284,7 @@ impl StepCompiler for CoreCompiler {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -286,6 +295,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -315,6 +325,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -326,6 +337,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -339,6 +351,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     }))
                 }
                 _ => Err(CamelError::Config("unsupported value source".into())),
@@ -351,6 +364,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -363,6 +377,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -376,6 +391,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     }))
                 }
                 _ => Err(CamelError::Config("unsupported value source".into())),
@@ -389,6 +405,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -402,6 +419,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     }))
                 }
                 _ => Err(CamelError::Config("unsupported value source".into())),
@@ -419,6 +437,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
@@ -434,6 +453,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(svc),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     }))
                 }
                 _ => Err(CamelError::Config("unsupported value source".into())),
@@ -447,6 +467,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     })),
                     Err(LanguageError::NotSupported { .. }) => {
                         // Graceful degradation: fall back to read-only Expression → SetBody
@@ -462,6 +483,7 @@ impl StepCompiler for CoreCompiler {
                             processor: BoxProcessor::new(svc),
                             body_contract: None,
                             lifecycle: None,
+                            label: None,
                         }))
                     }
                     Err(e) => Err(CamelError::RouteError(format!(
@@ -495,6 +517,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(step),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -525,6 +548,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(processor),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -536,6 +560,7 @@ impl StepCompiler for CoreCompiler {
                         processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
                         body_contract: None,
                         lifecycle: None,
+                        label: None,
                     })),
                     Err(LanguageError::NotSupported {
                         feature,
@@ -595,6 +620,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -605,6 +631,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 
@@ -619,6 +646,7 @@ impl StepCompiler for CoreCompiler {
                     processor: BoxProcessor::new(svc),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 }))
             }
 

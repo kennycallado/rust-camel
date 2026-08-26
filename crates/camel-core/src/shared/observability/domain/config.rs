@@ -81,7 +81,7 @@ pub struct FileOutput {
 /// Each variant progressively adds more fields to the trace output:
 ///
 /// - `Minimal`: Includes the core span attributes (correlation_id, route_id,
-///   step_id, and step_index). `duration_ms` is a `camel_tracer` log field at
+///   and step_index). `duration_ms` is a `camel_tracer` log field at
 ///   every detail level, not a span attribute.
 /// - `Medium`: Includes Minimal fields plus headers_count, body_type, has_error,
 ///   and output_body_type

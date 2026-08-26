@@ -57,6 +57,7 @@ fn build_three_step_pipeline() -> camel_api::BoxProcessor {
             processor: passthrough(),
             body_contract: None,
             lifecycle: None,
+            label: None,
         })
         .collect();
 

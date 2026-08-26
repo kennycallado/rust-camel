@@ -838,6 +838,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                                 processor: p,
                                 body_contract: None,
                                 lifecycle: None,
+                                label: None,
                             })
                             .collect(),
                         PipelineRuntimeCtx::compile_time(),

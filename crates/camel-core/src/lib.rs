@@ -34,8 +34,8 @@
 //!
 //! `camel_tracer` log records include `duration_ms`, `timestamp`, and `status`.
 //! OpenTelemetry span attributes include `messaging.system`, `route_id`, and
-//! `correlation_id` on root spans. Step and segment spans also include `step_id`
-//! and `step_index`.
+//! `correlation_id` on root spans. Step and segment spans also include
+//! `step_index`.
 //!
 //! ### Detail Levels
 //!

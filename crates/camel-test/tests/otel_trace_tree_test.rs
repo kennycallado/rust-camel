@@ -6,16 +6,18 @@
 //!
 //! Tree 1 (`direct_hop_nests_subroute_root_under_caller_step`): one
 //! exchange through `tree-main` (process, `to: direct:tree-sub`, process)
-//! produces a `tree-main` route root span; `tree-main:step-0/1/2` are
-//! siblings under the root; the `tree-sub` route root nests under the
-//! dispatching step `tree-main:step-1`; `tree-sub:step-0/1` nest under
-//! `tree-sub`; every child's `[start, end]` is contained in its parent's;
-//! the sequential steps are time-ordered; the whole run is one trace.
+//! produces a `tree-main` route root span; the closure steps
+//! `tree-main:step-0/2` and the labeled dispatch step
+//! `tree-main:to:direct` are siblings under the root; the `tree-sub` route
+//! root nests under the dispatching step `tree-main:to:direct`;
+//! `tree-sub:step-0/1` nest under `tree-sub`; every child's
+//! `[start, end]` is contained in its parent's; the sequential steps are
+//! time-ordered; the whole run is one trace.
 //!
 //! Tree 2 (`split_fragments_nest_under_segment_span_one_trace`): one
 //! exchange through `tree-split` (one split segment over a two-line body,
 //! each fragment dispatched to `direct:tree-sub`) produces a `tree-split`
-//! root; the split segment span `tree-split:step-0` is a child of the
+//! root; the split segment span `tree-split:split` is a child of the
 //! root; each fragment's `tree-sub` route root is a child of that segment
 //! span; the whole run is one trace.
 //!
@@ -231,7 +233,7 @@ fn tree_sub_route() -> camel_core::route::RouteDefinition {
 }
 
 /// Route A: three steps — no-op process (step-0), direct dispatch to
-/// `tree-sub` (step-1), no-op process (step-2).
+/// `tree-sub` (`to:direct` span, index 1), no-op process (step-2).
 fn tree_main_route() -> camel_core::route::RouteDefinition {
     RouteBuilder::from("direct:tree-main")
         .route_id("tree-main")
@@ -243,7 +245,7 @@ fn tree_main_route() -> camel_core::route::RouteDefinition {
         .expect("tree-main route builds")
 }
 
-/// Route C: one split segment (step-0) over a two-line body; each fragment
+/// Route C: one split segment over a two-line body; each fragment
 /// is dispatched to `direct:tree-sub` inside the segment.
 fn tree_split_route() -> camel_core::route::RouteDefinition {
     RouteBuilder::from("direct:tree-split")
@@ -293,12 +295,14 @@ async fn direct_hop_nests_subroute_root_under_caller_step() {
         "tree-main root span must have no parent"
     );
 
-    // Steps 0/1/2 are siblings under the root, each within its bounds.
+    // Steps 0/1/2 are siblings under the root, each within its bounds. The
+    // dispatch step carries its DSL label (`to:direct`); the closures keep
+    // the positional fallback names.
     let step0 = span(&all, "tree-main:step-0");
-    let step1 = span(&all, "tree-main:step-1");
+    let step1 = span(&all, "tree-main:to:direct");
     let step2 = span(&all, "tree-main:step-2");
     let root_span_id = root.span_context.span_id();
-    for (step, name) in [(step0, "step-0"), (step1, "step-1"), (step2, "step-2")] {
+    for (step, name) in [(step0, "step-0"), (step1, "to:direct"), (step2, "step-2")] {
         assert_eq!(
             step.parent_span_id, root_span_id,
             "tree-main:{name} must be parented by the tree-main root"
@@ -315,9 +319,9 @@ async fn direct_hop_nests_subroute_root_under_caller_step() {
     assert_eq!(
         sub.parent_span_id,
         step1.span_context.span_id(),
-        "tree-sub root must nest under tree-main:step-1 (the dispatching step)"
+        "tree-sub root must nest under tree-main:to:direct (the dispatching step)"
     );
-    assert_contained(sub, step1, "tree-sub under tree-main:step-1");
+    assert_contained(sub, step1, "tree-sub under tree-main:to:direct");
 
     // The sub-route's own steps nest under its root.
     let sub_step0 = span(&all, "tree-sub:step-0");
@@ -335,7 +339,7 @@ async fn direct_hop_nests_subroute_root_under_caller_step() {
     // previous step has ended.
     assert!(
         step1.start_time >= step0.end_time,
-        "tree-main:step-1 must start after tree-main:step-0 ends"
+        "tree-main:to:direct must start after tree-main:step-0 ends"
     );
 }
 
@@ -383,13 +387,13 @@ async fn split_fragments_nest_under_segment_span_one_trace() {
         "tree-split root span must have no parent"
     );
 
-    // The split step compiles to a segment: its attempt span is a direct
-    // child of the route root.
-    let segment = span(&all, "tree-split:step-0");
+    // The split step compiles to a segment: its labeled attempt span
+    // (`split`) is a direct child of the route root.
+    let segment = span(&all, "tree-split:split");
     assert_eq!(
         segment.parent_span_id,
         root.span_context.span_id(),
-        "tree-split:step-0 (segment span) must be parented by the tree-split root"
+        "tree-split:split (segment span) must be parented by the tree-split root"
     );
 
     // One tree-sub root per fragment, each nesting under the segment span
@@ -400,7 +404,7 @@ async fn split_fragments_nest_under_segment_span_one_trace() {
     for sub in &subs {
         assert_eq!(
             sub.parent_span_id, segment_span_id,
-            "fragment tree-sub root must nest under tree-split:step-0"
+            "fragment tree-sub root must nest under tree-split:split"
         );
     }
 }

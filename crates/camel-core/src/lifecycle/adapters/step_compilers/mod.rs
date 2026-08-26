@@ -49,6 +49,12 @@ pub enum CompiledStep {
         /// Lifecycle handle for this processor, if it is stateful.
         /// `None` for stateless processors (the common case).
         lifecycle: Option<Arc<dyn StepLifecycle>>,
+        /// Stable span name (e.g. `to:direct`, `split`), stamped by
+        /// `StepCompilerRegistry::compile_step` from
+        /// [`BuilderStep::span_label`]. `None` for anonymous steps — spans
+        /// fall back to the positional `step-{index}` name. Read by
+        /// `compose_traced_pipeline` / `segment_span` in route_compiler.rs.
+        label: Option<Arc<str>>,
     },
     /// Stop EIP marker. `run_steps` produces `PipelineOutcome::Stopped(ex)`
     /// without invoking a Tower service. Replaces `StopService` (Task 7).
@@ -60,11 +66,29 @@ pub enum CompiledStep {
         segment: camel_api::OutcomeSegment,
         body_contract: Option<BodyType>,
         /// Lifecycle handles from children nested inside this segment.
-        /// `Option<Vec<...>>` (not `Option<Arc<...>>`) so multiple stateful
+        /// `Option<Vec<...>>` (not `Option<Arc<...>>`) because multiple stateful
         /// children (e.g. Idempotent+Resequencer inside Filter) each
         /// register independently.
         lifecycle: Option<Vec<Arc<dyn StepLifecycle>>>,
+        /// Stable span name, same contract as [`CompiledStep::Process`]'s
+        /// `label` field.
+        label: Option<Arc<str>>,
     },
+}
+
+impl CompiledStep {
+    /// Overwrite the span label of a `Process`/`Segment` step; no-op on `Stop`
+    /// (the marker produces no step span, so it carries no label).
+    pub(crate) fn set_label(&mut self, label: Option<String>) {
+        let label = label.map(Arc::from);
+        match self {
+            CompiledStep::Process { label: slot, .. }
+            | CompiledStep::Segment { label: slot, .. } => {
+                *slot = label;
+            }
+            CompiledStep::Stop => {}
+        }
+    }
 }
 
 /// Result from a compiler: either it handled the step, or it did not recognize
@@ -160,6 +184,7 @@ impl<'a> CompilationContext<'a> {
                     processor,
                     body_contract,
                     lifecycle,
+                    label: _,
                 } => {
                     if let Some(lc) = lifecycle {
                         lifecycle_handles.push(lc);
@@ -186,6 +211,7 @@ impl<'a> CompilationContext<'a> {
                     segment,
                     body_contract: _,
                     lifecycle,
+                    label: _,
                 } => {
                     if let Some(lcs) = lifecycle {
                         lifecycle_handles.extend(lcs);
@@ -224,10 +250,15 @@ impl StepCompilerRegistry {
         step_index: usize,
         ctx: &CompilationContext,
     ) -> Result<Option<CompiledStep>, CamelError> {
+        // Capture the span label BEFORE the dispatch loop moves the step.
+        let label = step.span_label();
         let mut step = step;
         for compiler in &self.compilers {
             match compiler.compile(step, step_index, ctx, self)? {
-                CompileOutcome::Matched(s) => return Ok(Some(s)),
+                CompileOutcome::Matched(mut s) => {
+                    s.set_label(label);
+                    return Ok(Some(s));
+                }
                 CompileOutcome::NotHandled(s) => step = s,
             }
         }
@@ -368,6 +399,7 @@ mod segment_tests {
             segment: seg,
             body_contract: None,
             lifecycle: None,
+            label: None,
         };
         let _cloned = step.clone();
         if let CompiledStep::Segment { .. } = _cloned {
@@ -384,6 +416,7 @@ mod segment_tests {
             segment: seg,
             body_contract: None,
             lifecycle: None,
+            label: None,
         };
         let s = format!("{:?}", step);
         assert!(
@@ -466,6 +499,7 @@ mod segment_tests {
                     processor: op.0,
                     body_contract: None,
                     lifecycle: Some(self.handle.clone()),
+                    label: None,
                 })),
                 other => Ok(CompileOutcome::NotHandled(other)),
             }
@@ -873,6 +907,7 @@ mod dispatch_tests {
                     processor: BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })),
                     body_contract: None,
                     lifecycle: None,
+                    label: None,
                 })),
                 other => Ok(CompileOutcome::NotHandled(other)),
             }
@@ -965,6 +1000,59 @@ mod dispatch_tests {
             matches!(result, CompiledStep::Stop),
             "expected ToStopCompiler (first registered) to win, got {result:?}"
         );
+    }
+
+    /// Task 1.2 (span-name-enrichment): `set_label` is a no-op on `Stop`.
+    #[test]
+    fn set_label_noop_on_stop() {
+        let mut step = CompiledStep::Stop;
+        step.set_label(Some("x".into()));
+        assert!(
+            matches!(step, CompiledStep::Stop),
+            "set_label must not change a Stop step, got {step:?}"
+        );
+    }
+
+    /// Task 1.2 (span-name-enrichment): `compile_step` stamps the outcome with
+    /// the step's `span_label` (here `to:direct` from `BuilderStep::To`).
+    #[test]
+    fn compile_step_stamps_label() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(ToProcessCompiler));
+
+        let result = reg
+            .compile_step(BuilderStep::To("direct:x".into()), 0, &context)
+            .expect("compilation should succeed")
+            .expect("should match");
+
+        match result {
+            CompiledStep::Process { label, .. } => {
+                assert_eq!(label.as_deref(), Some("to:direct"));
+            }
+            other => panic!("expected Process, got {other:?}"),
+        }
     }
 
     /// Test that when no compiler handles a variant, the dispatcher returns

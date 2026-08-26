@@ -326,6 +326,83 @@ pub enum BuilderStep {
     },
 }
 
+impl BuilderStep {
+    /// Stable span name for this step (span-name-enrichment, task 1.2).
+    ///
+    /// `To` yields `to:{scheme}` where scheme is the AUTHORED URI before the
+    /// first `:` — a pure string split, no endpoint resolution, so a `SkipTo`
+    /// interception never rewrites the label. EIP variants yield their
+    /// kebab-case EIP name; declarative twins share the label of their
+    /// programmatic sibling (`DeclarativeSplit` and `Split` are both
+    /// `"split"`). Genuinely anonymous variants (opaque processors, the Stop
+    /// marker) yield `None` — spans fall back to the positional
+    /// `step-{index}` name.
+    ///
+    /// The match is exhaustive by design (no catch-all) so a future variant
+    /// forces a label decision here.
+    pub(crate) fn span_label(&self) -> Option<String> {
+        match self {
+            // Anonymous.
+            Self::Processor(_) | Self::Stop => None,
+
+            Self::To(uri) => uri.contains(':').then(|| {
+                let scheme = uri.split(':').next().unwrap_or_default();
+                format!("to:{scheme}")
+            }),
+
+            Self::Log { .. } | Self::DeclarativeLog { .. } => Some("log".into()),
+
+            Self::DeclarativeSetHeader { .. } => Some("set-header".into()),
+            Self::DeclarativeSetHeaderIfAbsent { .. } => Some("set-header-if-absent".into()),
+            Self::DeclarativeRemoveHeader { .. } => Some("remove-header".into()),
+            Self::DeclarativeSetProperty { .. } => Some("set-property".into()),
+            Self::DeclarativeSetBody { .. } => Some("set-body".into()),
+
+            Self::DeclarativeFilter { .. } | Self::Filter { .. } => Some("filter".into()),
+            Self::DeclarativeChoice { .. } | Self::Choice { .. } => Some("choice".into()),
+            Self::DeclarativeScript { .. } | Self::Script { .. } => Some("script".into()),
+            Self::DeclarativeFunction { .. } => Some("function".into()),
+
+            Self::DeclarativeSplit { .. }
+            | Self::DeclarativeStreamSplit { .. }
+            | Self::Split { .. } => Some("split".into()),
+
+            Self::DeclarativeDynamicRouter { .. } | Self::DynamicRouter { .. } => {
+                Some("dynamic-router".into())
+            }
+            Self::DeclarativeRoutingSlip { .. } | Self::RoutingSlip { .. } => {
+                Some("routing-slip".into())
+            }
+            Self::DeclarativeRecipientList { .. } | Self::RecipientList { .. } => {
+                Some("recipient-list".into())
+            }
+
+            Self::Aggregate { .. } => Some("aggregate".into()),
+            Self::WireTap { .. } => Some("wire-tap".into()),
+            Self::Multicast { .. } => Some("multicast".into()),
+            Self::Bean { .. } => Some("bean".into()),
+            Self::Throttle { .. } => Some("throttle".into()),
+            Self::LoadBalance { .. } => Some("load-balance".into()),
+            Self::Delay { .. } => Some("delay".into()),
+            Self::Loop { .. } | Self::DeclarativeLoop { .. } => Some("loop".into()),
+            Self::Enrich { .. } => Some("enrich".into()),
+            Self::PollEnrich { .. } => Some("poll-enrich".into()),
+            Self::Validate { .. } => Some("validate".into()),
+            Self::ClaimCheck { .. } => Some("claim-check".into()),
+            Self::Sampling { .. } => Some("sampling".into()),
+            Self::Sort { .. } => Some("sort".into()),
+            Self::IdempotentConsumer { .. } => Some("idempotent-consumer".into()),
+            Self::Cache { .. } => Some("cache".into()),
+            Self::CacheInvalidate { .. } => Some("cache-invalidate".into()),
+            Self::CacheClear { .. } => Some("cache-clear".into()),
+            Self::CacheStats { .. } => Some("cache-stats".into()),
+            Self::CachePeekStale { .. } => Some("cache-peek-stale".into()),
+            Self::DeclarativeDoTry { .. } => Some("do-try".into()),
+            Self::Resequence { .. } => Some("resequence".into()),
+        }
+    }
+}
+
 /// An unresolved route definition. "to" URIs have not been resolved to producers yet.
 pub struct RouteDefinition {
     pub(crate) from_uri: String,
@@ -618,6 +695,94 @@ impl RouteDefinitionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 1.2 (span-name-enrichment): `BuilderStep::span_label` mapping.
+    ///
+    /// `To` labels carry the authored URI scheme (before the first `:`, no
+    /// interception resolution); EIP variants map to kebab-case EIP names
+    /// (declarative twins share the label of their programmatic sibling);
+    /// anonymous variants (opaque processors) carry no label.
+    #[test]
+    fn builder_step_span_label_mapping() {
+        use camel_api::declarative::LanguageExpressionDef;
+        use camel_api::splitter::AggregationStrategy;
+        use camel_api::{BoxProcessor, IdentityProcessor, OpaqueProcessor};
+
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        };
+
+        // To: scheme is the authored URI before the first ':'.
+        assert_eq!(
+            BuilderStep::To("direct:tree-sub".into())
+                .span_label()
+                .as_deref(),
+            Some("to:direct")
+        );
+        assert_eq!(
+            BuilderStep::To("http://api.example/x".into())
+                .span_label()
+                .as_deref(),
+            Some("to:http")
+        );
+        // Scheme-less URI: no label — never leak the full text.
+        assert_eq!(BuilderStep::To("garbage".into()).span_label(), None);
+
+        // EIP variants → kebab-case EIP name.
+        assert_eq!(
+            BuilderStep::Log {
+                level: camel_processor::LogLevel::Info,
+                message: "m".into(),
+            }
+            .span_label()
+            .as_deref(),
+            Some("log")
+        );
+        assert_eq!(
+            BuilderStep::Split {
+                config: camel_api::splitter::SplitterConfig::new(
+                    camel_api::splitter::split_body_lines()
+                ),
+                steps: vec![BuilderStep::Stop],
+            }
+            .span_label()
+            .as_deref(),
+            Some("split")
+        );
+        assert_eq!(
+            BuilderStep::DeclarativeSplit {
+                expression: expr.clone(),
+                aggregation: AggregationStrategy::Original,
+                parallel: false,
+                parallel_limit: None,
+                stop_on_exception: true,
+                steps: vec![BuilderStep::Stop],
+            }
+            .span_label()
+            .as_deref(),
+            Some("split")
+        );
+        assert_eq!(
+            BuilderStep::DeclarativeStreamSplit {
+                stream_config: camel_api::StreamSplitConfig::default(),
+                aggregation: AggregationStrategy::Original,
+                stop_on_exception: true,
+                steps: vec![BuilderStep::Stop],
+            }
+            .span_label()
+            .as_deref(),
+            Some("split")
+        );
+        assert_eq!(BuilderStep::Stop.span_label(), None);
+
+        // Anonymous variants → None.
+        assert_eq!(
+            BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(IdentityProcessor)))
+                .span_label(),
+            None
+        );
+    }
 
     /// Golden debug output for EVERY BuilderStep variant.
     ///
