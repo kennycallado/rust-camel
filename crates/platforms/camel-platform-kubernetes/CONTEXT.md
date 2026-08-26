@@ -2,9 +2,23 @@
 
 Per ADR-0012, this component's `error!` sites are categorized as:
 
-- **(c) system-broken** (`platform_service.rs` L301-302): leader election loop terminated without cancellation. This is a lifecycle anomaly. The site keeps `error!` with `// log-policy: system-broken`. The `error!` event is the operator signal, so this site does not emit a metric.
+- **(c) system-broken** (`platform_service.rs` L381-387): leader election loop terminated without cancellation. This is a lifecycle anomaly. The site keeps `error!` with `// log-policy: system-broken`. The `error!` event is the operator signal, so this site does not emit a metric.
 
 Reviewer: r_glm5.1 verifies these classifications against source at Phase C review time.
+
+## Self-fencing
+
+The leadership loop self-fences on the renewal budget. The budget is
+`renew_deadline` counted from the last successful renewal
+(`leadership_fsm::remaining_budget`). Every reconcile attempt is bounded by
+the remaining budget (`leadership_fsm::bound_attempt`); a hanging attempt
+fails at the boundary. At budget exhaustion the holder steps down — clears
+`is_leader`, emits `StoppedLeading` — without observing the Lease. Within
+the budget, `Failed` and `Conflict` outcomes keep leadership and retry at a
+jittered `retry_period`, with the sleep clamped to the remaining budget.
+Config validation rejects `renew_deadline >= lease_duration`, so the holder
+fences itself before the lease can legally expire for peers (modulo clock
+skew on Lease timestamps).
 
 ## Dependency boundary
 

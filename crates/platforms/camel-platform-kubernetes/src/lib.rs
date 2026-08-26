@@ -7,6 +7,7 @@
 //! - [`KubernetesPlatformService`] — bundles identity/readiness/leadership ports
 
 pub mod identity;
+pub(crate) mod leadership_fsm;
 pub mod platform_service;
 pub mod readiness_gate;
 

@@ -46,6 +46,28 @@ The `KubernetesLeadershipService` runs a background loop for each lock:
    expires.
 4. If another pod holds a valid Lease, wait and retry.
 
+### Self-fencing
+
+Renewal obeys a renewal budget. The budget is `renew_deadline`, measured
+from the last successful renewal. Each renew attempt gets only the
+remaining budget. A hung attempt fails when its budget runs out.
+
+A leader that cannot renew within the budget steps down. It emits
+`StoppedLeading` and stops its delegate. The step-down does not depend
+on the Lease state the leader observes.
+
+Failures within the budget keep the leader in place. This covers
+transient API failures and optimistic-concurrency conflicts. The loop
+retries at the jittered `retry_period` cadence. The sleep before each
+retry is shortened so it never crosses the budget boundary.
+
+Validation enforces `renew_deadline < lease_duration`. The holder
+therefore fences itself before the Lease can legally expire for peers.
+This ordering holds modulo Kubernetes clock skew on Lease timestamps.
+
+**Reference**: `crates/platforms/camel-platform-kubernetes/CONTEXT.md`
+(Self-fencing).
+
 ### Fencing token
 
 The Lease carries a `camel.io/leader-term` annotation. This annotation

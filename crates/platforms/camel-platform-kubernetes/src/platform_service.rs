@@ -26,6 +26,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
 use crate::identity::KubernetesPlatformIdentity;
+use crate::leadership_fsm::{
+    AttemptFailure, CycleAction, CycleOutcome, LoopState, ReconcileVerdict, StepDownReason,
+    bound_attempt, budget_exhausted, decide, remaining_budget,
+};
 
 #[derive(Debug, Clone)]
 pub struct KubernetesPlatformConfig {
@@ -227,9 +231,68 @@ impl LeadershipService for KubernetesLeadershipService {
 
         tokio::spawn(async move {
             let leases: Api<Lease> = Api::namespaced(client, &namespace);
-            let mut currently_leader = false;
-            #[allow(unused_assignments)]
-            let mut cancelled = false;
+            let mut state = LoopState {
+                currently_leader: false,
+                last_success: None,
+            };
+            let cancelled;
+
+            // Side-effect applier for `CycleAction`: maps a decision to its
+            // observable effects (is_leader flag, fencing epoch, leadership
+            // events) and returns the sleep before the next cycle. `StepDown`
+            // carries no sleep — it sleeps `retry_sleep` to re-enter the
+            // contender path.
+            let apply_action = |action: CycleAction, retry_sleep: Duration| -> Duration {
+                match action {
+                    CycleAction::BecomeLeader { term, sleep } => {
+                        is_leader_task.store(true, Ordering::Release);
+                        // Store the server-confirmed leader-term as the fencing
+                        // epoch: a server-authoritative annotation counter on
+                        // the Lease object, incremented on each takeover via
+                        // optimistic concurrency — globally monotonic across
+                        // pods. See ADR-0035.
+                        leader_epoch_task.store(term, Ordering::Release);
+                        tracing::debug!(
+                            lease_name = %lease_name,
+                            leader_epoch = term,
+                            "leader epoch set from lease annotation"
+                        );
+                        let _ = event_tx_task.send(Some(LeadershipEvent::StartedLeading));
+                        sleep
+                    }
+                    CycleAction::ContinueLeading { term, sleep } => {
+                        // Renewal (still leader) — the server should return
+                        // the same term; update defensively if it ever
+                        // differs. Epoch policy for the stripped-annotation
+                        // edge: the follower-path fallback to 1 for a
+                        // missing term lives in
+                        // `leadership_fsm::decide`'s BecomeLeader arm
+                        // (ADR-0035); this defensive update stores what the
+                        // server reports — accepted behavior for a
+                        // non-conforming server, matching the blessed
+                        // decision table.
+                        if let Some(term) = term
+                            && term != leader_epoch_task.load(Ordering::Acquire)
+                        {
+                            leader_epoch_task.store(term, Ordering::Release);
+                        }
+                        sleep
+                    }
+                    CycleAction::StepDown { reason } => {
+                        warn!(
+                            lease_name = %lease_name,
+                            namespace = %namespace,
+                            holder_identity = %holder_identity,
+                            reason = ?reason,
+                            "stepping down from leadership"
+                        );
+                        is_leader_task.store(false, Ordering::Release);
+                        let _ = event_tx_task.send(Some(LeadershipEvent::StoppedLeading));
+                        retry_sleep
+                    }
+                    CycleAction::SleepAcquiring { sleep } => sleep,
+                }
+            };
 
             loop {
                 if cancel_task.is_cancelled() {
@@ -237,12 +300,44 @@ impl LeadershipService for KubernetesLeadershipService {
                     break;
                 }
 
-                let cycle_start = std::time::Instant::now();
+                let now = std::time::Instant::now();
+                let retry_sleep = jittered_duration(config.retry_period, config.jitter_factor);
 
-                let (leader_now, confirmed_term) =
-                    match reconcile_lease(&leases, &lease_name, &config, &holder_identity).await {
-                        Ok((value, term)) => (value, term),
-                        Err(err) => {
+                // Pre-attempt fence: when the renewal budget is fully spent
+                // before the cycle even starts, self-fence — apply the
+                // `StepDown` side effects and skip the attempt. A partitioned
+                // holder must not renew past its deadline.
+                let sleep_for = if budget_exhausted(state.last_success, &config, now) {
+                    let sleep = apply_action(
+                        CycleAction::StepDown {
+                            reason: StepDownReason::BudgetExhausted,
+                        },
+                        retry_sleep,
+                    );
+                    // `decide` owns the state clears on the outcome path; on
+                    // the pre-attempt fence path the applier side must clear
+                    // them, otherwise `budget_exhausted` stays true forever
+                    // and the pod never re-enters the contender path.
+                    state.currently_leader = false;
+                    state.last_success = None;
+                    sleep
+                } else {
+                    // Attempt budget: while leading, the remaining renewal
+                    // budget; while contending, capped at `renew_deadline`.
+                    let budget = remaining_budget(state.last_success, &config, now)
+                        .unwrap_or(config.renew_deadline);
+
+                    let outcome = match bound_attempt(
+                        reconcile_lease(&leases, &lease_name, &config, &holder_identity),
+                        budget,
+                    )
+                    .await
+                    {
+                        Ok(ReconcileVerdict::Acquired { term }) => CycleOutcome::Acquired { term },
+                        Ok(ReconcileVerdict::Renewed { term }) => CycleOutcome::Renewed { term },
+                        Ok(ReconcileVerdict::ForeignHolder) => CycleOutcome::Lost,
+                        Ok(ReconcileVerdict::Conflict) => CycleOutcome::Conflict,
+                        Err(AttemptFailure::Transport(err)) => {
                             warn!(
                                 lease_name = %lease_name,
                                 namespace = %namespace,
@@ -250,51 +345,29 @@ impl LeadershipService for KubernetesLeadershipService {
                                 error = %err,
                                 "leader election cycle failed"
                             );
-                            (false, None)
+                            CycleOutcome::Failed
+                        }
+                        Err(AttemptFailure::Deadline) => {
+                            warn!(
+                                lease_name = %lease_name,
+                                namespace = %namespace,
+                                holder_identity = %holder_identity,
+                                error = "renewal budget elapsed before the server answered",
+                                "leader election cycle failed"
+                            );
+                            CycleOutcome::Failed
                         }
                     };
 
-                if leader_now != currently_leader {
-                    currently_leader = leader_now;
-                    is_leader_task.store(leader_now, Ordering::Release);
-
-                    if leader_now {
-                        // Store the server-confirmed leader-term as the fencing epoch.
-                        // The term is a server-authoritative annotation counter on the
-                        // Lease object, incremented on each takeover via optimistic
-                        // concurrency — globally monotonic across pods. See ADR-0035.
-                        // Fallback to 1 if server stripped the annotation (defensive).
-                        let term = confirmed_term.unwrap_or(1);
-                        leader_epoch_task.store(term, Ordering::Release);
-                        tracing::debug!(
-                            lease_name = %lease_name,
-                            leader_epoch = term,
-                            "leader epoch set from lease annotation"
-                        );
-                    }
-
-                    let event = if leader_now {
-                        LeadershipEvent::StartedLeading
-                    } else {
-                        LeadershipEvent::StoppedLeading
-                    };
-                    let _ = event_tx_task.send(Some(event));
-                } else if leader_now {
-                    // Renewal (still leader) — server should return the same term.
-                    // Update defensively if it ever differs.
-                    if let Some(term) = confirmed_term {
-                        let current = leader_epoch_task.load(Ordering::Acquire);
-                        if term != current {
-                            leader_epoch_task.store(term, Ordering::Release);
-                        }
-                    }
-                }
-
-                // Deadline-scheduled sleep: when leading, subtract cycle
-                // elapsed time from renew_deadline. If the cycle took longer
-                // than renew_deadline, sleep is 0 and the next cycle starts
-                // immediately, detecting lease expiry and stepping down.
-                let sleep_for = next_cycle_sleep(currently_leader, cycle_start.elapsed(), &config);
+                    let action = decide(
+                        &mut state,
+                        outcome,
+                        &config,
+                        retry_sleep,
+                        std::time::Instant::now(),
+                    );
+                    apply_action(action, retry_sleep)
+                };
 
                 tokio::select! {
                     _ = cancel_task.cancelled() => {
@@ -315,7 +388,10 @@ impl LeadershipService for KubernetesLeadershipService {
                 );
             }
 
-            if currently_leader {
+            // Graceful shutdown release. The self-fence step-down does NOT
+            // call release_lease: a partitioned holder cannot reach the
+            // server, and a fenced holder re-enters the contender path.
+            if state.currently_leader {
                 if let Err(err) = release_lease(&leases, &lease_name, &holder_identity).await {
                     warn!(
                         lease_name = %lease_name,
@@ -354,26 +430,6 @@ fn jittered_duration(base: Duration, jitter_factor: f64) -> Duration {
     }
     let jitter = capped_ms * jitter_factor * (rand::random::<f64>() * 2.0 - 1.0);
     Duration::from_millis((capped_ms + jitter).max(0.0) as u64)
-}
-
-/// Compute the sleep duration before the next renew cycle.
-///
-/// When leading: `renew_deadline.saturating_sub(cycle_elapsed)` — if the
-/// reconcile cycle took longer than `renew_deadline`, the next cycle
-/// starts immediately (sleep = 0), detecting lease expiry and stepping
-/// down without waiting for a fresh slot.
-///
-/// When not leading: jittered `retry_period` (avoids thundering herd).
-fn next_cycle_sleep(
-    is_leader: bool,
-    cycle_elapsed: Duration,
-    config: &KubernetesPlatformConfig,
-) -> Duration {
-    if is_leader {
-        config.renew_deadline.saturating_sub(cycle_elapsed)
-    } else {
-        jittered_duration(config.retry_period, config.jitter_factor)
-    }
 }
 
 pub struct KubernetesPlatformService {
@@ -542,7 +598,7 @@ async fn reconcile_lease(
     lease_name: &str,
     config: &KubernetesPlatformConfig,
     holder_identity: &str,
-) -> Result<(bool, Option<u64>), kube::Error> {
+) -> Result<ReconcileVerdict, kube::Error> {
     let now = JiffTimestamp::now();
 
     let maybe_lease = leases.get_opt(lease_name).await?;
@@ -566,11 +622,13 @@ async fn reconcile_lease(
         };
         match leases.create(&PostParams::default(), &lease).await {
             Ok(created) => {
-                return Ok((true, extract_leader_term(&created)));
+                return Ok(ReconcileVerdict::Acquired {
+                    term: extract_leader_term(&created).unwrap_or(1),
+                });
             }
             Err(err) if is_optimistic_conflict(&err) => {
                 // Another contender created the lease first. This cycle loses leadership and retries.
-                return Ok((false, None));
+                return Ok(ReconcileVerdict::Conflict);
             }
             Err(err) => return Err(err),
         }
@@ -598,10 +656,14 @@ async fn reconcile_lease(
             .replace(lease_name, &PostParams::default(), &lease)
             .await
         {
-            Ok(replaced) => return Ok((true, extract_leader_term(&replaced))),
+            Ok(replaced) => {
+                return Ok(ReconcileVerdict::Renewed {
+                    term: extract_leader_term(&replaced),
+                });
+            }
             Err(err) if is_optimistic_conflict(&err) => {
                 // Replace carries resourceVersion from the fetched lease; 409 means stale generation.
-                return Ok((false, None));
+                return Ok(ReconcileVerdict::Conflict);
             }
             Err(err) => return Err(err),
         }
@@ -645,16 +707,20 @@ async fn reconcile_lease(
             .replace(lease_name, &PostParams::default(), &lease)
             .await
         {
-            Ok(replaced) => return Ok((true, extract_leader_term(&replaced))),
+            Ok(replaced) => {
+                return Ok(ReconcileVerdict::Acquired {
+                    term: extract_leader_term(&replaced).unwrap_or(1),
+                });
+            }
             Err(err) if is_optimistic_conflict(&err) => {
                 // Lease changed between read and replace; treat as lost race and retry next cycle.
-                return Ok((false, None));
+                return Ok(ReconcileVerdict::Conflict);
             }
             Err(err) => return Err(err),
         }
     }
 
-    Ok((false, None))
+    Ok(ReconcileVerdict::ForeignHolder)
 }
 
 /// Server-authoritative annotation counter on the Lease — incremented on each
@@ -801,38 +867,6 @@ mod tests {
     fn jittered_duration_with_zero_factor_is_stable() {
         let base = Duration::from_millis(750);
         assert_eq!(jittered_duration(base, 0.0), base);
-    }
-
-    #[test]
-    fn next_cycle_sleep_subtracts_elapsed_when_leading() {
-        // Default config: renew_deadline = 10s, retry_period = 2s, jitter = 0.2
-        let config = KubernetesPlatformConfig::default();
-        let sleep = next_cycle_sleep(true, Duration::from_secs(3), &config);
-        assert_eq!(sleep, Duration::from_secs(7)); // 10s - 3s
-    }
-
-    #[test]
-    fn next_cycle_sleep_zero_when_elapsed_exceeds_deadline() {
-        let config = KubernetesPlatformConfig::default();
-        // elapsed exactly == renew_deadline
-        let sleep = next_cycle_sleep(true, config.renew_deadline, &config);
-        assert_eq!(sleep, Duration::ZERO);
-        // elapsed > renew_deadline
-        let sleep = next_cycle_sleep(
-            true,
-            config.renew_deadline + Duration::from_millis(100),
-            &config,
-        );
-        assert_eq!(sleep, Duration::ZERO);
-    }
-
-    #[test]
-    fn next_cycle_sleep_uses_retry_period_when_not_leading() {
-        // Default config: retry_period = 2s, jitter_factor = 0.2 → [1.6s, 2.4s]
-        let config = KubernetesPlatformConfig::default();
-        let sleep = next_cycle_sleep(false, Duration::from_secs(5), &config);
-        assert!(sleep >= Duration::from_millis(1600));
-        assert!(sleep <= Duration::from_millis(2400));
     }
 
     #[test]
