@@ -30,17 +30,12 @@
 //! ctx.set_tracing(true).await;
 //! ```
 //!
-//! ### Span Fields
+//! ### Trace Data
 //!
-//! Each trace span includes the following fields:
-//!
-//! - `correlation_id`: Unique identifier that links all spans in a single message flow
-//! - `route_id`: Identifier for the route being traced
-//! - `step_id`: Unique identifier for this specific step in the route
-//! - `step_index`: Sequential index of this step within the route
-//! - `timestamp`: When the step was executed (Unix timestamp)
-//! - `duration_ms`: How long the step took to execute in milliseconds
-//! - `status`: The status of the step execution (e.g., "success", "error")
+//! `camel_tracer` log records include `duration_ms`, `timestamp`, and `status`.
+//! OpenTelemetry span attributes include `messaging.system`, `route_id`, and
+//! `correlation_id` on root spans. Step and segment spans also include `step_id`
+//! and `step_index`.
 //!
 //! ### Detail Levels
 //!

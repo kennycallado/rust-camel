@@ -97,6 +97,8 @@ camel-bridge.workspace = true
 rcgen = { workspace = true }
 tonic = { workspace = true }
 rustls.workspace = true
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 jsonwebtoken.workspace = true
 tokio-tungstenite.workspace = true
 

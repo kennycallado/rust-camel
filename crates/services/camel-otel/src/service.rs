@@ -38,6 +38,10 @@ use tracing::{error, info, warn};
 use crate::OtelMetrics;
 use crate::config::{OtelConfig, OtelProtocol, OtelSampler};
 
+#[cfg(test)]
+#[path = "sampler_tests.rs"]
+mod sampler_tests;
+
 /// Status values for atomic tracking
 const STATUS_STOPPED: u8 = 0;
 const STATUS_STARTED: u8 = 1;
@@ -304,12 +308,17 @@ impl OtelService {
         Resource::builder().with_attributes(attrs).build()
     }
 
-    /// Convert `OtelSampler` to SDK `Sampler`.
+    /// Convert `OtelSampler` to a parent-based SDK sampler.
+    ///
+    /// Children inherit the parent sampling decision; an unsampled parent
+    /// records nothing.
     fn to_sdk_sampler(sampler: &OtelSampler) -> Sampler {
         match sampler {
-            OtelSampler::AlwaysOn => Sampler::AlwaysOn,
-            OtelSampler::AlwaysOff => Sampler::AlwaysOff,
-            OtelSampler::TraceIdRatioBased(ratio) => Sampler::TraceIdRatioBased(*ratio),
+            OtelSampler::AlwaysOn => Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+            OtelSampler::AlwaysOff => Sampler::ParentBased(Box::new(Sampler::AlwaysOff)),
+            OtelSampler::TraceIdRatioBased(ratio) => {
+                Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(*ratio)))
+            }
         }
     }
 
@@ -559,30 +568,6 @@ mod tests {
         // Note: Resource doesn't expose a simple way to iterate attributes in 0.31,
         // so we just verify it builds without error
         let _ = resource;
-    }
-
-    #[test]
-    fn test_to_sdk_sampler_always_on() {
-        let sampler = OtelSampler::AlwaysOn;
-        let sdk_sampler = OtelService::to_sdk_sampler(&sampler);
-
-        assert!(matches!(sdk_sampler, Sampler::AlwaysOn));
-    }
-
-    #[test]
-    fn test_to_sdk_sampler_always_off() {
-        let sampler = OtelSampler::AlwaysOff;
-        let sdk_sampler = OtelService::to_sdk_sampler(&sampler);
-
-        assert!(matches!(sdk_sampler, Sampler::AlwaysOff));
-    }
-
-    #[test]
-    fn test_to_sdk_sampler_trace_id_ratio() {
-        let sampler = OtelSampler::TraceIdRatioBased(0.5);
-        let sdk_sampler = OtelService::to_sdk_sampler(&sampler);
-
-        assert!(matches!(sdk_sampler, Sampler::TraceIdRatioBased(r) if r == 0.5));
     }
 
     #[tokio::test]

@@ -284,21 +284,21 @@ impl SplitterConfig {
 ///
 /// # OpenTelemetry Trace Propagation
 ///
-/// Each fragment inherits the parent's `otel_context`, which carries the active span
-/// context. When TracingProcessor processes a fragment, it will create a child span
-/// linked to the parent span. This creates a natural fan-out relationship in the
-/// distributed trace:
+/// Each fragment inherits the live segment step span context: the splitter step's
+/// span, not the route root and not a previous fragment's span. A fragment-driven
+/// sub-route root therefore opens as a child of that segment span in the same trace,
+/// creating a natural fan-out relationship in the distributed trace:
 ///
 /// ```text
-/// ParentExchange (span A)
-///   ├─ Fragment 1 (span B, child of A)
-///   ├─ Fragment 2 (span C, child of A)
-///   └─ Fragment N (span N, child of A)
+/// Segment step (span A)
+///   ├─ Fragment 1 sub-route root (span B, child of A)
+///   ├─ Fragment 2 sub-route root (span C, child of A)
+///   └─ Fragment N sub-route root (span N, child of A)
 /// ```
 ///
-/// This parent-child relationship is the correct semantic for message splitting,
-/// as fragments are logical subdivisions of the parent message, not independent
-/// operations that merely reference the parent (which would warrant span links).
+/// Restoring the entry context after the segment completes is the segment wrapper's
+/// job (`route_compiler::TracedSegmentStep` in `camel-core`), not
+/// `fragment_exchange`'s job.
 pub fn fragment_exchange(parent: &Exchange, body: Body) -> Exchange {
     let mut msg = Message::new(body);
     msg.headers = parent.input.headers.clone();

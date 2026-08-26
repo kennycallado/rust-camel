@@ -21,11 +21,16 @@ use camel_api::error_handler::{BoundaryKind, RetryOutcome, StepDisposition};
 use camel_processor::{
     CircuitBreakerDecision, CircuitBreakerGate, RouteErrorHandler, invoke_processor,
 };
+use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
+use opentelemetry::{Context as OtelContext, KeyValue, global};
 use tracing::Instrument;
 
 use crate::lifecycle::adapters::body_coercing::wrap_if_needed;
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::shared::observability::adapters::TracingProcessor;
+use crate::shared::observability::adapters::tracer::{
+    SpanEndGuard, capped_correlation_id, record_exception, step_span_attributes,
+};
 use crate::shared::observability::domain::DetailLevel;
 
 // Re-export outcome composition types so existing step_compiler import paths
@@ -126,7 +131,10 @@ pub fn compose_pipeline_with_handler(
 
 /// Compose a list of CompiledSteps into a traced pipeline with Stop→Ok translation.
 ///
-/// Each processor is wrapped with TracingProcessor to emit spans for observability.
+/// Each processor is wrapped with TracingProcessor to emit spans for observability,
+/// and the pipeline opens one Internal route root span per invocation (named after
+/// `route_id`) that parents every step span. Empty traced routes still return a
+/// `TracedPipeline` so the root span records the route invocation with zero steps.
 /// When tracing is disabled, falls back to [`compose_pipeline_with_handler`] with zero overhead.
 pub fn compose_traced_pipeline(
     processors: Vec<CompiledStep>,
@@ -139,10 +147,6 @@ pub fn compose_traced_pipeline(
 ) -> BoxProcessor {
     if !trace_enabled {
         return compose_pipeline_with_handler(processors, handler, ctx);
-    }
-
-    if processors.is_empty() {
-        return BoxProcessor::new(IdentityProcessor);
     }
 
     let wrapped: Vec<CompiledStep> = processors
@@ -175,6 +179,7 @@ pub fn compose_traced_pipeline(
 
     BoxProcessor::new(TracedPipeline {
         steps: SharedSnapshot(wrapped.into()),
+        route_id: route_id.to_string(),
         handler,
         ctx,
     })
@@ -215,6 +220,9 @@ pub fn compose_pipeline_with_contracts(
 /// Compose a list of `CompiledStep` items into a traced pipeline with body coercion.
 ///
 /// Applies body coercion contracts first, then wraps with `TracingProcessor`.
+/// The pipeline opens one Internal route root span per invocation (named after
+/// `route_id`); empty traced routes still return a `TracedPipeline` so the
+/// root span records the route invocation with zero steps.
 /// When tracing is disabled, falls back to [`compose_pipeline_with_contracts`].
 pub(crate) fn compose_traced_pipeline_with_contracts(
     processors: Vec<CompiledStep>,
@@ -227,10 +235,6 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
 ) -> BoxProcessor {
     if !trace_enabled {
         return compose_pipeline_with_contracts(processors, handler, ctx);
-    }
-
-    if processors.is_empty() {
-        return BoxProcessor::new(IdentityProcessor);
     }
 
     let wrapped: Vec<CompiledStep> = processors
@@ -263,6 +267,7 @@ pub(crate) fn compose_traced_pipeline_with_contracts(
 
     BoxProcessor::new(TracedPipeline {
         steps: SharedSnapshot(wrapped.into()),
+        route_id: route_id.to_string(),
         handler,
         ctx,
     })
@@ -313,7 +318,7 @@ impl Service<Exchange> for SequentialPipeline {
         let handler = self.handler.clone();
         let ctx = self.ctx.clone();
         Box::pin(async move {
-            run_steps(steps, exchange, handler, false, &ctx)
+            run_steps(steps, exchange, handler, false, &ctx.route_id, &ctx)
                 .await
                 .into_tower_result()
         })
@@ -321,9 +326,15 @@ impl Service<Exchange> for SequentialPipeline {
 }
 
 /// A traced service pipeline for wrapped CompiledSteps.
+///
+/// Each invocation opens one Internal route root span named after the route;
+/// step spans (from `TracingProcessor`) nest under it. The root span handle
+/// lives inside the `call` async body — never on `self` — so hot-reload
+/// pipeline swaps are unaffected.
 #[derive(Clone)]
 struct TracedPipeline {
     steps: SharedSnapshot,
+    route_id: String,
     handler: Option<Arc<dyn RouteErrorHandler>>,
     ctx: PipelineRuntimeCtx,
 }
@@ -351,26 +362,57 @@ impl Service<Exchange> for TracedPipeline {
 
     // ADR-0024 reply-channel adapter (same as SequentialPipeline::call):
     // Completed(ex) and Stopped(ex) both map to Ok(ex). Bug B fix.
+    //
+    // Route root span (trace-model-tree T1.3): one Internal span per route
+    // invocation, named after the route, parenting every step span. Derived
+    // from the entry context (not the ambient current context) so parent
+    // entries such as baggage stay attached; the entry context is restored
+    // on the result exchange when one comes back.
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let steps = self.steps.clone();
+        let route_id = self.route_id.clone();
         let handler = self.handler.clone();
         let ctx = self.ctx.clone();
         Box::pin(async move {
-            run_steps(steps, exchange, handler, true, &ctx)
-                .await
-                .into_tower_result()
+            let tracer = global::tracer("camel-core");
+            let entry_cx = exchange.otel_context.clone();
+            let root_span = tracer
+                .span_builder(route_id.clone())
+                .with_kind(SpanKind::Internal)
+                .with_attributes([
+                    KeyValue::new("messaging.system", "camel"),
+                    KeyValue::new("route_id", route_id.clone()),
+                    KeyValue::new(
+                        "correlation_id",
+                        capped_correlation_id(exchange.correlation_id()).to_string(),
+                    ),
+                ])
+                .start_with_context(&tracer, &entry_cx);
+            let root_cx = entry_cx.with_span(root_span);
+            // Guard ends the root span even if a step panics.
+            let _root_guard = SpanEndGuard(root_cx.clone());
+            let mut exchange = exchange;
+            exchange.otel_context = root_cx.clone();
+
+            let outcome = run_steps(steps, exchange, handler, true, &route_id, &ctx).await;
+            finish_span_outcome(outcome, &root_cx, entry_cx).into_tower_result()
         })
     }
 }
 
 /// Run a sequence of CompiledSteps with optional error recovery.
 ///
-/// Each step is unified under [`OwnedRetryable`] — both Process and
+/// Each step is unified under [`OwnedRetryable`] — Process and
 /// Segment variants are treated uniformly via a stack-allocated enum
 /// that dispatches to the existing `RetryableStep` impls on
 /// `BoxProcessor` and `OutcomeSegment`. This eliminates the per-step
 /// `Box::new(...) as Box<dyn RetryableStep>` heap allocation that the
 /// pre-A2 implementation paid for every step of every Exchange (A2).
+///
+/// On the traced path (`trace == true`, `route_id` from the traced
+/// pipeline), Segment steps dispatch through [`TracedSegmentStep`]
+/// instead, so the initial invocation AND every retry attempt opened by
+/// the error handler runs through the same span wrapper (T1.4).
 ///
 /// On failure:
 /// 1. If a handler is present, `match_policy` selects a retry policy.
@@ -388,6 +430,7 @@ async fn run_steps(
     exchange: Exchange,
     handler: Option<Arc<dyn RouteErrorHandler>>,
     trace: bool,
+    route_id: &str,
     ctx: &PipelineRuntimeCtx,
 ) -> PipelineOutcome {
     use camel_api::error_handler::RetryableStep;
@@ -410,11 +453,23 @@ async fn run_steps(
         // A2: dispatch to existing `RetryableStep` impls through a stack
         // enum instead of paying `Box::new(...) as Box<dyn RetryableStep>`
         // per step. `OwnedRetryable` is `enum { Processor, Segment }` with
-        // discriminant-by-value layout — no extra heap alloc.
+        // discriminant-by-value layout — no extra heap alloc. On the traced
+        // path, Segment steps take the `TracedSegment` variant so every
+        // attempt (initial + retries) gets its own step span (T1.4).
         let mut retryable: OwnedRetryable = match &steps.0[i] {
             CompiledStep::Stop => return PipelineOutcome::Stopped(ex),
             CompiledStep::Process { processor, .. } => OwnedRetryable::Processor(processor.clone()),
-            CompiledStep::Segment { segment, .. } => OwnedRetryable::Segment(segment.clone()),
+            CompiledStep::Segment { segment, .. } => {
+                if trace {
+                    OwnedRetryable::TracedSegment(TracedSegmentStep {
+                        segment: segment.clone(),
+                        route_id: route_id.to_string(),
+                        index: i,
+                    })
+                } else {
+                    OwnedRetryable::Segment(segment.clone())
+                }
+            }
         };
 
         let original = handler.as_ref().map(|_| ex.clone());
@@ -543,6 +598,10 @@ async fn run_steps(
 enum OwnedRetryable {
     Processor(camel_api::BoxProcessor),
     Segment(camel_api::OutcomeSegment),
+    /// Traced segment dispatch (T1.4): every attempt — the initial
+    /// invocation and each retry opened by the error handler — goes
+    /// through `TracedSegmentStep` so each gets its own step span.
+    TracedSegment(TracedSegmentStep),
 }
 
 impl camel_api::error_handler::RetryableStep for OwnedRetryable {
@@ -553,7 +612,95 @@ impl camel_api::error_handler::RetryableStep for OwnedRetryable {
         match self {
             OwnedRetryable::Processor(p) => p.invoke(exchange),
             OwnedRetryable::Segment(s) => s.invoke(exchange),
+            OwnedRetryable::TracedSegment(s) => s.invoke(exchange),
         }
+    }
+}
+
+/// Start a `{route_id}:step-{index}` Internal span for one segment step
+/// attempt, parented by `entry_cx` (the traced pipeline's root context)
+/// with the Minimal-level attribute set from `step_span_attributes`
+/// (trace-model-tree T1.4).
+fn segment_span(
+    tracer: &global::BoxedTracer,
+    route_id: &str,
+    index: usize,
+    entry_cx: &OtelContext,
+    correlation_id: &str,
+) -> global::BoxedSpan {
+    tracer
+        .span_builder(format!("{route_id}:step-{index}"))
+        .with_kind(SpanKind::Internal)
+        .with_attributes(step_span_attributes(route_id, index, correlation_id))
+        .start_with_context(tracer, entry_cx)
+}
+
+/// Per-attempt span adapter for `CompiledStep::Segment` on traced
+/// pipelines (trace-model-tree T1.4).
+///
+/// Implements `RetryableStep` so BOTH the initial invocation and every
+/// retry attempt dispatched by `RouteErrorHandler::retry_step` run
+/// through the same wrapper: each `invoke` opens one fresh
+/// `{route_id}:step-{index}` Internal span parented by the incoming
+/// context (the route root), runs the inner segment with that span
+/// active, restores the incoming context on outcomes that carry the
+/// exchange, and ends the span with the future — spans never outlive
+/// the attempt.
+///
+/// Retry inputs are the error handler's preserved pre-attempt exchange,
+/// which still carries the route root context (restored by a previous
+/// attempt's Ok path, or never left on the first attempt), so every
+/// attempt span nests under the route root, not under each other.
+struct TracedSegmentStep {
+    segment: camel_api::OutcomeSegment,
+    route_id: String,
+    index: usize,
+}
+
+fn finish_span_outcome(
+    outcome: PipelineOutcome,
+    span_cx: &OtelContext,
+    entry_cx: OtelContext,
+) -> PipelineOutcome {
+    match outcome {
+        PipelineOutcome::Completed(mut ex) => {
+            span_cx.span().set_status(Status::Ok);
+            ex.otel_context = entry_cx;
+            PipelineOutcome::Completed(ex)
+        }
+        PipelineOutcome::Stopped(mut ex) => {
+            span_cx.span().set_status(Status::Ok);
+            ex.otel_context = entry_cx;
+            PipelineOutcome::Stopped(ex)
+        }
+        PipelineOutcome::Failed(e) => {
+            record_exception(&span_cx.span(), &e);
+            PipelineOutcome::Failed(e)
+        }
+    }
+}
+
+impl camel_api::error_handler::RetryableStep for TracedSegmentStep {
+    fn invoke<'a>(
+        &'a mut self,
+        mut exchange: Exchange,
+    ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            let tracer = global::tracer("camel-core");
+            let entry_cx = exchange.otel_context.clone();
+            let span = segment_span(
+                &tracer,
+                &self.route_id,
+                self.index,
+                &entry_cx,
+                exchange.correlation_id(),
+            );
+            let cx = entry_cx.with_span(span);
+            // Guard ends the attempt span even if the segment panics.
+            let _guard = SpanEndGuard(cx.clone());
+            exchange.otel_context = cx.clone();
+            finish_span_outcome(self.segment.run(exchange).await, &cx, entry_cx)
+        })
     }
 }
 

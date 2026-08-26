@@ -47,6 +47,7 @@ _Avoid_: tracing middleware, header copier
   providers and emits one `warn!`. Stopping explicitly is still preferred
   (graceful, observable), but drop-without-stop no longer leaks batch-exporter
   tasks.
+- **Sampling is root-only.** The configured sampler decides ROOT spans only; children inherit the parent sampling decision. An unsampled parent records nothing, while a sampled inbound parent records children even under AlwaysOff.
 
 ## `#[non_exhaustive]` posture
 

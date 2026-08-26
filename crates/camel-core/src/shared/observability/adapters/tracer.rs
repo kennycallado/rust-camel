@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
+use opentelemetry::trace::{SpanKind, SpanRef, Status, TraceContextExt, Tracer};
 use opentelemetry::{Context as OtelContext, KeyValue, global};
 use tower::Service;
 use tracing::Instrument;
@@ -16,7 +16,8 @@ use camel_api::{Body, BoxProcessor, CamelError, Exchange};
 /// RAII guard that ensures an OTel span is ended when dropped.
 ///
 /// This prevents span leaks if the inner processor panics or returns early.
-struct SpanEndGuard(OtelContext);
+/// `pub(crate)` so the route compiler can reuse it for the route root span.
+pub(crate) struct SpanEndGuard(pub(crate) OtelContext);
 
 impl Drop for SpanEndGuard {
     fn drop(&mut self) {
@@ -55,6 +56,10 @@ pub struct TracingProcessor {
     metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
+fn step_id_for(index: usize) -> String {
+    format!("step-{index}")
+}
+
 impl TracingProcessor {
     /// Wrap a processor with tracing.
     pub fn new(
@@ -64,7 +69,7 @@ impl TracingProcessor {
         detail_level: DetailLevel,
         metrics: Option<Arc<dyn MetricsCollector>>,
     ) -> Self {
-        let step_id = format!("step-{}", step_index);
+        let step_id = step_id_for(step_index);
         let span_name = format!("{route_id}:{step_id}");
         Self {
             inner,
@@ -97,38 +102,33 @@ impl Service<Exchange> for TracingProcessor {
         // Extract parent context from exchange.otel_context
         let parent_cx = exchange.otel_context.clone();
 
-        // Build span attributes
-        let mut attributes = [
-            KeyValue::new("messaging.system", "camel"),
-            KeyValue::new(
-                "correlation_id",
-                capped_correlation_id(exchange.correlation_id()).to_string(),
-            ),
-            KeyValue::new("route_id", self.route_id.clone()),
-            KeyValue::new("step_id", self.step_id.clone()),
-            KeyValue::new("step_index", self.step_index as i64),
-            KeyValue::new("headers_count", 0i64),
-            KeyValue::new("body_type", ""),
-            KeyValue::new("has_error", false),
-        ];
-        let mut attr_count = 5;
+        // Build span attributes (Minimal set; Medium/Full extras appended below)
+        let mut attributes =
+            step_span_attributes(&self.route_id, self.step_index, exchange.correlation_id());
 
         if self.detail_level >= DetailLevel::Medium {
-            attributes[5] = KeyValue::new("headers_count", exchange.input.headers.len() as i64);
-            attributes[6] = KeyValue::new("body_type", body_type_name(&exchange.input.body));
-            attributes[7] = KeyValue::new("has_error", exchange.has_error());
-            attr_count = 8;
+            attributes.push(KeyValue::new(
+                "headers_count",
+                exchange.input.headers.len() as i64,
+            ));
+            attributes.push(KeyValue::new(
+                "body_type",
+                body_type_name(&exchange.input.body),
+            ));
+            attributes.push(KeyValue::new("has_error", exchange.has_error()));
         }
 
         // Start a new span as a child of the parent context
         let span = tracer
             .span_builder(span_name)
             .with_kind(SpanKind::Internal)
-            .with_attributes(attributes[..attr_count].iter().cloned())
+            .with_attributes(attributes.iter().cloned())
             .start_with_context(&tracer, &parent_cx);
 
-        // Create new context with this span as the active span
-        let cx = OtelContext::current_with_span(span);
+        // Derive the step context from the parent (not from the ambient
+        // current context): parent entries such as baggage stay attached, and
+        // the parent context is restored on the result exchange after the step.
+        let cx = parent_cx.with_span(span);
 
         // Store back into exchange so downstream processors inherit this context
         exchange.otel_context = cx.clone();
@@ -199,10 +199,6 @@ impl Service<Exchange> for TracingProcessor {
                 let duration_ms = duration.as_millis() as u64;
                 tracing::Span::current().record("duration_ms", duration_ms);
 
-                // Record duration on OTel span
-                cx.span()
-                    .set_attribute(KeyValue::new("duration_ms", duration_ms as i64));
-
                 // Record metrics if collector is present
                 if let Some(ref metrics) = metrics {
                     metrics.record_exchange_duration(&route_id, duration);
@@ -213,8 +209,8 @@ impl Service<Exchange> for TracingProcessor {
                     }
                 }
 
-                match &result {
-                    Ok(ex) => {
+                match result {
+                    Ok(mut ex) => {
                         tracing::Span::current().record("status", "success");
                         cx.span().set_status(Status::Ok);
 
@@ -226,25 +222,21 @@ impl Service<Exchange> for TracingProcessor {
                                 body_type_name(&ex.input.body),
                             ));
                         }
+
+                        // Restore the caller's context: the step span ends with
+                        // this future, so downstream steps must not chain onto it.
+                        ex.otel_context = parent_cx.clone();
+                        Ok(ex)
                     }
                     Err(e) => {
+                        record_exception(&cx.span(), &e);
                         let error_class = e.classify();
-                        cx.span().set_status(Status::error(e.to_string()));
-                        cx.span().add_event(
-                            "error",
-                            vec![
-                                KeyValue::new("error.type", error_class.to_string()),
-                                KeyValue::new("error.message", e.to_string()),
-                            ],
-                        );
                         tracing::Span::current().record("status", "error");
                         tracing::Span::current().record("error", e.to_string());
                         tracing::Span::current().record("error_type", error_class);
+                        Err(e)
                     }
                 }
-
-                // Span is ended by _guard when it drops here
-                result
             }
             .instrument(tracing_span),
         )
@@ -266,7 +258,7 @@ impl Clone for TracingProcessor {
 }
 
 /// R4-L8: cap only the span-attr representation. Exchange.correlation_id is untouched.
-fn capped_correlation_id(id: &str) -> &str {
+pub(crate) fn capped_correlation_id(id: &str) -> &str {
     const CAP: usize = 128;
     if id.len() > CAP {
         "<oversized:correlation_id>"
@@ -275,25 +267,198 @@ fn capped_correlation_id(id: &str) -> &str {
     }
 }
 
+/// Minimal-level span attributes for a pipeline step span.
+///
+/// `correlation_id` is the raw exchange correlation id; this is the single
+/// capping site for its span-attribute representation (R4-L8). Medium/Full
+/// extras (`headers_count`, `body_type`, `has_error`) are appended by the
+/// caller, not here.
+pub(crate) fn step_span_attributes(
+    route_id: &str,
+    step_index: usize,
+    correlation_id: &str,
+) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new("messaging.system", "camel"),
+        KeyValue::new(
+            "correlation_id",
+            capped_correlation_id(correlation_id).to_string(),
+        ),
+        KeyValue::new("route_id", route_id.to_string()),
+        KeyValue::new("step_id", step_id_for(step_index)),
+        KeyValue::new("step_index", step_index as i64),
+    ]
+}
+
+pub(crate) fn record_exception(span: &SpanRef<'_>, e: &CamelError) {
+    let error_class = e.classify();
+    span.set_status(Status::error(e.to_string()));
+    span.add_event(
+        "exception",
+        vec![
+            KeyValue::new("exception.type", error_class.to_string()),
+            KeyValue::new("exception.message", e.to_string()),
+        ],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests for TracingProcessor.
     //!
-    //! These tests use the noop OTel provider, which means:
-    //! - Spans are created but not exported
-    //! - Span contexts may not have valid trace/span IDs
-    //! - Error recording on spans cannot be verified
-    //!
-    //! Full span hierarchy verification (trace ID matching, parent span ID, error recording)
-    //! requires an integration test with a real exporter, which will be covered in Task 11
-    //! (integration tests).
+    //! Span-exporting tests use `span_test_util`, which installs ONE global
+    //! in-memory `SdkTracerProvider` per test binary; test bodies using it are
+    //! serialized by a process-wide mutex and filter exported spans by their
+    //! own trace id. The remaining tests assert only provider-independent
+    //! behavior (error propagation, clone semantics, readiness).
 
     use super::*;
+    use crate::shared::observability::adapters::span_test_util::{finish, test_spans};
     use camel_api::{BoxProcessorExt, IdentityProcessor, Message, Value};
-    use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
+    use opentelemetry::baggage::BaggageExt;
+    use opentelemetry::trace::{Span, SpanId, TraceId};
     use std::time::Duration;
     use tokio::sync::{OwnedSemaphorePermit, Semaphore};
     use tower::ServiceExt;
+
+    /// Local double whose `call` always fails with a processor error.
+    #[derive(Clone)]
+    struct ErrProcessor;
+
+    impl Service<Exchange> for ErrProcessor {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _exchange: Exchange) -> Self::Future {
+            Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
+        }
+    }
+
+    /// Creates a parent span via the global tracer, returns its ids plus an
+    /// exchange whose `otel_context` carries that span as the active span.
+    fn exchange_under_parent_span() -> (Exchange, TraceId, SpanId) {
+        let tracer = global::tracer("camel-core-test");
+        let parent = tracer.span_builder("parent").start(&tracer);
+        let trace_id = parent.span_context().trace_id();
+        let parent_span_id = parent.span_context().span_id();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.otel_context = OtelContext::current_with_span(parent);
+        (exchange, trace_id, parent_span_id)
+    }
+
+    #[tokio::test]
+    async fn step_span_has_no_duration_ms_attribute() {
+        let spans = test_spans().await;
+        let (exchange, trace_id, parent_span_id) = exchange_under_parent_span();
+
+        let inner = BoxProcessor::new(IdentityProcessor);
+        let mut proc = TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+        let outcome = proc
+            .ready()
+            .await
+            .expect("service ready")
+            .call(exchange)
+            .await;
+        outcome.expect("step call succeeds");
+
+        let all = finish(spans);
+        let step = all
+            .into_iter()
+            .filter(|s| s.span_context.trace_id() == trace_id)
+            .find(|s| s.name == "r:step-0")
+            .expect("step span exported under parent trace");
+
+        assert_eq!(step.parent_span_id, parent_span_id);
+        assert!(
+            !step
+                .attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "duration_ms"),
+            "duration_ms must not be recorded as a span attribute"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_restores_parent_context_after_call() {
+        let _spans = test_spans().await;
+        let (mut exchange, _trace_id, parent_span_id) = exchange_under_parent_span();
+        exchange.otel_context = exchange
+            .otel_context
+            .clone()
+            .with_baggage([KeyValue::new("baggage_test", "1")]);
+
+        let inner = BoxProcessor::new(IdentityProcessor);
+        let mut proc = TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+        let outcome = proc
+            .ready()
+            .await
+            .expect("service ready")
+            .call(exchange)
+            .await;
+        let ex = outcome.expect("step call succeeds");
+
+        assert_eq!(
+            ex.otel_context.span().span_context().span_id(),
+            parent_span_id,
+            "active span on the returned exchange must be the parent, not the step span"
+        );
+        assert!(
+            ex.otel_context.baggage().get("baggage_test").is_some(),
+            "parent context baggage must survive the step"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_error_emits_exception_event() {
+        let spans = test_spans().await;
+        let (exchange, trace_id, _parent_span_id) = exchange_under_parent_span();
+
+        let inner = BoxProcessor::new(ErrProcessor);
+        let mut proc = TracingProcessor::new(inner, "r".to_string(), 0, DetailLevel::Minimal, None);
+        let outcome = proc
+            .ready()
+            .await
+            .expect("service ready")
+            .call(exchange)
+            .await;
+        assert!(outcome.is_err(), "error must propagate to the caller");
+
+        let all = finish(spans);
+        let step = all
+            .into_iter()
+            .filter(|s| s.span_context.trace_id() == trace_id)
+            .find(|s| s.name == "r:step-0")
+            .expect("step span exported under parent trace");
+
+        assert_eq!(step.events.len(), 1, "exactly one event on error");
+        let event = &step.events[0];
+        assert_eq!(event.name, "exception");
+        let attr = |key: &str| {
+            event
+                .attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.as_str().to_string())
+        };
+        assert!(
+            attr("exception.type").is_some_and(|v| !v.is_empty()),
+            "exception.type must be non-empty"
+        );
+        assert!(
+            attr("exception.message").is_some_and(|v| !v.is_empty()),
+            "exception.message must be non-empty"
+        );
+        assert!(
+            matches!(step.status, Status::Error { .. }),
+            "span status must be Error"
+        );
+    }
 
     #[tokio::test]
     async fn test_tracing_processor_minimal() {
@@ -395,6 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tracing_processor_with_parent_context() {
+        let _spans = test_spans().await;
         let inner = BoxProcessor::new(IdentityProcessor);
         let mut tracer = TracingProcessor::new(
             inner,
@@ -404,23 +570,7 @@ mod tests {
             None,
         );
 
-        // Create a parent span context
-        let trace_id = TraceId::from_hex("12345678901234567890123456789012").unwrap();
-        let span_id = SpanId::from_hex("1234567890123456").unwrap();
-        let parent_span_context = SpanContext::new(
-            trace_id,
-            span_id,
-            TraceFlags::SAMPLED,
-            true, // is_remote
-            TraceState::default(),
-        );
-
-        // Create exchange with parent context
-        let mut exchange = Exchange::new(Message::default());
-        exchange.otel_context = OtelContext::new().with_remote_span_context(parent_span_context);
-
-        // Store the initial parent span context for comparison
-        let initial_span_context = exchange.otel_context.span().span_context().clone();
+        let (exchange, _trace_id, parent_span_id) = exchange_under_parent_span();
 
         // Verify parent context is set
         assert!(
@@ -433,22 +583,12 @@ mod tests {
 
         let output_exchange = result.unwrap();
 
-        // The output should still have a valid context
-        // The trace ID should be preserved from parent
-        let output_span = output_exchange.otel_context.span();
-        // With noop provider, we may not get a valid span context,
-        // but the context propagation mechanism should work
-        let _output_trace_id = output_span.span_context().trace_id();
-
-        // Verify that the exchange's otel_context has been updated (child span created)
-        // Even with noop provider, the span context should be a different object
-        // (the processor creates a new span, which may be a noop but is still a new span)
-        let output_span_context = output_span.span_context();
-        // The span contexts should be different objects (different span IDs conceptually,
-        // though noop provider may not actually assign them)
-        assert!(
-            !std::ptr::eq(&initial_span_context, output_span_context),
-            "exchange.otel_context should have been updated with a new child span context"
+        // The step restores the caller's context so downstream steps continue
+        // from the parent span rather than chaining onto the completed step.
+        assert_eq!(
+            output_exchange.otel_context.span().span_context().span_id(),
+            parent_span_id,
+            "output exchange must restore the parent span context"
         );
     }
 
@@ -475,10 +615,8 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.to_string().contains("intentional test error"));
 
-        // Note: With noop provider, we cannot verify that the error was recorded on the span.
-        // Full span hierarchy verification (trace ID matching, parent span ID, error recording)
-        // requires an integration test with a real exporter, which will be covered in Task 11
-        // (integration tests).
+        // Full span hierarchy and error-recording coverage lives in this file
+        // via `step_error_emits_exception_event` and `span_test_util`.
     }
 
     #[tokio::test]
