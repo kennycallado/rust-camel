@@ -10,8 +10,6 @@ pub(crate) struct MasterConsumer {
     pub(crate) lock_name: String,
     pub(crate) delegate_uri: String,
     pub(crate) delegate_component: Arc<dyn Component>,
-    // TODO(MST-001): MetricsCollector is stored here but never used for emission.
-    // Wire into reconcile_event to record leadership transitions and delegate lifecycle.
     pub(crate) metrics: Arc<dyn MetricsCollector>,
     pub(crate) platform_service: Arc<dyn PlatformService>,
     pub(crate) drain_timeout: Duration,

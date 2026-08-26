@@ -735,28 +735,15 @@ fn build_error_delegate_master(
     consumer_error: Option<CamelError>,
     max_attempts: u32,
 ) -> MasterConsumer {
-    let reconnect = NetworkRetryPolicy {
-        max_attempts,
-        initial_delay: Duration::from_millis(1),
-        max_delay: Duration::from_millis(5),
-        multiplier: 1.0,
-        ..NetworkRetryPolicy::default()
-    };
-    MasterConsumer::new(
-        "lock-err".to_string(),
-        "errdelegate:delegate".to_string(),
-        Arc::new(ErrorDelegateComponent {
-            create_endpoint_calls,
-            create_consumer_calls,
-            endpoint_error,
-            consumer_error_after,
-            consumer_error,
-        }),
-        Arc::new(NoOpMetrics),
+    build_error_delegate_master_with_metrics(
         platform_service,
-        Duration::from_millis(500),
-        reconnect,
-        Arc::new(PanicRuntimeObservability) as Arc<dyn camel_component_api::RuntimeObservability>,
+        create_endpoint_calls,
+        create_consumer_calls,
+        endpoint_error,
+        consumer_error_after,
+        consumer_error,
+        max_attempts,
+        Arc::new(NoOpMetrics),
     )
 }
 
@@ -865,6 +852,978 @@ async fn delegate_transient_error_retries_and_eventually_succeeds() {
 
     cancel.cancel();
     master.stop().await.unwrap();
+}
+
+// ── MST-001 metrics wiring tests (master-metrics-wiring Task 1.2) ──
+
+const METRICS_TEST_LOCK: &str = "lock-err";
+const METRICS_TEST_ROUTE: &str = "master-test-route";
+
+/// One recorded counter observation: (metric name, value, owned labels).
+type RecordedCounter = (String, f64, Vec<(String, String)>);
+
+/// Metrics collector that records every `record_counter` observation as an
+/// owned `(name, value, labels)` tuple. The five classic methods are no-ops:
+/// the master component only emits counters today.
+struct RecordingMetricsCollector {
+    events: Mutex<Vec<RecordedCounter>>,
+}
+
+impl RecordingMetricsCollector {
+    /// Filtered, order-preserving view of all observations for one metric.
+    fn counters_named(&self, name: &str) -> Vec<(f64, Vec<(String, String)>)> {
+        self.events
+            .lock()
+            .expect("mutex poisoned: recording metrics collector")
+            .iter()
+            .filter(|(recorded, _, _)| recorded == name)
+            .map(|(_, value, labels)| (*value, labels.clone()))
+            .collect()
+    }
+
+    /// Position of the nth (0-based) observation of `name` in the GLOBAL
+    /// insertion order (across all metric names). `None` when fewer than
+    /// n+1 observations exist. Used to assert cross-metric emission
+    /// ordering; `Option` forces callers to handle absence explicitly.
+    fn nth_global_index_of(&self, name: &str, n: usize) -> Option<usize> {
+        self.events
+            .lock()
+            .expect("mutex poisoned: recording metrics collector")
+            .iter()
+            .enumerate()
+            .filter(|(_, (recorded, _, _))| recorded == name)
+            .nth(n)
+            .map(|(idx, _)| idx)
+    }
+}
+
+impl MetricsCollector for RecordingMetricsCollector {
+    fn record_exchange_duration(&self, _route_id: &str, _duration: Duration) {}
+    fn increment_errors(&self, _route_id: &str, _error_type: &str) {}
+    fn increment_exchanges(&self, _route_id: &str) {}
+    fn set_queue_depth(&self, _route_id: &str, _depth: usize) {}
+    fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
+    fn record_counter(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+        self.events
+            .lock()
+            .expect("mutex poisoned: recording metrics collector")
+            .push((
+                name.to_string(),
+                value,
+                labels
+                    .iter()
+                    .map(|(key, label_value)| (key.to_string(), label_value.to_string()))
+                    .collect(),
+            ));
+    }
+}
+
+/// Transient per `is_retryable_camel_error` (`Io(_)` is always retryable).
+fn transient_io_error() -> CamelError {
+    CamelError::Io("boom".to_string())
+}
+
+/// Expected complete label set of a `master_delegate_lifecycle_total`
+/// observation for the lock/route pair used by the metrics tests.
+fn expected_lifecycle_labels(event: &str, reason: &str) -> Vec<(String, String)> {
+    vec![
+        ("lock".to_string(), METRICS_TEST_LOCK.to_string()),
+        ("route_id".to_string(), METRICS_TEST_ROUTE.to_string()),
+        ("event".to_string(), event.to_string()),
+        ("reason".to_string(), reason.to_string()),
+    ]
+}
+
+/// Expected complete label set of a `master_leadership_transitions_total`
+/// observation for the lock/route pair used by the metrics tests.
+fn expected_transition_labels(event: &str) -> Vec<(String, String)> {
+    vec![
+        ("lock".to_string(), METRICS_TEST_LOCK.to_string()),
+        ("route_id".to_string(), METRICS_TEST_ROUTE.to_string()),
+        ("event".to_string(), event.to_string()),
+    ]
+}
+
+/// Sibling of [`build_error_delegate_master`] that injects a metrics
+/// collector so tests observe every counter the supervision loop emits.
+/// Recording-collector access is always through this builder.
+#[allow(clippy::too_many_arguments)] // harness signature mandated by Task 1.2
+fn build_error_delegate_master_with_metrics(
+    platform_service: Arc<dyn PlatformService>,
+    create_endpoint_calls: Arc<AtomicUsize>,
+    create_consumer_calls: Arc<AtomicUsize>,
+    endpoint_error: Option<CamelError>,
+    consumer_error_after: usize,
+    consumer_error: Option<CamelError>,
+    max_attempts: u32,
+    metrics: Arc<dyn MetricsCollector>,
+) -> MasterConsumer {
+    let reconnect = NetworkRetryPolicy {
+        max_attempts,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+        multiplier: 1.0,
+        ..NetworkRetryPolicy::default()
+    };
+    MasterConsumer::new(
+        METRICS_TEST_LOCK.to_string(),
+        "errdelegate:delegate".to_string(),
+        Arc::new(ErrorDelegateComponent {
+            create_endpoint_calls,
+            create_consumer_calls,
+            endpoint_error,
+            consumer_error_after,
+            consumer_error,
+        }),
+        metrics,
+        platform_service,
+        Duration::from_millis(500),
+        reconnect,
+        Arc::new(PanicRuntimeObservability) as Arc<dyn camel_component_api::RuntimeObservability>,
+    )
+}
+
+/// Poll the recording collector until `name` has at least `count`
+/// observations. Retries advance on the 200 ms `DELEGATE_RETRY_INTERVAL`
+/// tick, so the 5 s bound covers every retry-consuming config below
+/// (worst case 4 attempts x 200 ms = 800 ms).
+async fn await_counter_observations(
+    metrics: &RecordingMetricsCollector,
+    name: &str,
+    count: usize,
+) -> bool {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if metrics.counters_named(name).len() >= count {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Poll the leadership task for completion (task failure or
+/// budget-exhaustion shutdown) using the existing 5 ms poll pattern.
+async fn await_leadership_task_exit(master: &MasterConsumer) -> bool {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if master
+                .leadership_task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[tokio::test]
+async fn lifecycle_started_emitted_on_acquisition() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Run to success: the delegate's first exchange arrives via the bridge.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+
+    // The "started" observation races the spawned delegate's first send, so
+    // poll the collector rather than assuming ordering.
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 1).await,
+        "started observation should be recorded within 5s"
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(lifecycle.len(), 1);
+    assert_eq!(
+        lifecycle[0],
+        (1.0, expected_lifecycle_labels("started", "none"))
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_stopped_emitted_after_active_drain() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 1).await,
+        "started observation should be recorded within 5s"
+    );
+
+    leadership.emit(LeadershipEvent::StoppedLeading).await;
+
+    // The drain is bounded by stop_delegate's drain timeout; poll until the
+    // "stopped" observation lands (started + stopped).
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 2).await,
+        "stopped observation should be recorded after the active drain"
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(lifecycle.len(), 2);
+    assert_eq!(
+        lifecycle[0],
+        (1.0, expected_lifecycle_labels("started", "none"))
+    );
+    assert_eq!(
+        lifecycle[1],
+        (1.0, expected_lifecycle_labels("stopped", "none"))
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn inactive_stop_emits_nothing() {
+    let leadership = Arc::new(FakeLeadershipService::new(None));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Never leading: no initial snapshot event and no watch deliveries. Let
+    // the supervision loop idle across a few retry ticks.
+    sleep(Duration::from_millis(100)).await;
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+
+    assert!(
+        metrics
+            .counters_named("master_delegate_lifecycle_total")
+            .is_empty(),
+        "inactive leadership must not emit lifecycle observations"
+    );
+    assert_eq!(create_endpoint_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(create_consumer_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn create_error_endpoint_transient() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // max_attempts = 1: the initial-snapshot attempt is not budget-gated,
+    // should_retry(0) is true, so exactly one retry follows it.
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        Some(transient_io_error()),
+        0,
+        None,
+        1,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Budget exhaustion terminates the leadership task (clean exit).
+    assert!(
+        await_leadership_task_exit(&master).await,
+        "budget-exhaustion shutdown should finish the leadership task within 5s"
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(lifecycle.len(), 2);
+    assert_eq!(
+        lifecycle[0],
+        (1.0, expected_lifecycle_labels("create_error", "transient"))
+    );
+    assert_eq!(
+        lifecycle[1],
+        (1.0, expected_lifecycle_labels("create_error", "transient"))
+    );
+    assert_eq!(
+        create_endpoint_calls.load(Ordering::SeqCst),
+        2,
+        "initial snapshot attempt plus one budget-gated retry"
+    );
+
+    cancel.cancel();
+    let _ = master.stop().await;
+}
+
+#[tokio::test]
+async fn create_error_endpoint_permanent() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        Some(CamelError::EndpointCreationFailed("permanent".to_string())),
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Permanent errors fail fast: the leadership task terminates on the
+    // first attempt, not via budget exhaustion.
+    assert!(
+        await_leadership_task_exit(&master).await,
+        "permanent error must terminate the leadership task within 5s"
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(lifecycle.len(), 1);
+    assert_eq!(
+        lifecycle[0],
+        (1.0, expected_lifecycle_labels("create_error", "permanent"))
+    );
+    assert_eq!(
+        create_endpoint_calls.load(Ordering::SeqCst),
+        1,
+        "permanent error must fail fast after exactly 1 invocation"
+    );
+
+    cancel.cancel();
+    let _ = master.stop().await;
+}
+
+#[tokio::test]
+async fn create_error_consumer_transient() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // First 2 create_consumer calls fail transiently, the 3rd succeeds.
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        2,
+        Some(transient_io_error()),
+        3,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Run to success: two transient failures, then the delegate starts.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 3).await,
+        "two transient create_error observations plus started should be recorded"
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(lifecycle.len(), 3);
+    assert_eq!(
+        lifecycle[0],
+        (1.0, expected_lifecycle_labels("create_error", "transient"))
+    );
+    assert_eq!(
+        lifecycle[1],
+        (1.0, expected_lifecycle_labels("create_error", "transient"))
+    );
+    assert_eq!(
+        lifecycle[2],
+        (1.0, expected_lifecycle_labels("started", "none"))
+    );
+    assert_eq!(create_consumer_calls.load(Ordering::SeqCst), 3);
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn create_error_consumer_permanent() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        1,
+        Some(CamelError::ProcessorError("permanent".to_string())),
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    assert!(
+        await_leadership_task_exit(&master).await,
+        "permanent consumer error must terminate the leadership task within 5s"
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(lifecycle.len(), 1);
+    assert_eq!(
+        lifecycle[0],
+        (1.0, expected_lifecycle_labels("create_error", "permanent"))
+    );
+    assert_eq!(
+        create_consumer_calls.load(Ordering::SeqCst),
+        1,
+        "permanent error must fail fast after exactly 1 invocation"
+    );
+
+    cancel.cancel();
+    let _ = master.stop().await;
+}
+
+#[tokio::test]
+async fn retry_accumulation_one_transition_n_create_errors() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // 3 transient failures then success: the retry tick re-dispatches
+    // synthetic StartedLeading, which must not re-emit the transition.
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        3,
+        Some(transient_io_error()),
+        4,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Run to success: three transient failures, then the delegate starts
+    // (3 create_error + 1 started lifecycle observations in total).
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 4).await,
+        "three create_error observations plus started should be recorded"
+    );
+
+    let transitions = metrics.counters_named("master_leadership_transitions_total");
+    assert_eq!(transitions.len(), 1);
+    assert_eq!(
+        transitions[0],
+        (1.0, expected_transition_labels("acquired"))
+    );
+
+    let lifecycle = metrics.counters_named("master_delegate_lifecycle_total");
+    assert_eq!(
+        lifecycle.len(),
+        4,
+        "three transient create_error observations plus one started"
+    );
+    let transient_create_errors = lifecycle
+        .iter()
+        .filter(|(_, labels)| *labels == expected_lifecycle_labels("create_error", "transient"))
+        .count();
+    assert_eq!(transient_create_errors, 3);
+    assert_eq!(
+        lifecycle[3],
+        (1.0, expected_lifecycle_labels("started", "none"))
+    );
+    assert_eq!(create_consumer_calls.load(Ordering::SeqCst), 4);
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+// ── MST-001 leadership transition edge tests (master-metrics-wiring
+// Task 1.3) ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn transition_acquired_on_initial_snapshot() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Success signal: the delegate's first exchange arrives via the bridge.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 1).await,
+        "initial-snapshot acquisition should be recorded within 5s"
+    );
+
+    let transitions = metrics.counters_named("master_leadership_transitions_total");
+    assert_eq!(transitions.len(), 1);
+    assert_eq!(
+        transitions[0],
+        (1.0, expected_transition_labels("acquired"))
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn transition_lost_on_leading_edge() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 1).await,
+        "initial acquisition should be recorded within 5s"
+    );
+
+    leadership.emit(LeadershipEvent::StoppedLeading).await;
+
+    // Bounded drain wait: the lost edge is emitted before reconcile_event
+    // stops the delegate.
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 2).await,
+        "lost transition should be recorded within 5s of the StoppedLeading delivery"
+    );
+
+    let transitions = metrics.counters_named("master_leadership_transitions_total");
+    assert_eq!(transitions.len(), 2);
+    assert_eq!(
+        transitions[0],
+        (1.0, expected_transition_labels("acquired"))
+    );
+    assert_eq!(transitions[1], (1.0, expected_transition_labels("lost")));
+
+    // Spec clause: the lost transition is emitted BEFORE reconcile_event
+    // processes the edge — i.e. before the delegate drain emits its
+    // ("event","stopped") lifecycle observation. Await the stopped
+    // observation (lifecycle count 2 = started + stopped), then compare
+    // the global insertion position of the SECOND transition (lost)
+    // against the SECOND lifecycle observation (stopped).
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 2).await,
+        "stopped lifecycle observation should be recorded within 5s of the lost edge"
+    );
+    let lost_idx = metrics
+        .nth_global_index_of("master_leadership_transitions_total", 1)
+        .expect("two transition observations recorded");
+    let stopped_idx = metrics
+        .nth_global_index_of("master_delegate_lifecycle_total", 1)
+        .expect("two lifecycle observations recorded");
+    assert!(
+        lost_idx < stopped_idx,
+        "lost transition (global index {lost_idx}) must precede the stopped \
+         lifecycle observation (global index {stopped_idx})"
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn repeated_identical_delivery_does_not_reemit() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Baseline: leading with an active delegate and exactly one acquired
+    // transition from the initial snapshot.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 1).await,
+        "initial acquisition should be recorded within 5s"
+    );
+
+    // Phase A: deliver StartedLeading again (true → true, no edge). The
+    // duplicate still re-runs reconcile_event, which recreates the
+    // delegate — the create_consumer_calls bump proves the loop
+    // processed the delivery before the assertion below.
+    leadership.emit(LeadershipEvent::StartedLeading).await;
+    let processed = timeout(Duration::from_secs(5), async {
+        loop {
+            if create_consumer_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(
+        processed,
+        "duplicate StartedLeading should be processed within 5s"
+    );
+
+    let acquired_count = metrics
+        .counters_named("master_leadership_transitions_total")
+        .iter()
+        .filter(|(_, labels)| *labels == expected_transition_labels("acquired"))
+        .count();
+    assert_eq!(
+        acquired_count, 1,
+        "true→true delivery must not re-emit the acquired transition"
+    );
+
+    // Establish the leading → not-leading edge so Phase B starts from
+    // not-leading with exactly one lost transition recorded.
+    leadership.emit(LeadershipEvent::StoppedLeading).await;
+    assert!(
+        await_counter_observations(&metrics, "master_leadership_transitions_total", 2).await,
+        "lost transition should be recorded within 5s of the edge"
+    );
+
+    // Phase B: StoppedLeading twice in a row (false → false, no edge).
+    // Neither delivery emits anything, so there is no counter to await
+    // (no positive signal exists for a no-edge delivery); settle 500 ms
+    // (matches the file's sleep-settle precedent). Back-to-back watch
+    // emits may coalesce into one observation — either way, no re-emit
+    // is expected.
+    leadership.emit(LeadershipEvent::StoppedLeading).await;
+    leadership.emit(LeadershipEvent::StoppedLeading).await;
+    sleep(Duration::from_millis(500)).await;
+
+    let transitions = metrics.counters_named("master_leadership_transitions_total");
+    assert_eq!(transitions.len(), 2);
+    let lost_count = transitions
+        .iter()
+        .filter(|(_, labels)| *labels == expected_transition_labels("lost"))
+        .count();
+    assert_eq!(
+        lost_count, 1,
+        "false→false deliveries must not re-emit the lost transition"
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn synthetic_retry_does_not_reemit_transition() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    // Three transient consumer failures then success: the retry tick
+    // re-dispatches synthetic StartedLeading three times, and none of
+    // those re-dispatches may re-emit the acquired transition.
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        None,
+        3,
+        Some(transient_io_error()),
+        4,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // Run to success, then wait until every synthetic re-dispatch has
+    // been processed (3 create_error + 1 started lifecycle observation).
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert!(
+        await_counter_observations(&metrics, "master_delegate_lifecycle_total", 4).await,
+        "three create_error observations plus started confirm all re-dispatches were processed"
+    );
+
+    let transitions = metrics.counters_named("master_leadership_transitions_total");
+    assert_eq!(
+        transitions.len(),
+        1,
+        "synthetic retry re-dispatches must not re-emit the acquired transition"
+    );
+    assert_eq!(
+        transitions[0],
+        (1.0, expected_transition_labels("acquired"))
+    );
+
+    cancel.cancel();
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn transition_counted_despite_permanent_endpoint_failure() {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let platform_service = Arc::new(FakePlatformService::new(leadership));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+
+    let mut master = build_error_delegate_master_with_metrics(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        Some(CamelError::EndpointCreationFailed("permanent".to_string())),
+        0,
+        None,
+        30,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // The permanent endpoint error propagates and terminates the task,
+    // but the acquired transition must already have been recorded.
+    assert!(
+        await_leadership_task_exit(&master).await,
+        "permanent endpoint failure must terminate the leadership task within 5s"
+    );
+
+    let transitions = metrics.counters_named("master_leadership_transitions_total");
+    assert_eq!(
+        transitions.len(),
+        1,
+        "acquired transition must be recorded exactly once before the failure"
+    );
+    assert_eq!(
+        transitions[0],
+        (1.0, expected_transition_labels("acquired"))
+    );
+
+    cancel.cancel();
+    let _ = master.stop().await;
 }
 
 // ── Existing regression tests (rc-f9k) ──────────────────────────────

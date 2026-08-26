@@ -9,7 +9,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
 use crate::consumer::{DelegateState, MasterConsumer};
-use crate::leadership::{ReconcileContext, reconcile_event, stop_delegate};
+use crate::leadership::{
+    ReconcileContext, emit_leadership_transition, reconcile_event, stop_delegate,
+};
 
 const DELEGATE_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -72,6 +74,12 @@ impl Consumer for MasterConsumer {
                 is_leading = matches!(&initial_event, camel_api::LeadershipEvent::StartedLeading);
                 if is_leading {
                     delegate_attempts = 0;
+                    emit_leadership_transition(
+                        rctx.metrics,
+                        rctx.lock_name,
+                        rctx.route_id.as_str(),
+                        "acquired",
+                    );
                 }
                 if let Err(err) = reconcile_event(initial_event, &mut state, &rctx).await {
                     // log-policy: system-broken
@@ -98,6 +106,19 @@ impl Consumer for MasterConsumer {
                             is_leading = matches!(&event, camel_api::LeadershipEvent::StartedLeading);
                             if !was_leading && is_leading {
                                 delegate_attempts = 0;
+                                emit_leadership_transition(
+                                    rctx.metrics,
+                                    rctx.lock_name,
+                                    rctx.route_id.as_str(),
+                                    "acquired",
+                                );
+                            } else if was_leading && !is_leading {
+                                emit_leadership_transition(
+                                    rctx.metrics,
+                                    rctx.lock_name,
+                                    rctx.route_id.as_str(),
+                                    "lost",
+                                );
                             }
                             if let Err(err) = reconcile_event(event, &mut state, &rctx).await {
                                 // log-policy: system-broken
@@ -108,7 +129,14 @@ impl Consumer for MasterConsumer {
                     }
                     _ = retry_tick.tick() => {
                         if matches!(&state, DelegateState::Active { handle, .. } if handle.is_finished())
-                            && let Err(err) = stop_delegate(&mut state, drain_timeout).await
+                            && let Err(err) = stop_delegate(
+                                &mut state,
+                                drain_timeout,
+                                rctx.lock_name,
+                                rctx.route_id.as_str(),
+                                rctx.metrics,
+                            )
+                            .await
                         {
                             // log-policy: system-broken
                             error!(lock = %lock_name, "master delegate task failed: {err}");
@@ -179,7 +207,14 @@ impl Consumer for MasterConsumer {
                 }
             }
 
-            stop_delegate(&mut state, drain_timeout).await?;
+            stop_delegate(
+                &mut state,
+                drain_timeout,
+                rctx.lock_name,
+                rctx.route_id.as_str(),
+                rctx.metrics,
+            )
+            .await?;
             let _ = timeout(drain_timeout, leadership_handle.step_down()).await;
             Ok::<(), CamelError>(())
         });

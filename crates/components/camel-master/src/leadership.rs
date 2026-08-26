@@ -81,9 +81,51 @@ fn stamp_epoch(env: &mut ExchangeEnvelope, epoch: u64) {
     );
 }
 
+/// Emit a leadership transition counter observation. Called by the
+/// supervision loop on observed not-leading → leading (`acquired`) and
+/// leading → not-leading (`lost`) state edges. See
+/// specs/master-component/spec.md.
+pub(crate) fn emit_leadership_transition(
+    metrics: &Arc<dyn MetricsCollector>,
+    lock: &str,
+    route_id: &str,
+    event: &str,
+) {
+    metrics.record_counter(
+        "master_leadership_transitions_total",
+        1.0,
+        &[("lock", lock), ("route_id", route_id), ("event", event)],
+    );
+}
+
+/// Emit a delegate lifecycle counter observation. All lifecycle
+/// emissions go through this helper so the uniform label schema
+/// (lock, route_id, event, reason) is structural.
+pub(crate) fn emit_lifecycle(
+    metrics: &Arc<dyn MetricsCollector>,
+    lock: &str,
+    route_id: &str,
+    event: &str,
+    reason: &str,
+) {
+    metrics.record_counter(
+        "master_delegate_lifecycle_total",
+        1.0,
+        &[
+            ("lock", lock),
+            ("route_id", route_id),
+            ("event", event),
+            ("reason", reason),
+        ],
+    );
+}
+
 pub(crate) async fn stop_delegate(
     state: &mut DelegateState,
     drain_timeout: Duration,
+    lock_name: &str,
+    route_id: &str,
+    metrics: &Arc<dyn MetricsCollector>,
 ) -> Result<(), CamelError> {
     if let DelegateState::Active {
         run_token,
@@ -134,6 +176,8 @@ pub(crate) async fn stop_delegate(
             }
         }
 
+        emit_lifecycle(metrics, lock_name, route_id, "stopped", "none");
+
         return delegate_result;
     }
     Ok(())
@@ -163,9 +207,14 @@ pub(crate) async fn reconcile_event(
     match event {
         camel_api::LeadershipEvent::StartedLeading => {
             info!(lock = %ctx.lock_name, "master leadership acquired");
-            // TODO(MST-001): emit metrics here — MetricsCollector is wired but never called
-            tracing::info!(lock = %ctx.lock_name, "metrics emission placeholder: leadership acquired");
-            stop_delegate(state, ctx.drain_timeout).await?;
+            stop_delegate(
+                state,
+                ctx.drain_timeout,
+                ctx.lock_name,
+                ctx.route_id.as_str(),
+                ctx.metrics,
+            )
+            .await?;
 
             let delegate_ctx = MasterDelegateContext {
                 delegate_component: Arc::clone(ctx.delegate_component),
@@ -179,7 +228,19 @@ pub(crate) async fn reconcile_event(
             {
                 Ok(endpoint) => endpoint,
                 Err(err) => {
-                    if is_retryable_camel_error(&err) {
+                    let is_retryable = is_retryable_camel_error(&err);
+                    emit_lifecycle(
+                        ctx.metrics,
+                        ctx.lock_name,
+                        ctx.route_id.as_str(),
+                        "create_error",
+                        if is_retryable {
+                            "transient"
+                        } else {
+                            "permanent"
+                        },
+                    );
+                    if is_retryable {
                         warn!(lock = %ctx.lock_name, error = %err, "transient delegate endpoint error (will retry)");
                         return Ok(()); // swallow transient — retry via next tick
                     }
@@ -190,7 +251,19 @@ pub(crate) async fn reconcile_event(
             let mut consumer = match endpoint.create_consumer(Arc::clone(&ctx.runtime)) {
                 Ok(consumer) => consumer,
                 Err(err) => {
-                    if is_retryable_camel_error(&err) {
+                    let is_retryable = is_retryable_camel_error(&err);
+                    emit_lifecycle(
+                        ctx.metrics,
+                        ctx.lock_name,
+                        ctx.route_id.as_str(),
+                        "create_error",
+                        if is_retryable {
+                            "transient"
+                        } else {
+                            "permanent"
+                        },
+                    );
+                    if is_retryable {
                         warn!(lock = %ctx.lock_name, error = %err, "transient delegate consumer error (will retry)");
                         return Ok(()); // swallow transient — retry via next tick
                     }
@@ -227,12 +300,24 @@ pub(crate) async fn reconcile_event(
                 handle,
                 bridge_handle: Some(bridge_handle),
             };
+            emit_lifecycle(
+                ctx.metrics,
+                ctx.lock_name,
+                ctx.route_id.as_str(),
+                "started",
+                "none",
+            );
         }
         camel_api::LeadershipEvent::StoppedLeading => {
             info!(lock = %ctx.lock_name, "master leadership lost");
-            // TODO(MST-001): emit metrics here — MetricsCollector is wired but never called
-            tracing::info!(lock = %ctx.lock_name, "metrics emission placeholder: leadership lost");
-            stop_delegate(state, ctx.drain_timeout).await?;
+            stop_delegate(
+                state,
+                ctx.drain_timeout,
+                ctx.lock_name,
+                ctx.route_id.as_str(),
+                ctx.metrics,
+            )
+            .await?;
         }
         // Future leadership events require no state change.
         _ => {}
@@ -249,7 +334,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::time::Duration;
 
-    use camel_api::{Body, CamelError, Exchange, Message};
+    use camel_api::{Body, CamelError, Exchange, Message, NoOpMetrics};
     use camel_component_api::ExchangeEnvelope;
     use serde_json::Value;
     use tokio::time::timeout;
@@ -487,7 +572,15 @@ mod tests {
             bridge_handle: Some(bridge_handle),
         };
 
-        let result = stop_delegate(&mut state, Duration::from_secs(5)).await;
+        let metrics: Arc<dyn camel_api::MetricsCollector> = Arc::new(NoOpMetrics);
+        let result = stop_delegate(
+            &mut state,
+            Duration::from_secs(5),
+            "test-lock",
+            "test-route",
+            &metrics,
+        )
+        .await;
 
         // (a) result should be Err matching the delegate error.
         assert!(result.is_err(), "expected Err from delegate failure");
@@ -534,7 +627,15 @@ mod tests {
             bridge_handle: Some(bridge_handle),
         };
 
-        let result = stop_delegate(&mut state, Duration::from_millis(100)).await;
+        let metrics: Arc<dyn camel_api::MetricsCollector> = Arc::new(NoOpMetrics);
+        let result = stop_delegate(
+            &mut state,
+            Duration::from_millis(100),
+            "test-lock",
+            "test-route",
+            &metrics,
+        )
+        .await;
 
         // (a) timeout path returns Ok(()).
         assert!(result.is_ok(), "timeout path should return Ok");

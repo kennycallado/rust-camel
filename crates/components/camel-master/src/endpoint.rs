@@ -15,9 +15,6 @@ pub(crate) struct MasterEndpoint {
     pub(crate) lock_name: String,
     pub(crate) delegate_uri: String,
     pub(crate) delegate_component: Arc<dyn Component>,
-    // TODO(MST-001): MetricsCollector is wired through from ComponentContext but never called.
-    // Should emit metrics on leader acquisition (increment_exchanges), leader loss
-    // (increment_errors), and delegate start/stop events (record_circuit_breaker_change).
     pub(crate) metrics: Arc<dyn MetricsCollector>,
     pub(crate) platform_service: Arc<dyn PlatformService>,
     pub(crate) drain_timeout: Duration,
